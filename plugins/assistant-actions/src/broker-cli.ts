@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 import { createPrivateKey, createPublicKey, type KeyObject } from 'node:crypto'
-import { constants } from 'node:fs'
+import { constants, realpathSync } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { requestActionBrokerAdmin, requestGitHubBrokerAdmin } from './broker-client.js'
-import { createExternalBrokerCore, normalizeExternalBrokerCoreConfig } from './broker-core.js'
 import type { BrokerCredentialSpec } from './broker-credentials.js'
 import type { AnyExternalBrokerGrant } from './broker-ledger.js'
 import { isWindowsNamedPipePath, verifyWindowsPrivatePath } from './broker-peer-windows.js'
@@ -298,7 +297,8 @@ async function admin(command: string, config: BrokerCliConfig, args: readonly st
   return await requestGitHubBrokerAdmin(connOptions, intent, source, config.adminKeyId, adminPrivateKey)
 }
 
-function productionCore(config: BrokerServeConfig): GitHubBrokerCorePort {
+async function productionCore(config: BrokerServeConfig): Promise<GitHubBrokerCorePort> {
+  const { createExternalBrokerCore, normalizeExternalBrokerCoreConfig } = await import('./broker-core.js')
   return createExternalBrokerCore(normalizeExternalBrokerCoreConfig({
     instanceId: config.brokerId,
     statePath: config.statePath,
@@ -378,6 +378,35 @@ export async function runBrokerCli(argv: readonly string[], dependencies: Broker
   } catch { stderr.write(FAILURE); return 1 }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function installSqliteWarningFilter(): void {
+  const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+  if (Reflect.get(process.emitWarning, sqliteWarningFiltered)) return
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(this: unknown, warning: string | Error, ...rest: unknown[]): void {
+    const first = rest[0]
+    let warningType: string | undefined
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof (first as { type?: unknown }).type === 'string') {
+      warningType = (first as { type: string }).type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning as typeof process.emitWarning
+}
+
+let isMain = false
+try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href } catch { /* Importing modules need not have a filesystem entry point. */ }
+if (isMain) {
+  installSqliteWarningFilter()
   process.exitCode = await runBrokerCli(process.argv.slice(2))
 }

@@ -3,8 +3,34 @@
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto'
 import { closeSync, constants as F, existsSync, fsyncSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, readSync, realpathSync, statfsSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
+
+const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(warning, ...rest) {
+    const first = rest[0]
+    let warningType
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof first.type === 'string') {
+      warningType = first.type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    return Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning
+}
+
+const { DatabaseSync } = await import('node:sqlite')
 
 export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-8'
 const DIGEST = /^[a-f0-9]{64}$/u

@@ -2,9 +2,13 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { installRestartSupervisorPlan, planRestartSupervisorInstall } from '../scripts/install/restart-supervisor.mjs'
+import { KNOWN_ENHANCED_PACKAGES, runUpgrade } from '../packages/dsh-rsi-cli/src/upgrade.ts'
+import { inspectRestartPolicyAndCode, validateRestartSupervisorConfig, type RestartSupervisorConfig } from '../plugins/assistant-delivery/src/restart-supervisor.ts'
 
 const sha = (source: string | Uint8Array) => createHash('sha256').update(source).digest('hex')
 const roots: string[] = []
@@ -199,5 +203,141 @@ describe('external restart supervisor installer', () => {
     await expect(planRestartSupervisorInstall(host.input,
       { userHome: host.userHome, showUnit: host.showUnit }))
       .rejects.toThrow('Host code differs from installed receipt')
+  })
+
+  it('F28: KNOWN_ENHANCED_PACKAGES matches release-manifest.json and runUpgrade produces config verified by validateRestartSupervisorConfig & inspectRestartPolicyAndCode', async () => {
+    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+    const manifest = JSON.parse(await readFile(join(repoRoot, 'release-manifest.json'), 'utf8')) as {
+      current: { packages: Record<string, string> }
+    }
+    const expectedNonCli = Object.keys(manifest.current.packages)
+      .filter(name => name !== '@dsh-enhanced/dsh-rsi-cli')
+      .sort()
+    expect([...KNOWN_ENHANCED_PACKAGES].sort()).toEqual(expectedNonCli)
+
+    const sample = await fixture()
+    // Seed profile package.json + coordinator marker + .pnpm layout with 0.1.82 and upgrade to 0.1.85
+    const coordProfile = 'rsi-assistant-0123456789ab'
+    const coordMarker = join(sample.home, `.rsi-coordinator-${sha('assistant').slice(0, 16)}.json`)
+    await writeFile(coordMarker, JSON.stringify({
+      schemaVersion: 1,
+      targetProfile: 'assistant',
+      coordinatorProfile: coordProfile,
+      version: '0.1.62',
+      sourceRepository: join(sample.root, 'repo-deleted'),
+    }), { mode: 0o600 })
+    const coordDir = join(sample.home, 'profiles', coordProfile)
+    await mkdir(coordDir, { recursive: true, mode: 0o700 })
+    await writeFile(join(coordDir, 'package.json'), JSON.stringify({
+      name: `dsh-profile-${coordProfile}`,
+      private: true,
+      dependencies: { '@dsh-enhanced/assistant-automations': '0.1.82', '@dsh-enhanced/plugin-control-plane': '0.1.82' },
+    }), { mode: 0o644 })
+
+    const profileDir = join(sample.home, 'profiles', 'assistant')
+    await writeFile(join(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-assistant',
+      private: true,
+      dependencies: { '@dsh-enhanced/assistant-delivery': '0.1.82', '@dsh-enhanced/personal-wiki': '0.1.82' },
+    }), { mode: 0o600 })
+    await writeFile(join(profileDir, 'pnpm-workspace.yaml'), 'nodeLinker: isolated\n', { mode: 0o600 })
+    await writeFile(join(profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n', { mode: 0o600 })
+
+    // Move fragment into user systemd dir as dsh-profile-assistant.service
+    const systemdDir = join(sample.userHome, '.config', 'systemd', 'user')
+    await mkdir(systemdDir, { recursive: true, mode: 0o700 })
+    const unitPath = join(systemdDir, 'dsh-profile-assistant.service')
+    await writeFile(unitPath, await readFile(sample.fragment, 'utf8'), { mode: 0o600 })
+
+    // 1. Install restart supervisor originally against frozen 0.1.62 cohort
+    const plan = await planRestartSupervisorInstall(sample.input, {
+      userHome: sample.userHome,
+      showUnit: (unit: string) => `Id=${unit}\nLoadState=loaded\nActiveState=active\nSubState=running\nFragmentPath=${unitPath}\nDropInPaths=\n`,
+    })
+    await installRestartSupervisorPlan(plan, { systemctl: () => {} })
+
+    // 2. Simulate migrated npm profile at 0.1.82 (.pnpm virtual store, transitive assistant-policy)
+    const mkStorePkg = async (ver: string, slug: string, files: Record<string, string>) => {
+      const storePkg = join(profileDir, 'node_modules', '.pnpm', `@dsh-enhanced+${slug}@${ver}_cordis`, 'node_modules', '@dsh-enhanced', slug)
+      await mkdir(join(storePkg, 'lib'), { recursive: true })
+      await mkdir(join(storePkg, 'bin'), { recursive: true })
+      await writeFile(join(storePkg, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${slug}`, version: ver }), { mode: 0o644 })
+      for (const [rel, content] of Object.entries(files)) {
+        await writeFile(join(storePkg, rel), content, { mode: 0o644 })
+      }
+      return storePkg
+    }
+
+    const delivery082 = await mkStorePkg('0.1.82', 'assistant-delivery', {
+      'bin/dsh-restart-supervisor.js': '#!/usr/bin/env node\n',
+      'lib/restart-store.js': 'export const store = 1\n',
+      'lib/restart-supervisor.js': 'export const supervisor = 1\n',
+    })
+    await mkStorePkg('0.1.82', 'assistant-policy', {
+      'lib/evaluator.js': 'export const compilePolicy = x => x; export const evaluatePolicy = () => ({ effect: "allow" })\n',
+      'lib/service.js': 'export const policy = 1\n',
+    })
+    const wiki082 = await mkStorePkg('0.1.82', 'personal-wiki', {
+      'lib/index.js': 'export const wiki = 1\n',
+    })
+    await rm(join(profileDir, 'node_modules', '@dsh-enhanced'), { recursive: true, force: true })
+    await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced'), { recursive: true })
+    await symlink(delivery082, join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'))
+    await symlink(wiki082, join(profileDir, 'node_modules', '@dsh-enhanced', 'personal-wiki'))
+
+    const res = await runUpgrade({
+      dshHome: sample.home,
+      profile: 'assistant',
+      action: 'apply',
+      targetVersion: '0.1.85',
+      confirmDshHomeStopped: true,
+      platform: 'linux',
+      osHome: sample.userHome,
+    }, {
+      fetch: (async () => new Response(JSON.stringify({ 'dist-tags': { latest: '0.1.85' } }), { status: 200 })) as typeof globalThis.fetch,
+      inspectBoundHost: async () => ({ status: 'ready', bindingPath: join(sample.home, '.dsh-rsi-host.json'), version: '0.2.1-rc.2', dshPath: '/bin/dsh', issues: [] }),
+      runner: () => ({ status: 0, stdout: 'inactive\n', stderr: '' }),
+      upgradeProfilePackages: async () => {
+        const delivery085 = await mkStorePkg('0.1.85', 'assistant-delivery', {
+          'bin/dsh-restart-supervisor.js': '#!/usr/bin/env node\n',
+          'lib/restart-store.js': 'export const store = 2\n',
+          'lib/restart-supervisor.js': 'export const supervisor = 2\n',
+        })
+        await mkStorePkg('0.1.85', 'assistant-policy', {
+          'lib/evaluator.js': 'export const compilePolicy = x => x; export const evaluatePolicy = () => ({ effect: "allow" })\n',
+          'lib/service.js': 'export const policy = 2\n',
+        })
+        const wiki085 = await mkStorePkg('0.1.85', 'personal-wiki', {
+          'lib/index.js': 'export const wiki = 2\n',
+        })
+        await rm(join(profileDir, 'node_modules', '@dsh-enhanced'), { recursive: true, force: true })
+        await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced'), { recursive: true })
+        await symlink(delivery085, join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'))
+        await symlink(wiki085, join(profileDir, 'node_modules', '@dsh-enhanced', 'personal-wiki'))
+      },
+      verifyHealth: async () => ({ ok: true }),
+    })
+    expect(res.exitCode, res.report.execution?.error).toBe(0)
+
+    const refreshedRaw = JSON.parse(await readFile(plan.configPath, 'utf8')) as RestartSupervisorConfig
+    const validated = validateRestartSupervisorConfig(refreshedRaw)
+    expect(validated.policyEvaluatorPath).toContain('@dsh-enhanced+assistant-policy@0.1.85_cordis')
+    await mkdir(dirname(sample.input.policyDatabasePath), { recursive: true, mode: 0o700 })
+    const policyDb = new DatabaseSync(sample.input.policyDatabasePath)
+    try {
+      policyDb.exec('CREATE TABLE IF NOT EXISTS emergency_state (singleton INTEGER PRIMARY KEY, enabled INTEGER NOT NULL); INSERT OR REPLACE INTO emergency_state (singleton, enabled) VALUES (1, 0);')
+    } finally {
+      policyDb.close()
+    }
+    const ok = await inspectRestartPolicyAndCode(validated, {
+      id: 'task-1',
+      updatedAt: 1,
+      binding: {
+        preset: 'assistant',
+        workspace: join(sample.home, 'ws'),
+        principal: { channel: 'lark', account: 'acc', tenant: 't', user: 'u' },
+      },
+    })
+    expect(ok).toBe(true)
   })
 })

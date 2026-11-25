@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { parseDocument } from 'yaml'
 import { formatUpgradeReport, main, parseArgs, runUpgrade, validateRegistryUrl, type UpgradeDeps } from '../src/index.ts'
-import { defaultUpgradeProfilePackages } from '../src/upgrade.ts'
+import { defaultUpgradeProfilePackages, KNOWN_ENHANCED_PACKAGES } from '../src/upgrade.ts'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -1042,5 +1043,255 @@ overrides:
       expect(res.report.dshHome).toBe(symHome)
       expect(res.report.readiness.blockedReasons.join('\n')).toContain('symlink')
     }
+  })
+
+  test('F28: updates minimumReleaseAgeExclude without overrides, preserves prefix order/duplicates, and respects minimumReleaseAgeStrict', async () => {
+    const f = await createHomeFixture({ profile: 'assistant', enhancedVersion: '0.1.82' })
+    const wsPath = join(f.profileDir, 'pnpm-workspace.yaml')
+    const fakeBinDir = join(f.root, 'fake-bin-f28-exclude')
+    await mkdir(fakeBinDir, { recursive: true })
+    const fakePnpm = join(fakeBinDir, 'pnpm')
+    await writeFile(fakePnpm, '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 })
+    await chmod(fakePnpm, 0o755)
+
+    // 1. Workspace WITHOUT overrides: preserves comments and old @0.1.82 prefix, deduplicates, appends @0.1.85 for all KNOWN_ENHANCED_PACKAGES
+    const wsWithoutOverrides = `# assistant workspace
+nodeLinker: isolated
+autoInstallPeers: false
+minimumReleaseAgeExclude:
+  - '@dsh-enhanced/assistant-delivery@0.1.82'
+  - '@dsh-enhanced/assistant-policy@0.1.82'
+  - '@dsh-enhanced/assistant-delivery@0.1.85'
+`
+    await writeFile(wsPath, wsWithoutOverrides, { mode: 0o600 })
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: 'assistant',
+      targetVersion: '0.1.85',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-enhanced/assistant-web-owner'],
+      runner: () => ({ status: 0, stdout: '', stderr: '' }),
+      env: { PATH: fakeBinDir },
+      osHome: f.osHome,
+    })
+
+    const updatedRaw = await readFile(wsPath, 'utf8')
+    expect(updatedRaw).toContain('# assistant workspace')
+    expect(updatedRaw).toContain('nodeLinker: isolated')
+    const parsed = parseDocument(updatedRaw).toJS() as { minimumReleaseAgeExclude: string[] }
+    expect(parsed.minimumReleaseAgeExclude.slice(0, 3)).toEqual([
+      '@dsh-enhanced/assistant-delivery@0.1.82',
+      '@dsh-enhanced/assistant-policy@0.1.82',
+      '@dsh-enhanced/assistant-delivery@0.1.85',
+    ])
+    // Deduplicated: delivery@0.1.85 appears only once
+    expect(parsed.minimumReleaseAgeExclude.filter(x => x === '@dsh-enhanced/assistant-delivery@0.1.85')).toHaveLength(1)
+    for (const pkg of KNOWN_ENHANCED_PACKAGES) {
+      expect(parsed.minimumReleaseAgeExclude).toContain(`${pkg}@0.1.85`)
+    }
+
+    // 2. minimumReleaseAgeStrict: true forbids adding exclusions
+    const strictWs = 'nodeLinker: isolated\nminimumReleaseAgeStrict: true\nminimumReleaseAgeExclude:\n  - "@dsh-enhanced/assistant-delivery@0.1.82"\n'
+    await writeFile(wsPath, strictWs, { mode: 0o600 })
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: 'assistant',
+      targetVersion: '0.1.85',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-enhanced/assistant-web-owner'],
+      runner: () => ({ status: 0, stdout: '', stderr: '' }),
+      env: { PATH: fakeBinDir },
+      osHome: f.osHome,
+    })
+    expect(await readFile(wsPath, 'utf8')).toBe(strictWs)
+  })
+
+  test('F28: Linux restart-supervisor stop, backup, .pnpm digest/ExecStart refresh, daemon-reload, timer restart, rollback, and dshHome guard', async () => {
+    const f = await createHomeFixture({ profile: 'assistant', enhancedVersion: '0.1.82' })
+    const sha = (source: string | Uint8Array) => createHash('sha256').update(source).digest('hex')
+    await writeFile(join(f.profileDir, 'pnpm-workspace.yaml'), 'nodeLinker: isolated\n', { mode: 0o600 })
+
+    // Create a valid bound host directory matching hostReceipt
+    const hostRoot = join(f.root, 'host-cache', '0.2.2-rc.5')
+    await mkdir(join(hostRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib'), { recursive: true })
+    await writeFile(join(hostRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '#!/usr/bin/env node\n', { mode: 0o644 })
+    const hostReceiptRaw = JSON.stringify({ schemaVersion: 1, version: '0.2.2-rc.5', entries: [] })
+    await writeFile(join(hostRoot, 'receipt.json'), hostReceiptRaw, { mode: 0o600 })
+    const hostBindingRaw = JSON.stringify({
+      schemaVersion: 1,
+      cacheRoot: join(f.root, 'host-cache'),
+      version: '0.2.2-rc.5',
+      receiptDigest: sha(hostReceiptRaw),
+    }, null, 2)
+    await writeFile(f.hostPath, hostBindingRaw, { mode: 0o600 })
+
+    // Seed .pnpm virtual store at 0.1.82 (direct assistant-delivery + transitive assistant-policy)
+    const mkPnpmPkg = async (ver: string, slug: string, files: Record<string, string>) => {
+      const storePkg = join(f.profileDir, 'node_modules', '.pnpm', `@dsh-enhanced+${slug}@${ver}_cordis`, 'node_modules', '@dsh-enhanced', slug)
+      await mkdir(join(storePkg, 'lib'), { recursive: true })
+      await mkdir(join(storePkg, 'bin'), { recursive: true })
+      await writeFile(join(storePkg, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${slug}`, version: ver }), { mode: 0o644 })
+      for (const [rel, content] of Object.entries(files)) {
+        await writeFile(join(storePkg, rel), content, { mode: 0o644 })
+      }
+      return storePkg
+    }
+
+    const oldDeliveryRoot = await mkPnpmPkg('0.1.82', 'assistant-delivery', {
+      'bin/dsh-restart-supervisor.js': '#!/usr/bin/env node\n// old\n',
+      'lib/restart-supervisor.js': 'export const v = "0.1.82"\n',
+    })
+    await mkPnpmPkg('0.1.82', 'assistant-policy', {
+      'lib/evaluator.js': 'export const compilePolicy = x => x; export const evaluatePolicy = () => ({ effect: "allow" })\n',
+    })
+    await rm(join(f.profileDir, 'node_modules', '@dsh-enhanced'), { recursive: true, force: true })
+    await mkdir(join(f.profileDir, 'node_modules', '@dsh-enhanced'), { recursive: true })
+    await symlink(oldDeliveryRoot, join(f.profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'))
+
+    // Seed restart-supervisor config + systemd units
+    const supStateDir = join(f.osHome, '.local', 'state', 'dsh-enhanced', 'restart-supervisor', 'assistant')
+    const systemdDir = join(f.osHome, '.config', 'systemd', 'user')
+    await mkdir(supStateDir, { recursive: true, mode: 0o700 })
+    await mkdir(systemdDir, { recursive: true, mode: 0o700 })
+    const profileServicePath = join(systemdDir, 'dsh-profile-assistant.service')
+    const profileServiceRaw = `[Unit]\nDescription=assistant\n[Service]\nWorkingDirectory=${f.profileDir}\nEnvironment="DSH_HOME=${f.dshHome}"\n`
+    await writeFile(profileServicePath, profileServiceRaw, { mode: 0o600 })
+
+    const supConfigPath = join(supStateDir, 'config.json')
+    const supServicePath = join(systemdDir, 'dsh-restart-supervisor-assistant.service')
+    const initialSupConfig = {
+      dshHome: f.dshHome,
+      profile: 'assistant',
+      databasePath: join(f.dshHome, 'assistant-delivery', 'restart.sqlite'),
+      deliveryDatabasePath: join(f.dshHome, 'assistant-delivery', 'state.sqlite'),
+      policyDatabasePath: join(f.dshHome, 'assistant-policy', 'policy.sqlite'),
+      automationDatabasePath: join(f.dshHome, 'assistant-automations', 'state.sqlite'),
+      policyEvaluatorPath: join(f.profileDir, 'node_modules', '.pnpm', '@dsh-enhanced+assistant-policy@0.1.82_cordis', 'node_modules', '@dsh-enhanced', 'assistant-policy', 'lib', 'evaluator.js'),
+      profilePatchDigest: '0'.repeat(64),
+      cohortReceiptDigest: '1'.repeat(64),
+      sourceCommit: 'a'.repeat(40),
+      restartOwnerRouteId: 'owner-route-1',
+      hostBindingDigest: '2'.repeat(64),
+      hostReceiptPath: join(hostRoot, 'receipt.json'),
+      hostReceiptSourceDigest: '3'.repeat(64),
+      trustedFiles: [{ path: join(oldDeliveryRoot, 'package.json'), digest: '4'.repeat(64) }],
+      policyRules: [],
+      unit: 'dsh-profile-assistant.service',
+      expectedUnitDigest: '5'.repeat(64),
+      readyTimeoutMs: 120_000,
+      stableWindowMs: 12_000,
+      maxRestarts: 3,
+      windowMs: 600_000,
+    }
+    const initialSupConfigText = `${JSON.stringify(initialSupConfig, null, 2)}\n`
+    const initialSupServiceText = `[Unit]\nDescription=supervisor\n[Service]\nExecStart=/usr/bin/node --disable-warning=ExperimentalWarning ${join(oldDeliveryRoot, 'bin/dsh-restart-supervisor.js')} --config ${supConfigPath} --once\n`
+    await writeFile(supConfigPath, initialSupConfigText, { mode: 0o600 })
+    await writeFile(supServicePath, initialSupServiceText, { mode: 0o600 })
+
+    // Also seed a DIFFERENT Home's supervisor to verify isolation guard
+    const otherSupDir = join(f.osHome, '.local', 'state', 'dsh-enhanced', 'restart-supervisor', 'other')
+    await mkdir(otherSupDir, { recursive: true, mode: 0o700 })
+    const otherConfigText = JSON.stringify({ ...initialSupConfig, profile: 'other', dshHome: '/some/other/dsh-home' })
+    await writeFile(join(otherSupDir, 'config.json'), otherConfigText, { mode: 0o600 })
+
+    // Dry-run plan includes supervisor config & service
+    const dryRes = await runUpgrade({
+      dshHome: f.dshHome,
+      profile: 'assistant',
+      action: 'dry-run',
+      targetVersion: '0.1.85',
+      platform: 'linux',
+      osHome: f.osHome,
+    }, {
+      fetch: makeRegistryFetch('0.1.85', '0.2.2-rc.5'),
+      inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+    })
+    expect(dryRes.exitCode).toBe(0)
+    expect(dryRes.report.plan.backupFiles).toContain(supConfigPath)
+    expect(dryRes.report.plan.backupFiles).toContain(supServicePath)
+
+    const systemctlCalls: string[] = []
+    const makeDeps = (healthOk: boolean): UpgradeDeps => ({
+      fetch: makeRegistryFetch('0.1.85', '0.2.2-rc.5'),
+      inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+      inspectService: async () => ({ managed: false, definitionPath: profileServicePath, foreign: false }),
+      scanProcesses: async () => ({ processes: [] }),
+      runner: (command, args) => {
+        if (command === 'systemctl') {
+          systemctlCalls.push(args.join(' '))
+          return { status: 0, stdout: 'active\n', stderr: '' }
+        }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      upgradeProfilePackages: async () => {
+        const newDelivery = await mkPnpmPkg('0.1.85', 'assistant-delivery', {
+          'bin/dsh-restart-supervisor.js': '#!/usr/bin/env node\n// new 0.1.85\n',
+          'lib/restart-supervisor.js': 'export const v = "0.1.85"\n',
+        })
+        await mkPnpmPkg('0.1.85', 'assistant-policy', {
+          'lib/evaluator.js': 'export const compilePolicy = x => x; export const evaluatePolicy = () => ({ effect: "allow", v: "0.1.85" })\n',
+        })
+        await rm(join(f.profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'), { force: true })
+        await symlink(newDelivery, join(f.profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'))
+      },
+      verifyHealth: async () => healthOk ? { ok: true } : { ok: false, error: 'post-upgrade failed' },
+    })
+
+    // 1. Rollback restores config.json, .service, runs daemon-reload, and restarts stopped timer
+    const failed = await runUpgrade({
+      dshHome: f.dshHome,
+      profile: 'assistant',
+      action: 'apply',
+      targetVersion: '0.1.85',
+      confirmDshHomeStopped: true,
+      platform: 'linux',
+      osHome: f.osHome,
+    }, makeDeps(false))
+    expect(failed.exitCode).toBe(1)
+    expect(failed.report.execution?.rolledBack).toBe(true)
+    expect(failed.report.execution?.rollbackSucceeded).toBe(true)
+    expect(await readFile(supConfigPath, 'utf8')).toBe(initialSupConfigText)
+    expect(await readFile(supServicePath, 'utf8')).toBe(initialSupServiceText)
+    expect(systemctlCalls).toEqual([
+      '--user is-active dsh-restart-supervisor-assistant.timer',
+      '--user is-active dsh-restart-supervisor-assistant.service',
+      '--user stop dsh-restart-supervisor-assistant.timer dsh-restart-supervisor-assistant.service',
+      '--user daemon-reload',
+      '--user daemon-reload',
+      '--user start dsh-restart-supervisor-assistant.timer',
+    ])
+
+    // 2. Success refreshes config.json digests, ExecStart, runs daemon-reload, restarts timer, and never touches otherHome
+    systemctlCalls.length = 0
+    const succeeded = await runUpgrade({
+      dshHome: f.dshHome,
+      profile: 'assistant',
+      action: 'apply',
+      targetVersion: '0.1.85',
+      confirmDshHomeStopped: true,
+      platform: 'linux',
+      osHome: f.osHome,
+    }, makeDeps(true))
+    expect(succeeded.exitCode).toBe(0)
+    const refreshedConfig = JSON.parse(await readFile(supConfigPath, 'utf8')) as typeof initialSupConfig
+    expect(refreshedConfig.cohortReceiptDigest).toBe('1'.repeat(64))
+    expect(refreshedConfig.sourceCommit).toBe('a'.repeat(40))
+    expect(refreshedConfig.policyEvaluatorPath).toContain('@dsh-enhanced+assistant-policy@0.1.85_cordis')
+    expect(refreshedConfig.profilePatchDigest).toBe(sha(await readFile(join(f.profileDir, 'cordis.patch.yml'))))
+    expect(refreshedConfig.expectedUnitDigest).toBe(sha(profileServiceRaw))
+    expect(refreshedConfig.hostBindingDigest).toBe(sha(hostBindingRaw))
+    expect(refreshedConfig.hostReceiptSourceDigest).toBe(sha(hostReceiptRaw))
+    expect(refreshedConfig.trustedFiles.some(item => item.path === refreshedConfig.policyEvaluatorPath)).toBe(true)
+    expect(refreshedConfig.trustedFiles.some(item => item.path.includes('@dsh-enhanced+assistant-delivery@0.1.85_cordis') && item.path.endsWith('dsh-restart-supervisor.js'))).toBe(true)
+    const refreshedService = await readFile(supServicePath, 'utf8')
+    expect(refreshedService).toContain('@dsh-enhanced+assistant-delivery@0.1.85_cordis/node_modules/@dsh-enhanced/assistant-delivery/bin/dsh-restart-supervisor.js')
+    expect(await readFile(join(otherSupDir, 'config.json'), 'utf8')).toBe(otherConfigText)
+    expect(systemctlCalls).toEqual([
+      '--user is-active dsh-restart-supervisor-assistant.timer',
+      '--user is-active dsh-restart-supervisor-assistant.service',
+      '--user stop dsh-restart-supervisor-assistant.timer dsh-restart-supervisor-assistant.service',
+      '--user daemon-reload',
+      '--user start dsh-restart-supervisor-assistant.timer',
+    ])
   })
 })

@@ -577,3 +577,175 @@ test('fresh exec rejects a mismatched manifest or unsafe bin before spawning', a
     expect(freshExec).not.toHaveBeenCalled()
   } finally { error.mockRestore(); output.mockRestore() }
 })
+
+test('detectFrozenOwner returns undefined for npm-migrated Linux RSI Home even with frozen residue, missing repo, and 0644 coordinator manifest', async () => {
+  const f = await fixture()
+  await auxiliary(f)
+  // Remove the old bound git repository (simulating post-migration deletion) and keep unrelated file: profile
+  await rm(f.repository, { recursive: true, force: true })
+  const targetDir = join(f.home, 'profiles', f.profile)
+  const coordDir = join(f.home, 'profiles', 'coordinator')
+  const webDir = join(f.home, 'profiles', 'web')
+  await Promise.all([
+    mkdir(targetDir, { recursive: true, mode: 0o700 }),
+    mkdir(coordDir, { recursive: true, mode: 0o700 }),
+    mkdir(webDir, { recursive: true, mode: 0o700 }),
+  ])
+  await writeFile(join(targetDir, 'package.json'), JSON.stringify({
+    name: `dsh-profile-${f.profile}`,
+    dependencies: { '@dsh-enhanced/assistant-delivery': '0.1.82', '@dsh-enhanced/assistant-policy': '0.1.82' },
+  }), { mode: 0o600 })
+  // Coordinator package.json with 0644 permissions (must be allowed!)
+  const coordPkg = join(coordDir, 'package.json')
+  await writeFile(coordPkg, JSON.stringify({
+    name: 'dsh-profile-coordinator',
+    dependencies: { '@dsh-enhanced/assistant-automations': '0.1.82', '@dsh-enhanced/plugin-control-plane': '0.1.82' },
+  }), { mode: 0o644 })
+  await chmod(coordPkg, 0o644)
+  // Unrelated file: profile must not falsely trigger frozen mode or failure
+  await writeFile(join(webDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web',
+    dependencies: { '@dsh-enhanced/assistant-web-owner': `file:${join(f.home, 'rsi-local-cohorts', f.profile, 'artifacts', 'assistant-web-owner.tgz')}` },
+  }), { mode: 0o644 })
+
+  expect(await detectFrozenOwner(f.home)).toBeUndefined()
+})
+
+test('detectFrozenOwner fails closed on mixed file:/npm specs or target-vs-coordinator mismatch, and retains genuine frozen cohorts', async () => {
+  // 1. Mixed within targetProfile
+  {
+    const f = await fixture()
+    await mkdir(join(f.home, 'profiles', f.profile), { recursive: true, mode: 0o700 })
+    await mkdir(join(f.home, 'profiles', 'coordinator'), { recursive: true, mode: 0o700 })
+    await writeFile(join(f.home, 'profiles', f.profile, 'package.json'), JSON.stringify({
+      dependencies: { '@dsh-enhanced/assistant-delivery': '0.1.82', '@dsh-enhanced/assistant-policy': 'file:./local.tgz' },
+    }), { mode: 0o600 })
+    await writeFile(join(f.home, 'profiles', 'coordinator', 'package.json'), JSON.stringify({
+      dependencies: { '@dsh-enhanced/plugin-control-plane': '0.1.82' },
+    }), { mode: 0o644 })
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/混合/)
+  }
+  // 2. npm target + file: pnpm-workspace.yaml override
+  {
+    const f = await fixture()
+    await mkdir(join(f.home, 'profiles', f.profile), { recursive: true, mode: 0o700 })
+    await mkdir(join(f.home, 'profiles', 'coordinator'), { recursive: true, mode: 0o700 })
+    await writeFile(join(f.home, 'profiles', f.profile, 'package.json'), JSON.stringify({
+      dependencies: { '@dsh-enhanced/assistant-delivery': '0.1.82' },
+    }), { mode: 0o600 })
+    await writeFile(join(f.home, 'profiles', f.profile, 'pnpm-workspace.yaml'), 'overrides:\n  "@dsh-enhanced/assistant-delivery": "file:./local.tgz"\n', { mode: 0o600 })
+    await writeFile(join(f.home, 'profiles', 'coordinator', 'package.json'), JSON.stringify({
+      dependencies: { '@dsh-enhanced/plugin-control-plane': '0.1.82' },
+    }), { mode: 0o644 })
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/混合/)
+  }
+  // 3. npm target + frozen-local coordinator
+  {
+    const f = await fixture()
+    await mkdir(join(f.home, 'profiles', f.profile), { recursive: true, mode: 0o700 })
+    await mkdir(join(f.home, 'profiles', 'coordinator'), { recursive: true, mode: 0o700 })
+    await writeFile(join(f.home, 'profiles', f.profile, 'package.json'), JSON.stringify({
+      dependencies: { '@dsh-enhanced/assistant-delivery': '0.1.82' },
+    }), { mode: 0o600 })
+    await writeFile(join(f.home, 'profiles', 'coordinator', 'package.json'), JSON.stringify({
+      dependencies: { '@dsh-enhanced/plugin-control-plane': `file:${join(f.home, 'rsi-local-cohorts', f.profile, 'artifacts', 'plugin-control-plane.tgz')}` },
+    }), { mode: 0o644 })
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/混合/)
+  }
+  // 4. Genuine frozen-local target + coordinator still returns FrozenOwner
+  {
+    const f = await fixture()
+    await mkdir(join(f.home, 'profiles', f.profile), { recursive: true, mode: 0o700 })
+    await mkdir(join(f.home, 'profiles', 'coordinator'), { recursive: true, mode: 0o700 })
+    await writeFile(join(f.home, 'profiles', f.profile, 'package.json'), JSON.stringify({
+      dependencies: { '@dsh-enhanced/assistant-delivery': `file:${join(f.home, 'rsi-local-cohorts', f.profile, 'artifacts', 'assistant-delivery.tgz')}` },
+    }), { mode: 0o600 })
+    await writeFile(join(f.home, 'profiles', 'coordinator', 'package.json'), JSON.stringify({
+      dependencies: { '@dsh-enhanced/plugin-control-plane': `file:${join(f.home, 'rsi-local-cohorts', f.profile, 'artifacts', 'plugin-control-plane.tgz')}` },
+    }), { mode: 0o644 })
+    expect(await detectFrozenOwner(f.home)).toEqual({ home: f.home, profile: f.profile, repository: f.repository })
+  }
+})
+
+test('update --all --yes and --dry-run on migrated npm Linux RSI Home route to transactional runUpgrade instead of install/lifecycle-profile', async () => {
+  const f = await fixture()
+  await mkdir(join(f.home, 'profiles', f.profile), { recursive: true, mode: 0o700 })
+  await mkdir(join(f.home, 'profiles', 'coordinator'), { recursive: true, mode: 0o700 })
+  await writeFile(join(f.home, 'profiles', f.profile, 'package.json'), JSON.stringify({
+    dependencies: { '@dsh-enhanced/assistant-delivery': '0.1.82' },
+  }), { mode: 0o600 })
+  await writeFile(join(f.home, 'profiles', 'coordinator', 'package.json'), JSON.stringify({
+    dependencies: { '@dsh-enhanced/plugin-control-plane': '0.1.82' },
+  }), { mode: 0o644 })
+
+  const install = vi.fn(async () => 0)
+  const frozenUpdate = vi.fn(async () => 0)
+  const upgrade = vi.fn(async (opts: { dshHome: string; action: string; targetVersion?: string }) => ({
+    report: {
+      schemaVersion: 1 as const,
+      command: 'upgrade' as const,
+      action: opts.action as 'check' | 'dry-run' | 'apply',
+      ok: true,
+      ready: true,
+      dshHome: opts.dshHome,
+      mode: 'standard-local' as const,
+      frozenSystemd: { detected: false, profiles: [] },
+      packages: {
+        cliPackageVersion: VERSION,
+        installedEnhancedVersion: '0.1.82',
+        ...(opts.targetVersion === undefined ? {} : { targetEnhancedVersion: opts.targetVersion }),
+        upgradeAvailable: true,
+        boundHost: { status: 'missing' as const, upgradeAvailable: false },
+        profiles: [],
+      },
+      registry: {
+        url: 'https://registry.npmjs.org',
+        checked: true,
+        status: 'ok' as const,
+        ...(opts.targetVersion === undefined ? {} : { latestEnhancedVersion: opts.targetVersion }),
+      },
+      readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+      plan: { canExecute: true, steps: [], rollbackSupported: true, backupFiles: [] },
+    },
+    exitCode: 0,
+  }))
+  const selfUpdate = vi.fn(async () => ({
+    fromVersion: VERSION,
+    selector: 'latest',
+    installedVersion: VERSION,
+    resolvedVersion: VERSION,
+    alreadyCurrent: true,
+    migratedFrom: false,
+    actions: [],
+  }))
+  const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+  const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  try {
+    expect(await main(['update', '--all', '--dry-run'], { DSH_HOME: f.home }, {
+      platform: 'linux', selfUpdate, install, frozenUpdate, upgrade,
+    })).toBe(0)
+    expect(upgrade).toHaveBeenCalledWith(expect.objectContaining({
+      dshHome: f.home, action: 'dry-run', targetVersion: VERSION,
+    }), undefined)
+    expect(install).not.toHaveBeenCalled()
+    expect(frozenUpdate).not.toHaveBeenCalled()
+
+    upgrade.mockClear()
+    expect(await main(['update', '--all', '--yes'], { DSH_HOME: f.home }, {
+      platform: 'linux', selfUpdate, install, frozenUpdate, upgrade,
+    })).toBe(0)
+    expect(upgrade).toHaveBeenCalledWith(expect.objectContaining({
+      dshHome: f.home, action: 'apply', targetVersion: VERSION,
+    }), undefined)
+    expect(install).not.toHaveBeenCalled()
+    expect(frozenUpdate).not.toHaveBeenCalled()
+
+    // Rejects unsupported installer-only passthrough flags on migrated Home
+    expect(await main(['update', '--all', '--yes', '--scenario', 'web'], { DSH_HOME: f.home }, {
+      platform: 'linux', selfUpdate, install, frozenUpdate, upgrade,
+    })).toBe(1)
+  } finally {
+    output.mockRestore()
+    error.mockRestore()
+  }
+})

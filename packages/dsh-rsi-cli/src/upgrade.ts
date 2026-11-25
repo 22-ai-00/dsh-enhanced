@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto'
 import { constants, existsSync } from 'node:fs'
-import { access, chmod, cp, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { access, chmod, cp, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { isMap, isScalar, parseDocument } from 'yaml'
+import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import { collectLiveDoctorReport, type LiveDoctorReport } from './doctor-live.ts'
 import { withDshHomeLifecycleLock } from './home-lifecycle-lock.ts'
 import { isSupportedCandidateVersion } from './host-runtime.ts'
@@ -720,10 +721,84 @@ async function updatePnpmProfilePackageJson(
   }
 }
 
+export const KNOWN_ENHANCED_PACKAGES: readonly string[] = [
+  '@dsh-enhanced/acp',
+  '@dsh-enhanced/assistant-actions',
+  '@dsh-enhanced/assistant-association',
+  '@dsh-enhanced/assistant-automations',
+  '@dsh-enhanced/assistant-deepseek-budget',
+  '@dsh-enhanced/assistant-delivery',
+  '@dsh-enhanced/assistant-dreaming',
+  '@dsh-enhanced/assistant-evaluation',
+  '@dsh-enhanced/assistant-evolution',
+  '@dsh-enhanced/assistant-goals',
+  '@dsh-enhanced/assistant-growth-contract',
+  '@dsh-enhanced/assistant-growth-driver',
+  '@dsh-enhanced/assistant-growth-experiments',
+  '@dsh-enhanced/assistant-health',
+  '@dsh-enhanced/assistant-heartbeat',
+  '@dsh-enhanced/assistant-isolation',
+  '@dsh-enhanced/assistant-memory-learning',
+  '@dsh-enhanced/assistant-policy',
+  '@dsh-enhanced/assistant-proactive',
+  '@dsh-enhanced/assistant-recovery',
+  '@dsh-enhanced/assistant-skills',
+  '@dsh-enhanced/assistant-verifier',
+  '@dsh-enhanced/assistant-web-owner',
+  '@dsh-enhanced/assistant-work-items',
+  '@dsh-enhanced/coding-subscription-provider',
+  '@dsh-enhanced/credentials-keychain',
+  '@dsh-enhanced/event-triggers',
+  '@dsh-enhanced/hello',
+  '@dsh-enhanced/lark-channel',
+  '@dsh-enhanced/llm-route-capabilities',
+  '@dsh-enhanced/memory-wiki-bridge',
+  '@dsh-enhanced/owner-console',
+  '@dsh-enhanced/personal-assistant',
+  '@dsh-enhanced/personal-memory',
+  '@dsh-enhanced/personal-wiki',
+  '@dsh-enhanced/plugin-control-plane',
+  '@dsh-enhanced/preference-learning',
+  '@dsh-enhanced/task-acceptance-contract',
+  '@dsh-enhanced/traex-acp-provider',
+]
+
+function extractEnhancedPackageFromExclude(entry: string): string | undefined {
+  if (!entry.startsWith('@dsh-enhanced/') || entry === '@dsh-enhanced/*') return undefined
+  const atIndex = entry.indexOf('@', '@dsh-enhanced/'.length)
+  const name = atIndex > 0 ? entry.slice(0, atIndex) : entry
+  if (!/^@dsh-enhanced\/[a-z0-9][a-z0-9-]*$/u.test(name)) return undefined
+  return name
+}
+
+async function readRegistryEnhancedDepsFromManifest(profileDir: string): Promise<string[]> {
+  const pkgPath = join(profileDir, 'package.json')
+  try {
+    const meta = await lstat(pkgPath)
+    if (!meta.isFile() || meta.isSymbolicLink()) return []
+    const parsed = asObject(JSON.parse(await readFile(pkgPath, 'utf8')))
+    if (!parsed) return []
+    const names: string[] = []
+    for (const sectionName of ['dependencies', 'optionalDependencies', 'devDependencies'] as const) {
+      const section = asObject(parsed[sectionName])
+      if (!section) continue
+      for (const [depName, depSpec] of Object.entries(section)) {
+        if (depName.startsWith('@dsh-enhanced/') && typeof depSpec === 'string' && !isNonRegistrySpec(depSpec)) {
+          names.push(depName)
+        }
+      }
+    }
+    return names
+  } catch {
+    return []
+  }
+}
+
 async function updatePnpmWorkspaceOverrides(
   profileDir: string,
   profile: string,
   targetVersion: string,
+  npmPlugins: readonly string[] = [],
 ): Promise<void> {
   const wsPath = join(profileDir, 'pnpm-workspace.yaml')
   let wsStat
@@ -742,18 +817,54 @@ async function updatePnpmWorkspaceOverrides(
   if (doc.errors.length > 0) {
     throw new Error(`profile ${profile} pnpm-workspace.yaml YAML 语法错误：${doc.errors[0]!.message}`)
   }
-  const overrides = doc.get('overrides', true)
-  if (!isMap(overrides)) return
 
   let changed = false
-  for (const pair of overrides.items) {
-    const keyVal = isScalar(pair.key) ? pair.key.value : pair.key
-    if (typeof keyVal !== 'string' || !keyVal.startsWith('@dsh-enhanced/') || keyVal.includes('>')) continue
-    if (!isScalar(pair.value) || typeof pair.value.value !== 'string') continue
-    if (isNonRegistrySpec(pair.value.value)) continue
-    if (pair.value.value !== targetVersion) {
-      pair.value.value = targetVersion
+  const overrides = doc.get('overrides', true)
+  if (isMap(overrides)) {
+    for (const pair of overrides.items) {
+      const keyVal = isScalar(pair.key) ? pair.key.value : pair.key
+      if (typeof keyVal !== 'string' || !keyVal.startsWith('@dsh-enhanced/') || keyVal.includes('>')) continue
+      if (!isScalar(pair.value) || typeof pair.value.value !== 'string') continue
+      if (isNonRegistrySpec(pair.value.value)) continue
+      if (pair.value.value !== targetVersion) {
+        pair.value.value = targetVersion
+        changed = true
+      }
+    }
+  }
+
+  const strictNode = doc.get('minimumReleaseAgeStrict', true)
+  const isStrict = strictNode === true || (isScalar(strictNode) && strictNode.value === true)
+  if (!isStrict) {
+    const excludeNode = doc.get('minimumReleaseAgeExclude', true)
+    const packageNames = new Set<string>([...KNOWN_ENHANCED_PACKAGES, ...npmPlugins])
+    for (const depName of await readRegistryEnhancedDepsFromManifest(profileDir)) {
+      packageNames.add(depName)
+    }
+
+    if (excludeNode === undefined || excludeNode === null) {
+      const entries = [...packageNames].sort().map(pkg => `${pkg}@${targetVersion}`)
+      doc.set('minimumReleaseAgeExclude', entries)
       changed = true
+    } else if (!isSeq(excludeNode)) {
+      throw new Error(`profile ${profile} pnpm-workspace.yaml minimumReleaseAgeExclude 必须为数组`)
+    } else {
+      const existingEntries = new Set<string>()
+      for (const item of excludeNode.items) {
+        const val = isScalar(item) ? item.value : item
+        if (typeof val !== 'string') continue
+        existingEntries.add(val)
+        const pkg = extractEnhancedPackageFromExclude(val)
+        if (pkg) packageNames.add(pkg)
+      }
+      for (const pkg of [...packageNames].sort()) {
+        const entry = `${pkg}@${targetVersion}`
+        if (!existingEntries.has(entry)) {
+          excludeNode.add(entry)
+          existingEntries.add(entry)
+          changed = true
+        }
+      }
     }
   }
 
@@ -822,7 +933,7 @@ export async function defaultUpgradeProfilePackages(input: {
 
   if (isPnpmProfile) {
     await updatePnpmProfilePackageJson(profileDir, input.profile, input.targetVersion, input.npmPlugins)
-    await updatePnpmWorkspaceOverrides(profileDir, input.profile, input.targetVersion)
+    await updatePnpmWorkspaceOverrides(profileDir, input.profile, input.targetVersion, input.npmPlugins)
     const env = input.env ?? process.env
     const osHome = input.osHome ?? env.HOME ?? homedir()
     const platform = input.platform ?? process.platform
@@ -907,6 +1018,15 @@ interface ProfileBackupRecord {
   readonly hasEnhancedModules: boolean
 }
 
+interface SupervisorBackupRecord {
+  readonly profile: string
+  readonly configSrc: string
+  readonly configDst: string
+  readonly serviceSrc: string
+  readonly serviceDst: string
+  readonly hasService: boolean
+}
+
 interface LedgerBackupRecord {
   readonly src: string
   readonly dst: string
@@ -916,6 +1036,278 @@ interface LedgerBackupRecord {
   readonly shmSrc: string
   readonly shmDst: string
   readonly hadShm: boolean
+}
+
+interface RestartSupervisorTarget {
+  readonly profile: string
+  readonly configPath: string
+  readonly serviceName: string
+  readonly timerName: string
+  readonly servicePath: string
+  readonly config: Record<string, unknown>
+  readonly hasService: boolean
+}
+
+async function readCheckedRegularBytes(filePath: string, maxBytes: number, label: string): Promise<Buffer> {
+  const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = await handle.stat()
+    const named = await lstat(filePath)
+    if (!before.isFile() || !named.isFile() || named.isSymbolicLink()
+      || before.uid !== process.getuid?.() || before.dev !== named.dev || before.ino !== named.ino
+      || (before.mode & 0o022) !== 0 || before.size < 1 || before.size > maxBytes) {
+      throw new Error(`${label}文件不安全：${filePath}`)
+    }
+    const bytes = await handle.readFile()
+    const after = await handle.stat()
+    if (bytes.length !== before.size || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+      throw new Error(`${label}读取期间变化：${filePath}`)
+    }
+    return bytes
+  } finally {
+    await handle.close()
+  }
+}
+
+function sha256Buffer(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+async function resolveRestartSupervisorTarget(
+  osHome: string,
+  profile: string,
+  canonicalHome: string,
+): Promise<RestartSupervisorTarget | undefined> {
+  const configPath = join(osHome, '.local', 'state', 'dsh-enhanced', 'restart-supervisor', profile, 'config.json')
+  let configBytes: Buffer
+  try {
+    configBytes = await readCheckedRegularBytes(configPath, 2_000_000, 'restart-supervisor 配置')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    return undefined
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(configBytes.toString('utf8'))
+  } catch {
+    return undefined
+  }
+  const config = asObject(parsed)
+  if (!config || config.dshHome !== canonicalHome || config.profile !== profile) {
+    return undefined
+  }
+  const serviceName = `dsh-restart-supervisor-${profile}.service`
+  const timerName = `dsh-restart-supervisor-${profile}.timer`
+  const servicePath = join(osHome, '.config', 'systemd', 'user', serviceName)
+  const serviceMeta = await lstat(servicePath).catch(() => undefined)
+  const hasService = Boolean(serviceMeta && serviceMeta.isFile() && !serviceMeta.isSymbolicLink())
+  return { profile, configPath, serviceName, timerName, servicePath, config, hasService }
+}
+
+async function collectInstalledEnhancedPackageRoots(
+  profileDir: string,
+  canonicalHome: string,
+  targetEnhancedVersion?: string,
+): Promise<Map<string, string>> {
+  const roots = new Map<string, string>()
+  const homePrefix = canonicalHome.endsWith(sep) ? canonicalHome : `${canonicalHome}${sep}`
+  const directDir = join(profileDir, 'node_modules', '@dsh-enhanced')
+  const directEntries = await readdir(directDir).catch(() => [] as string[])
+  for (const entry of [...directEntries].sort()) {
+    const candidate = join(directDir, entry)
+    const real = await realpath(candidate).catch(() => undefined)
+    if (!real || !real.startsWith(homePrefix)) continue
+    try {
+      const manifestBytes = await readCheckedRegularBytes(join(real, 'package.json'), 2_000_000, 'package.json')
+      const manifest = asObject(JSON.parse(manifestBytes.toString('utf8')))
+      if (manifest && manifest.name === `@dsh-enhanced/${entry}`) {
+        roots.set(manifest.name, real)
+      }
+    } catch {
+      // Ignore unreadable package roots here; required roots are verified below.
+    }
+  }
+
+  const pnpmDir = join(profileDir, 'node_modules', '.pnpm')
+  const pnpmEntries = await readdir(pnpmDir).catch(() => [] as string[])
+  const candidatesByPkg = new Map<string, Array<{ root: string; version: string | undefined }>>()
+  for (const entry of [...pnpmEntries].sort()) {
+    if (!entry.startsWith('@dsh-enhanced+')) continue
+    const atIndex = entry.indexOf('@', '@dsh-enhanced+'.length)
+    if (atIndex <= '@dsh-enhanced+'.length) continue
+    const slug = entry.slice('@dsh-enhanced+'.length, atIndex)
+    const pkgName = `@dsh-enhanced/${slug}`
+    if (roots.has(pkgName)) continue
+    const candidate = join(pnpmDir, entry, 'node_modules', '@dsh-enhanced', slug)
+    const real = await realpath(candidate).catch(() => undefined)
+    if (!real || !real.startsWith(homePrefix)) continue
+    try {
+      const manifestBytes = await readCheckedRegularBytes(join(real, 'package.json'), 2_000_000, 'package.json')
+      const manifest = asObject(JSON.parse(manifestBytes.toString('utf8')))
+      if (!manifest || manifest.name !== pkgName) continue
+      const list = candidatesByPkg.get(pkgName) ?? []
+      list.push({ root: real, version: typeof manifest.version === 'string' ? manifest.version : undefined })
+      candidatesByPkg.set(pkgName, list)
+    } catch {
+      // Skip non-package entries
+    }
+  }
+
+  for (const [pkgName, list] of candidatesByPkg) {
+    const preferred = targetEnhancedVersion
+      ? list.find(item => item.version === targetEnhancedVersion) ?? list[0]
+      : list[0]
+    if (preferred) roots.set(pkgName, preferred.root)
+  }
+  return roots
+}
+
+async function collectPackageTrustedFiles(
+  packageRoot: string,
+  canonicalHome: string,
+): Promise<Array<{ path: string; digest: string }>> {
+  const homePrefix = canonicalHome.endsWith(sep) ? canonicalHome : `${canonicalHome}${sep}`
+  const collected: Array<{ path: string; digest: string }> = []
+  const addFile = async (filePath: string): Promise<void> => {
+    if (!filePath.startsWith(homePrefix)) {
+      throw new Error(`trustedFile 越界 DSH_HOME：${filePath}`)
+    }
+    const bytes = await readCheckedRegularBytes(filePath, 2_000_000, 'trustedFile')
+    collected.push({ path: filePath, digest: sha256Buffer(bytes) })
+  }
+
+  await addFile(join(packageRoot, 'package.json'))
+  const patchPath = join(packageRoot, 'cordis.patch.yml')
+  if (await lstat(patchPath).then(m => m.isFile() && !m.isSymbolicLink(), () => false)) {
+    await addFile(patchPath)
+  }
+
+  const walkCodeDir = async (dirPath: string): Promise<void> => {
+    let entries
+    try {
+      entries = await readdir(dirPath, { withFileTypes: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const child = join(dirPath, entry.name)
+      if (entry.isSymbolicLink()) continue
+      if (entry.isDirectory()) {
+        await walkCodeDir(child)
+      } else if (entry.isFile() && /\.(?:js|mjs|cjs)$/u.test(entry.name)) {
+        await addFile(child)
+      }
+    }
+  }
+
+  await walkCodeDir(join(packageRoot, 'lib'))
+  await walkCodeDir(join(packageRoot, 'bin'))
+  return collected
+}
+
+async function refreshRestartSupervisorForProfile(input: {
+  target: RestartSupervisorTarget
+  canonicalHome: string
+  osHome: string
+  targetEnhancedVersion?: string
+}): Promise<{ updatedService: boolean }> {
+  const { target, canonicalHome, osHome, targetEnhancedVersion } = input
+  const profileDir = join(profilesDirectory(canonicalHome), target.profile)
+  const roots = await collectInstalledEnhancedPackageRoots(profileDir, canonicalHome, targetEnhancedVersion)
+  if (roots.size === 0) {
+    throw new Error(`profile ${target.profile} 未找到可钉死的 @dsh-enhanced/* 包目录`)
+  }
+  const deliveryRoot = roots.get('@dsh-enhanced/assistant-delivery')
+  const policyRoot = roots.get('@dsh-enhanced/assistant-policy')
+  if (!deliveryRoot || !policyRoot) {
+    throw new Error(`profile ${target.profile} 缺少 assistant-delivery 或 assistant-policy 包目录，无法刷新 restart-supervisor`)
+  }
+  const helperPath = join(deliveryRoot, 'bin', 'dsh-restart-supervisor.js')
+  const policyEvaluatorPath = join(policyRoot, 'lib', 'evaluator.js')
+  await readCheckedRegularBytes(helperPath, 2_000_000, 'dsh-restart-supervisor helper')
+  await readCheckedRegularBytes(policyEvaluatorPath, 2_000_000, 'policy evaluator')
+
+  const trustedByPath = new Map<string, string>()
+  for (const pkgName of [...roots.keys()].sort()) {
+    const files = await collectPackageTrustedFiles(roots.get(pkgName)!, canonicalHome)
+    for (const file of files) {
+      trustedByPath.set(file.path, file.digest)
+    }
+  }
+  const trustedFiles = [...trustedByPath.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([path, digest]) => ({ path, digest }))
+  if (trustedFiles.length < 3 || trustedFiles.length > 2048 || !trustedByPath.has(policyEvaluatorPath)) {
+    throw new Error(`profile ${target.profile} restart-supervisor trustedFiles 无效（count=${trustedFiles.length}）`)
+  }
+
+  const profilePatchDigest = sha256Buffer(
+    await readCheckedRegularBytes(join(profileDir, 'cordis.patch.yml'), 2_000_000, 'profile cordis.patch.yml'),
+  )
+
+  let expectedUnitDigest = target.config.expectedUnitDigest
+  if (typeof target.config.unit === 'string') {
+    const unitFile = join(osHome, '.config', 'systemd', 'user', target.config.unit)
+    const unitMeta = await lstat(unitFile).catch(() => undefined)
+    if (unitMeta && unitMeta.isFile() && !unitMeta.isSymbolicLink()) {
+      expectedUnitDigest = sha256Buffer(await readCheckedRegularBytes(unitFile, 2_000_000, 'profile systemd unit'))
+    }
+  }
+
+  let hostBindingDigest = target.config.hostBindingDigest
+  let hostReceiptPath = target.config.hostReceiptPath
+  let hostReceiptSourceDigest = target.config.hostReceiptSourceDigest
+  const bindingFile = join(canonicalHome, '.dsh-rsi-host.json')
+  const bindingMeta = await lstat(bindingFile).catch(() => undefined)
+  if (bindingMeta && bindingMeta.isFile() && !bindingMeta.isSymbolicLink()) {
+    const bindingBytes = await readCheckedRegularBytes(bindingFile, 16_384, '.dsh-rsi-host.json')
+    hostBindingDigest = sha256Buffer(bindingBytes)
+    const bound = asObject(JSON.parse(bindingBytes.toString('utf8')))
+    if (bound && typeof bound.cacheRoot === 'string' && typeof bound.version === 'string') {
+      const nextReceiptPath = join(bound.cacheRoot, bound.version, 'receipt.json')
+      const homePrefix = canonicalHome.endsWith(sep) ? canonicalHome : `${canonicalHome}${sep}`
+      if (nextReceiptPath.startsWith(homePrefix)) {
+        throw new Error(`hostReceiptPath 不得位于 DSH_HOME 内：${nextReceiptPath}`)
+      }
+      hostReceiptPath = nextReceiptPath
+      hostReceiptSourceDigest = sha256Buffer(
+        await readCheckedRegularBytes(nextReceiptPath, 16_777_216, 'host receipt.json'),
+      )
+    }
+  }
+
+  const refreshedConfig = {
+    ...target.config,
+    policyEvaluatorPath,
+    trustedFiles,
+    profilePatchDigest,
+    expectedUnitDigest,
+    hostBindingDigest,
+    hostReceiptPath,
+    hostReceiptSourceDigest,
+  }
+  await writeTextAtomically(target.configPath, `${JSON.stringify(refreshedConfig, null, 2)}\n`, 0o600)
+
+  let updatedService = false
+  if (target.hasService) {
+    const serviceMeta = await lstat(target.servicePath)
+    const serviceMode = serviceMeta.mode & 0o777
+    const serviceRaw = (await readCheckedRegularBytes(target.servicePath, 262_144, 'restart-supervisor service')).toString('utf8')
+    const execStartRe = /^ExecStart=(.+?\s+)("?)([^\s"]+\/bin\/dsh-restart-supervisor\.js)\2(\s+.*)$/mu
+    if (!execStartRe.test(serviceRaw)) {
+      throw new Error(`restart-supervisor service ExecStart 未匹配 helper 路径：${target.servicePath}`)
+    }
+    const nextService = serviceRaw.replace(execStartRe, (_m, prefix, quote, _oldHelper, suffix) =>
+      `ExecStart=${String(prefix)}${String(quote)}${helperPath}${String(quote)}${String(suffix)}`,
+    )
+    if (nextService !== serviceRaw) {
+      await writeTextAtomically(target.servicePath, nextService, serviceMode)
+    }
+    updatedService = true
+  }
+  return { updatedService }
 }
 
 async function copyIfRegularFile(src: string, dst: string): Promise<boolean> {
@@ -944,11 +1336,16 @@ async function restoreRegularFileFromBackup(src: string, dst: string): Promise<v
   }
 }
 
-async function createUpgradeBackup(dshHome: string, profiles: readonly string[]): Promise<{
+async function createUpgradeBackup(
+  dshHome: string,
+  profiles: readonly string[],
+  supervisorTargets: readonly RestartSupervisorTarget[] = [],
+): Promise<{
   backupDir: string
   hadHostBinding: boolean
   profileBackups: ProfileBackupRecord[]
   ledgerBackups: LedgerBackupRecord[]
+  supervisorBackups: SupervisorBackupRecord[]
   backupFiles: string[]
 }> {
   const stamp = `${new Date().toISOString().replace(/[:.]/gu, '-')}-${process.pid}`
@@ -1032,7 +1429,28 @@ async function createUpgradeBackup(dshHome: string, profiles: readonly string[])
     }
   }
 
-  return { backupDir, hadHostBinding, profileBackups, ledgerBackups, backupFiles }
+  const supervisorBackups: SupervisorBackupRecord[] = []
+  for (const target of supervisorTargets) {
+    const supBackupDir = join(backupDir, 'restart-supervisor', target.profile)
+    await mkdir(supBackupDir, { recursive: true, mode: 0o700 })
+    const configDst = join(supBackupDir, 'config.json')
+    if (await copyIfRegularFile(target.configPath, configDst)) {
+      backupFiles.push(target.configPath)
+      const serviceDst = join(supBackupDir, target.serviceName)
+      const hasService = target.hasService && await copyIfRegularFile(target.servicePath, serviceDst)
+      if (hasService) backupFiles.push(target.servicePath)
+      supervisorBackups.push({
+        profile: target.profile,
+        configSrc: target.configPath,
+        configDst,
+        serviceSrc: target.servicePath,
+        serviceDst,
+        hasService,
+      })
+    }
+  }
+
+  return { backupDir, hadHostBinding, profileBackups, ledgerBackups, supervisorBackups, backupFiles }
 }
 
 async function restoreUpgradeBackup(
@@ -1083,6 +1501,13 @@ async function restoreUpgradeBackup(
         await restoreRegularFileFromBackup(ledger.shmDst, ledger.shmSrc)
       } else {
         await rm(ledger.shmSrc, { force: true })
+      }
+    }
+
+    for (const sup of backup.supervisorBackups) {
+      await restoreRegularFileFromBackup(sup.configDst, sup.configSrc)
+      if (sup.hasService) {
+        await restoreRegularFileFromBackup(sup.serviceDst, sup.serviceSrc)
       }
     }
     return true
@@ -1296,6 +1721,14 @@ export async function runUpgrade(
   const readinessOk = blockedReasons.length === 0 && bindingOk && ledgersOk
 
   // Compute concrete plan steps & backup manifest.
+  const supervisorTargets: RestartSupervisorTarget[] = []
+  if (platform === 'linux' && homeUsable && mode !== 'frozen-linux-systemd') {
+    for (const profile of targetProfiles) {
+      const target = await resolveRestartSupervisorTarget(osHome, profile, canonicalHome)
+      if (target) supervisorTargets.push(target)
+    }
+  }
+
   const backupFiles: string[] = []
   if (boundHostStatus === 'ready') backupFiles.push(join(canonicalHome, '.dsh-rsi-host.json'))
   for (const profile of targetProfiles) {
@@ -1303,6 +1736,10 @@ export async function runUpgrade(
       const candidate = join(profilesDirectory(canonicalHome), profile, fileName)
       if (existsSync(candidate)) backupFiles.push(candidate)
     }
+  }
+  for (const sup of supervisorTargets) {
+    backupFiles.push(sup.configPath)
+    if (sup.hasService) backupFiles.push(sup.servicePath)
   }
 
   const steps: string[] = []
@@ -1318,6 +1755,9 @@ export async function runUpgrade(
       if (npmCount > 0 && targetEnhancedVersion && (enhancedUpgradeAvailable || options.targetVersion)) {
         steps.push(`升级 profile ${prof.profile} @dsh-enhanced/*（${prof.minVersion ?? installedEnhancedVersion} -> ${targetEnhancedVersion}）`)
       }
+    }
+    if (supervisorTargets.length > 0) {
+      steps.push(`同步刷新 ${supervisorTargets.map(s => s.serviceName).join(', ')} 配置与 ExecStart`)
     }
     steps.push('运行 dsh-rsi doctor 就绪检查，失败时自动回滚备份')
   }
@@ -1584,8 +2024,36 @@ export async function runUpgrade(
       }
     }
 
+    // 1b. Stop active dsh-restart-supervisor-<profile> timers/services before mutating .pnpm store.
+    const stoppedSupervisorTimers: string[] = []
+    for (const sup of supervisorTargets) {
+      const timerActive = runner('systemctl', ['--user', 'is-active', sup.timerName]).status === 0
+      const serviceActive = runner('systemctl', ['--user', 'is-active', sup.serviceName]).status === 0
+      if (timerActive || serviceActive) {
+        const stopRes = runner('systemctl', ['--user', 'stop', sup.timerName, sup.serviceName])
+        if (stopRes.status !== 0) {
+          const detail = stopRes.stderr.trim() || stopRes.stdout.trim() || `exit ${stopRes.status}`
+          return {
+            report: {
+              ...baseReport,
+              ok: false,
+              ready: readinessOk,
+              execution: {
+                executed: false,
+                dryRun: false,
+                rolledBack: false,
+                error: `无法停止 ${sup.timerName}/${sup.serviceName}：${detail}`,
+              },
+            },
+            exitCode: 1,
+          }
+        }
+        if (timerActive) stoppedSupervisorTimers.push(sup.timerName)
+      }
+    }
+
     // 2. Create transactional backup before any mutation.
-    const backup = await createUpgradeBackup(canonicalHome, targetProfiles)
+    const backup = await createUpgradeBackup(canonicalHome, targetProfiles, supervisorTargets)
     let servicesRestarted = false
 
     try {
@@ -1607,6 +2075,27 @@ export async function runUpgrade(
             osHome,
             env,
           })
+        }
+      }
+
+      // 2b. Refresh matching Linux restart-supervisor configs & systemd service ExecStart paths.
+      let needDaemonReload = false
+      const profilesSet = new Set(profilesNeedingWork.map(p => p.profile))
+      for (const sup of supervisorTargets) {
+        if (!hostNeedsWork && !profilesSet.has(sup.profile)) continue
+        const refreshed = await refreshRestartSupervisorForProfile({
+          target: sup,
+          canonicalHome,
+          osHome,
+          ...(targetEnhancedVersion ? { targetEnhancedVersion } : {}),
+        })
+        if (refreshed.updatedService) needDaemonReload = true
+      }
+      if (needDaemonReload) {
+        const reloadRes = runner('systemctl', ['--user', 'daemon-reload'])
+        if (reloadRes.status !== 0) {
+          const detail = reloadRes.stderr.trim() || reloadRes.stdout.trim() || `exit ${reloadRes.status}`
+          throw new Error(`刷新 restart-supervisor 后 systemctl --user daemon-reload 失败：${detail}`)
         }
       }
 
@@ -1638,6 +2127,14 @@ export async function runUpgrade(
         }
       }
 
+      for (const timerName of stoppedSupervisorTimers) {
+        const startTimerRes = runner('systemctl', ['--user', 'start', timerName])
+        if (startTimerRes.status !== 0) {
+          const detail = startTimerRes.stderr.trim() || startTimerRes.stdout.trim() || `exit ${startTimerRes.status}`
+          throw new Error(`升级后重启 ${timerName} 失败：${detail}`)
+        }
+      }
+
       return {
         report: {
           ...baseReport,
@@ -1662,8 +2159,14 @@ export async function runUpgrade(
       }
       const rollbackSucceeded = await restoreUpgradeBackup(canonicalHome, backup)
       if (rollbackSucceeded) {
+        if (backup.supervisorBackups.some(b => b.hasService)) {
+          try { runner('systemctl', ['--user', 'daemon-reload']) } catch { /* ignore */ }
+        }
         for (const profile of previouslyRunning) {
           try { await controlServiceFn(platform, osHome, profile, 'start', runner, false, canonicalHome) } catch { /* ignore */ }
+        }
+        for (const timerName of stoppedSupervisorTimers) {
+          try { runner('systemctl', ['--user', 'start', timerName]) } catch { /* ignore */ }
         }
       }
       return {

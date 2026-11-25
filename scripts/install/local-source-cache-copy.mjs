@@ -155,6 +155,30 @@ export async function copyLocalSourcePackageCache({ storePath, cachePath, rootPa
   return Object.freeze({ storePath: store, cachePath: cache })
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+  if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
+    const originalEmitWarning = process.emitWarning
+    const filteredEmitWarning = function emitWarning(warning, ...rest) {
+      const first = rest[0]
+      let warningType
+      if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+        warningType = warning.name
+      } else if (typeof first === 'string') {
+        warningType = first
+      } else if (first !== null && typeof first === 'object' && typeof first.type === 'string') {
+        warningType = first.type
+      }
+      const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+        ? warning.message
+        : String(warning ?? '')
+      if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+        return
+      }
+      return Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+    }
+    Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+    process.emitWarning = filteredEmitWarning
+  }
   if (process.argv.length !== 5 || process.argv[2] !== '--snapshot-index') fail('invalid private backup invocation')
   await backupIndex(process.argv[3], process.argv[4])
 }

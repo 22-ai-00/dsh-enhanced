@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { constants } from 'node:fs'
 import { lstat, open, readdir, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { isMap, isScalar, parseDocument } from 'yaml'
 import { PurgeError } from './purge.ts'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -208,6 +209,101 @@ async function verifyAuxiliaryCohort(home: string, profile: string, repository: 
   }
 }
 
+async function ownedRegularText(path: string, limit: number, label: string): Promise<string | undefined> {
+  let descriptor
+  try {
+    descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    fail(`${label}不安全或不可读：${path}`)
+  }
+  try {
+    const before = await descriptor.stat()
+    if (!before.isFile() || before.nlink !== 1 || before.uid !== process.getuid?.()
+      || (before.mode & 0o022) || before.size < 1 || before.size > limit) fail(`${label}不安全：${path}`)
+    const bytes = await descriptor.readFile()
+    const after = await descriptor.stat()
+    const named = await lstat(path)
+    if (bytes.length !== before.size || before.dev !== after.dev || before.ino !== after.ino
+      || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+      || named.dev !== before.dev || named.ino !== before.ino || named.isSymbolicLink()) fail(`${label}读取期间变化：${path}`)
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } finally { await descriptor.close() }
+}
+
+async function ownedRegularJson(path: string, limit: number): Promise<Record<string, unknown> | undefined> {
+  const source = await ownedRegularText(path, limit, 'profile 清单')
+  if (source === undefined) return undefined
+  const value: unknown = JSON.parse(source)
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) fail(`profile 清单格式错误：${path}`)
+  return value as Record<string, unknown>
+}
+
+const REGISTRY_SEMVER_SPEC = /^(?:\^|~|>=|<=|>|<|=)?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u
+const NON_REGISTRY_PREFIX = /^(?:file:|link:|workspace:|portal:|git\+|http:|https:|npm:|github:)/u
+const LOCAL_FROZEN_PREFIX = /^(?:file:|link:|workspace:)/u
+
+function isRegistrySemverSpec(spec: string): boolean {
+  return REGISTRY_SEMVER_SPEC.test(spec)
+    && !spec.includes('rsi-local-cohorts')
+    && !NON_REGISTRY_PREFIX.test(spec)
+}
+
+function isLocalFrozenSpec(spec: string): boolean {
+  return LOCAL_FROZEN_PREFIX.test(spec) || spec.includes('rsi-local-cohorts')
+}
+
+type ProfileEnhancedKind = 'absent' | 'empty' | 'npm' | 'frozen-local' | 'mixed'
+
+async function classifyProfileEnhancedSpecs(canonicalHome: string, profile: string): Promise<ProfileEnhancedKind> {
+  const manifest = await ownedRegularJson(join(canonicalHome, 'profiles', profile, 'package.json'), 16_777_216)
+  if (manifest === undefined) return 'absent'
+
+  let npmCount = 0
+  let localCount = 0
+  let unknownCount = 0
+
+  for (const sectionName of ['dependencies', 'optionalDependencies', 'devDependencies'] as const) {
+    const section = manifest[sectionName]
+    if (section === undefined) continue
+    if (section === null || typeof section !== 'object' || Array.isArray(section)) {
+      fail(`profile ${profile} package.json 字段 ${sectionName} 必须为对象`)
+    }
+    for (const [depName, depSpec] of Object.entries(section as Record<string, unknown>)) {
+      if (!depName.startsWith('@dsh-enhanced/')) continue
+      if (typeof depSpec !== 'string' || depSpec.trim() === '') {
+        fail(`profile ${profile} package.json 包含无效 @dsh-enhanced 依赖规范：${depName}`)
+      }
+      if (isRegistrySemverSpec(depSpec)) npmCount++
+      else if (isLocalFrozenSpec(depSpec)) localCount++
+      else unknownCount++
+    }
+  }
+
+  let hasLocalWorkspaceOverride = false
+  const wsSource = await ownedRegularText(join(canonicalHome, 'profiles', profile, 'pnpm-workspace.yaml'), 2_097_152, 'pnpm-workspace.yaml')
+  if (wsSource !== undefined) {
+    const doc = parseDocument(wsSource)
+    if (doc.errors.length > 0) fail(`profile ${profile} pnpm-workspace.yaml 语法错误`)
+    const overrides = doc.get('overrides', true)
+    if (isMap(overrides)) {
+      for (const pair of overrides.items) {
+        const keyVal = isScalar(pair.key) ? pair.key.value : pair.key
+        if (typeof keyVal !== 'string' || !keyVal.startsWith('@dsh-enhanced/')) continue
+        if (!isScalar(pair.value) || typeof pair.value.value !== 'string') continue
+        if (isLocalFrozenSpec(pair.value.value)) {
+          hasLocalWorkspaceOverride = true
+        }
+      }
+    }
+  }
+
+  if (unknownCount > 0 || (npmCount > 0 && (localCount > 0 || hasLocalWorkspaceOverride))) return 'mixed'
+  if (npmCount > 0) return 'npm'
+  if (localCount > 0 || hasLocalWorkspaceOverride) return 'frozen-local'
+  return 'empty'
+}
+
 /** Read-only, fail-closed recognition. Partial frozen installations must not fall into the npm updater. */
 export async function detectFrozenOwner(dshHome: string): Promise<FrozenOwner | undefined> {
   if (!isAbsolute(dshHome) || resolve(dshHome) !== dshHome) {
@@ -231,20 +327,38 @@ export async function detectFrozenOwner(dshHome: string): Promise<FrozenOwner | 
   }
   const pair = await privateJson(join(canonical, markers[0]!), 65_536)
   const profile = pair.targetProfile
-  if (typeof profile !== 'string' || !profilePattern.test(profile) || !cohorts.includes(profile)) {
+  if (typeof profile !== 'string' || !profilePattern.test(profile)) {
     fail('只接受恰好一个冻结 target 与 coordinator marker')
   }
   const marker = `.rsi-coordinator-${createHash('sha256').update(profile).digest('hex').slice(0, 16)}.json`
   if (markers[0] !== marker) fail('coordinator marker 与 target 不一致')
+  if (pair.schemaVersion !== 1 || !profilePattern.test(String(pair.coordinatorProfile)) || pair.coordinatorProfile === profile) {
+    fail('冻结收据的 target、source 或 coordinator 不一致')
+  }
+  const coordinatorProfile = String(pair.coordinatorProfile)
+  const targetKind = await classifyProfileEnhancedSpecs(canonical, profile)
+  const coordKind = await classifyProfileEnhancedSpecs(canonical, coordinatorProfile)
+  if (targetKind === 'mixed' || coordKind === 'mixed') {
+    fail('检测到混合的本地冻结与 npm @dsh-enhanced/* 依赖；拒绝继续')
+  }
+  if ((targetKind === 'npm' && coordKind === 'frozen-local') || (targetKind === 'frozen-local' && coordKind === 'npm')) {
+    fail('target 与 coordinator profile 处于混合的本地与 npm 状态；拒绝继续')
+  }
+  if (targetKind === 'npm' && coordKind === 'npm') {
+    return undefined
+  }
+  if (!cohorts.includes(profile)) {
+    fail('只接受恰好一个冻结 target 与 coordinator marker')
+  }
   await ownedDirectory(join(canonical, 'rsi-local-cohorts'))
   await ownedDirectory(join(canonical, 'rsi-local-cohorts', profile))
   const cohort = await privateJson(join(canonical, 'rsi-local-cohorts', profile, 'receipt.json'), 16_777_216)
   const repository = cohort.sourceRepository
   if (cohort.schemaVersion !== 1 || cohort.root !== join(canonical, 'rsi-local-cohorts', profile)
     || typeof repository !== 'string' || !isAbsolute(repository) || resolve(repository) !== repository
-    || await realpath(repository) !== repository || pair.schemaVersion !== 1 || pair.targetProfile !== profile
-    || pair.sourceRepository !== repository || !profilePattern.test(String(pair.coordinatorProfile))
-    || pair.coordinatorProfile === profile) fail('冻结收据的 target、source 或 coordinator 不一致')
+    || await realpath(repository) !== repository || pair.sourceRepository !== repository) {
+    fail('冻结收据的 target、source 或 coordinator 不一致')
+  }
   await ownedDirectory(repository)
   for (const name of cohorts) if (name !== profile) await verifyAuxiliaryCohort(canonical, name, repository)
   return { home: canonical, profile, repository }

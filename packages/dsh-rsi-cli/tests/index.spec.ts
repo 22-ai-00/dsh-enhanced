@@ -1,9 +1,11 @@
-import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { delimiter, dirname, join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, test, vi } from 'vitest'
 import { parseDocument } from 'yaml'
 import {
@@ -269,40 +271,32 @@ describe('standalone installation smoke test', () => {
         symlinkSync(resolveDepRoot(dep), targetLink, process.platform === 'win32' ? 'junction' : 'dir')
       }
 
-      const upgradeHelpOut = execFileSync(
-        process.execPath,
-        [join(tmp, 'bin', 'dsh-rsi.js'), 'upgrade', '--help'],
-        { cwd: tmp, encoding: 'utf8' },
-      )
+      const runBin = (args: readonly string[]) => {
+        const res = spawnSync(
+          process.execPath,
+          [join(tmp, 'bin', 'dsh-rsi.js'), ...args],
+          { cwd: tmp, encoding: 'utf8' },
+        )
+        expect(res.error).toBeUndefined()
+        expect(res.status, `exit status for ${args.join(' ')}: ${res.stderr}`).toBe(0)
+        expect(res.stderr, `stderr for ${args.join(' ')}`).toBe('')
+        return res.stdout
+      }
+
+      const upgradeHelpOut = runBin(['upgrade', '--help'])
       expect(upgradeHelpOut).toContain('dsh-rsi — DSH enhanced')
       expect(upgradeHelpOut).toContain('upgrade ')
 
-      const capabilitiesOut = execFileSync(
-        process.execPath,
-        [join(tmp, 'bin', 'dsh-rsi.js'), '--capabilities'],
-        { cwd: tmp, encoding: 'utf8' },
-      )
+      const capabilitiesOut = runBin(['--capabilities'])
       expect(capabilitiesOut).toBe('{"capabilities":["macos-launchd-ownership-v1"]}\n')
 
-      const verOut = execFileSync(
-        process.execPath,
-        [join(tmp, 'bin', 'dsh-rsi.js'), '--version'],
-        { cwd: tmp, encoding: 'utf8' },
-      )
+      const verOut = runBin(['--version'])
       expect(verOut).toBe(`${version}\n`)
 
-      const shortOut = execFileSync(
-        process.execPath,
-        [join(tmp, 'bin', 'dsh-rsi.js'), 'version', '--short'],
-        { cwd: tmp, encoding: 'utf8' },
-      )
+      const shortOut = runBin(['version', '--short'])
       expect(shortOut).toBe(`${version}\n`)
 
-      const verJsonOut = execFileSync(
-        process.execPath,
-        [join(tmp, 'bin', 'dsh-rsi.js'), 'version', '--json', '--dsh-home', join(tmp, 'absent-home')],
-        { cwd: tmp, encoding: 'utf8' },
-      )
+      const verJsonOut = runBin(['version', '--json', '--dsh-home', join(tmp, 'absent-home')])
       const parsedVerJson = JSON.parse(verJsonOut) as AssistantVersionReport
       expect(parsedVerJson.protocol).toBe('dsh-rsi/version/v1')
       expect(parsedVerJson.schemaVersion).toBe(1)
@@ -799,6 +793,147 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
       } finally {
         outSpy2.mockRestore()
       }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('F27: subprocess stderr cleanliness and non-SQLite warning preservation', () => {
+  const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const binPath = join(pkgRoot, 'bin', 'dsh-rsi.js')
+
+  const spawnNodeAsync = (args: readonly string[], env: NodeJS.ProcessEnv): Promise<{ status: number | null; stdout: string; stderr: string }> =>
+    new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn(process.execPath, [...args], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', chunk => { stdout += String(chunk) })
+      child.stderr.on('data', chunk => { stderr += String(chunk) })
+      child.on('error', rejectPromise)
+      child.on('close', status => resolvePromise({ status, stdout, stderr }))
+    })
+
+  test('真实子进程执行 --version/-V/version/status/update/upgrade 时 stderr 零 SQLite ExperimentalWarning', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-rsi-f27-')))
+    const server = createServer((req, res) => {
+      const url = req.url ?? '/'
+      res.writeHead(200, { 'content-type': 'application/json' })
+      if (url.includes('dsh-enhanced')) {
+        res.end(JSON.stringify({ 'dist-tags': { latest: version } }))
+      } else {
+        res.end(JSON.stringify({ 'dist-tags': { latest: '0.2.2-rc.5' } }))
+      }
+    })
+    try {
+      await new Promise<void>(resolveListen => server.listen(0, '127.0.0.1', resolveListen))
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('Expected loopback port')
+      const registryUrl = `http://127.0.0.1:${address.port}`
+
+      const absentHome = join(root, 'absent-home')
+      const seededHome = join(root, 'seeded-home')
+      const profileDir = join(seededHome, 'profiles', 'web')
+      const enhancedDir = join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-web-owner')
+      const cpDir = join(seededHome, 'plugin-control-plane')
+      mkdirSync(enhancedDir, { recursive: true })
+      mkdirSync(cpDir, { recursive: true })
+      writeFileSync(join(profileDir, 'cordis.patch.yml'), '- id: dsh-enhanced-assistant-web-owner\n  name: "@dsh-enhanced/assistant-web-owner"\n', 'utf8')
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true, dependencies: { '@dsh-enhanced/assistant-web-owner': version } }), 'utf8')
+      writeFileSync(join(profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n', 'utf8')
+      writeFileSync(join(enhancedDir, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/assistant-web-owner', version }), 'utf8')
+      const db = new DatabaseSync(join(cpDir, 'web.sqlite'))
+      try {
+        db.exec('CREATE TABLE IF NOT EXISTS control_plane_meta (k TEXT PRIMARY KEY, v TEXT)')
+      } finally {
+        db.close()
+      }
+
+      const shimDir = join(root, 'shim-bin')
+      mkdirSync(shimDir, { recursive: true })
+      if (process.platform === 'win32') {
+        writeFileSync(join(shimDir, 'npm.cmd'), `@echo off\r\nif "%1"=="prefix" (echo ${join(root, 'npm-prefix')}& exit /b 0)\r\nif "%1"=="view" (echo ${version}& exit /b 0)\r\nexit /b 0\r\n`, 'utf8')
+      } else {
+        const npmShim = join(shimDir, 'npm')
+        writeFileSync(npmShim, `#!/usr/bin/env sh\nif [ "$1" = "prefix" ]; then printf '%s\\n' "${join(root, 'npm-prefix')}"; exit 0; fi\nif [ "$1" = "view" ]; then printf '%s\\n' "${version}"; exit 0; fi\nexit 0\n`, 'utf8')
+        chmodSync(npmShim, 0o755)
+      }
+      const env = { ...process.env, DSH_HOME: absentHome, PATH: `${shimDir}${delimiter}${process.env.PATH ?? ''}` }
+
+      const syncCases: ReadonlyArray<{ args: string[]; check: (stdout: string) => void }> = [
+        { args: ['--version'], check: out => expect(out).toBe(`${version}\n`) },
+        { args: ['-V'], check: out => expect(out).toBe(`${version}\n`) },
+        { args: ['version', '--short'], check: out => expect(out).toBe(`${version}\n`) },
+        {
+          args: ['version', '--json', '--dsh-home', absentHome],
+          check: out => expect(JSON.parse(out)).toMatchObject({ protocol: 'dsh-rsi/version/v1', assistant: { version } }),
+        },
+        {
+          args: ['status', '--json', '--dsh-home', absentHome],
+          check: out => expect(JSON.parse(out)).toMatchObject({ homeExists: false, dshHome: absentHome }),
+        },
+        { args: ['update', '--help'], check: out => expect(out).toContain('update') },
+        { args: ['upgrade', '--help'], check: out => expect(out).toContain('upgrade') },
+        { args: ['update', '--dry-run', '--version', version], check: out => expect(out.length).toBeGreaterThan(0) },
+      ]
+
+      for (const item of syncCases) {
+        const res = spawnSync(process.execPath, [binPath, ...item.args], { encoding: 'utf8', env })
+        expect(res.error, item.args.join(' ')).toBeUndefined()
+        expect(res.status, `${item.args.join(' ')}: ${res.stderr}`).toBe(0)
+        expect(res.stderr, item.args.join(' ')).toBe('')
+        expect(res.stderr).not.toContain('ExperimentalWarning')
+        expect(res.stderr).not.toContain('SQLite is an experimental feature')
+        item.check(res.stdout)
+      }
+
+      for (const upgradeArgs of [
+        ['upgrade', '--check', '--json', '--dsh-home', seededHome, '--registry', registryUrl],
+        ['upgrade', '--dry-run', '--json', '--dsh-home', seededHome, '--registry', registryUrl],
+      ]) {
+        const res = await spawnNodeAsync([binPath, ...upgradeArgs], env)
+        expect(res.status, `${upgradeArgs.join(' ')}: ${res.stderr}`).toBe(0)
+        expect(res.stderr, upgradeArgs.join(' ')).toBe('')
+        expect(res.stderr).not.toContain('ExperimentalWarning')
+        expect(res.stderr).not.toContain('SQLite is an experimental feature')
+        const parsed = JSON.parse(res.stdout) as { command: string; dshHome: string; packages: { cliPackageVersion: string } }
+        expect(parsed.command).toBe('upgrade')
+        expect(parsed.dshHome).toBe(seededHome)
+        expect(parsed.packages.cliPackageVersion).toBe(version)
+      }
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolveClose => server.close(() => resolveClose()))
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('保留非 SQLite 的 ExperimentalWarning 与 DeprecationWarning 输出', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-rsi-warn-preserve-')))
+    try {
+      const preloadPath = join(root, 'emit-warnings.mjs')
+      writeFileSync(
+        preloadPath,
+        [
+          "process.once('beforeExit', () => {",
+          "  process.emitWarning('Custom experimental feature', 'ExperimentalWarning')",
+          "  process.emitWarning('Legacy API deprecated', 'DeprecationWarning')",
+          '})',
+          '',
+        ].join('\n'),
+        'utf8',
+      )
+      const res = spawnSync(
+        process.execPath,
+        ['--import', pathToFileURL(preloadPath).href, binPath, '--version'],
+        { encoding: 'utf8' },
+      )
+      expect(res.error).toBeUndefined()
+      expect(res.status).toBe(0)
+      expect(res.stdout).toBe(`${version}\n`)
+      expect(res.stderr).not.toContain('SQLite is an experimental feature')
+      expect(res.stderr).toContain('ExperimentalWarning: Custom experimental feature')
+      expect(res.stderr).toContain('DeprecationWarning: Legacy API deprecated')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

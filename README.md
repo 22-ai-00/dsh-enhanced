@@ -5,116 +5,92 @@
 <h1 align="center">dsh-enhanced · 文鳐 Ray</h1>
 
 <p align="center">
-  <img src="plugins/owner-console/assets/hero.webp" width="720" alt="文鳐 Ray logo">
-</p>
-
-<p align="center">
   <a href="https://www.npmjs.com/package/@dsh-enhanced/dsh-rsi-cli"><img alt="npm" src="https://img.shields.io/npm/v/@dsh-enhanced/dsh-rsi-cli?color=2f6f6f"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D24.9.0-339933">
   <img alt="status" src="https://img.shields.io/badge/status-experimental-orange">
 </p>
 
-在本机运行的个人 AI 助手，通过 **Web 控制台 / 左栏原生设置与飞书** 聊天、处理任务、积累经验与记忆，可接入模型 API 或本机 **TraeX / Antigravity (`agy`)** ACP 编程 Agent，并支持受控的主动提醒（Proactive）、突发奇想（Dreaming）与成长驱动（Growth）。基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。
+**文鳐 Ray**（小名小鳐，出自《山海经》「小鳐小鳐，游而化飞」，基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)）是在本机运行的个人自成长 AI 助手，默认支持 **飞书 + 本地 Web 控制台**双端使用，可接入主流大模型或本机 **TraeX (`traex`) / Antigravity (`agy`)**，在日常使用与纠偏中积累记忆、生成并沙箱验收新技能与工作流，支持一键启停自迭代与一键升级回滚。**目前为实验版，完整自动闭环的长期真实效果仍在验证中**，能力与限制详见[当前状态](docs/rsi-status.md)。
 
-助手名叫 **文鳐**（英文 Ray，小名小鳐）。文鳐出自《山海经》，是鱼身有翼、夜间飞行的祥瑞之鱼；
-定位是突破型、创造力型助手，口号「小鳐小鳐，游而化飞」。包名与插件 id 仍沿用 `dsh-enhanced` / `@dsh-enhanced/*`。
-
-项目希望让助手从日常使用和纠正中持续改进。**目前是实验版，完整的自动改进闭环仍在验证中。** 已支持的能力与限制见[当前状态](docs/rsi-status.md)。
-
-## 架构一览
-
-<p align="center"><img src="docs/assets/architecture-overview.jpg" width="880" alt="文鳐 Ray 工作方式与自我成长架构图"></p>
-
-- **随时连接**：通过飞书或本机网页控制台随时对话与调整设置，也可按需接入飞书日历、文件或外部通知提醒。
-- **懂你办事**：自由接入常用大模型或本机 TraeX / Antigravity 编程助手，把复杂工作拆解为可持续推进的长任务，并在合适时机主动提醒。
-- **自我成长闭环**：在日常使用与纠偏中记住你的习惯与经验，空闲时酝酿新技能或改进方案，先在沙箱中独立验收通过后再启用。
-- **本机安全护航**：记忆与凭据默认留在本机，敏感操作与自主权限需经你明确授权，实验改动在原生沙箱中隔离验证，异常时可一键回滚。
-
-开发者可查阅[架构说明](docs/architecture.md)、[插件目录](plugins/README.md)与[共享包目录](packages/README.md)了解完整包清单（36 个插件 + 4 个共享包 = 40 个发布包）与各自边界；共享库在 `packages/*`，不自动启用。当前主线另集成四项默认关闭或按预设启用的记忆、主动与通知增强（实际长期效果仍在真实宿主观测中，见[当前状态](docs/rsi-status.md)与[验收合同](docs/rsi-acceptance.md)）：
-
-- **联想记忆层（`assistant-association`）**：面向日常记忆进化的进程内存双缓冲关联图与 ≤5ms 联想召回层（Slice S1–S4，含 Hebbian 边权更新、WP22 参数自调参与 `dsh-rsi growth-report` 第 6 节留出对照）；由 `--plugin-preset dogfood` 安装并开启本地联想，其中 S3 空闲做梦/observe 信号与 S4 隔离子进程只读 Web 学习均默认关闭。
-- **受控事件源与目标退订**：`event-triggers` 5 类 sensor（GitHub 仓库、飞书日历、文件、HTTPS/JSON、Webhook）可按触发器开启 `intake` 适配器桥接至 `assistant-work-items`，并在 `assistant-proactive` / Goal 终态时无轮询自动退订。
-- **超限文本附件与注意力边界**：`assistant-delivery`（`attentionAttachOverCap`）配合 `assistant-web-owner` 与 `lark-channel` 支持把超长后台/owner 通知转为短摘要加 UTF-8 文本附件，同时保持目的审计与可选强制门禁（`attentionEnforce` 默认关闭）。
-- **Inferred 规则预设与吻合度闭环**：`assistant-policy`（`conservative` / `balanced`）与 `assistant-proactive` 提供 opt-in `inferred` intake 规则预设；`assistant-work-items` 只读 `listIntakeEvaluationFeed` 供 `assistant-evaluation` 记录 `would-accept` 吻合度，用于密封留出重放与一次性授权内的有界调优。
+- **随时对话**：飞书私聊与本机 Web 控制台随时交互，后台常驻运行，支持日程、仓库与 Webhook 主动提醒。
+- **懂你办事**：自由选择云端模型或本机 TraeX / Antigravity 编程助手，自动拆解长任务并跨断点推进。
+- **自我成长闭环**：从日常对话与纠偏沉淀偏好和经验，在原生沙箱独立验收新技能后有界启用，异常可一键回滚。
+- **本机安全护航**：记忆与凭据默认留在本机，敏感操作须经你授权，随时可通过对话或命令行启停自迭代与升级恢复。
 
 ## 开始使用
 
-准备好 [Node.js 24 LTS](https://nodejs.org/en/download)（推荐 `>=24.9.0`，与各包 `package.json` 的 `engines.node` 一致；当前安装脚本预检仍兼容 22.19+ / 24+，详细版本与平台基线见[兼容性基线](docs/compatibility.md)）、飞书账号，以及一个可用模型（已登录的本机 **TraeX / Antigravity (`agy`)** 或模型服务的 API Key）。
+前置条件：Node.js `>=24.9.0`（macOS 原生免 Docker；Linux 需 `systemd --user` 与 `bwrap`）。
 
-- **macOS**：原生运行，无需 Docker；已在 Apple Silicon Mac 验证，Intel Mac 尚未实机验收。
-- **Linux**：新安装的默认学习场景采用原生隔离，需要 bubblewrap、systemd 用户服务与已委派给当前用户的 cgroup v1 四控制器或统一 cgroup v2 子树（Linux x64/v1 已实机验证，v2 实机冷安装→学习验证待跑）。详见[安装准备](scripts/install/README.md)。
-
-暂不接飞书、只想先体验聊天与本地控制台，可直接看[只用本机 Web](scripts/install/README.md#只用本机-web)。
-
-### 1. 安装
-
-在终端执行，无需下载源码：
+**标准安装（推荐：飞书 + 本地 Web + 自成长全能力，交互式向导）**：
 
 ```sh
-npm install --global @dsh-enhanced/dsh-rsi-cli
-dsh-rsi install
+npm i -g @dsh-enhanced/dsh-rsi-cli && dsh-rsi install
 ```
 
-安装器先问一次“按推荐配置一路继续”还是“逐项自定义”：默认推荐会接入本机已登录的 **TraeX (`traex`) / Antigravity (`agy`)** 或 DeepSeek 官方模型（只在缺少 API Key 时隐藏输入一次并存入 `0600` 的 `.credentials.yaml`）；提前 `export DEEPSEEK_API_KEY=...` 并加 `--yes` 时模型步骤无需输入。引导自定义或通过 `--proactive` / `--dreaming` / `--growth` / `--with` 可按白话开关组合自主能力（`assistant-dreaming` 仅在显式授权齐备后脱离休眠）。默认 profile 名为 `web`。
-
-新安装默认 **Full access**：助手可读写文件、访问网络、执行命令，不逐次请求批准。希望限制工作区外的写入并启用人工批准时，将第二条命令改为 `dsh-rsi install --permission workspace-write`。
-
-### 2. 完成首次连接
-
-1. 打开终端给出的飞书授权链接，选择或创建机器人。
-2. 给机器人私聊发送终端显示的最新 `DSH-CONNECT-…` 验证码，以终端显示绑定成功为准；这一步不会收到聊天回复。
-3. 终端提示“最后一步”时，私聊发送 `/model`，选择模型并确认；安装器检测到这条私聊后自动继续，无需重新运行。之后只有已绑定的你可以操作和授权。
-
-如果等待超时或终端提示缺少主人私聊会话，先完成第 3 步，再按[安装排障](scripts/install/README.md)继续。飞书消息接入与文档、邮件等业务权限是分开的，详见[飞书接入](plugins/lark-channel/docs/setup.md)。
-
-### 3. 打开 Web 与控制台
+**纯本地 Web 速览体验（暂不配飞书，一键安装并打开控制台）**：
 
 ```sh
-dsh-rsi open --profile web
+npm i -g @dsh-enhanced/dsh-rsi-cli && dsh-rsi install --scenario web --model skip --yes && dsh-rsi open --profile web
 ```
 
-`dsh-rsi open` 会读取受管服务地址（或前台拉起轻量场景）并在桌面环境自动打开浏览器（含 `--wait`、`--no-browser`）。进入后可在左侧栏打开 **文鳐** 面板或 **Settings → 文鳐助手**（`owner-console`）：使用 **自主能力一键开启向导**（基于已激活 owner 路由生成三权分立授权或安全暂停/停用）、**版本与自助升级卡片**（版本检查、预演及本地二次确认升级；受控 Linux systemd 会提示带外终端升级命令），以及查看飞书连接、一键检测/切换 `traex` 与 `agy`，并管理 Proactive、Dreaming、WorkItems、Memory Learning 与 Growth 等自主模块。不打开 UI 时也可通过 `dsh-web-owner-setup --autonomy-setup` 在 CLI 完成 Web-owner 自主授权；仅需打印受管地址时改用 `dsh-rsi web-url --profile web`。地址包含登录令牌，请勿公开分享；模型配置见[添加与切换模型](docs/models.md)。
+### 首次连接（3 步完成）
+
+1. 打开终端向导给出的飞书授权链接，选择或创建机器人并确认权限。
+2. 给机器人私聊发送终端显示的最新 `DSH-CONNECT-…` 验证码，以终端提示绑定成功为准。
+3. 服务启动后，私聊发送 `/model` 选择模型并确认即可开始对话（更多细节与排障见[安装指南](scripts/install/README.md)与[飞书接入](plugins/lark-channel/docs/setup.md)；暂不接飞书见[只用本机 Web](scripts/install/README.md#只用本机-web)）。
+
+> 安装向导默认自动探测本机已登录的 `traex` / `agy` 或引导配置 DeepSeek API Key（`0600` 存于本机）；新安装默认 `Full access`，如需收紧为写入需人工批准可改用 `dsh-rsi install --permission workspace-write`。`dsh-rsi open` 输出的 Web 地址含登录令牌，请勿公开分享。
+
+## 架构一览
+
+<p align="center"><img src="docs/assets/architecture-overview.jpg" width="880" alt="文鳐 Ray · 本机自成长 AI 助手架构图"></p>
+
+1. **双端随行与主动触达**：通过飞书长连接与本地 Web「文鳐」控制台随时对话，可按需接入日历、GitHub 仓库、文件与 Webhook 事件跟进，在合适时机送上精简摘要或通知。
+2. **多模型与本机编程助手**：自由接入常用大模型 API 或本机 TraeX / Antigravity，遇到多步骤复杂工作时自动拆解为长任务并持续推进、断点召回。
+3. **记住习惯与原生沙箱进化**：从日常对话与纠偏中沉淀你的偏好、联想记忆与高频工作流；新生成的技能或插件先在原生隔离沙箱中独立验收，通过后限额试用与平滑热更新。
+4. **可授权、可开关、可回滚**：记忆与凭据留在本机，外部动作与敏感操作受授权边界保护；支持自然语言与命令行一键开启/关闭自迭代、自助升级并自动体检恢复，升级失败自动回滚。
+
+开发者如需了解 40 个发布包（36 个插件 + 4 个共享库）边界与运行时契约，见[架构说明](docs/architecture.md)、[插件目录](plugins/README.md)与[共享包目录](packages/README.md)。
 
 ## 日常使用
 
-直接在聊天里说“以后叫你柳神”“记住我喜欢简短回复”或“把这段内容保存到 Wiki”。明确要求的普通记忆和 Wiki 更新会保存并反馈结果，无需再点一次批准；助手自行提出的修改、删除或敏感记忆，以及你要求先确认的操作，仍会询问。
+在飞书或本地 Web 对话中，可直接说“记住我喜欢简短回复”“开启自迭代”“关闭自迭代”“升级整体助手”，或发送 `/version`、`/autonomy enable|disable|upgrade` 控制助手状态。常用 CLI 命令：
 
 | 想做什么 | 命令 |
 | --- | --- |
-| 打开 Web 与文鳐控制台 | `dsh-rsi open --profile web` |
-| 检查或执行自助升级 | `dsh-rsi upgrade --check` / `dsh-rsi upgrade --dry-run` / `dsh-rsi upgrade --yes` |
-| 查看只读成长计分卡（含联想层对照） | `dsh-rsi growth-report --since 7d` |
-| 一键配置 Web-owner 自主授权 | `dsh-web-owner-setup --profile web --autonomy-setup --enable-memory-learning --enable-dreaming --enable-growth --dry-run` |
-| 查看助手/Host/插件版本与只读自迭代统计 | `dsh-rsi version [--json]` / `dsh-rsi --version` / 聊天 `/version` |
-| 查看运行状态（含 JSON） | `dsh-rsi status [--json]` |
-| 只读体检（含 `traex`/`agy` 与前提） | `dsh-rsi doctor [--profile web] [--json]` |
-| 仅获取已运行 Web 地址 | `dsh-rsi web-url --profile web` |
-| 查看最近日志 | `dsh-rsi logs --profile web --lines 100` |
-| 重启服务 | `dsh-rsi restart --profile web` |
+| 打开 Web 与「文鳐」控制台 | `dsh-rsi open --profile web` |
+| 检查、预演或一键自助升级并恢复 | `dsh-rsi upgrade --check` / `--dry-run` / `--yes` |
+| 查看助手/Host/插件版本与自迭代统计 | `dsh-rsi version [--json]` / `dsh-rsi --version` / 聊天 `/version` |
+| 一键开启或关闭自迭代能力 | `dsh-rsi enable` / `dsh-rsi disable`（或对话 `/autonomy enable\|disable`） |
+| 只读环境与服务体检（含 `traex`/`agy`） | `dsh-rsi doctor [--profile web] [--json]` |
+| 查看 Home、绑定 Host 与服务状态 | `dsh-rsi status [--json]` |
+| 升级全局 `dsh-rsi` CLI（加 `--all` 同步升级插件） | `dsh-rsi update` / `dsh-rsi update --all --yes` |
+| 查看只读成长计分卡 | `dsh-rsi growth-report --since 7d` |
+| 查看最近日志或重启服务 | `dsh-rsi logs --profile web --lines 100` / `dsh-rsi restart --profile web` |
 
-浏览器关闭后，默认安装的服务仍会在后台运行。注意：安装、向导授权或体检通过不代表真实宿主上的长期普通任务效果已通过验收（见[当前状态](docs/rsi-status.md)）。只升级 CLI 命令本身用 `dsh-rsi update`；Docker 迁移边界与 macOS 限制见 [CLI 帮助](packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](scripts/install/maintenance.md)。`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
+> 浏览器关闭后，默认安装的常驻服务仍会在后台运行。注意：`dsh-rsi reinstall` 会删除旧数据后重装，日常升级请使用 `dsh-rsi upgrade --yes` 或 `dsh-rsi update`（详见[命令参考](packages/dsh-rsi-cli/README.md)与[维护说明](scripts/install/maintenance.md)）。
 
 ## 按需阅读
 
 | 需要帮助 | 文档 |
 | --- | --- |
-| 首次安装、只用本机 Web、安装失败 | [安装指南](scripts/install/README.md) |
-| 添加自己的模型、切换模型 | [模型配置](docs/models.md) |
-| 飞书绑定、权限、没有回复 | [飞书接入](plugins/lark-channel/docs/setup.md) |
-| 升级、重装、卸载 | [命令参考](packages/dsh-rsi-cli/README.md) |
-| 已支持什么、还有哪些限制 | [当前状态](docs/rsi-status.md) |
-| 选择额外插件与共享包 | [插件目录](plugins/README.md) · [共享包目录](packages/README.md) |
+| 首次安装、场景选择、安装排障 | [安装指南](scripts/install/README.md) |
+| 添加或切换模型（含 `traex` / `agy`） | [模型配置](docs/models.md) |
+| 飞书绑定、权限与消息排查 | [飞书接入](plugins/lark-channel/docs/setup.md) |
+| `dsh-rsi` 完整命令、升级与卸载 | [命令参考](packages/dsh-rsi-cli/README.md) |
+| 已支持能力与当前限制 | [当前状态](docs/rsi-status.md) · [验收合同](docs/rsi-acceptance.md) |
+| 全部插件与共享库清单 | [插件目录](plugins/README.md) · [共享包目录](packages/README.md) |
 
 ## 参与开发
 
-开发需要 Node.js（`.node-version` 锁定 `24.9.0`，`engines.node >=24.9.0`）和 `pnpm@11.7.0`。本地和远端只保留 `dev`、`main`；开发、版本准备、提交与推送使用 `dev`，仅在发布验证通过后合入 `main`。克隆仓库后：
+开发需要 Node.js（`.node-version` 锁定 `24.9.0`，`engines.node >=24.9.0`）和 `pnpm@11.7.0`。本地与远端只保留 `dev` 与 `main`；日常开发在 `dev` 提交推送，发布验证通过后合入 `main`。
 
 ```sh
 pnpm install
 pnpm check
 ```
 
-`pnpm check` 包含校验、lint、构建、类型检查、测试和打包检查。参与协作见[贡献指南](CONTRIBUTING.md)与[安全政策](SECURITY.md)，新增插件见[开发指南](docs/creating-a-plugin.md)，包边界见[架构说明](docs/architecture.md)，Linux 复跑门禁见[Linux 验证环境](docs/linux-validation.md)，发布见[发版指南](docs/releasing.md)。更多资料见[文档索引](docs/README.md)。
+协作规范见[贡献指南](CONTRIBUTING.md)与[安全政策](SECURITY.md)，新增插件见[开发指南](docs/creating-a-plugin.md)，包边界见[架构说明](docs/architecture.md)，Linux 门禁见[Linux 验证环境](docs/linux-validation.md)，发版见[发版指南](docs/releasing.md)。更多资料见[文档索引](docs/README.md)。
 
 [MIT License](LICENSE)

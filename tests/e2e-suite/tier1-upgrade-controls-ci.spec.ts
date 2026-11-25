@@ -3,10 +3,11 @@ import { createServer } from 'node:http'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { isSeq, parseDocument } from 'yaml'
 import { getExport, getExportFn, sha256Hex } from './helpers/assertions.ts'
-import { runBashCommand, runDshRsiInProcess, runNodeScript } from './helpers/cli-runner.ts'
+import { runBashCommand, runCommandProcess, runDshRsiInProcess, runNodeScript } from './helpers/cli-runner.ts'
 import { createCordisHarness } from './helpers/cordis-harness.ts'
 import {
   loadAssistantDelivery,
@@ -1096,6 +1097,108 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       }
       await drive()
       expect(sends.at(-1)?.text).toContain('/version')
+    })
+  })
+
+  describe('F27: Surgical SQLite ExperimentalWarning suppression across CLI entrypoints', () => {
+    test('T1-F27-01: dsh-rsi.js subprocesses emit zero SQLite ExperimentalWarning across CLI commands and seeded upgrade --check', async () => {
+      const ws = await workspaces.create('f27-cli-stderr-')
+      const manifests = await readAllWorkspaceManifests()
+      const expectedVersion = manifests[0]!.version
+
+      const absentHome = join(ws.root, 'absent-home')
+      const cleanCommands: ReadonlyArray<{ args: string[]; assertStdout: (stdout: string) => void }> = [
+        { args: ['--version'], assertStdout: out => expect(out.trim()).toBe(expectedVersion) },
+        { args: ['-V'], assertStdout: out => expect(out.trim()).toBe(expectedVersion) },
+        { args: ['version', '--short'], assertStdout: out => expect(out.trim()).toBe(expectedVersion) },
+        {
+          args: ['version', '--json', '--dsh-home', absentHome],
+          assertStdout: out => expect(JSON.parse(out)).toMatchObject({ protocol: 'dsh-rsi/version/v1', assistant: { version: expectedVersion } }),
+        },
+        {
+          args: ['status', '--json', '--dsh-home', absentHome],
+          assertStdout: out => expect(JSON.parse(out)).toMatchObject({ homeExists: false, dshHome: absentHome }),
+        },
+        { args: ['update', '--help'], assertStdout: out => expect(out).toContain('update') },
+        { args: ['upgrade', '--help'], assertStdout: out => expect(out).toContain('upgrade') },
+      ]
+
+      for (const item of cleanCommands) {
+        const res = await runNodeScript('packages/dsh-rsi-cli/bin/dsh-rsi.js', item.args, { env: { DSH_HOME: absentHome } })
+        expect(res.exitCode, `${item.args.join(' ')}: ${res.stderr}`).toBe(0)
+        expect(res.stderr, item.args.join(' ')).toBe('')
+        expect(res.stderr).not.toContain('ExperimentalWarning')
+        expect(res.stderr).not.toContain('SQLite is an experimental feature')
+        item.assertStdout(res.stdout)
+      }
+
+      // Seeded SQLite control-plane ledger + loopback registry ensures node:sqlite is actively opened during upgrade --check --json
+      const seededHome = ws.dshHome
+      const profileDir = join(seededHome, 'profiles', 'web')
+      const enhancedDir = join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery')
+      const cpDir = join(seededHome, 'plugin-control-plane')
+      await mkdir(enhancedDir, { recursive: true, mode: 0o700 })
+      await mkdir(cpDir, { recursive: true, mode: 0o700 })
+      await writeFile(join(profileDir, 'cordis.patch.yml'), '- id: dsh-enhanced-assistant-delivery\n  name: "@dsh-enhanced/assistant-delivery"\n', 'utf8')
+      await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true, dependencies: { '@dsh-enhanced/assistant-delivery': expectedVersion } }), 'utf8')
+      await writeFile(join(profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n', 'utf8')
+      await writeFile(join(enhancedDir, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: expectedVersion }), 'utf8')
+      const db = new DatabaseSync(join(cpDir, 'web.sqlite'))
+      try {
+        db.exec('CREATE TABLE IF NOT EXISTS control_plane_meta (k TEXT PRIMARY KEY, v TEXT)')
+      } finally {
+        db.close()
+      }
+
+      const server = createServer((req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ 'dist-tags': { latest: (req.url ?? '').includes('dsh-enhanced') ? expectedVersion : '0.2.2-rc.5' } }))
+      })
+      try {
+        await new Promise<void>(resolveListen => server.listen(0, '127.0.0.1', resolveListen))
+        const addr = server.address()
+        if (!addr || typeof addr === 'string') throw new Error('Expected loopback address')
+        const checkRes = await runNodeScript(
+          'packages/dsh-rsi-cli/bin/dsh-rsi.js',
+          ['upgrade', '--check', '--json', '--dsh-home', seededHome, '--registry', `http://127.0.0.1:${addr.port}`],
+          { env: { DSH_HOME: seededHome } },
+        )
+        expect(checkRes.exitCode, checkRes.stderr).toBe(0)
+        expect(checkRes.stderr).toBe('')
+        expect(checkRes.stderr).not.toContain('ExperimentalWarning')
+        expect(checkRes.stderr).not.toContain('SQLite is an experimental feature')
+        expect(JSON.parse(checkRes.stdout)).toMatchObject({ command: 'upgrade', dshHome: seededHome })
+      } finally {
+        server.closeAllConnections()
+        await new Promise<void>(resolveClose => server.close(() => resolveClose()))
+      }
+    })
+
+    test('T1-F27-02: non-SQLite ExperimentalWarning and DeprecationWarning remain intact on stderr', async () => {
+      const ws = await workspaces.create('f27-warn-preserve-')
+      const manifests = await readAllWorkspaceManifests()
+      const expectedVersion = manifests[0]!.version
+      const preloadPath = join(ws.root, 'emit-warnings.mjs')
+      await writeFile(
+        preloadPath,
+        [
+          "process.once('beforeExit', () => {",
+          "  process.emitWarning('Custom experimental feature', 'ExperimentalWarning')",
+          "  process.emitWarning('Legacy API deprecated', 'DeprecationWarning')",
+          '})',
+          '',
+        ].join('\n'),
+        'utf8',
+      )
+      const res = await runCommandProcess(
+        process.execPath,
+        ['--import', pathToFileURL(preloadPath).href, join(repoRoot, 'packages/dsh-rsi-cli/bin/dsh-rsi.js'), '--version'],
+      )
+      expect(res.exitCode, res.stderr).toBe(0)
+      expect(res.stdout).toBe(`${expectedVersion}\n`)
+      expect(res.stderr).not.toContain('SQLite is an experimental feature')
+      expect(res.stderr).toContain('ExperimentalWarning: Custom experimental feature')
+      expect(res.stderr).toContain('DeprecationWarning: Legacy API deprecated')
     })
   })
 })

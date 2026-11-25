@@ -3,8 +3,34 @@
 import { constants } from 'node:fs'
 import { open, lstat } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
-import { RestartStore } from '../lib/restart-store.js'
-import { runLockedRestartSupervisorTick, validateRestartSupervisorConfig } from '../lib/restart-supervisor.js'
+
+const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(warning, ...rest) {
+    const first = rest[0]
+    let warningType
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof first.type === 'string') {
+      warningType = first.type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    return Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning
+}
+
+const { RestartStore } = await import('../lib/restart-store.js')
+const { runLockedRestartSupervisorTick, validateRestartSupervisorConfig } = await import('../lib/restart-supervisor.js')
 
 function options(argv) {
   let configPath

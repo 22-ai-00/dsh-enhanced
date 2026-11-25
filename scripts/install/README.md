@@ -11,11 +11,10 @@
 
 ## 安装：默认 supervised
 
-在**交互式终端**运行：
+在**交互式终端**运行一行安装命令：
 
 ```sh
-npm install --global @dsh-enhanced/dsh-rsi-cli
-dsh-rsi install
+npm i -g @dsh-enhanced/dsh-rsi-cli && dsh-rsi install
 ```
 
 默认 `supervised` 包含飞书常驻助理、`owner-console`（「文鳐」控制台与原生设置 UI）、`assistant-proactive` / `assistant-growth-driver` / `assistant-memory-learning` / `assistant-work-items` 等自主组件。安装器解析并固定兼容的 DSH Host（`0.2.2-rc.5`）和同批插件版本；遇到未知 Host 版本会拒绝安装，并把绑定的 Host 写入 `$DSH_HOME/.dsh-rsi-host.json`。第一次安装请按终端向导完成飞书应用、本人绑定、模型与可选能力选择。
@@ -50,8 +49,7 @@ dsh-rsi web-url --profile web       # 仅读取已运行服务的带 token URL
 适合先在本机体验聊天与「文鳐」控制台，暂不连接飞书；无需 Docker。`--scenario web` 直接包含 `owner-console` 与 `assistant-web-owner`；极简 `--scenario core` 可按需追加 `--with console`。两者都不默认注册常驻服务，安装后直接运行 `dsh-rsi open --profile web` 即可自动读取 `.dsh-rsi-host.json` 绑定的 `0.2.2-rc.5` 私有 Host 前台启动并打开浏览器：
 
 ```sh
-dsh-rsi install --scenario web --model skip --yes
-dsh-rsi open --profile web
+npm i -g @dsh-enhanced/dsh-rsi-cli && dsh-rsi install --scenario web --model skip --yes && dsh-rsi open --profile web
 ```
 
 如需手动在前台直接拉起新安装的 `0.2.2-rc.5` 私有 Host，可运行（旧 Home 或自定义路径请先[查找绑定的 Host 入口](maintenance.md#查找私有-host-入口)）：
@@ -66,10 +64,13 @@ dsh-rsi open --profile web
 
 ```sh
 dsh-rsi open --profile web
+dsh-rsi version [--json]
+dsh-rsi enable / disable
+dsh-rsi upgrade --check / --dry-run / --yes
+dsh-rsi update
 dsh-rsi status --json
 dsh-rsi doctor --json
 dsh-rsi growth-report --since 7d
-dsh-rsi upgrade --check
 dsh-rsi logs --profile web --lines 100
 dsh-rsi restart --profile web
 dsh-rsi install --help

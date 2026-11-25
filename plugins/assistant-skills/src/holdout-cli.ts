@@ -3,7 +3,6 @@ import { constants, openSync, closeSync, fstatSync, readFileSync, lstatSync, rea
 import { dirname, isAbsolute } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
-import { DatabaseSync } from 'node:sqlite'
 import { StringDecoder } from 'node:string_decoder'
 import { HoldoutAuthority, type AuthorityOptions, type QualificationBinding, type CellObservation } from './holdout-authority.js'
 import { createProspectiveCertificate, generateProspectiveDataset, isProspectiveGeneratorName, prospectiveGeneratorProfile, type ProspectiveGeneratorName, type ProspectiveHoldoutCertificate } from './prospective-holdout.js'
@@ -46,6 +45,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   privateParent(path)
   process.umask(0o077)
   try { const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600); closeSync(fd) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; privateRead(path, 4194304) }
+  const { DatabaseSync } = await import('node:sqlite')
   const db = new DatabaseSync(path); chmodSync(path, 0o600)
   db.exec('PRAGMA busy_timeout=1000; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS authority (id INTEGER PRIMARY KEY CHECK(id=1), controller TEXT NOT NULL, lease_until INTEGER NOT NULL, state TEXT, prospective TEXT) STRICT')
   if (!(db.prepare("SELECT 1 FROM pragma_table_info('authority') WHERE name='prospective'").get())) db.exec('ALTER TABLE authority ADD COLUMN prospective TEXT')
@@ -139,8 +139,35 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     db.close()
   }
 }
+function installSqliteWarningFilter(): void {
+  const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+  if (Reflect.get(process.emitWarning, sqliteWarningFiltered)) return
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(this: unknown, warning: string | Error, ...rest: unknown[]): void {
+    const first = rest[0]
+    let warningType: string | undefined
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof (first as { type?: unknown }).type === 'string') {
+      warningType = (first as { type: string }).type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning as typeof process.emitWarning
+}
+
 let isMain = false
 try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href } catch { /* Importing modules need not have a filesystem entry point. */ }
 if (isMain) {
+  installSqliteWarningFilter()
   main().catch(() => { process.stderr.write('holdout authority unavailable; verify private operator configuration and controller lease\n'); process.exitCode = 1 })
 }

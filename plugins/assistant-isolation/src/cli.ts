@@ -6,12 +6,35 @@ import { open } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { canonicalAbsolutePath, isPrivateDirectoryStats, isPrivateFileStats, matchesOwnerUid, hasPrivateMode, noFollowFlag } from './fs-ownership.js'
-import { IsolationLedger, IsolationLedgerError } from './ledger.js'
-import { reconcileLinuxJob } from './linux-job-recovery.js'
-import { reconcileNativeReceiptJob } from './native-job-recovery.js'
+import type { IsolationLedger } from './ledger.js'
 import { defaultStoragePolicy, validateStoragePolicy } from './storage-policy.js'
 import { maintainIsolationStorage, type IsolationStorageMaintenance } from './storage.js'
-import { archiveIsolationAudit, verifyIsolationAuditArchive } from './audit-archive.js'
+
+function installSqliteWarningFilter(): void {
+  const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+  if (Reflect.get(process.emitWarning, sqliteWarningFiltered)) return
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(this: unknown, warning: string | Error, ...rest: unknown[]): void {
+    const first = rest[0]
+    let warningType: string | undefined
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof (first as { type?: unknown }).type === 'string') {
+      warningType = (first as { type: string }).type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning as typeof process.emitWarning
+}
 
 function privateLedger(stateRoot: string): string {
   if (!canonicalAbsolutePath(stateRoot) || realpathSync(stateRoot) !== stateRoot) throw new Error('canonical state root required')
@@ -32,6 +55,11 @@ export interface IsolationRevocationResult {
 
 /** Operator entry point, separate from the model's tool registry. */
 export async function revokeIsolationGrant(stateRoot: string, grantId: string, revision: number): Promise<IsolationRevocationResult> {
+  const [{ IsolationLedger, IsolationLedgerError }, { reconcileLinuxJob }, { reconcileNativeReceiptJob }] = await Promise.all([
+    import('./ledger.js'),
+    import('./linux-job-recovery.js'),
+    import('./native-job-recovery.js'),
+  ])
   const file = privateLedger(stateRoot)
   const ledger = new IsolationLedger(file)
   let authority: ReturnType<IsolationLedger['claimController']> | undefined
@@ -84,6 +112,11 @@ export async function revokeIsolationGrant(stateRoot: string, grantId: string, r
 /** Reconcile only settled requests; a live Host owns its own background sweep. */
 export async function reconcileIsolation(stateRoot: string,
   signal: AbortSignal = new AbortController().signal): Promise<{ checked: number; released: number; retained: number }> {
+  const [{ IsolationLedger }, { reconcileLinuxJob }, { reconcileNativeReceiptJob }] = await Promise.all([
+    import('./ledger.js'),
+    import('./linux-job-recovery.js'),
+    import('./native-job-recovery.js'),
+  ])
   const ledger = new IsolationLedger(privateLedger(stateRoot))
   const abort = new AbortController()
   let timer: NodeJS.Timeout | undefined
@@ -121,6 +154,7 @@ export async function reconcileIsolation(stateRoot: string,
 
 /** Operator-only one-page maintenance; positive retention explicitly enables body pruning. */
 export async function maintainIsolation(stateRoot: string, resultRetentionMs = 0, afterId = ''): Promise<IsolationStorageMaintenance> {
+  const { IsolationLedger } = await import('./ledger.js')
   const policy = validateStoragePolicy({ ...defaultStoragePolicy, resultRetentionMs })
   const ledger = new IsolationLedger(privateLedger(stateRoot))
   let authority: ReturnType<IsolationLedger['claimController']> | undefined
@@ -137,7 +171,10 @@ export async function maintainIsolation(stateRoot: string, resultRetentionMs = 0
   }
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+let isMain = false
+try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href } catch { /* Importing modules need not have a filesystem entry point. */ }
+if (isMain) {
+  installSqliteWarningFilter()
   const [command, stateRoot, grantId, revision, ...extra] = process.argv.slice(2)
   try {
     if (command === 'probe-native') {
@@ -166,11 +203,13 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
         || (revision !== undefined && (!/^[1-9][0-9]*$/.test(revision) || !Number.isSafeInteger(Number(revision)) || Number(revision) > 1_000))) {
         throw new Error('usage: dsh-isolation archive-audit /absolute/private/state-root /absolute/private/archive-directory [batch-size]')
       }
+      const { archiveIsolationAudit } = await import('./audit-archive.js')
       process.stdout.write(`${JSON.stringify(await archiveIsolationAudit({ stateRoot, archiveDirectory: grantId, ...(revision === undefined ? {} : { batchSize: Number(revision) }) }))}\n`)
     } else if (command === 'verify-audit') {
       if (stateRoot === undefined || grantId !== undefined || revision !== undefined || extra.length > 0) {
         throw new Error('usage: dsh-isolation verify-audit /absolute/private/archive-directory')
       }
+      const { verifyIsolationAuditArchive } = await import('./audit-archive.js')
       process.stdout.write(`${JSON.stringify(verifyIsolationAuditArchive(stateRoot))}\n`)
     } else if (command === 'revoke') {
       if (command !== 'revoke' || stateRoot === undefined || grantId === undefined || revision === undefined || extra.length > 0 || !/^[1-9][0-9]*$/.test(revision)) throw new Error('usage: dsh-isolation revoke /absolute/private/state-root grant-id revision')

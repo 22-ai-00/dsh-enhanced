@@ -104,9 +104,59 @@ const SCANNER_RETIREMENT_TIMEOUT_MS = 30_000
 const SCANNER_RETIREMENT_ARTIFACT_MAX_BYTES = 8 * 1024 * 1024
 const SCANNER_RETIREMENT_SOURCE_PROGRAM = String.raw`
 import { pathToFileURL } from 'node:url'
+const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(warning, ...rest) {
+    const first = rest[0]
+    let warningType
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof first.type === 'string') {
+      warningType = first.type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    return Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning
+}
 const [helperPath, homePath, profile] = process.argv.slice(1)
 const helper = await import(pathToFileURL(helperPath).href)
 process.stdout.write(JSON.stringify(await helper.inspectRsiScannerOwnerSource({ homePath, physicalHome: homePath, profile })))
+`
+const SQLITE_WARNING_FILTER_SNIPPET = String.raw`
+const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(warning, ...rest) {
+    const first = rest[0]
+    let warningType
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof first.type === 'string') {
+      warningType = first.type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    return Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning
+}
 `
 const SCANNER_RETIREMENT_OPERATOR_PROGRAM = String.raw`
 import { createHash } from 'node:crypto'
@@ -115,6 +165,30 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(warning, ...rest) {
+    const first = rest[0]
+    let warningType
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof first.type === 'string') {
+      warningType = first.type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    return Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning
+}
 const [action, home, profile, dsh, sourcePath, sourceDigest, capturePath, captureDigest, completionPath, completionDigest] = process.argv.slice(1)
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const read = async (path, expected) => {
@@ -164,6 +238,30 @@ import { spawnSync } from 'node:child_process'
 import { readFile, writeFile, rename } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(warning, ...rest) {
+    const first = rest[0]
+    let warningType
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof first.type === 'string') {
+      warningType = first.type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    return Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning
+}
 const [action, home, profile, dsh, nonce = ''] = process.argv.slice(1)
 const digest = value => createHash('sha256').update(value).digest('hex')
 const canonical = value => value === null || typeof value !== 'object' ? JSON.stringify(value)
@@ -313,6 +411,30 @@ process.stdout.write(JSON.stringify(output))
 const SUPERVISED_CAPABILITY_PROGRAM = String.raw`
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
+const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(warning, ...rest) {
+    const first = rest[0]
+    let warningType
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof first.type === 'string') {
+      warningType = first.type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    return Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning
+}
 const [home, profile] = process.argv.slice(1)
 const require = createRequire(join(home, 'profiles', profile, 'package.json'))
 const load = async name => import(require.resolve(name))
@@ -4603,6 +4725,30 @@ async function assertRsiCoordinatorActivation(homePath, service, startedAt) {
   const program = String.raw`
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
+const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
+  const originalEmitWarning = process.emitWarning
+  const filteredEmitWarning = function emitWarning(warning, ...rest) {
+    const first = rest[0]
+    let warningType
+    if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+      warningType = warning.name
+    } else if (typeof first === 'string') {
+      warningType = first
+    } else if (first !== null && typeof first === 'object' && typeof first.type === 'string') {
+      warningType = first.type
+    }
+    const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+      ? warning.message
+      : String(warning ?? '')
+    if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+      return
+    }
+    return Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+  }
+  Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+  process.emitWarning = filteredEmitWarning
+}
 const [home, profile, contractSource, since] = process.argv.slice(1)
 const require = createRequire(join(home, 'profiles', profile, 'package.json'))
 const { listActiveAutomationsLocally } = await import(require.resolve('@dsh-enhanced/assistant-automations'))
@@ -8870,6 +9016,7 @@ async function awaitHostOwnerRepairReadiness({ manifestPath, homePath, dshExecut
     }
     const recoveryHelper = join(dirname(SCRIPT_PATH), 'owner-program-readiness-recovery.mjs')
     const script = [
+      SQLITE_WARNING_FILTER_SNIPPET,
       "import { readFile } from 'node:fs/promises'",
       "import { pathToFileURL } from 'node:url'",
       'const [manifestPath, helperPath, startedAt] = process.argv.slice(1)',
@@ -8892,6 +9039,7 @@ async function awaitHostOwnerRepairReadiness({ manifestPath, homePath, dshExecut
   const helperPath = join(sourceProof.installer.root, 'scripts', 'install',
     programUpdate ? 'owner-program-update.mjs' : 'owner-source-repair.mjs')
   const script = [
+    SQLITE_WARNING_FILTER_SNIPPET,
     "import { readFile } from 'node:fs/promises'",
     "import { pathToFileURL } from 'node:url'",
     'const [manifestPath, homePath, helperPath, startedAt] = process.argv.slice(1)',
@@ -9238,6 +9386,30 @@ async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath
 }
 
 async function main() {
+  const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+  if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
+    const originalEmitWarning = process.emitWarning
+    const filteredEmitWarning = function emitWarning(warning, ...rest) {
+      const first = rest[0]
+      let warningType
+      if (typeof warning === 'object' && warning !== null && typeof warning.name === 'string') {
+        warningType = warning.name
+      } else if (typeof first === 'string') {
+        warningType = first
+      } else if (first !== null && typeof first === 'object' && typeof first.type === 'string') {
+        warningType = first.type
+      }
+      const warningMessage = typeof warning === 'object' && warning !== null && typeof warning.message === 'string'
+        ? warning.message
+        : String(warning ?? '')
+      if (warningType === 'ExperimentalWarning' && warningMessage.includes('SQLite is an experimental feature')) {
+        return
+      }
+      return Reflect.apply(originalEmitWarning, this ?? process, [warning, ...rest])
+    }
+    Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
+    process.emitWarning = filteredEmitWarning
+  }
   const argv = process.argv.slice(2)
   const lockHeld = argv.at(-1) === '--lock-held'
   if (lockHeld) argv.pop()

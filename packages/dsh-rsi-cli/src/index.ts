@@ -1508,13 +1508,158 @@ async function runMaintenance(dshHome: string, tokens: readonly string[]): Promi
   }
 }
 
+type ExtendedMainDeps = MainDeps & {
+  platform?: NodeJS.Platform
+  osHome?: string
+  macHostProcessesStopped?: typeof assertMacHostProcessesStopped
+  detectFrozenOwner?: typeof detectFrozenOwner
+  frozenUpdate?: typeof runFrozenOwnerUpdate
+  upgrade?: typeof runUpgrade
+  upgradeDeps?: UpgradeDeps
+  freshExec?: (bin: string, argv: readonly string[], env: NodeJS.ProcessEnv) => number
+}
+
+async function hasMigratedFrozenResidue(dshHome: string): Promise<boolean> {
+  if (!isAbsolute(dshHome) || resolve(dshHome) !== dshHome) return false
+  const canonical = await realpath(dshHome).catch(() => undefined)
+  if (canonical === undefined) return false
+  const hasCohorts = await lstat(join(canonical, 'rsi-local-cohorts')).then(() => true, () => false)
+  if (hasCohorts) return true
+  const entries = await readdir(canonical).catch(() => [] as string[])
+  return entries.some(name => name.startsWith('.rsi-coordinator-'))
+}
+
+async function executeTransactionalUpgrade(
+  args: ParsedArgs,
+  env: NodeJS.ProcessEnv,
+  deps: ExtendedMainDeps,
+  overrides: { action?: UpgradeAction; targetVersion?: string } = {},
+): Promise<number> {
+  const platform = deps.platform ?? process.platform
+  const osHome = deps.osHome ?? homedir()
+  const action: UpgradeAction = overrides.action ?? (args.dryRun ? 'dry-run' : args.check ? 'check' : args.yes ? 'apply' : 'check')
+  const targetVersion = overrides.targetVersion ?? args.targetVersion
+  const { report, exitCode } = await (deps.upgrade ?? runUpgrade)(
+    {
+      dshHome: args.dshHome,
+      ...(args.profile !== undefined ? { profile: args.profile } : {}),
+      action,
+      ...(args.registry !== undefined ? { registryUrl: args.registry } : {}),
+      ...(args.dshVersion !== undefined ? { dshVersion: args.dshVersion } : {}),
+      ...(targetVersion !== undefined ? { targetVersion } : {}),
+      allowNonEmptyHistoryMigration: args.allowNonEmptyHistoryMigration,
+      confirmDshHomeStopped: args.confirmDshHomeStopped,
+      platform,
+      osHome,
+      env,
+    },
+    deps.upgradeDeps,
+  )
+  let finalReport: UpgradeReport = report
+  let finalExitCode = exitCode
+  const canManageServices = !deps.upgrade || Boolean(deps.upgradeDeps?.controlService)
+  if (action === 'apply' && finalReport.ok && finalReport.mode !== 'frozen-linux-systemd' && canManageServices) {
+    const canonicalHome = finalReport.dshHome
+    const runner = deps.upgradeDeps?.runner ?? defaultRunner
+    const inspectFn = deps.upgradeDeps?.inspectService ?? inspectManagedServiceForDshHome
+    const controlFn = deps.upgradeDeps?.controlService ?? controlManagedService
+    const isRunningFn = deps.upgradeDeps?.isServiceRunning
+      ?? ((plat, homeDir, homePath, prof, cmdRunner) => isManagedProfileRunning(plat, homeDir, homePath, prof, cmdRunner))
+    try {
+      const targetProfiles = args.profile !== undefined
+        ? [args.profile]
+        : finalReport.packages.profiles.length > 0
+          ? finalReport.packages.profiles.map(p => p.profile)
+          : await resolveTargetProfiles(canonicalHome, args.profile)
+
+      const managedProfiles: string[] = []
+      for (const prof of targetProfiles) {
+        const presence = await inspectFn(platform, osHome, prof, canonicalHome, runner)
+        if (presence.foreign) {
+          throw new Error(`服务定义非本工具受管：${presence.definitionPath}`)
+        }
+        if (presence.managed) {
+          managedProfiles.push(prof)
+        }
+      }
+
+      for (const prof of managedProfiles) {
+        const running = await isRunningFn(platform, osHome, canonicalHome, prof, runner)
+        const alreadyRestartedByUpgrade = Boolean(finalReport.execution?.executed)
+          && !args.confirmDshHomeStopped
+          && running
+        if (!alreadyRestartedByUpgrade) {
+          const svcAction: ServiceAction = running ? 'restart' : 'start'
+          const outcome = await controlFn(platform, osHome, prof, svcAction, runner, false, canonicalHome)
+          if (outcome.errors.length > 0) {
+            throw new Error(`升级后启动服务 ${prof} 失败：${outcome.errors.join('；')}`)
+          }
+        }
+      }
+
+      if (managedProfiles.length > 0 || Boolean(deps.upgradeDeps?.doctor)) {
+        const health = deps.upgradeDeps?.doctor
+          ? await deps.upgradeDeps.doctor({
+            dshHome: canonicalHome,
+            ...(args.profile !== undefined ? { profile: args.profile } : {}),
+            platform,
+            home: osHome,
+            env,
+            runner,
+          })
+          : deps.upgradeDeps?.verifyHealth
+            ? await deps.upgradeDeps.verifyHealth({
+              dshHome: canonicalHome,
+              ...(args.profile !== undefined ? { profile: args.profile } : {}),
+              profiles: targetProfiles,
+              runner,
+              platform,
+              osHome,
+              env,
+            })
+            : await defaultVerifyHealth({
+              dshHome: canonicalHome,
+              ...(args.profile !== undefined ? { profile: args.profile } : {}),
+              profiles: targetProfiles,
+              runner,
+              platform,
+              osHome,
+              env,
+            })
+        if (!health.ok) {
+          throw new Error(`服务启动后就绪诊断失败：${health.error ?? 'unknown'}`)
+        }
+      }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error)
+      finalExitCode = 1
+      finalReport = {
+        ...finalReport,
+        ok: false,
+        ready: false,
+        execution: {
+          executed: finalReport.execution?.executed ?? false,
+          dryRun: false,
+          ...(finalReport.execution?.backupDir ? { backupDir: finalReport.execution.backupDir } : {}),
+          ...(finalReport.execution?.delegatedScript ? { delegatedScript: finalReport.execution.delegatedScript } : {}),
+          healthCheckPassed: false,
+          rolledBack: finalReport.execution?.rolledBack ?? false,
+          ...(finalReport.execution?.rollbackSucceeded !== undefined
+            ? { rollbackSucceeded: finalReport.execution.rollbackSucceeded }
+            : {}),
+          error: errMsg,
+        },
+      }
+    }
+  }
+  process.stdout.write(args.json ? `${JSON.stringify(finalReport, null, 2)}\n` : formatUpgradeReport(finalReport))
+  return finalExitCode
+}
+
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
-  deps: MainDeps & { platform?: NodeJS.Platform; osHome?: string; macHostProcessesStopped?: typeof assertMacHostProcessesStopped;
-    detectFrozenOwner?: typeof detectFrozenOwner; frozenUpdate?: typeof runFrozenOwnerUpdate;
-    upgrade?: typeof runUpgrade; upgradeDeps?: UpgradeDeps;
-    freshExec?: (bin: string, argv: readonly string[], env: NodeJS.ProcessEnv) => number } = {},
+  deps: ExtendedMainDeps = {},
 ): Promise<number> {
   // Rescue scripts probe this before delegating destructive work to an installed CLI.
   // Keep the response read-only and independent of Home, launchd and installed Host state.
@@ -1727,124 +1872,7 @@ export async function main(
         }
       }
       case 'upgrade': {
-        const platform = deps.platform ?? process.platform
-        const osHome = deps.osHome ?? homedir()
-        const action: UpgradeAction = args.dryRun ? 'dry-run' : args.check ? 'check' : args.yes ? 'apply' : 'check'
-        const { report, exitCode } = await (deps.upgrade ?? runUpgrade)(
-          {
-            dshHome: args.dshHome,
-            ...(args.profile !== undefined ? { profile: args.profile } : {}),
-            action,
-            ...(args.registry !== undefined ? { registryUrl: args.registry } : {}),
-            ...(args.dshVersion !== undefined ? { dshVersion: args.dshVersion } : {}),
-            ...(args.targetVersion !== undefined ? { targetVersion: args.targetVersion } : {}),
-            allowNonEmptyHistoryMigration: args.allowNonEmptyHistoryMigration,
-            confirmDshHomeStopped: args.confirmDshHomeStopped,
-            platform,
-            osHome,
-            env,
-          },
-          deps.upgradeDeps,
-        )
-        let finalReport: UpgradeReport = report
-        let finalExitCode = exitCode
-        const canManageServices = !deps.upgrade || Boolean(deps.upgradeDeps?.controlService)
-        if (action === 'apply' && finalReport.ok && finalReport.mode !== 'frozen-linux-systemd' && canManageServices) {
-          const canonicalHome = finalReport.dshHome
-          const runner = deps.upgradeDeps?.runner ?? defaultRunner
-          const inspectFn = deps.upgradeDeps?.inspectService ?? inspectManagedServiceForDshHome
-          const controlFn = deps.upgradeDeps?.controlService ?? controlManagedService
-          const isRunningFn = deps.upgradeDeps?.isServiceRunning
-            ?? ((plat, homeDir, homePath, prof, cmdRunner) => isManagedProfileRunning(plat, homeDir, homePath, prof, cmdRunner))
-          try {
-            const targetProfiles = args.profile !== undefined
-              ? [args.profile]
-              : finalReport.packages.profiles.length > 0
-                ? finalReport.packages.profiles.map(p => p.profile)
-                : await resolveTargetProfiles(canonicalHome, args.profile)
-
-            const managedProfiles: string[] = []
-            for (const prof of targetProfiles) {
-              const presence = await inspectFn(platform, osHome, prof, canonicalHome, runner)
-              if (presence.foreign) {
-                throw new Error(`服务定义非本工具受管：${presence.definitionPath}`)
-              }
-              if (presence.managed) {
-                managedProfiles.push(prof)
-              }
-            }
-
-            for (const prof of managedProfiles) {
-              const running = await isRunningFn(platform, osHome, canonicalHome, prof, runner)
-              const alreadyRestartedByUpgrade = Boolean(finalReport.execution?.executed)
-                && !args.confirmDshHomeStopped
-                && running
-              if (!alreadyRestartedByUpgrade) {
-                const svcAction: ServiceAction = running ? 'restart' : 'start'
-                const outcome = await controlFn(platform, osHome, prof, svcAction, runner, false, canonicalHome)
-                if (outcome.errors.length > 0) {
-                  throw new Error(`升级后启动服务 ${prof} 失败：${outcome.errors.join('；')}`)
-                }
-              }
-            }
-
-            if (managedProfiles.length > 0 || Boolean(deps.upgradeDeps?.doctor)) {
-              const health = deps.upgradeDeps?.doctor
-                ? await deps.upgradeDeps.doctor({
-                  dshHome: canonicalHome,
-                  ...(args.profile !== undefined ? { profile: args.profile } : {}),
-                  platform,
-                  home: osHome,
-                  env,
-                  runner,
-                })
-                : deps.upgradeDeps?.verifyHealth
-                  ? await deps.upgradeDeps.verifyHealth({
-                    dshHome: canonicalHome,
-                    ...(args.profile !== undefined ? { profile: args.profile } : {}),
-                    profiles: targetProfiles,
-                    runner,
-                    platform,
-                    osHome,
-                    env,
-                  })
-                  : await defaultVerifyHealth({
-                    dshHome: canonicalHome,
-                    ...(args.profile !== undefined ? { profile: args.profile } : {}),
-                    profiles: targetProfiles,
-                    runner,
-                    platform,
-                    osHome,
-                    env,
-                  })
-              if (!health.ok) {
-                throw new Error(`服务启动后就绪诊断失败：${health.error ?? 'unknown'}`)
-              }
-            }
-          } catch (error) {
-            const errMsg = error instanceof Error ? error.message : String(error)
-            finalExitCode = 1
-            finalReport = {
-              ...finalReport,
-              ok: false,
-              ready: false,
-              execution: {
-                executed: finalReport.execution?.executed ?? false,
-                dryRun: false,
-                ...(finalReport.execution?.backupDir ? { backupDir: finalReport.execution.backupDir } : {}),
-                ...(finalReport.execution?.delegatedScript ? { delegatedScript: finalReport.execution.delegatedScript } : {}),
-                healthCheckPassed: false,
-                rolledBack: finalReport.execution?.rolledBack ?? false,
-                ...(finalReport.execution?.rollbackSucceeded !== undefined
-                  ? { rollbackSucceeded: finalReport.execution.rollbackSucceeded }
-                  : {}),
-                error: errMsg,
-              },
-            }
-          }
-        }
-        process.stdout.write(args.json ? `${JSON.stringify(finalReport, null, 2)}\n` : formatUpgradeReport(finalReport))
-        return finalExitCode
+        return await executeTransactionalUpgrade(args, env, deps)
       }
       case 'update': {
         const platform = deps.platform ?? process.platform
@@ -1912,14 +1940,60 @@ export async function main(
           return (deps.frozenUpdate ?? runFrozenOwnerUpdate)(frozen,
             { dryRun: args.dryRun, ...(args.dshVersion === undefined ? {} : { dshVersion: args.dshVersion }) })
         }
+        const releaseVersion = report.installedVersion
+          ?? report.resolvedVersion
+          ?? (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(report.selector) ? report.selector : undefined)
+        if (args.all && platform === 'linux' && args.local === undefined && await hasMigratedFrozenResidue(args.dshHome)) {
+          const extraPassthrough: string[] = []
+          let allowNonEmptyHistoryMigration = args.allowNonEmptyHistoryMigration
+          let confirmDshHomeStopped = args.confirmDshHomeStopped
+          for (let i = 0; i < args.passthrough.length; i++) {
+            const token = args.passthrough[i]!
+            if (token === '--yes' || token === '--dry-run') continue
+            if (token === '--dsh-version' && args.passthrough[i + 1] === args.dshVersion) { i++; continue }
+            if (token === '--confirm-dsh-home-stopped') { confirmDshHomeStopped = true; continue }
+            if (token === '--allow-non-empty-history-migration') { allowNonEmptyHistoryMigration = true; continue }
+            extraPassthrough.push(token)
+          }
+          if (extraPassthrough.length > 0) {
+            throw new PurgeError(`已迁移 npm RSI Home 的 update --all 不支持附加安装器参数：${extraPassthrough.join(' ')}`)
+          }
+          if (!args.dryRun && await hasPendingHostRecovery(args.dshHome)) {
+            const recoveryPassthrough = [...args.passthrough]
+            if (!recoveryPassthrough.includes('--operation')) recoveryPassthrough.push('--operation', 'upgrade')
+            if (!recoveryPassthrough.includes('--confirm-dsh-home-stopped')) {
+              recoveryPassthrough.push('--confirm-dsh-home-stopped')
+            }
+            if (releaseVersion === undefined) {
+              throw new PurgeError('无法把 dsh-rsi 目标 selector 解析为精确发布版本；为避免 CLI 与安装器版本错配，未开始插件升级。')
+            }
+            const recovery = await install({
+              ...buildInstallOptions(args), releaseRef: `v${releaseVersion}`, passthrough: recoveryPassthrough,
+              recoveryOnly: true,
+            })
+            if (recovery !== 0) return recovery
+          }
+          const upgradeArgs: ParsedArgs = {
+            ...args,
+            allowNonEmptyHistoryMigration,
+            confirmDshHomeStopped,
+          }
+          const upgradeAction: UpgradeAction = args.dryRun ? 'dry-run' : args.yes ? 'apply' : 'check'
+          const explicitTargetVersion = args.targetVersion !== undefined && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(args.targetVersion)
+            ? args.targetVersion
+            : releaseVersion && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(releaseVersion)
+              ? releaseVersion
+              : undefined
+          return await executeTransactionalUpgrade(upgradeArgs, env, deps, {
+            action: upgradeAction,
+            ...(explicitTargetVersion !== undefined ? { targetVersion: explicitTargetVersion } : {}),
+          })
+        }
         const passthrough = [...args.passthrough]
         if (!passthrough.includes('--operation')) passthrough.push('--operation', 'upgrade')
         if (platform !== 'darwin' && !passthrough.includes('--confirm-dsh-home-stopped')) {
           passthrough.push('--confirm-dsh-home-stopped')
         }
-        const releaseVersion = report.installedVersion
-          ?? report.resolvedVersion
-          ?? (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(report.selector) ? report.selector : undefined)
         if (releaseVersion === undefined) {
           throw new PurgeError(
             '无法把 dsh-rsi 目标 selector 解析为精确发布版本；为避免 CLI 与安装器版本错配，未开始插件升级。',
