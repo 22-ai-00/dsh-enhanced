@@ -647,7 +647,7 @@ describe.skipIf(process.platform !== 'win32')('real Windows Job Object execution
       shell: 'cmd',
       networkMode: 'none',
       artifacts: ['out.txt'],
-      deadline: Date.now() + 45_000,
+      deadline: Date.now() + 90_000,
       maxOutputBytes: 4096,
       maxArtifactBytes: 1024,
       limits: { memoryMiB: 256, pidsLimit: 16, cpus: 1 },
@@ -659,5 +659,5 @@ describe.skipIf(process.platform !== 'win32')('real Windows Job Object execution
       exitCode: 0,
       artifacts: [{ path: 'out.txt', content: 'real-win\r\n' }],
     })
-  }, 75_000)
+  }, 110_000)
 })

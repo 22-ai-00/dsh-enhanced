@@ -72,10 +72,13 @@ async function createRuntimeHarness(options?: {
     holdoutRateBps: options?.holdoutRateBps ?? 1250,
     holdoutSeed: options?.holdoutSeed ?? 'test-holdout-seed-0123456789abcdef',
     hysteresisDelta: options?.hysteresisDelta ?? 0.15,
-    hotPathBudgetMs: options?.hotPathBudgetMs ?? 4.5,
+    hotPathBudgetMs: options?.hotPathBudgetMs ?? 50,
   })
 
   const service = ctx.assistantAssociation
+  if (options?.hotPathBudgetMs === undefined) {
+    service.setHotPathClock(() => 0)
+  }
   const harness = await mountAgentLoopTestHarness(ctx)
 
   const principalId = `headless:${root}:primary`
@@ -345,7 +348,9 @@ describe('assistant-association runtime-context integration (ReactLoopAgent)', (
   })
 
   test('degrades non-blocking on forced assoc-timeout, logs warning, and suppresses injection on HMAC sealed holdout', async () => {
-    const { root, ctx, service, harness, ownerScope } = await createRuntimeHarness()
+    const { root, ctx, service, harness, ownerScope } = await createRuntimeHarness({
+      hotPathBudgetMs: 4.5,
+    })
     await seedNodes(service, ownerScope, [
       {
         id: 'a:m-timeout-node',

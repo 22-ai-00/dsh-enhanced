@@ -218,10 +218,12 @@ async function setupFullStack(options: {
     databasePath: options.assocDbPath ?? join(root, 'assoc.sqlite'),
     holdoutSeed: options.holdoutSeed ?? 'test-s4-holdout-seed-0123456789abcdef',
     allowLowTrust: options.allowLowTrust ?? true,
+    hotPathBudgetMs: 50,
     ...(options.webLearning !== undefined ? { webLearning: options.webLearning } : {}),
   })
 
   const assoc = ctx.assistantAssociation
+  assoc.setHotPathClock(() => 0)
   const policy = ctx.assistantPolicy
   const principalId = 'lark/bot/t1/ou_owner'
   const principalDigest = computePrincipalDigest(principalId)

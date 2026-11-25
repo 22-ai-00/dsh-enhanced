@@ -377,10 +377,12 @@ describe('personal-memory recall parity, Step-1 standing retention, and automati
       databasePath: join(root, 'assoc.sqlite'),
       allowHeadlessScope: true,
       holdoutSeed: 'parity-edge-seed-0123456789abcdef',
+      hotPathBudgetMs: 50,
     })
 
     const pm = ctx.personalMemory
     const assoc = ctx.assistantAssociation
+    assoc.setHotPathClock(() => 0)
     const seedAgent = stubAgent('parity-seed', workspace)
     seedAgent.session.append('approval/policy', { policy: 'never' })
     seedAgent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })

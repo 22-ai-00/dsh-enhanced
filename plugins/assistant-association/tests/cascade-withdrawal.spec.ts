@@ -266,9 +266,11 @@ describe('derivedFrom cascade withdrawal & conflict retraction across all 5 sour
     await ctx.plugin(AssistantAssociationService, {
       databasePath: join(root, 'assoc.sqlite'),
       holdoutSeed: 'cascade-test-seed-0123456789abcdef',
+      hotPathBudgetMs: 50,
     })
 
     const assoc = ctx.assistantAssociation
+    assoc.setHotPathClock(() => 0)
     const pm = ctx.personalMemory
     const store = assoc.store!
 
@@ -846,9 +848,11 @@ describe('derivedFrom cascade withdrawal & conflict retraction across all 5 sour
     await ctx.plugin(AssistantAssociationService, {
       databasePath: join(root, 'assoc.sqlite'),
       holdoutSeed: 'cascade-reg-seed-0123456789abcdef',
+      hotPathBudgetMs: 50,
     })
 
     const assoc = ctx.assistantAssociation
+    assoc.setHotPathClock(() => 0)
     const pm = ctx.personalMemory
     const store = assoc.store!
 

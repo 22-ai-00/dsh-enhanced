@@ -363,8 +363,10 @@ describe('sources ingestion across all 5 sources, Delivery+Evaluation episodes, 
     // Now mount AssistantAssociationService (discovers owner route on startup + backfills!)
     await ctx.plugin(AssistantAssociationService, {
       databasePath: join(root, 'assoc.sqlite'),
+      hotPathBudgetMs: 50,
     })
     const assoc = ctx.assistantAssociation
+    assoc.setHotPathClock(() => 0)
 
     // Simulate a tool call in session before foreground episode completion so toolNames[] are captured
     liveAgent.session.append('tool/call', {
@@ -510,10 +512,12 @@ describe('sources ingestion across all 5 sources, Delivery+Evaluation episodes, 
     await ctx.plugin(AssistantAssociationService, {
       databasePath: join(root, 'assoc.sqlite'),
       allowHeadlessScope: true,
+      hotPathBudgetMs: 50,
     })
 
     const pm = ctx.personalMemory
     const assoc = ctx.assistantAssociation
+    assoc.setHotPathClock(() => 0)
     const a1 = stubAgent('dedup-1', ws1, 'primary')
     const prop = pm.propose(a1, {
       idempotencyKey: 'global-dedup-1',

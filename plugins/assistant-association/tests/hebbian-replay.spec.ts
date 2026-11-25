@@ -122,12 +122,15 @@ async function setupRuntimeHarness(options?: {
     allowHeadlessScope: true,
     holdoutRateBps: options?.holdoutRateBps ?? 1250,
     holdoutSeed: options?.holdoutSeed ?? 's2-replay-holdout-seed-0123456789abcdef',
-    hotPathBudgetMs: options?.hotPathBudgetMs ?? 4.5,
+    hotPathBudgetMs: options?.hotPathBudgetMs ?? 50,
     ...(options?.hebbian !== undefined ? { hebbian: options.hebbian } : {}),
     ...(options?.paramTuning !== undefined ? { paramTuning: options.paramTuning } : {}),
   })
 
   const service = ctx.assistantAssociation
+  if (options?.hotPathBudgetMs === undefined) {
+    service.setHotPathClock(() => 0)
+  }
   const harness = await mountAgentLoopTestHarness(ctx)
 
   const principalId = `headless:${root}:primary`
@@ -1055,6 +1058,7 @@ describe('Slice S2: Hebbian reinforcement, decay, owner correction & WP22 parame
     })
     await ctx.plugin(AssistantAssociationService, {
       databasePath: join(root, 'assoc.sqlite'),
+      hotPathBudgetMs: 50,
       hebbian: {
         alpha: 0.25,
         beta: 0.4,
@@ -1067,6 +1071,7 @@ describe('Slice S2: Hebbian reinforcement, decay, owner correction & WP22 parame
     const pm = ctx.personalMemory
     const evalSvc = ctx.assistantEvaluation
     const assoc = ctx.assistantAssociation
+    assoc.setHotPathClock(() => 0)
     const now = 1_700_000_200_000
     assoc.setNowClock(() => now)
 

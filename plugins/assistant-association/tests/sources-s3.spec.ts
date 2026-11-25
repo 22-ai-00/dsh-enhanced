@@ -243,6 +243,7 @@ describe('Slice S3 End-to-End Integration', () => {
       allowLowTrust: true,
       minItems: 1,
       maxItems: 8,
+      hotPathBudgetMs: 50,
       syncIntervalMs: 60_000,
       dreaming: {
         enabled: true,
@@ -256,6 +257,7 @@ describe('Slice S3 End-to-End Integration', () => {
     })
     const assoc = ctx.assistantAssociation
     assoc.setNowClock(() => clockMs)
+    assoc.setHotPathClock(() => 0)
     const store = assoc.store!
 
     const scopeB = makeHeadlessScope('owner-b', workspace)
@@ -861,6 +863,7 @@ describe('Slice S3 End-to-End Integration', () => {
     })
     const assoc = ctx.assistantAssociation
     assoc.setNowClock(() => clockMs)
+    assoc.setHotPathClock(() => 0)
     await assoc.syncAll()
     await assoc.refreshIndex()
 
@@ -1104,6 +1107,7 @@ describe('Slice S3 End-to-End Integration', () => {
       allowHeadlessScope: true,
       minItems: 1,
       maxItems: 8,
+      hotPathBudgetMs: 50,
       syncIntervalMs: 60_000,
       intakeSignal: {
         enabled: true,
@@ -1114,6 +1118,7 @@ describe('Slice S3 End-to-End Integration', () => {
     })
     const assoc = ctx.assistantAssociation
     assoc.setNowClock(() => clockMs)
+    assoc.setHotPathClock(() => 0)
     const store = assoc.store!
     const scope = makeHeadlessScope('owner-intake', workspace)
     const now = clockMs

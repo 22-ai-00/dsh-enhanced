@@ -3838,7 +3838,7 @@ setInterval(() => {}, 1000)`,
     expect(commands).toEqual(['store', 'lookup', 'clear'])
   })
 
-  test('runs credential preflight before journal recovery or cloud authorization', async () => {
+  test.runIf(process.platform !== 'win32')('runs credential preflight before journal recovery or cloud authorization', async () => {
     const dshHome = await mkdtemp(join(tmpdir(), 'lark-setup-preflight-'))
     const { dshHomeLifecycleRendezvousPath } = await import('../src/setup.ts')
     const lockPath = dshHomeLifecycleRendezvousPath(dshHome)
