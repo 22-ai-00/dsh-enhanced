@@ -1569,10 +1569,10 @@ export async function runUpgrade(
 
   const registryUrl = validateRegistryUrl(options.registryUrl ?? env.npm_config_registry ?? DEFAULT_REGISTRY_URL)
 
-  // 1. Detect frozen Linux systemd owner mode cleanly.
+  // 1. Detect frozen Linux systemd owner mode cleanly (Linux-only; avoid POSIX uid/mode checks on Windows/macOS).
   let frozenOwner: FrozenOwner | undefined
   let frozenError: string | undefined
-  if (homeUsable) {
+  if (platform === 'linux' && homeUsable) {
     try {
       frozenOwner = await detectFrozen(canonicalHome)
     } catch (error) {

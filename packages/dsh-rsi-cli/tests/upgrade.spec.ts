@@ -1294,4 +1294,42 @@ minimumReleaseAgeExclude:
       '--user start dsh-restart-supervisor-assistant.timer',
     ])
   })
+
+  test('skips Linux frozen-owner detection on win32 and darwin so standard-local checks succeed cross-platform', async () => {
+    const f = await createHomeFixture()
+    let frozenChecked = 0
+    for (const plat of ['win32', 'darwin'] as const) {
+      const check = await runUpgrade(
+        { dshHome: f.dshHome, profile: f.profile, action: 'check', osHome: f.osHome, platform: plat },
+        {
+          fetch: makeRegistryFetch('0.1.85', '0.2.2-rc.5'),
+          inspectBoundHost: async () => ({ status: 'missing', bindingPath: f.hostPath, issues: [] }),
+          detectFrozenOwner: async () => {
+            frozenChecked++
+            throw new Error(`unexpected frozen-owner check on ${plat}`)
+          },
+        },
+      )
+      expect(check.exitCode).toBe(0)
+      expect(check.report.readiness.ok).toBe(true)
+      expect(check.report.mode).toBe('standard-local')
+      expect(check.report.frozenSystemd).toEqual({ detected: false, profiles: [] })
+
+      const dry = await runUpgrade(
+        { dshHome: f.dshHome, profile: f.profile, action: 'dry-run', osHome: f.osHome, platform: plat },
+        {
+          fetch: makeRegistryFetch('0.1.85', '0.2.2-rc.5'),
+          inspectBoundHost: async () => ({ status: 'missing', bindingPath: f.hostPath, issues: [] }),
+          detectFrozenOwner: async () => {
+            frozenChecked++
+            throw new Error(`unexpected frozen-owner check on ${plat}`)
+          },
+        },
+      )
+      expect(dry.exitCode).toBe(0)
+      expect(dry.report.ok).toBe(true)
+      expect(dry.report.mode).toBe('standard-local')
+    }
+    expect(frozenChecked).toBe(0)
+  })
 })
