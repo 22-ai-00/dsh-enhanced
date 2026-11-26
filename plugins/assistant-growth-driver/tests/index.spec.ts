@@ -670,7 +670,7 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     const unknownValidation = Config['~standard'].validate({ unknownField: 1 } as never) as { issues?: readonly { message: string }[] }
     expect(unknownValidation.issues?.[0]?.message).toContain('unknown config field')
 
-    const explicitEnabledNoScope = Config['~standard'].validate({ enabled: true }) as { value?: AssistantGrowthDriverService['Config'] }
+    const explicitEnabledNoScope = Config['~standard'].validate({ enabled: true }) as { value?: unknown }
     expect(() => normalizeConfig(explicitEnabledNoScope.value as never)).toThrow(/explicit owner scope/)
 
     const explicitWorkItemNoPins = Config['~standard'].validate({
