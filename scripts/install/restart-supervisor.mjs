@@ -96,7 +96,7 @@ async function hostIdentity(home, userHome) {
   const hostRoot = join(binding.cacheRoot, binding.version)
   if (!inside(userHome, hostRoot) || await realpath(hostRoot) !== hostRoot) fail('Host escapes private user runtime')
   const receiptPath = join(hostRoot, 'receipt.json')
-  const receiptSource = await privateFile(receiptPath, 16_777_216)
+  const receiptSource = await privateFile(receiptPath, 33_554_432)
   const receipt = JSON.parse(receiptSource.toString('utf8'))
   if (receipt.schemaVersion !== 1 || receipt.version !== binding.version
     || !Array.isArray(receipt.entries) || receipt.entries.length < 2 || receipt.entries.length > 150_000

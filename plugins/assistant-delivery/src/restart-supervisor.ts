@@ -120,7 +120,7 @@ export function validateRestartSupervisorConfig(value: RestartSupervisorConfig):
     || value.hostReceiptPath.startsWith(value.dshHome + sep)) {
     throw new Error('restart-supervisor: unit/profile or pinned digest is invalid')
   }
-  if (!Array.isArray(value.trustedFiles) || value.trustedFiles.length < 3 || value.trustedFiles.length > 2048
+  if (!Array.isArray(value.trustedFiles) || value.trustedFiles.length < 3 || value.trustedFiles.length > 4096
     || value.trustedFiles.some(file => file === null || typeof file !== 'object'
       || Object.keys(file).sort().join(',') !== 'digest,path'
       || typeof file.path !== 'string' || !isAbsolute(file.path) || resolve(file.path) !== file.path
@@ -464,7 +464,7 @@ async function hostCodeMatches(config: RestartSupervisorConfig): Promise<boolean
     || typeof bound.receiptDigest !== 'string' || !shaPattern.test(bound.receiptDigest)) return false
   const hostRoot = join(bound.cacheRoot, bound.version)
   if (hostRoot !== dirname(config.hostReceiptPath) || await realpath(hostRoot) !== hostRoot) return false
-  const source = await pinnedDigest(config.hostReceiptPath, 16_777_216)
+  const source = await pinnedDigest(config.hostReceiptPath, 33_554_432)
   if (source.digest !== config.hostReceiptSourceDigest) return false
   const receipt = JSON.parse(source.source.toString('utf8')) as {
     schemaVersion?: number; version?: string; entries?: Array<{

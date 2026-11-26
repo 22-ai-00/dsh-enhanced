@@ -1239,7 +1239,7 @@ async function refreshRestartSupervisorForProfile(input: {
   const trustedFiles = [...trustedByPath.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([path, digest]) => ({ path, digest }))
-  if (trustedFiles.length < 3 || trustedFiles.length > 2048 || !trustedByPath.has(policyEvaluatorPath)) {
+  if (trustedFiles.length < 3 || trustedFiles.length > 4096 || !trustedByPath.has(policyEvaluatorPath)) {
     throw new Error(`profile ${target.profile} restart-supervisor trustedFiles 无效（count=${trustedFiles.length}）`)
   }
 
@@ -1273,7 +1273,7 @@ async function refreshRestartSupervisorForProfile(input: {
       }
       hostReceiptPath = nextReceiptPath
       hostReceiptSourceDigest = sha256Buffer(
-        await readCheckedRegularBytes(nextReceiptPath, 16_777_216, 'host receipt.json'),
+        await readCheckedRegularBytes(nextReceiptPath, 33_554_432, 'host receipt.json'),
       )
     }
   }

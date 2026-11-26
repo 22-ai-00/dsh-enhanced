@@ -1293,6 +1293,60 @@ minimumReleaseAgeExclude:
       '--user daemon-reload',
       '--user start dsh-restart-supervisor-assistant.timer',
     ])
+
+    // 3. Large Host receipt.json (>16 MiB, <=32 MiB — matching real 0.2.2-rc.5 receipt ~18.9 MiB) succeeds; >32 MiB fails closed & rolls back.
+    const largeReceiptRaw = JSON.stringify({
+      schemaVersion: 1,
+      version: '0.2.2-rc.5',
+      entries: [],
+      pad: 'x'.repeat(18 * 1024 * 1024),
+    })
+    await writeFile(join(hostRoot, 'receipt.json'), largeReceiptRaw, { mode: 0o600 })
+    const largeHostBindingRaw = JSON.stringify({
+      schemaVersion: 1,
+      cacheRoot: join(f.root, 'host-cache'),
+      version: '0.2.2-rc.5',
+      receiptDigest: sha(largeReceiptRaw),
+    }, null, 2)
+    await writeFile(f.hostPath, largeHostBindingRaw, { mode: 0o600 })
+    systemctlCalls.length = 0
+    const largeSucceeded = await runUpgrade({
+      dshHome: f.dshHome,
+      profile: 'assistant',
+      action: 'apply',
+      targetVersion: '0.1.86',
+      confirmDshHomeStopped: true,
+      platform: 'linux',
+      osHome: f.osHome,
+    }, {
+      ...makeDeps(true),
+      fetch: makeRegistryFetch('0.1.86', '0.2.2-rc.5'),
+    })
+    expect(largeSucceeded.exitCode).toBe(0)
+    expect(JSON.parse(await readFile(supConfigPath, 'utf8')).hostReceiptSourceDigest).toBe(sha(largeReceiptRaw))
+
+    const oversizedReceiptRaw = JSON.stringify({
+      schemaVersion: 1,
+      version: '0.2.2-rc.5',
+      entries: [],
+      pad: 'x'.repeat(33 * 1024 * 1024),
+    })
+    await writeFile(join(hostRoot, 'receipt.json'), oversizedReceiptRaw, { mode: 0o600 })
+    const oversizedRejected = await runUpgrade({
+      dshHome: f.dshHome,
+      profile: 'assistant',
+      action: 'apply',
+      targetVersion: '0.1.87',
+      confirmDshHomeStopped: true,
+      platform: 'linux',
+      osHome: f.osHome,
+    }, {
+      ...makeDeps(true),
+      fetch: makeRegistryFetch('0.1.87', '0.2.2-rc.5'),
+    })
+    expect(oversizedRejected.exitCode).toBe(1)
+    expect(oversizedRejected.report.execution?.rolledBack).toBe(true)
+    expect(oversizedRejected.report.execution?.error).toContain('host receipt.json文件不安全')
   })
 
   test('skips Linux frozen-owner detection on win32 and darwin so standard-local checks succeed cross-platform', async () => {
