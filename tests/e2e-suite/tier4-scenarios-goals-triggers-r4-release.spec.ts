@@ -1376,7 +1376,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
           createProgress: async () => ({ cotId: 'c1', messageId: 'om_cot' }),
           writeProgress: async () => {},
           send: async (_chatId: string, input: { text?: string }) => {
-            sends.push(input.text ?? '')
+            sends.push(typeof input.text === 'string' ? input.text : JSON.stringify(input))
             return { messageId: `om_out_${sends.length}` }
           },
         }),

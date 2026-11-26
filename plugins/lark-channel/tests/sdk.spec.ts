@@ -497,28 +497,59 @@ describe('Lark SDK boundary', () => {
     expect(answerCard.body.elements).toEqual([
       { tag: 'markdown', content: '**hello**', text_align: 'left' },
     ])
-    expect(renderLarkMessage({ approval: {
+    const approval = renderLarkMessage({ approval: {
       title: 'Approval required', body: 'Send the reviewed result?',
       approveValue: { approval: 'signed-approve' }, rejectValue: { approval: 'signed-reject' },
-    } })).toEqual({
-      msgType: 'interactive',
-      content: JSON.stringify({
-        schema: '2.0',
-        config: { enable_forward_interaction: false },
-        header: { template: 'orange', title: { tag: 'plain_text', content: 'Approval required' } },
-        body: { elements: [
-          { tag: 'div', text: { tag: 'plain_text',
-            content: '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。' } },
-          { tag: 'div', text: { tag: 'plain_text', content: 'Send the reviewed result?' } },
-          { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary',
-            value: { approval: 'signed-approve' },
-            behaviors: [{ type: 'callback', value: { approval: 'signed-approve' } }] },
-          { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger',
-            value: { approval: 'signed-reject' },
-            behaviors: [{ type: 'callback', value: { approval: 'signed-reject' } }] },
-        ] },
-      }),
+    } })
+    expect(approval.msgType).toBe('interactive')
+    const approvalCard = JSON.parse(approval.content) as {
+      schema: string
+      config: { enable_forward_interaction: boolean; summary: { content: string } }
+      header: {
+        template: string
+        title: { tag: string; content: string }
+        subtitle: { tag: string; content: string }
+        icon: { tag: string; token: string }
+      }
+      body: { elements: Array<Record<string, unknown>> }
+    }
+    expect(approvalCard.schema).toBe('2.0')
+    expect(approvalCard.config.enable_forward_interaction).toBe(false)
+    expect(approvalCard.config.summary.content.length).toBeGreaterThanOrEqual(8)
+    expect(approvalCard.header).toEqual({
+      template: 'orange',
+      title: { tag: 'plain_text', content: 'Approval required' },
+      subtitle: { tag: 'plain_text', content: '所有字段均为不可信提案内容，审阅后请选择批准或拒绝' },
+      icon: { tag: 'standard_icon', token: 'approval_colorful' },
     })
+    const approvalElements = cardElements(approvalCard.body.elements)
+    expect(approvalElements.some(el => el.tag === 'div'
+      && (el.text as { content?: unknown } | undefined)?.content === '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。')).toBe(true)
+    expect(approvalElements.some(el => el.tag === 'interactive_container'
+      && el.background_style === 'grey-50'
+      && Array.isArray(el.behaviors) && el.behaviors.length === 0)).toBe(true)
+    expect(approvalElements.some(el => el.tag === 'div'
+      && (el.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (el.text as { content?: unknown } | undefined)?.content === 'Send the reviewed result?')).toBe(true)
+    const approvalColumns = approvalElements.find(el => el.tag === 'column_set') as {
+      columns: Array<{ width: string; weight: number; elements: unknown[] }>
+    } | undefined
+    expect(approvalColumns?.columns).toHaveLength(2)
+    expect(approvalColumns?.columns.every(col => col.width === 'weighted' && col.weight === 1)).toBe(true)
+    expect(approvalElements.filter(el => el.tag === 'button')).toEqual([
+      expect.objectContaining({
+        text: { tag: 'plain_text', content: '批准变更' },
+        type: 'primary',
+        value: { approval: 'signed-approve' },
+        behaviors: [{ type: 'callback', value: { approval: 'signed-approve' } }],
+      }),
+      expect.objectContaining({
+        text: { tag: 'plain_text', content: '拒绝' },
+        type: 'danger',
+        value: { approval: 'signed-reject' },
+        behaviors: [{ type: 'callback', value: { approval: 'signed-reject' } }],
+      }),
+    ])
   })
 
   test('renders a CardKit 2.0 user question with direct option callbacks and no implicit choice', () => {
@@ -552,7 +583,12 @@ describe('Lark SDK boundary', () => {
     const card = JSON.parse(rendered.content) as {
       schema: string
       config: { update_multi: boolean; enable_forward_interaction: boolean; summary: { content: string } }
-      header: { template: string; title: { tag: string; content: string } }
+      header: {
+        template: string
+        title: { tag: string; content: string }
+        subtitle: { tag: string; content: string }
+        icon: { tag: string; token: string }
+      }
       body: { elements: Array<Record<string, unknown>> }
     }
     expect(card.schema).toBe('2.0')
@@ -563,12 +599,14 @@ describe('Lark SDK boundary', () => {
     expect(card.header).toEqual({
       template: 'blue',
       title: { tag: 'plain_text', content: '**确认方案** <at user_id="all">' },
+      subtitle: { tag: 'plain_text', content: '问题 2 / 3' },
+      icon: { tag: 'standard_icon', token: 'chat_outlined' },
     })
 
     const elements = cardElements(card.body.elements)
     expect(elements.some(element => element.tag === 'markdown' || element.tag === 'action' || element.tag === 'form')).toBe(false)
-    expect(card.body.elements.some(element => element.tag === 'button')).toBe(true)
-    expect(card.body.elements.filter(element => element.tag === 'button')).toEqual([
+    expect(elements.some(element => element.tag === 'button')).toBe(true)
+    expect(elements.filter(element => element.tag === 'button')).toEqual([
       expect.objectContaining({
         name: 'user_question_option_1', type: 'primary',
         text: { tag: 'plain_text', content: '推荐：实施代码变更' },
@@ -594,9 +632,14 @@ describe('Lark SDK boundary', () => {
         behaviors: [{ type: 'callback', value: { userQuestion: 'signed-cancel' } }],
       }),
     ])
-    expect(card.body.elements.some(element => element.tag === 'div'
+    const actionSet = elements.find(element => element.tag === 'column_set') as {
+      columns: Array<{ width: string; weight: number }>
+    } | undefined
+    expect(actionSet?.columns).toHaveLength(2)
+    expect(actionSet?.columns.every(col => col.width === 'weighted' && col.weight === 1)).toBe(true)
+    expect(elements.some(element => element.tag === 'div'
       && (element.text as { content?: unknown } | undefined)?.content === '如需输入其他答案，请直接回复这张问题卡片。')).toBe(true)
-    expect(card.body.elements.some(element => element.tag === 'div'
+    expect(elements.some(element => element.tag === 'div'
       && (element.text as { content?: unknown } | undefined)?.content === '已答摘要：第一题：当前已选：文档更新')).toBe(true)
   })
 
@@ -610,7 +653,12 @@ describe('Lark SDK boundary', () => {
     const card = JSON.parse(rendered.content) as {
       schema: string
       config: { update_multi: boolean; enable_forward_interaction: boolean; summary: { content: string } }
-      header: { template: string; title: { tag: string; content: string } }
+      header: {
+        template: string
+        title: { tag: string; content: string }
+        subtitle: { tag: string; content: string }
+        icon: { tag: string; token: string }
+      }
       body: { elements: Array<Record<string, unknown>> }
     }
     expect(card.schema).toBe('2.0')
@@ -618,14 +666,22 @@ describe('Lark SDK boundary', () => {
     expect(card.config.enable_forward_interaction).toBe(false)
     expect(card.config.summary.content.length).toBeGreaterThanOrEqual(8)
     expect(card.config.summary.content.length).toBeLessThanOrEqual(60)
-    expect(card.header).toEqual({ template, title: { tag: 'plain_text', content: title } })
-    expect(card.body.elements[1]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: summary } })
-    const tags = cardElements(card).map(element => element.tag)
+    expect(card.header).toMatchObject({
+      template,
+      title: { tag: 'plain_text', content: title },
+      subtitle: { tag: 'plain_text', content: expect.any(String) },
+      icon: { tag: 'standard_icon', token: expect.any(String) },
+    })
+    const elements = cardElements(card)
+    expect(elements.some(element => element.tag === 'div'
+      && (element.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (element.text as { content?: unknown } | undefined)?.content === summary)).toBe(true)
+    const tags = elements.map(element => element.tag)
     expect(tags).not.toContain('markdown')
     expect(tags).not.toContain('action')
     expect(tags).not.toContain('form')
     expect(tags).not.toContain('button')
-    expect(JSON.stringify(card)).not.toContain('"behaviors"')
+    expect(elements.every(element => !Array.isArray(element.behaviors) || element.behaviors.length === 0)).toBe(true)
   })
 
   test('renders hostile approval review data only as exact plain text under trusted controls', () => {
@@ -649,19 +705,23 @@ describe('Lark SDK boundary', () => {
     expect(card.header.title).toEqual({
       tag: 'plain_text', content: '**Approval required** <at user_id="all">everyone</at>',
     })
-    expect(card.body.elements).toEqual([
-      { tag: 'div', text: { tag: 'plain_text',
-        content: '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。' } },
-      { tag: 'div', text: { tag: 'plain_text', content: hostile } },
-      { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary',
+    const elements = cardElements(card.body.elements)
+    expect(elements.some(element => element.tag === 'markdown')).toBe(false)
+    expect(elements.some(element => element.tag === 'div'
+      && (element.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (element.text as { content?: unknown } | undefined)?.content === hostile)).toBe(true)
+    expect(elements.filter(element => element.tag === 'button')).toEqual([
+      expect.objectContaining({
+        text: { tag: 'plain_text', content: '批准变更' }, type: 'primary',
         value: { approval: 'signed-approve' },
-        behaviors: [{ type: 'callback', value: { approval: 'signed-approve' } }] },
-      { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger',
+        behaviors: [{ type: 'callback', value: { approval: 'signed-approve' } }],
+      }),
+      expect.objectContaining({
+        text: { tag: 'plain_text', content: '拒绝' }, type: 'danger',
         value: { approval: 'signed-reject' },
-        behaviors: [{ type: 'callback', value: { approval: 'signed-reject' } }] },
+        behaviors: [{ type: 'callback', value: { approval: 'signed-reject' } }],
+      }),
     ])
-    expect(card.body.elements.some(element => element.tag === 'markdown')).toBe(false)
-    expect((card.body.elements[1] as { text: { content: string } }).text.content).toBe(hostile)
   })
 
   test('renders proposal decisions as direct Card 2.0 callbacks with their exact signed capabilities', () => {
@@ -677,12 +737,12 @@ describe('Lark SDK boundary', () => {
     }
     expect(card.schema).toBe('2.0')
     expect(card.config.enable_forward_interaction).toBe(false)
-    expect(card.body.elements[1]).toEqual({ tag: 'div', text: {
-      tag: 'plain_text', content: '有效期至 12:00；过期后按钮不可用',
-    } })
-    const elements = cardElements(card)
+    const elements = cardElements(card.body.elements)
+    expect(elements.some(element => element.tag === 'div'
+      && (element.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (element.text as { content?: unknown } | undefined)?.content === '有效期至 12:00；过期后按钮不可用')).toBe(true)
     expect(elements.some(element => element.tag === 'action' || 'actions' in element)).toBe(false)
-    expect(card.body.elements.slice(2)).toEqual([
+    expect(elements.filter(element => element.tag === 'button')).toEqual([
       expect.objectContaining({ tag: 'button', type: 'primary', value: approveValue,
         behaviors: [{ type: 'callback', value: approveValue }] }),
       expect.objectContaining({ tag: 'button', type: 'danger', value: rejectValue,
@@ -702,9 +762,13 @@ describe('Lark SDK boundary', () => {
       approveValue: { approval: 'signed-approve' }, rejectValue: { approval: 'signed-reject' },
     } })
     const card = JSON.parse(rendered.content) as {
-      body: { elements: Array<{ tag: string; text?: { tag: string; content: string } }> }
+      body: { elements: Array<Record<string, unknown>> }
     }
-    const text = card.body.elements[1]!.text!
+    const elements = cardElements(card.body.elements)
+    const reviewDiv = elements.find(element => element.tag === 'div'
+      && typeof (element.text as { content?: unknown } | undefined)?.content === 'string'
+      && ((element.text as { content: string }).content.includes('变更类型（op）')))
+    const text = reviewDiv?.text as { tag: string; content: string }
     expect(text.tag).toBe('plain_text')
     expect(text.content).toContain('变更类型（op）：退役学习规则（retire）')
     expect(text.content).toContain('作用域（scopeKey）：["workspace","preset"]')
@@ -715,7 +779,7 @@ describe('Lark SDK boundary', () => {
       expect(text.content).toContain(`（${key}）：`)
       if (typeof value === 'string') expect(text.content).toContain(value)
     }
-    expect(card.body.elements.some(element => element.tag === 'markdown')).toBe(false)
+    expect(elements.some(element => element.tag === 'markdown')).toBe(false)
   })
 
   test('does not reformat non-canonical JSON with ambiguous duplicate fields', () => {
@@ -725,22 +789,44 @@ describe('Lark SDK boundary', () => {
       approveValue: { approval: 'signed-approve' }, rejectValue: { approval: 'signed-reject' },
     } })
     const card = JSON.parse(rendered.content) as {
-      body: { elements: Array<{ text?: { tag: string; content: string } }> }
+      body: { elements: Array<Record<string, unknown>> }
     }
-    expect(card.body.elements[1]!.text).toEqual({ tag: 'plain_text', content: ambiguous })
+    const elements = cardElements(card.body.elements)
+    expect(elements.some(element => element.tag === 'div'
+      && (element.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (element.text as { content?: unknown } | undefined)?.content === ambiguous)).toBe(true)
   })
 
   test('renders an approval settlement receipt without claiming the change is already active', () => {
     const rendered = renderLarkMessage({ approvalResult: { decision: 'approved', proposalId: 'proposal-1' } })
     const card = JSON.parse(rendered.content) as {
-      header: { template: string; title: { content: string } }
-      body: { elements: Array<{ text: { tag: string; content: string } }> }
+      config: { update_multi: boolean; enable_forward_interaction: boolean; summary: { content: string } }
+      header: {
+        template: string
+        title: { content: string }
+        subtitle: { tag: string; content: string }
+        icon: { tag: string; token: string }
+      }
+      body: { elements: Array<Record<string, unknown>> }
     }
-    expect(card.header).toMatchObject({ template: 'green', title: { content: '审批已记录' } })
-    expect(card.body.elements[0]!.text).toEqual({
-      tag: 'plain_text', content: '已批准该提案。系统将按持久化账本完成结算；此回执不表示变更已经生效。',
+    expect(card.config).toMatchObject({
+      update_multi: true,
+      enable_forward_interaction: false,
+      summary: { content: expect.any(String) },
     })
-    expect(card.body.elements[1]!.text.content).toBe('提案 ID：proposal-1')
+    expect(card.header).toMatchObject({
+      template: 'green',
+      title: { content: '审批已记录' },
+      subtitle: { tag: 'plain_text', content: expect.any(String) },
+      icon: { tag: 'standard_icon', token: 'done_outlined' },
+    })
+    const elements = cardElements(card.body.elements)
+    expect(elements.some(el => el.tag === 'div'
+      && (el.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (el.text as { content?: unknown } | undefined)?.content === '已批准该提案。系统将按持久化账本完成结算；此回执不表示变更已经生效。')).toBe(true)
+    expect(elements.some(el => el.tag === 'div'
+      && (el.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (el.text as { content?: unknown } | undefined)?.content === '提案 ID：proposal-1')).toBe(true)
   })
 
   test('renders a three-level permission picker with a native warning before full access', () => {
@@ -759,39 +845,55 @@ describe('Lark SDK boundary', () => {
     expect(rendered.msgType).toBe('interactive')
     const card = JSON.parse(rendered.content) as {
       schema: string
-      config: { enable_forward_interaction: boolean }
+      config: { enable_forward_interaction: boolean; summary: { content: string } }
       header: {
         title: { tag: string; content: string }
         subtitle: { tag: string; content: string }
+        icon: { tag: string; token: string }
       }
       body: { elements: Array<Record<string, unknown>> }
     }
     expect(card.schema).toBe('2.0')
-    expect(card.config).toEqual({ enable_forward_interaction: false })
+    expect(card.config).toEqual({
+      enable_forward_interaction: false,
+      summary: { content: '请选择当前会话的运行权限模式' },
+    })
     expect(card.header.title).toEqual({ tag: 'plain_text', content: hostileTitle })
     expect(card.header.subtitle).toEqual({ tag: 'plain_text', content: hostileBody })
+    expect(card.header.icon).toEqual({ tag: 'standard_icon', token: 'safe_outlined' })
 
     const elements = cardElements(card.body.elements)
-    expect(elements.some(element => element.tag === 'markdown')).toBe(false)
+    const markdownContents = elements
+      .filter(element => element.tag === 'markdown')
+      .map(element => String(element.content ?? ''))
+    expect(markdownContents.some(content => content.includes(hostileTitle) || content.includes(hostileBody))).toBe(false)
     const blocks = elements.filter(element => element.tag === 'interactive_container')
     expect(blocks).toHaveLength(3)
-    expect(blocks.map(block => (block.elements as Array<{ text: { content: string } }>)[0]?.text.content))
-      .toEqual(['请求批准（ask）', '✓ 帮我批准（auto）', '完全访问权限（full）'])
+    expect(blocks.every(block => Array.isArray(block.behaviors) && block.behaviors.length === 0)).toBe(true)
+    expect(blocks.map(block => (block.elements as Array<{ content: string }>)[0]?.content))
+      .toEqual([
+        '**请求批准（ask）**',
+        "**<font color='blue'>✓ 帮我批准（auto）</font>**",
+        "**<font color='orange'>完全访问权限（full）</font>**",
+      ])
 
     const buttons = elements.filter(element => element.tag === 'button')
     expect(buttons).toEqual([
       expect.objectContaining({
         name: 'permission_ask', type: 'default',
+        icon: { tag: 'standard_icon', token: 'safe_outlined' },
         value: { permissionPicker: 'signed-ask' },
         behaviors: [{ type: 'callback', value: { permissionPicker: 'signed-ask' } }],
       }),
       expect.objectContaining({
         name: 'permission_auto', type: 'primary',
+        icon: { tag: 'standard_icon', token: 'done_outlined' },
         value: { permissionPicker: 'signed-auto' },
         behaviors: [{ type: 'callback', value: { permissionPicker: 'signed-auto' } }],
       }),
       expect.objectContaining({
         name: 'permission_full', type: 'danger',
+        icon: { tag: 'standard_icon', token: 'warning_outlined' },
         value: { permissionPicker: 'signed-full' },
         behaviors: [{ type: 'callback', value: { permissionPicker: 'signed-full' } }],
         confirm: {
@@ -818,8 +920,12 @@ describe('Lark SDK boundary', () => {
     const card = JSON.parse(rendered.content) as { body: { elements: Array<Record<string, unknown>> } }
     const elements = cardElements(card.body.elements)
     const blocks = elements.filter(element => element.tag === 'interactive_container')
-    expect(blocks.map(block => (block.elements as Array<{ text: { content: string } }>)[0]?.text.content))
-      .toEqual(['请求批准（ask）', '帮我批准（auto）', '完全访问权限（full）'])
+    expect(blocks.map(block => (block.elements as Array<{ content: string }>)[0]?.content))
+      .toEqual([
+        '**请求批准（ask）**',
+        '**帮我批准（auto）**',
+        "**<font color='orange'>完全访问权限（full）</font>**",
+      ])
     expect(elements.filter(element => element.tag === 'button').map(button => button.type))
       .toEqual(['default', 'default', 'danger'])
   })
@@ -844,11 +950,15 @@ describe('Lark SDK boundary', () => {
     expect(rendered.msgType).toBe('interactive')
     const card = JSON.parse(rendered.content) as {
       schema: string
-      config: { enable_forward_interaction: boolean; update_multi: boolean }
+      config: { enable_forward_interaction: boolean; update_multi: boolean; summary: { content: string } }
       body: { elements: Array<Record<string, unknown>> }
     }
     expect(card.schema).toBe('2.0')
-    expect(card.config).toEqual({ update_multi: true, enable_forward_interaction: false })
+    expect(card.config).toEqual({
+      update_multi: true,
+      enable_forward_interaction: false,
+      summary: { content: '请选择当前会话使用的模型路由与档位' },
+    })
     expect(cardElements(card.body.elements).some(element => element.tag === 'form')).toBe(false)
     const selects = cardElements(card.body.elements).filter(element => element.tag === 'select_static')
     const names = selects.map(element => element.name)
@@ -887,11 +997,11 @@ describe('Lark SDK boundary', () => {
       subtitle: '正在验证；验证成功后将从下一条消息生效，并保留当前上下文。',
     },
     {
-      status: 'selected' as const, template: 'green', title: '模型切换成功', summary: '模型切换成功',
+      status: 'selected' as const, template: 'green', title: '模型切换成功', summary: '模型切换已生效，下一条消息启用',
       subtitle: '已完成验证；下一条消息起生效，并保留当前上下文。',
     },
     {
-      status: 'rejected' as const, template: 'orange', title: '模型切换未生效', summary: '模型切换未生效',
+      status: 'rejected' as const, template: 'orange', title: '模型切换未生效', summary: '模型切换未生效，请查看说明详情',
       subtitle: '所选模型当前不可用，模型未切换。请重新发送 /model。',
     },
   ])('renders a read-only $status model selection result', ({ status, template, title, summary, subtitle }) => {
@@ -1370,23 +1480,160 @@ describe('Lark SDK boundary', () => {
 
 describe('tool approval terminal card rendering', () => {
   test.each([
-    ['allowed-once', '已允许本次操作，任务继续中'],
-    ['rejected', '已拒绝本次操作'],
-    ['cancelled', '本次审批已取消'],
-    ['expired', '本次审批已超时'],
-    ['unavailable', '本次审批已结束'],
-  ] as const)('renders %s as honest plain text with no interactive controls', (status, title) => {
+    ['allowed-once', '已允许本次操作，任务继续中', '已允许本次操作，任务继续中'],
+    ['rejected', '已拒绝本次操作', '已拒绝本次工具调用授权'],
+    ['cancelled', '本次审批已取消', '本次工具审批已取消'],
+    ['expired', '本次审批已超时', '本次工具审批已超时'],
+    ['unavailable', '本次审批已结束', '本次工具审批已结束'],
+  ] as const)('renders %s as honest plain text with no interactive controls', (status, title, summary) => {
     const rendered = renderLarkMessage({ toolApprovalResult: { status, toolName: '<script>[link](https://example.com)</script>' } })
-    const card = JSON.parse(rendered.content)
-    expect(card).toMatchObject({ schema: '2.0', config: { summary: { content: title } },
-      header: { title: { tag: 'plain_text', content: title } } })
-    expect(card.body.elements).toEqual([
-      { tag: 'div', text: { tag: 'plain_text', content: expect.any(String) } },
-      { tag: 'div', text: { tag: 'plain_text', content: '工具：<script>[link](https://example.com)</script>' } },
-    ])
-    expect(rendered.content).not.toContain('"tag":"button"')
-    expect(rendered.content).not.toContain('"behaviors"')
+    const card = JSON.parse(rendered.content) as {
+      schema: string
+      config: { update_multi: boolean; enable_forward_interaction: boolean; summary: { content: string } }
+      header: {
+        title: { tag: string; content: string }
+        subtitle: { tag: string; content: string }
+        icon: { tag: string; token: string }
+      }
+      body: { elements: Array<Record<string, unknown>> }
+    }
+    expect(card).toMatchObject({
+      schema: '2.0',
+      config: { update_multi: true, enable_forward_interaction: false, summary: { content: summary } },
+      header: {
+        title: { tag: 'plain_text', content: title },
+        subtitle: { tag: 'plain_text', content: expect.any(String) },
+        icon: { tag: 'standard_icon', token: expect.any(String) },
+      },
+    })
+    const elements = cardElements(card.body.elements)
+    expect(elements.some(el => el.tag === 'div'
+      && (el.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (el.text as { content?: unknown } | undefined)?.content === '工具：<script>[link](https://example.com)</script>')).toBe(true)
+    expect(elements.some(el => el.tag === 'button' || el.tag === 'markdown' || el.tag === 'action' || el.tag === 'form')).toBe(false)
+    expect(elements.every(el => !Array.isArray(el.behaviors) || el.behaviors.length === 0)).toBe(true)
     expect(rendered.content).not.toContain('执行成功')
+  })
+})
+
+describe('Card 2.0 structural & plain_text security invariants', () => {
+  test('renders approvalApplication and automationIncident without deprecated note tags and keeps untrusted IDs in plain_text', () => {
+    const hostileId = '**hostile** [click](https://evil.invalid)'
+    const applicationCard = JSON.parse(renderLarkMessage({
+      approvalApplication: {
+        status: 'applied',
+        operation: 'adopt',
+        policyProposalId: hostileId,
+        localProposalId: 'local-1',
+        terminalAt: 1_000,
+        ruleId: 'rule-1',
+        resultingRuleVersion: 2,
+        ruleStatus: 'active',
+      },
+    }).content) as Record<string, unknown>
+    const incidentCard = JSON.parse(renderLarkMessage({
+      automationIncident: {
+        incidentId: hostileId,
+        automationId: 'auto-1',
+        definitionHash: 'h',
+        stage: 'terminal',
+        state: 'open',
+        failureClass: 'cfg',
+        failurePhase: 'run',
+        failureCode: 'err',
+        sideEffectState: 'none',
+        retryability: 'safe',
+        lifecycleGeneration: 1,
+        incidentRevision: 1,
+        openedAt: 1,
+        updatedAt: 2,
+      },
+    }).content) as Record<string, unknown>
+
+    for (const card of [applicationCard, incidentCard]) {
+      const elements = cardElements(card)
+      expect(elements.some(el => el.tag === 'note' || el.tag === 'action' || el.tag === 'form' || el.tag === 'markdown')).toBe(false)
+      expect(elements.some(el => el.tag === 'div' && el.text_size === 'notation')).toBe(true)
+      expect(elements.every(el => !Array.isArray(el.behaviors) || el.behaviors.length === 0)).toBe(true)
+      const config = card.config as { summary: { content: string } }
+      expect(config.summary.content.length).toBeGreaterThanOrEqual(8)
+      expect(config.summary.content.length).toBeLessThanOrEqual(60)
+      expect(elements.some(el => el.tag === 'div'
+        && (el.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+        && String((el.text as { content?: unknown } | undefined)?.content ?? '').includes(hostileId))).toBe(true)
+    }
+  })
+
+  test('renders toolApproval untrusted fields strictly inside plain_text and uses 1:1 button columns', () => {
+    const hostileTool = '**rm -rf** [evil](https://evil.invalid)'
+    const hostileReason = '<at user_id="all">everyone</at>'
+    const hostileArgs = '{"cmd":"**bad**"}'
+    const card = JSON.parse(renderLarkMessage({
+      toolApproval: {
+        title: '**Exec**',
+        toolName: hostileTool,
+        reason: hostileReason,
+        arguments: hostileArgs,
+        allowValue: { toolApproval: 'allow' },
+        rejectValue: { toolApproval: 'reject' },
+      },
+    }).content) as Record<string, unknown>
+    const elements = cardElements(card)
+    expect(elements.some(el => el.tag === 'markdown')).toBe(false)
+    expect(elements.some(el => el.tag === 'div'
+      && (el.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (el.text as { content?: unknown } | undefined)?.content === `工具：${hostileTool}`)).toBe(true)
+    expect(elements.some(el => el.tag === 'div'
+      && (el.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (el.text as { content?: unknown } | undefined)?.content === `理由：${hostileReason}`)).toBe(true)
+    expect(elements.some(el => el.tag === 'div'
+      && (el.text as { tag?: unknown; content?: unknown } | undefined)?.tag === 'plain_text'
+      && (el.text as { content?: unknown } | undefined)?.content === `参数：${hostileArgs}`)).toBe(true)
+    const columnSet = elements.find(el => el.tag === 'column_set') as {
+      columns: Array<{ width: string; weight: number }>
+    } | undefined
+    expect(columnSet?.columns).toHaveLength(2)
+    expect(columnSet?.columns.every(col => col.width === 'weighted' && col.weight === 1)).toBe(true)
+  })
+
+  test('keeps config.summary.content within 8-60 chars across modelSelectionResult and modelPicker', () => {
+    const cards = [
+      renderLarkMessage({
+        modelSelectionResult: { status: 'pending', provider: 'Codex', model: 'Default', effort: 'High' },
+      }),
+      renderLarkMessage({
+        modelSelectionResult: { status: 'selected', provider: 'Codex', model: 'Default', effort: 'High' },
+      }),
+      renderLarkMessage({
+        modelSelectionResult: {
+          status: 'rejected',
+          provider: 'Codex',
+          model: 'Default',
+          effort: 'High',
+          explanation: '所选模型当前不可用，模型未切换。请重新发送 /model。',
+        },
+      }),
+      renderLarkMessage({
+        modelPicker: {
+          title: '选择模型',
+          body: '当前：Codex / Default',
+          providerOptions: [{ value: 'codex-subscription', label: 'Codex' }],
+          modelOptions: [{ value: 'codex-subscription/default', label: 'Default' }],
+          effortOptions: [{ value: 'high', label: 'High' }],
+          callbackValues: {
+            provider: { modelPicker: 'signed-provider' },
+            model: { modelPicker: 'signed-model' },
+            effort: { modelPicker: 'signed-effort' },
+            confirm: { modelPicker: 'signed-confirm' },
+          },
+        },
+      }),
+    ]
+    for (const rendered of cards) {
+      const card = JSON.parse(rendered.content) as { config: { summary: { content: string } } }
+      expect(card.config.summary.content.length).toBeGreaterThanOrEqual(8)
+      expect(card.config.summary.content.length).toBeLessThanOrEqual(60)
+    }
   })
 })
 

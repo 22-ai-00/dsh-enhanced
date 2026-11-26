@@ -20,6 +20,7 @@ import {
 } from '@larksuiteoapi/node-sdk'
 import {
   LarkTransportError,
+  type LarkCommandCardTone,
   type LarkMessage,
   type LarkProgressEvent,
   type LarkProgressHandle,
@@ -704,6 +705,42 @@ export const LARK_PERMISSION_PICKER_CONTROLS = Object.freeze({
   full: 'permission_full',
 })
 
+function surfaceContainer(
+  tone: LarkCommandCardTone | 'yellow',
+  elements: readonly Record<string, unknown>[],
+  padding = '12px 12px 12px 12px',
+  verticalSpacing = '6px',
+) {
+  return {
+    tag: 'interactive_container',
+    behaviors: [] as const,
+    width: 'fill',
+    corner_radius: '8px',
+    has_border: true,
+    border_color: `${tone}-200`,
+    background_style: `${tone}-50`,
+    padding,
+    direction: 'vertical',
+    vertical_spacing: verticalSpacing,
+    elements,
+  }
+}
+
+function equalButtonColumnSet(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+) {
+  return {
+    tag: 'column_set',
+    flex_mode: 'bisect',
+    horizontal_spacing: '8px',
+    columns: [
+      { tag: 'column', width: 'weighted', weight: 1, elements: [left] },
+      { tag: 'column', width: 'weighted', weight: 1, elements: [right] },
+    ],
+  }
+}
+
 export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'interactive' | 'text'; content: string } {
   if ('text' in input) return { msgType: 'text', content: JSON.stringify({ text: input.text }) }
   if ('fileKey' in input) {
@@ -711,6 +748,92 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
       throw new LarkTransportError('format_error', 'lark-channel: invalid file identifier')
     }
     return { msgType: 'file', content: JSON.stringify({ file_key: input.fileKey }) }
+  }
+  if ('commandCard' in input) {
+    const card = input.commandCard
+    const elements: Record<string, unknown>[] = []
+    if (card.metrics !== undefined && card.metrics.length > 0) {
+      elements.push({
+        tag: 'column_set',
+        flex_mode: 'bisect',
+        horizontal_spacing: '8px',
+        columns: card.metrics.map(metric => ({
+          tag: 'column',
+          width: 'weighted',
+          weight: 1,
+          background_style: 'grey-50',
+          padding: '10px 12px 10px 12px',
+          direction: 'vertical',
+          vertical_spacing: '4px',
+          elements: [
+            { tag: 'div', text_size: 'notation', text: { tag: 'plain_text', content: metric.label, text_color: 'grey' } },
+            { tag: 'div', text: { tag: 'plain_text', content: metric.value } },
+          ],
+        })),
+      })
+    }
+    for (const section of card.sections) {
+      const tone = section.tone ?? 'grey'
+      const sectionElements: Record<string, unknown>[] = []
+      if (section.heading !== undefined) {
+        sectionElements.push({
+          tag: 'markdown',
+          content: tone === 'grey'
+            ? `**${section.heading}**`
+            : `**<font color='${tone}'>${section.heading}</font>**`,
+          text_align: 'left',
+        })
+      }
+      for (const item of section.items) {
+        if (item.kind === 'markdown') {
+          sectionElements.push({ tag: 'markdown', content: item.content, text_align: 'left' })
+        } else {
+          sectionElements.push({
+            tag: 'div',
+            ...(item.notation ? { text_size: 'notation' } : {}),
+            text: {
+              tag: 'plain_text',
+              content: item.content,
+              ...(item.notation ? { text_color: 'grey' } : {}),
+            },
+          })
+        }
+      }
+      if (sectionElements.length > 0) {
+        elements.push(surfaceContainer(tone, sectionElements))
+      }
+    }
+    if (card.footer !== undefined) {
+      elements.push({
+        tag: 'div',
+        text_size: 'notation',
+        icon: { tag: 'standard_icon', token: 'info_outlined', color: 'grey' },
+        text: { tag: 'plain_text', content: card.footer, text_color: 'grey' },
+      })
+    }
+    return {
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: {
+          compact_width: false,
+          width_mode: 'fill',
+          summary: { content: card.summary },
+        },
+        header: {
+          template: card.template,
+          title: { tag: 'plain_text', content: card.title },
+          ...(card.subtitle === undefined ? {} : { subtitle: { tag: 'plain_text', content: card.subtitle } }),
+          icon: { tag: 'standard_icon', token: card.iconToken },
+        },
+        body: {
+          padding: '12px 12px 16px 12px',
+          direction: 'vertical',
+          vertical_spacing: '8px',
+          elements,
+        },
+      }),
+    }
   }
   if ('userQuestion' in input) {
     const question = input.userQuestion
@@ -734,28 +857,63 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
         behaviors: [{ type: 'callback', value }],
       }
     }
-    const submit = question.submitValue === undefined
-      ? []
-      : [{
+    const submitButton = question.submitValue === undefined
+      ? undefined
+      : {
           tag: 'button',
           name: 'user_question_submit',
           type: 'primary',
           width: 'fill',
+          icon: { tag: 'standard_icon', token: 'done_outlined' },
           text: { tag: 'plain_text', content: question.multiSelect ? '提交已选答案' : '提交答案' },
           value: question.submitValue,
           behaviors: [{ type: 'callback' as const, value: question.submitValue }],
-        }]
-    const cancel = question.cancelValue === undefined
-      ? []
-      : [{
+        }
+    const cancelButton = question.cancelValue === undefined
+      ? undefined
+      : {
           tag: 'button',
           name: 'user_question_cancel',
           type: 'default',
           width: 'fill',
+          icon: { tag: 'standard_icon', token: 'close_outlined' },
           text: { tag: 'plain_text', content: '取消本次问题' },
           value: question.cancelValue,
           behaviors: [{ type: 'callback' as const, value: question.cancelValue }],
-        }]
+        }
+    const questionSurface = surfaceContainer('blue', [
+      { tag: 'div', text: { tag: 'plain_text', content: question.question } },
+      ...(question.detail === undefined ? [] : [
+        { tag: 'div', text_size: 'notation', text: { tag: 'plain_text', content: question.detail, text_color: 'grey' } },
+      ]),
+      ...(question.expectsText ? [{
+        tag: 'div',
+        text_size: 'notation',
+        icon: { tag: 'standard_icon', token: 'edit_outlined', color: 'blue' },
+        text: { tag: 'plain_text', content: '如需输入其他答案，请直接回复这张问题卡片。', text_color: 'blue' },
+      }] : []),
+    ])
+    const answeredElements = question.answered === undefined || question.answered.length === 0
+      ? []
+      : [surfaceContainer('grey', question.answered.map(answered => ({
+          tag: 'div',
+          text_size: 'notation',
+          text: { tag: 'plain_text', content: `已答摘要：${answered.title}：${answered.answer}`, text_color: 'grey' },
+        })), '10px 12px 10px 12px', '4px')]
+    const optionElements = question.options.map((option, index) => {
+      const button = optionButton(option, index)
+      if (option.description === undefined) return button
+      return surfaceContainer('grey', [
+        { tag: 'div', text_size: 'notation', text: { tag: 'plain_text', content: option.description, text_color: 'grey' } },
+        button,
+      ], '10px 12px 10px 12px', '6px')
+    })
+    const actionElements = submitButton !== undefined && cancelButton !== undefined
+      ? [equalButtonColumnSet(submitButton, cancelButton)]
+      : [
+          ...(submitButton === undefined ? [] : [submitButton]),
+          ...(cancelButton === undefined ? [] : [cancelButton]),
+        ]
     return {
       msgType: 'interactive',
       content: JSON.stringify({
@@ -768,29 +926,20 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
         header: {
           template: 'blue',
           title: { tag: 'plain_text', content: question.title },
+          subtitle: { tag: 'plain_text', content: `问题 ${question.position} / ${question.total}` },
+          icon: { tag: 'standard_icon', token: 'chat_outlined' },
         },
-        body: { padding: '12px 12px 20px 12px', elements: [
-          { tag: 'div', text: { tag: 'plain_text', content: `问题 ${question.position} / ${question.total}` } },
-          { tag: 'div', text: { tag: 'plain_text', content: question.question } },
-          ...(question.detail === undefined ? [] : [
-            { tag: 'div', text: { tag: 'plain_text', content: question.detail } },
-          ]),
-          ...(question.answered === undefined ? [] : question.answered.map(answered => ({
-            tag: 'div',
-            text: { tag: 'plain_text', content: `已答摘要：${answered.title}：${answered.answer}` },
-          }))),
-          ...(question.expectsText ? [
-            { tag: 'div', text: { tag: 'plain_text', content: '如需输入其他答案，请直接回复这张问题卡片。' } },
-          ] : []),
-          ...question.options.flatMap((option, index) => [
-            ...(option.description === undefined ? [] : [
-              { tag: 'div', text: { tag: 'plain_text', content: option.description } },
-            ]),
-            optionButton(option, index),
-          ]),
-          ...submit,
-          ...cancel,
-        ] },
+        body: {
+          padding: '12px 12px 16px 12px',
+          direction: 'vertical',
+          vertical_spacing: '8px',
+          elements: [
+            questionSurface,
+            ...answeredElements,
+            ...optionElements,
+            ...actionElements,
+          ],
+        },
       }),
     }
   }
@@ -798,19 +947,22 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
     const result = input.userQuestionResult
     const presentation = {
       answered: {
-        template: 'green',
+        template: 'green' as const,
+        icon: 'done_outlined',
         title: '已收到您的回答',
         detail: '回答已交给智能体，正在继续处理。',
         summary: '智能体已收到您的回答并将继续处理',
       },
       cancelled: {
-        template: 'grey',
+        template: 'grey' as const,
+        icon: 'close_outlined',
         title: '本次问题已取消',
         detail: '该问题已取消，智能体不会继续等待此回答。',
         summary: '本次问题已取消，智能体不再等待回答',
       },
       resolved: {
-        template: 'blue',
+        template: 'blue' as const,
+        icon: 'info_outlined',
         title: '本次问题已处理',
         detail: '该问题已在其他已授权终端完成处理。',
         summary: '本次问题已由已授权终端处理完成',
@@ -825,11 +977,22 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
           enable_forward_interaction: false,
           summary: { content: presentation.summary },
         },
-        header: { template: presentation.template, title: { tag: 'plain_text', content: presentation.title } },
-        body: { padding: '12px 12px 20px 12px', elements: [
-          { tag: 'div', text: { tag: 'plain_text', content: presentation.detail } },
-          { tag: 'div', text: { tag: 'plain_text', content: result.summary } },
-        ] },
+        header: {
+          template: presentation.template,
+          title: { tag: 'plain_text', content: presentation.title },
+          subtitle: { tag: 'plain_text', content: presentation.detail },
+          icon: { tag: 'standard_icon', token: presentation.icon },
+        },
+        body: {
+          padding: '12px 12px 16px 12px',
+          direction: 'vertical',
+          vertical_spacing: '8px',
+          elements: [
+            surfaceContainer(presentation.template, [
+              { tag: 'div', text: { tag: 'plain_text', content: result.summary } },
+            ]),
+          ],
+        },
       }),
     }
   }
@@ -843,52 +1006,55 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
       const current = picker.current === key
       const value = picker.callbackValues[key]
       const full = key === 'full'
-      return {
-        tag: 'interactive_container',
-        behaviors: [],
-        width: 'fill',
-        corner_radius: '8px',
-        has_border: true,
-        border_color: full ? 'orange-200' : current ? 'blue-200' : 'grey-200',
-        background_style: full ? 'orange-50' : current ? 'blue-50' : 'grey-50',
-        padding: '12px 12px 12px 12px',
-        direction: 'vertical',
-        vertical_spacing: '6px',
-        margin: '0px 0px 8px 0px',
-        elements: [
-          { tag: 'div', text: { tag: 'plain_text', content: `${current ? '✓ ' : ''}${label}` } },
-          { tag: 'div', text: { tag: 'plain_text', content: description } },
-          {
-            tag: 'button',
-            name: LARK_PERMISSION_PICKER_CONTROLS[key],
-            type: full ? 'danger' : current ? 'primary' : 'default',
-            width: 'fill',
-            text: { tag: 'plain_text', content: current ? '✓ 当前档位' : '选择此档位' },
-            value,
-            behaviors: [{ type: 'callback', value }],
-            ...(full ? { confirm: {
-              title: { tag: 'plain_text', content: '确认开启完全访问权限？' },
-              text: { tag: 'plain_text', content: '开启后可访问互联网和电脑上的任何文件，并关闭逐次审批。' },
-            } } : {}),
-          },
-        ],
-      }
+      const tone = full ? 'orange' : current ? 'blue' : 'grey'
+      const titleMarkdown = full
+        ? `**<font color='orange'>${current ? '✓ ' : ''}${label}</font>**`
+        : current
+          ? `**<font color='blue'>✓ ${label}</font>**`
+          : `**${label}**`
+      return surfaceContainer(tone, [
+        { tag: 'markdown', content: titleMarkdown, text_align: 'left' },
+        { tag: 'markdown', content: `<font color='grey'>${description}</font>`, text_size: 'notation', text_align: 'left' },
+        {
+          tag: 'button',
+          name: LARK_PERMISSION_PICKER_CONTROLS[key],
+          type: full ? 'danger' : current ? 'primary' : 'default',
+          width: 'fill',
+          icon: { tag: 'standard_icon', token: full ? 'warning_outlined' : current ? 'done_outlined' : 'safe_outlined' },
+          text: { tag: 'plain_text', content: current ? '✓ 当前档位' : '选择此档位' },
+          value,
+          behaviors: [{ type: 'callback', value }],
+          ...(full ? { confirm: {
+            title: { tag: 'plain_text', content: '确认开启完全访问权限？' },
+            text: { tag: 'plain_text', content: '开启后可访问互联网和电脑上的任何文件，并关闭逐次审批。' },
+          } } : {}),
+        },
+      ])
     }
     return {
       msgType: 'interactive',
       content: JSON.stringify({
         schema: '2.0',
-        config: { enable_forward_interaction: false },
+        config: {
+          enable_forward_interaction: false,
+          summary: { content: '请选择当前会话的运行权限模式' },
+        },
         header: {
           template: 'blue',
           title: { tag: 'plain_text', content: picker.title },
           subtitle: { tag: 'plain_text', content: picker.body },
+          icon: { tag: 'standard_icon', token: 'safe_outlined' },
         },
-        body: { padding: '12px 12px 12px 12px', elements: [
-          level('ask', '请求批准（ask）', '编辑外部文件和使用互联网时始终询问'),
-          level('auto', '帮我批准（auto）', '仅对检测到的风险操作请求批准'),
-          level('full', '完全访问权限（full）', '不受限制地访问互联网和电脑上的任何文件，并关闭逐次审批'),
-        ] },
+        body: {
+          padding: '12px 12px 16px 12px',
+          direction: 'vertical',
+          vertical_spacing: '8px',
+          elements: [
+            level('ask', '请求批准（ask）', '编辑外部文件和使用互联网时始终询问'),
+            level('auto', '帮我批准（auto）', '仅对检测到的风险操作请求批准'),
+            level('full', '完全访问权限（full）', '不受限制地访问互联网和电脑上的任何文件，并关闭逐次审批'),
+          ],
+        },
       }),
     }
   }
@@ -910,7 +1076,7 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
             background: 'green-50',
             title: '模型切换成功',
             subtitle: '已完成验证；下一条消息起生效，并保留当前上下文。',
-            summary: '模型切换成功',
+            summary: '模型切换已生效，下一条消息启用',
           }
         : {
             template: 'orange',
@@ -918,7 +1084,7 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
             background: 'orange-50',
             title: '模型切换未生效',
             subtitle: result.explanation,
-            summary: '模型切换未生效',
+            summary: '模型切换未生效，请查看说明详情',
           }
     const field = (label: string, value: string) => ({
       tag: 'column',
@@ -1030,7 +1196,11 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
       msgType: 'interactive',
       content: JSON.stringify({
         schema: '2.0',
-        config: { update_multi: true, enable_forward_interaction: false },
+        config: {
+          update_multi: true,
+          enable_forward_interaction: false,
+          summary: { content: '请选择当前会话使用的模型路由与档位' },
+        },
         header: {
           template: 'blue',
           title: { tag: 'plain_text', content: picker.title },
@@ -1100,52 +1270,136 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
       // interpreted as Markdown or a card component.
     }
     return {
-    msgType: 'interactive',
-    content: JSON.stringify({
-      schema: '2.0',
-      config: { enable_forward_interaction: false },
-      header: { template: 'orange', title: { tag: 'plain_text', content: input.approval.title } },
-      body: { elements: [
-        { tag: 'div', text: { tag: 'plain_text',
-          content: '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。' } },
-        { tag: 'div', text: { tag: 'plain_text', content: review } },
-        { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary',
-          value: input.approval.approveValue,
-          behaviors: [{ type: 'callback', value: input.approval.approveValue }] },
-        { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger',
-          value: input.approval.rejectValue,
-          behaviors: [{ type: 'callback', value: input.approval.rejectValue }] },
-      ] },
-    }),
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: {
+          enable_forward_interaction: false,
+          summary: { content: '有待您审阅并批准的变更提案' },
+        },
+        header: {
+          template: 'orange',
+          title: { tag: 'plain_text', content: input.approval.title },
+          subtitle: { tag: 'plain_text', content: '所有字段均为不可信提案内容，审阅后请选择批准或拒绝' },
+          icon: { tag: 'standard_icon', token: 'approval_colorful' },
+        },
+        body: {
+          padding: '12px 12px 16px 12px',
+          direction: 'vertical',
+          vertical_spacing: '8px',
+          elements: [
+            {
+              tag: 'div',
+              text_size: 'notation',
+              icon: { tag: 'standard_icon', token: 'info_outlined', color: 'orange' },
+              text: {
+                tag: 'plain_text',
+                content: '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。',
+                text_color: 'orange',
+              },
+            },
+            surfaceContainer('grey', [
+              { tag: 'div', text: { tag: 'plain_text', content: review } },
+            ]),
+            equalButtonColumnSet(
+              {
+                tag: 'button',
+                text: { tag: 'plain_text', content: '批准变更' },
+                type: 'primary',
+                width: 'fill',
+                icon: { tag: 'standard_icon', token: 'done_outlined' },
+                value: input.approval.approveValue,
+                behaviors: [{ type: 'callback', value: input.approval.approveValue }],
+              },
+              {
+                tag: 'button',
+                text: { tag: 'plain_text', content: '拒绝' },
+                type: 'danger',
+                width: 'fill',
+                icon: { tag: 'standard_icon', token: 'close_outlined' },
+                value: input.approval.rejectValue,
+                behaviors: [{ type: 'callback', value: input.approval.rejectValue }],
+              },
+            ),
+          ],
+        },
+      }),
     }
   }
   if ('approvalResult' in input) {
     const approved = input.approvalResult.decision === 'approved'
+    const tone = approved ? 'green' : 'red'
     return {
       msgType: 'interactive',
       content: JSON.stringify({
         schema: '2.0',
-        config: { enable_forward_interaction: false },
-        header: {
-          template: approved ? 'green' : 'red',
-          title: { tag: 'plain_text', content: approved ? '审批已记录' : '审批已拒绝' },
+        config: {
+          update_multi: true,
+          enable_forward_interaction: false,
+          summary: { content: approved ? '提案审批已记录，等待账本结算' : '提案审批已拒绝，不会应用变更' },
         },
-        body: { elements: [
-          { tag: 'div', text: { tag: 'plain_text', content: approved
-            ? '已批准该提案。系统将按持久化账本完成结算；此回执不表示变更已经生效。'
-            : '已拒绝该提案，系统不会应用这项变更。' } },
-          { tag: 'div', text: { tag: 'plain_text', content: `提案 ID：${input.approvalResult.proposalId}` } },
-        ] },
+        header: {
+          template: tone,
+          title: { tag: 'plain_text', content: approved ? '审批已记录' : '审批已拒绝' },
+          subtitle: {
+            tag: 'plain_text',
+            content: approved ? '已批准该提案，等待持久化账本结算' : '已拒绝该提案，系统不会应用变更',
+          },
+          icon: { tag: 'standard_icon', token: approved ? 'done_outlined' : 'close_outlined' },
+        },
+        body: {
+          padding: '12px 12px 16px 12px',
+          direction: 'vertical',
+          vertical_spacing: '8px',
+          elements: [
+            surfaceContainer(tone, [
+              {
+                tag: 'div',
+                text: {
+                  tag: 'plain_text',
+                  content: approved
+                    ? '已批准该提案。系统将按持久化账本完成结算；此回执不表示变更已经生效。'
+                    : '已拒绝该提案，系统不会应用这项变更。',
+                },
+              },
+              { tag: 'div', text: { tag: 'plain_text', content: `提案 ID：${input.approvalResult.proposalId}` } },
+            ]),
+          ],
+        },
       }),
     }
   }
   if ('approvalApplication' in input) {
     const terminal = input.approvalApplication
     const presentation = {
-      applied: { template: 'green', title: '变更已实际生效', detail: '领域账本已完成原子结算。' },
-      conflicted: { template: 'yellow', title: '变更未生效：证据或状态冲突', detail: '审批决定已记录，但领域账本拒绝应用过期或冲突的变更。' },
-      expired: { template: 'grey', title: '变更未生效：审批已过期', detail: '该提案已经过期，领域账本没有应用变更。' },
-      rejected: { template: 'red', title: '变更已拒绝', detail: 'owner 已拒绝该提案，领域账本没有应用变更。' },
+      applied: {
+        template: 'green',
+        icon: 'done_outlined',
+        title: '变更已实际生效',
+        detail: '领域账本已完成原子结算。',
+        summary: '变更已实际生效，领域账本已完成结算',
+      },
+      conflicted: {
+        template: 'yellow',
+        icon: 'warning_outlined',
+        title: '变更未生效：证据或状态冲突',
+        detail: '审批决定已记录，但领域账本拒绝应用过期或冲突的变更。',
+        summary: '变更未生效：证据或状态存在冲突',
+      },
+      expired: {
+        template: 'grey',
+        icon: 'time_outlined',
+        title: '变更未生效：审批已过期',
+        detail: '该提案已经过期，领域账本没有应用变更。',
+        summary: '变更未生效：该提案审批已过期',
+      },
+      rejected: {
+        template: 'red',
+        icon: 'close_outlined',
+        title: '变更已拒绝',
+        detail: 'owner 已拒绝该提案，领域账本没有应用变更。',
+        summary: '变更已拒绝，领域账本未应用变更',
+      },
     }[terminal.status]
     const operation = {
       adopt: '采纳学习规则',
@@ -1157,107 +1411,260 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'in
       : [
           { tag: 'div', text: { tag: 'plain_text', content: `规则 ID：${terminal.ruleId}` } },
           ...(terminal.resultingRuleVersion === undefined ? [] : [{
-            tag: 'div', text: { tag: 'plain_text',
-              content: `规则版本：${terminal.resultingRuleVersion}；状态：${terminal.ruleStatus ?? '未知'}` },
+            tag: 'div',
+            text: {
+              tag: 'plain_text',
+              content: `规则版本：${terminal.resultingRuleVersion}；状态：${terminal.ruleStatus ?? '未知'}`,
+            },
           }]),
         ]
     const undo = terminal.status === 'applied' && terminal.operation === 'adopt'
       && terminal.ruleId !== undefined && terminal.resultingRuleVersion !== undefined
-      ? [{ tag: 'note', elements: [{ tag: 'plain_text',
-          content: `可撤销入口：在当前 owner 会话中要求“撤销规则 ${terminal.ruleId} 版本 ${terminal.resultingRuleVersion}”。系统只会创建一张独立的二次审批，不会直接退役规则。` }] }]
+      ? [{
+          tag: 'div',
+          text_size: 'notation',
+          icon: { tag: 'standard_icon', token: 'info_outlined', color: 'grey' },
+          text: {
+            tag: 'plain_text',
+            content: `可撤销入口：在当前 owner 会话中要求“撤销规则 ${terminal.ruleId} 版本 ${terminal.resultingRuleVersion}”。系统只会创建一张独立的二次审批，不会直接退役规则。`,
+            text_color: 'grey',
+          },
+        }]
       : []
     return {
       msgType: 'interactive',
       content: JSON.stringify({
         schema: '2.0',
-        config: { enable_forward_interaction: false },
-        header: { template: presentation.template, title: { tag: 'plain_text', content: presentation.title } },
-        body: { elements: [
-          { tag: 'div', text: { tag: 'plain_text', content: presentation.detail } },
-          { tag: 'div', text: { tag: 'plain_text', content: `操作：${operation}（${terminal.operation}）` } },
-          { tag: 'div', text: { tag: 'plain_text', content: `Policy 提案：${terminal.policyProposalId}` } },
-          { tag: 'div', text: { tag: 'plain_text', content: `领域提案：${terminal.localProposalId}` } },
-          ...exactRule,
-          ...undo,
-        ] },
+        config: {
+          update_multi: true,
+          enable_forward_interaction: false,
+          summary: { content: presentation.summary },
+        },
+        header: {
+          template: presentation.template,
+          title: { tag: 'plain_text', content: presentation.title },
+          subtitle: { tag: 'plain_text', content: presentation.detail },
+          icon: { tag: 'standard_icon', token: presentation.icon },
+        },
+        body: {
+          padding: '12px 12px 16px 12px',
+          direction: 'vertical',
+          vertical_spacing: '8px',
+          elements: [
+            surfaceContainer('grey', [
+              { tag: 'div', text: { tag: 'plain_text', content: `操作：${operation}（${terminal.operation}）` } },
+              { tag: 'div', text: { tag: 'plain_text', content: `Policy 提案：${terminal.policyProposalId}` } },
+              { tag: 'div', text: { tag: 'plain_text', content: `领域提案：${terminal.localProposalId}` } },
+              ...exactRule,
+            ]),
+            ...undo,
+          ],
+        },
       }),
     }
   }
   if ('automationIncident' in input) {
     const incident = input.automationIncident
     const state = {
-      open: { template: 'red', title: '自动化故障已打开', detail: '该自动化仍处于故障状态。' },
-      recovering: { template: 'blue', title: '自动化故障恢复中', detail: '已启动受控探针，尚未确认恢复。' },
-      resolved: { template: 'green', title: '自动化故障已恢复', detail: '同一故障代次已通过实际运行确认恢复。' },
+      open: {
+        template: 'red',
+        icon: 'warning_outlined',
+        title: '自动化故障已打开',
+        detail: '该自动化仍处于故障状态。',
+        summary: '自动化故障已打开，仍处于故障状态',
+      },
+      recovering: {
+        template: 'blue',
+        icon: 'refresh_outlined',
+        title: '自动化故障恢复中',
+        detail: '已启动受控探针，尚未确认恢复。',
+        summary: '自动化故障恢复中，受控探针运行中',
+      },
+      resolved: {
+        template: 'green',
+        icon: 'done_outlined',
+        title: '自动化故障已恢复',
+        detail: '同一故障代次已通过实际运行确认恢复。',
+        summary: '自动化故障已恢复，运行验证已通过',
+      },
     }[incident.state]
     return {
       msgType: 'interactive',
       content: JSON.stringify({
         schema: '2.0',
-        config: { enable_forward_interaction: false },
-        header: { template: state.template, title: { tag: 'plain_text', content: state.title } },
-        body: { elements: [
-          { tag: 'div', text: { tag: 'plain_text', content: state.detail } },
-          { tag: 'div', text: { tag: 'plain_text', content: `自动化：${incident.automationId}` } },
-          { tag: 'div', text: { tag: 'plain_text',
-            content: `阶段：${incident.stage}；故障：${incident.failureCode}（${incident.failureClass}/${incident.failurePhase}）` } },
-          { tag: 'div', text: { tag: 'plain_text',
-            content: `副作用：${incident.sideEffectState}；重试：${incident.retryability}` } },
-          { tag: 'note', elements: [{ tag: 'plain_text',
-            content: `Incident ${incident.incidentId} · generation ${incident.lifecycleGeneration} · revision ${incident.incidentRevision}` }] },
-        ] },
+        config: {
+          update_multi: true,
+          enable_forward_interaction: false,
+          summary: { content: state.summary },
+        },
+        header: {
+          template: state.template,
+          title: { tag: 'plain_text', content: state.title },
+          subtitle: { tag: 'plain_text', content: state.detail },
+          icon: { tag: 'standard_icon', token: state.icon },
+        },
+        body: {
+          padding: '12px 12px 16px 12px',
+          direction: 'vertical',
+          vertical_spacing: '8px',
+          elements: [
+            surfaceContainer('grey', [
+              { tag: 'div', text: { tag: 'plain_text', content: `自动化：${incident.automationId}` } },
+              {
+                tag: 'div',
+                text: {
+                  tag: 'plain_text',
+                  content: `阶段：${incident.stage}；故障：${incident.failureCode}（${incident.failureClass}/${incident.failurePhase}）`,
+                },
+              },
+              {
+                tag: 'div',
+                text: {
+                  tag: 'plain_text',
+                  content: `副作用：${incident.sideEffectState}；重试：${incident.retryability}`,
+                },
+              },
+            ]),
+            {
+              tag: 'div',
+              text_size: 'notation',
+              icon: { tag: 'standard_icon', token: 'info_outlined', color: 'grey' },
+              text: {
+                tag: 'plain_text',
+                content: `Incident ${incident.incidentId} · generation ${incident.lifecycleGeneration} · revision ${incident.incidentRevision}`,
+                text_color: 'grey',
+              },
+            },
+          ],
+        },
       }),
     }
   }
   if ('toolApprovalResult' in input) {
     const result = input.toolApprovalResult
     const presentation = {
-      'allowed-once': { template: 'green', title: '已允许本次操作，任务继续中',
-        detail: '本次授权已生效。工具执行结果将在任务后续消息中提供。' },
-      rejected: { template: 'red', title: '已拒绝本次操作', detail: '本次审批未授权工具执行。' },
-      cancelled: { template: 'grey', title: '本次审批已取消', detail: '本次审批未授权工具执行，已停止等待确认。' },
-      expired: { template: 'grey', title: '本次审批已超时', detail: '有效期已过，本次审批未授权工具执行。' },
-      unavailable: { template: 'grey', title: '本次审批已结束', detail: '会话或连接已结束，本次审批未授权工具执行。' },
+      'allowed-once': {
+        template: 'green' as const,
+        icon: 'done_outlined',
+        title: '已允许本次操作，任务继续中',
+        detail: '本次授权已生效。工具执行结果将在任务后续消息中提供。',
+        summary: '已允许本次操作，任务继续中',
+      },
+      rejected: {
+        template: 'red' as const,
+        icon: 'close_outlined',
+        title: '已拒绝本次操作',
+        detail: '本次审批未授权工具执行。',
+        summary: '已拒绝本次工具调用授权',
+      },
+      cancelled: {
+        template: 'grey' as const,
+        icon: 'info_outlined',
+        title: '本次审批已取消',
+        detail: '本次审批未授权工具执行，已停止等待确认。',
+        summary: '本次工具审批已取消',
+      },
+      expired: {
+        template: 'grey' as const,
+        icon: 'time_outlined',
+        title: '本次审批已超时',
+        detail: '有效期已过，本次审批未授权工具执行。',
+        summary: '本次工具审批已超时',
+      },
+      unavailable: {
+        template: 'grey' as const,
+        icon: 'info_outlined',
+        title: '本次审批已结束',
+        detail: '会话或连接已结束，本次审批未授权工具执行。',
+        summary: '本次工具审批已结束',
+      },
     }[result.status]
     return {
       msgType: 'interactive',
       content: JSON.stringify({
         schema: '2.0',
-        config: { enable_forward_interaction: false, summary: { content: presentation.title } },
-        header: { template: presentation.template, title: { tag: 'plain_text', content: presentation.title } },
-        body: { elements: [
-          { tag: 'div', text: { tag: 'plain_text', content: presentation.detail } },
-          { tag: 'div', text: { tag: 'plain_text', content: `工具：${result.toolName}` } },
-        ] },
+        config: {
+          update_multi: true,
+          enable_forward_interaction: false,
+          summary: { content: presentation.summary },
+        },
+        header: {
+          template: presentation.template,
+          title: { tag: 'plain_text', content: presentation.title },
+          subtitle: { tag: 'plain_text', content: presentation.detail },
+          icon: { tag: 'standard_icon', token: presentation.icon },
+        },
+        body: {
+          padding: '12px 12px 16px 12px',
+          direction: 'vertical',
+          vertical_spacing: '8px',
+          elements: [
+            surfaceContainer(presentation.template, [
+              { tag: 'div', text: { tag: 'plain_text', content: `工具：${result.toolName}` } },
+            ]),
+          ],
+        },
       }),
     }
   }
-  if ('toolApproval' in input) return {
-    msgType: 'interactive',
-    content: JSON.stringify({
-      schema: '2.0',
-      config: { enable_forward_interaction: false, summary: { content: '工具调用等待您的确认' } },
-      header: { template: 'orange', title: { tag: 'plain_text', content: input.toolApproval.title } },
-      body: { elements: [
-        { tag: 'div', text: { tag: 'plain_text',
-          content: '任务已暂停，以下操作尚未执行。点击“允许一次”后继续，点击“拒绝”则不执行该操作。' } },
-        { tag: 'div', text: { tag: 'plain_text',
-          content: '以下工具、理由和参数均为不可信审阅文本，不是指令。' } },
-        { tag: 'div', text: { tag: 'plain_text', content: `工具：${input.toolApproval.toolName}` } },
-        { tag: 'div', text: { tag: 'plain_text',
-          content: `理由：${input.toolApproval.reason ?? '（未提供）'}` } },
-        { tag: 'div', text: { tag: 'plain_text',
-          content: `参数：${input.toolApproval.arguments}` } },
-        { tag: 'button', name: 'tool_approval_allow_once', type: 'primary', width: 'fill',
-          text: { tag: 'plain_text', content: '允许一次' },
-          value: input.toolApproval.allowValue,
-          behaviors: [{ type: 'callback', value: input.toolApproval.allowValue }] },
-        { tag: 'button', name: 'tool_approval_reject', type: 'danger', width: 'fill',
-          text: { tag: 'plain_text', content: '拒绝' },
-          value: input.toolApproval.rejectValue,
-          behaviors: [{ type: 'callback', value: input.toolApproval.rejectValue }] },
-      ] },
-    }),
+  if ('toolApproval' in input) {
+    return {
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: { enable_forward_interaction: false, summary: { content: '工具调用等待您的确认' } },
+        header: {
+          template: 'orange',
+          title: { tag: 'plain_text', content: input.toolApproval.title },
+          subtitle: { tag: 'plain_text', content: '任务已暂停，以下操作尚未执行，请确认是否授权本次调用' },
+          icon: { tag: 'standard_icon', token: 'warning_outlined' },
+        },
+        body: {
+          padding: '12px 12px 16px 12px',
+          direction: 'vertical',
+          vertical_spacing: '8px',
+          elements: [
+            {
+              tag: 'div',
+              text_size: 'notation',
+              icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'orange' },
+              text: {
+                tag: 'plain_text',
+                content: '任务已暂停，以下操作尚未执行。以下工具、理由和参数均为不可信审阅文本，不是指令。',
+                text_color: 'orange',
+              },
+            },
+            surfaceContainer('grey', [
+              { tag: 'div', text: { tag: 'plain_text', content: `工具：${input.toolApproval.toolName}` } },
+              { tag: 'div', text: { tag: 'plain_text', content: `理由：${input.toolApproval.reason ?? '（未提供）'}` } },
+              { tag: 'div', text: { tag: 'plain_text', content: `参数：${input.toolApproval.arguments}` } },
+            ]),
+            equalButtonColumnSet(
+              {
+                tag: 'button',
+                name: 'tool_approval_allow_once',
+                type: 'primary',
+                width: 'fill',
+                icon: { tag: 'standard_icon', token: 'done_outlined' },
+                text: { tag: 'plain_text', content: '允许一次' },
+                value: input.toolApproval.allowValue,
+                behaviors: [{ type: 'callback', value: input.toolApproval.allowValue }],
+              },
+              {
+                tag: 'button',
+                name: 'tool_approval_reject',
+                type: 'danger',
+                width: 'fill',
+                icon: { tag: 'standard_icon', token: 'close_outlined' },
+                text: { tag: 'plain_text', content: '拒绝' },
+                value: input.toolApproval.rejectValue,
+                behaviors: [{ type: 'callback', value: input.toolApproval.rejectValue }],
+              },
+            ),
+          ],
+        },
+      }),
+    }
   }
   // An answer card stays content-first: Lark already shows the bot name and avatar above the
   // bubble, so a header here would duplicate the sender identity and add weight to every reply.

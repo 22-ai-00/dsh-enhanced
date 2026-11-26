@@ -177,7 +177,7 @@ describe('Lark open-turn tool approval adapter', () => {
     acceptSend({ messageId: 'om_late_card' })
     await expect(pending).resolves.toBe('cancelled')
     await vi.waitFor(() => expect(f.transport.updateRawCard).toHaveBeenCalledWith('om_late_card',
-      expect.objectContaining({ config: { enable_forward_interaction: false, summary: { content: '本次审批已取消' } } }),
+      expect.objectContaining({ config: { update_multi: true, enable_forward_interaction: false, summary: { content: '本次工具审批已取消' } } }),
       expect.any(AbortSignal)))
     await f.dispose()
   })
@@ -246,7 +246,14 @@ describe('Lark open-turn tool approval adapter', () => {
     const card = JSON.parse(renderLarkMessage(sent).content) as Record<string, unknown>
     expect(card).toMatchObject({ config: { enable_forward_interaction: false } })
     const elements = (card.body as { elements: unknown[] }).elements
-    expect(elements).toEqual(expect.arrayContaining([
+    const walk = (value: unknown): Array<Record<string, unknown>> => {
+      if (Array.isArray(value)) return value.flatMap(walk)
+      if (value === null || typeof value !== 'object') return []
+      const record = value as Record<string, unknown>
+      return [record, ...Object.values(record).flatMap(walk)]
+    }
+    const allElements = walk(elements)
+    expect(allElements).toEqual(expect.arrayContaining([
       expect.objectContaining({
         tag: 'button', name: 'tool_approval_allow_once', width: 'fill',
         behaviors: [expect.objectContaining({ type: 'callback', value: sent.toolApproval.allowValue })],
@@ -256,7 +263,12 @@ describe('Lark open-turn tool approval adapter', () => {
         behaviors: [expect.objectContaining({ type: 'callback', value: sent.toolApproval.rejectValue })],
       }),
     ]))
-    expect(elements).not.toEqual(expect.arrayContaining([expect.objectContaining({ tag: 'action' })]))
+    const buttonColumns = allElements.find(el => el.tag === 'column_set') as {
+      columns: Array<{ width: string; weight: number }>
+    } | undefined
+    expect(buttonColumns?.columns).toHaveLength(2)
+    expect(buttonColumns?.columns.every(col => col.width === 'weighted' && col.weight === 1)).toBe(true)
+    expect(allElements).not.toEqual(expect.arrayContaining([expect.objectContaining({ tag: 'action' })]))
     const serialized = JSON.stringify(card)
     expect(serialized).toContain('任务已暂停，以下操作尚未执行')
     expect(serialized).toContain('不可信审阅文本')
@@ -310,7 +322,7 @@ describe('Lark open-turn tool approval adapter', () => {
     await expect(pending).resolves.toBe('allowed-once')
     await vi.waitFor(() => expect(f.transport.addReaction).toHaveBeenCalledWith('om_owner_text', 'DONE'))
     expect(f.transport.updateRawCard).toHaveBeenCalledWith('om_tool_card',
-      expect.objectContaining({ config: { enable_forward_interaction: false, summary: { content: '已允许本次操作，任务继续中' } } }),
+      expect.objectContaining({ config: { update_multi: true, enable_forward_interaction: false, summary: { content: '已允许本次操作，任务继续中' } } }),
       expect.any(AbortSignal))
     await f.dispose?.()
   })
@@ -402,7 +414,7 @@ describe('Lark open-turn tool approval adapter', () => {
     try {
       expect(observed).toBe('allowed-once')
       await vi.waitFor(() => expect(f.transport.updateRawCard).toHaveBeenCalledWith('om_tool_card',
-        expect.objectContaining({ config: { enable_forward_interaction: false, summary: { content: '已允许本次操作，任务继续中' } } }),
+        expect.objectContaining({ config: { update_multi: true, enable_forward_interaction: false, summary: { content: '已允许本次操作，任务继续中' } } }),
         expect.any(AbortSignal)))
     } finally {
       controller.abort()

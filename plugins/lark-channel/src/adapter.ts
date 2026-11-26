@@ -26,6 +26,7 @@ import {
   verifyLarkApprovalAction,
   verifyLarkApprovalActionForRecovery,
 } from './approval.js'
+import { tryBuildLarkCommandCard } from './command-card.js'
 import {
   LarkModelPickerError,
   parseLarkModelPickerCallback,
@@ -1234,8 +1235,18 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         chatId: conversation.chat,
         revision: 0,
       }) }
+    } else if (useMarkdownCard) {
+      input = { markdown: intent.text }
     } else {
-      input = useMarkdownCard ? { markdown: intent.text } : { text: intent.text }
+      const commandCard = tryBuildLarkCommandCard(intent.text)
+      if (commandCard !== undefined) {
+        const candidate: import('./types.js').LarkSendInput = { commandCard }
+        input = Buffer.byteLength(renderLarkMessage(candidate).content, 'utf8') <= LARK_APPROVAL_CARD_MAX_BYTES
+          ? candidate
+          : { text: intent.text }
+      } else {
+        input = { text: intent.text }
+      }
     }
     const options: LarkSendOptions = {
       requestKey: intent.idempotencyKey,
@@ -1253,11 +1264,13 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       // a text message instead of dead-lettering the only user-visible result.
       const fallback = useMarkdownCard
         ? { text: intent.text, suffix: 'markdown-fallback' }
-        : intent.format === 'permission-picker' && intent.permissionPicker !== undefined
-          ? { text: intent.text, suffix: 'permission-picker-fallback' }
-          : intent.format === 'model-picker' && intent.modelPicker !== undefined
-            ? { text: modelPickerFallbackText(intent), suffix: 'model-picker-fallback' }
-            : undefined
+        : 'commandCard' in input
+          ? { text: intent.text, suffix: 'command-card-fallback' }
+          : intent.format === 'permission-picker' && intent.permissionPicker !== undefined
+            ? { text: intent.text, suffix: 'permission-picker-fallback' }
+            : intent.format === 'model-picker' && intent.modelPicker !== undefined
+              ? { text: modelPickerFallbackText(intent), suffix: 'model-picker-fallback' }
+              : undefined
       if (fallback === undefined) return sendFailure(error)
       try {
         result = await this.transport.send(conversation.chat, { text: fallback.text }, {

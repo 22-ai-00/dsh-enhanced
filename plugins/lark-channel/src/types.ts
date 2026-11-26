@@ -182,11 +182,40 @@ export interface LarkAutomationIncidentCard {
   resolvedAt?: number
 }
 
+export type LarkCommandCardTone = 'blue' | 'green' | 'grey' | 'orange' | 'red'
+
+export type LarkCommandCardItem =
+  | { readonly kind: 'markdown'; readonly content: string }
+  | { readonly kind: 'plain'; readonly content: string; readonly notation?: boolean }
+
+export interface LarkCommandCardSection {
+  readonly heading?: string
+  readonly tone?: LarkCommandCardTone
+  readonly items: readonly LarkCommandCardItem[]
+}
+
+export interface LarkCommandCardMetric {
+  readonly label: string
+  readonly value: string
+}
+
+export interface LarkCommandCard {
+  readonly summary: string
+  readonly template: LarkCommandCardTone
+  readonly title: string
+  readonly subtitle?: string
+  readonly iconToken: string
+  readonly metrics?: readonly LarkCommandCardMetric[]
+  readonly sections: readonly LarkCommandCardSection[]
+  readonly footer?: string
+}
+
 export type LarkSendInput =
   | { approval: LarkApprovalCard }
   | { approvalApplication: LarkApprovalApplicationCard }
   | { approvalResult: LarkApprovalResultCard }
   | { automationIncident: LarkAutomationIncidentCard }
+  | { commandCard: LarkCommandCard }
   | { fileKey: string }
   | { markdown: string }
   | { modelPicker: LarkModelPickerCard }
