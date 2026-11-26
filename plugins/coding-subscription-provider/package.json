@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/coding-subscription-provider",
-  "version": "0.1.88",
+  "version": "0.1.89",
   "description": "Use locally authenticated coding subscriptions as DeepSeek Harness model providers.",
   "license": "MIT",
   "type": "module",

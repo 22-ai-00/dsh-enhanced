@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-web-owner",
-  "version": "0.1.88",
+  "version": "0.1.89",
   "description": "A DeepSeek Harness plugin for Assistant Web Owner.",
   "license": "MIT",
   "type": "module",

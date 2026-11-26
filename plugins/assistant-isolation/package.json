@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-isolation",
-  "version": "0.1.88",
+  "version": "0.1.89",
   "description": "Finite owner-authorized offline Linux execution with native isolation, durable audit and external revocation.",
   "license": "MIT",
   "type": "module",

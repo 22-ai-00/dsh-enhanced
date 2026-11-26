@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-growth-contract",
-  "version": "0.1.88",
+  "version": "0.1.89",
   "description": "Strict shared workflow-growth wire contracts for DSH assistant plugins.",
   "license": "MIT",
   "type": "module",

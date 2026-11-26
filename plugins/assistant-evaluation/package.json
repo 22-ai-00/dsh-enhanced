@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-evaluation",
-  "version": "0.1.88",
+  "version": "0.1.89",
   "description": "A bounded, append-only outcome evaluation ledger for the DSH personal assistant.",
   "license": "MIT",
   "type": "module",

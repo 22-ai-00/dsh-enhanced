@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/personal-memory",
-  "version": "0.1.88",
+  "version": "0.1.89",
   "description": "Scoped, bounded, approval-gated long-term memory for DeepSeek Harness agents.",
   "license": "MIT",
   "type": "module",
