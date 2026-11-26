@@ -120,11 +120,11 @@ export const assertEffectiveSupervisedGrowthConfig = ({ effectiveConfig }) => {
 }
 export const expectedSupervisedGrowthRecoveryBootstrap = async () => ({ attestationSetDigest: '${'a'.repeat(64)}' })
 export const expectedSupervisedGrowthManagedAutomationDigest = async () => ({
-  protocol: 'dsh-enhanced/supervised-growth-managed-automations/v1',
+  protocol: 'dsh-ray/supervised-growth-managed-automations/v1',
   records: [], digest: '${'b'.repeat(64)}',
 })
 export const captureSupervisedGrowthLifecycleAttestation = async ({ stage }) => ({
-  protocol: 'dsh-enhanced/supervised-growth-lifecycle-attestation/v1', stage,
+  protocol: 'dsh-ray/supervised-growth-lifecycle-attestation/v1', stage,
   externalProviderExemptions: stage === 'preview' ? ['larkChannel'] : [],
 })
 `,
@@ -187,7 +187,7 @@ async function buildFixture() {
   const home = join(root, 'dsh-home')
   const profile = 'test-profile'
   const profileDir = join(home, 'profiles', profile)
-  const modulesDir = join(profileDir, 'node_modules', '@dsh-enhanced')
+  const modulesDir = join(profileDir, 'node_modules', '@dsh-ray')
   await mkdir(modulesDir, { recursive: true, mode: 0o700 })
   await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'fixture-profile', private: true }, null, 2))
   await writeFile(join(profileDir, 'cordis.patch.yml'), '- id: owner-initial\n')
@@ -195,7 +195,7 @@ async function buildFixture() {
     const dir = join(modulesDir, pkg.dir)
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, 'package.json'), JSON.stringify({
-      name: `@dsh-enhanced/${pkg.dir}`, version: '0.1.0', type: 'module', main: 'index.mjs',
+      name: `@dsh-ray/${pkg.dir}`, version: '0.1.0', type: 'module', main: 'index.mjs',
     }, null, 2))
     await writeFile(join(dir, 'index.mjs'), `${pkg.deps.join('\n')}\n${pkg.body}`)
   }
@@ -204,7 +204,7 @@ async function buildFixture() {
   await chmod(dsh, 0o755)
   const persistedPath = join(home, 'persisted.json')
   await writeFile(persistedPath, persistedConfig())
-  const overlayPath = join(home, `.dsh-enhanced-disable-lark-tx.yml`)
+  const overlayPath = join(home, `.dsh-ray-disable-lark-tx.yml`)
   const run = (action, nonce, extraEnv = {}) => spawnSync(process.execPath, [
     '--input-type=module', '--eval', PROGRAM,
     action, home, profile, dsh, ...(nonce === undefined ? [] : [nonce]),
@@ -212,7 +212,7 @@ async function buildFixture() {
     encoding: 'utf8',
     env: {
       ...process.env, DSH_HOME: home, DSH_FAKE_PERSISTED: persistedPath,
-      DSH_ENHANCED_SUPERVISED_PREVIEW_OVERLAY: overlayPath, ...extraEnv,
+      DSH_RAY_SUPERVISED_PREVIEW_OVERLAY: overlayPath, ...extraEnv,
     },
   })
   const packageEntry = key => join(modulesDir, PACKAGES[key].dir, 'index.mjs')
@@ -255,7 +255,7 @@ describe('supervised operator program（真实 node --eval spawn，无安装器�
 
   test('prepare-preview：overlay 路径逃逸 DSH_HOME 时 fail-closed', () => {
     const result = fx.run('prepare-preview', NONCE, {
-      DSH_ENHANCED_SUPERVISED_PREVIEW_OVERLAY: '/etc/passwd',
+      DSH_RAY_SUPERVISED_PREVIEW_OVERLAY: '/etc/passwd',
     })
     expect(result.status).not.toBe(0)
     expect(String(result.stderr)).toContain('inside DSH_HOME')
@@ -325,7 +325,7 @@ describe('supervised operator program（真实 node --eval spawn，无安装器�
     const result = fx.runCapability()
     expect(result.status, result.stderr).toBe(0)
     const proof = JSON.parse(result.stdout)
-    expect(proof).toEqual({ protocol: 'dsh-enhanced/supervised-lifecycle-capability/v1' })
+    expect(proof).toEqual({ protocol: 'dsh-ray/supervised-lifecycle-capability/v1' })
     // 真实 spawn 产物必须通过安装器侧消费的同一个强校，而不是测试自己另写一套判定。
     expect(lifecycleProfileTest.validSupervisedCapabilityProof(proof)).toBe(true)
   })
@@ -358,8 +358,8 @@ export const inspectRecoveryOperatorSnapshot = () => ({
   test('capability：真实探针夹带额外键时，安装器侧强校对其原始 stdout fail-closed（程序自身退出 0 也不接受）', () => {
     // 模拟被调包的探针/中间层：seam 检查全部通过、进程退出 0，但在 proof 里走私字段。
     const tamperedProgram = CAPABILITY_PROGRAM.replace(
-      "process.stdout.write(JSON.stringify({ protocol: 'dsh-enhanced/supervised-lifecycle-capability/v1' }))",
-      "process.stdout.write(JSON.stringify({ protocol: 'dsh-enhanced/supervised-lifecycle-capability/v1', smuggled: 1 }))",
+      "process.stdout.write(JSON.stringify({ protocol: 'dsh-ray/supervised-lifecycle-capability/v1' }))",
+      "process.stdout.write(JSON.stringify({ protocol: 'dsh-ray/supervised-lifecycle-capability/v1', smuggled: 1 }))",
     )
     expect(tamperedProgram).not.toBe(CAPABILITY_PROGRAM)
     const result = spawnSync(process.execPath, [

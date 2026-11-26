@@ -455,7 +455,7 @@ async function pinnedDigest(path: string, maxSize: number, allowEmpty = false): 
 }
 
 async function hostCodeMatches(config: RestartSupervisorConfig): Promise<boolean> {
-  const binding = await pinnedDigest(join(config.dshHome, '.dsh-rsi-host.json'), 16_384)
+  const binding = await pinnedDigest(join(config.dshHome, '.dsh-ray-host.json'), 16_384)
   if (binding.digest !== config.hostBindingDigest) return false
   const bound = JSON.parse(binding.source.toString('utf8')) as Record<string, unknown>
   if (bound.schemaVersion !== 1 || typeof bound.cacheRoot !== 'string'
@@ -560,7 +560,7 @@ export function createSystemRestartSupervisor(): RestartSupervisorSystem {
       try {
         raw = await command('/usr/bin/journalctl', ['--user', '-u', unit,
           `_SYSTEMD_INVOCATION_ID=${invocationId}`, '--no-pager', '--output=json',
-          '--grep=dsh-enhanced host ready: v1|lark-channel: connected', '-n', '256'],
+          '--grep=dsh-ray host ready: v1|lark-channel: connected', '-n', '256'],
         new AbortController().signal)
       } catch { return false /* journalctl exits 1 before this instance has either marker. */ }
       let hostReady = false, channelReady = false
@@ -570,13 +570,13 @@ export function createSystemRestartSupervisor(): RestartSupervisorSystem {
         if (entry._SYSTEMD_INVOCATION_ID !== invocationId) continue
         const message = entry.MESSAGE
         if (typeof message !== 'string') continue
-        if (message.includes('dsh-enhanced host ready: v1')) hostReady = true
+        if (message.includes('dsh-ray host ready: v1')) hostReady = true
         if (message.includes('lark-channel: connected')) channelReady = true
       }
       return hostReady && channelReady
     },
     async transactionExists(home) {
-      try { await lstat(`${home}.dsh-enhanced-transaction`); return true }
+      try { await lstat(`${home}.dsh-ray-transaction`); return true }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
     },
     async unitDigest(fragmentPath) {
@@ -606,7 +606,7 @@ export function createSystemRestartSupervisor(): RestartSupervisorSystem {
       const digest = createHash('sha256').update(physical).digest('hex')
       const uid = process.getuid?.()
       if (!Number.isSafeInteger(uid)) throw new Error('restart-supervisor: missing UID')
-      const lockPath = `/tmp/.dsh-enhanced-lifecycle-${uid}-${digest}.lock`
+      const lockPath = `/tmp/.dsh-ray-lifecycle-${uid}-${digest}.lock`
       const fd = await open(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600)
       try {
         const [opened, linked] = await Promise.all([fd.stat(), lstat(lockPath)])

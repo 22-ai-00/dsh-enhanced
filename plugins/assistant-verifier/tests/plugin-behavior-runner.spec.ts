@@ -12,7 +12,7 @@ const seam = vi.hoisted(() => ({
   close: vi.fn(async () => {}),
   configs: [] as unknown[],
 }))
-vi.mock('@dsh-enhanced/assistant-isolation', () => ({
+vi.mock('@dsh-ray/assistant-isolation', () => ({
   NativeMacVerifierRunner: class {
     constructor(config: unknown) { seam.configs.push(config) }
     run(...args: unknown[]) { return seam.run(...args) }

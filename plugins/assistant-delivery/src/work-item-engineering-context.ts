@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isProxy } from 'node:util/types'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import type { OwnerForegroundTaskSourceScope } from './types.js'
 import type { OwnerWorkItemLearningTask, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'
 

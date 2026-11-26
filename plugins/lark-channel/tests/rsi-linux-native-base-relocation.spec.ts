@@ -2,7 +2,7 @@ import { chmod, cp, link, lstat, readdir, rename, rm, symlink } from 'node:fs/pr
 import { chmodSync, cpSync, existsSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
-import { hashLinuxRuntimeTree, linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
+import { hashLinuxRuntimeTree, linuxRuntimeDigest } from '@dsh-ray/assistant-isolation'
 import { inspectLinuxRsiNativeBaseAt, openLinuxRsiNativeRelocatedBase, openLinuxRsiNativeRelocatedBaseAt,
   relocateLinuxRsiNativeBase } from '../src/rsi-linux-native-relocation.js'
 import { fixture, privateDirectory, PROFILE, readJson, removeFixtureDirectories, seal, write, writeReceipt } from './fixtures/linux-native-home-fixture.js'
@@ -13,7 +13,7 @@ vi.mock('node:module', async importOriginal => {
   return { ...actual, createRequire: (url: string) => {
     const original = actual.createRequire(url)
     const guard = (specifier: string): void => {
-      if (specifier === '@dsh-enhanced/assistant-verifier/linux-behavior-runtime') {
+      if (specifier === '@dsh-ray/assistant-verifier/linux-behavior-runtime') {
         peer.required(); throw new Error('base relocation must not require the behavior peer')
       }
     }

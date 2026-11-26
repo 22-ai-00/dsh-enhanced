@@ -3,8 +3,8 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFil
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
-import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
+import type { LinuxPluginBehaviorRuntime } from '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 import { RsiLinuxCgroupUnavailableError } from '../src/rsi-linux-cgroup-roots.js'
 import { LinuxRsiRuntimeUnavailableError } from '../src/rsi-linux-runtime-bootstrap.js'
 import { prepareLinuxRsiCreationBuildEnvironment, readLinuxRsiCreationBuildEnvironment,
@@ -264,7 +264,7 @@ test.runIf(process.platform === 'linux')('a missing behavior peer is a fatal opt
   vi.resetModules()
   vi.doMock('node:module', async importOriginal => ({ ...(await importOriginal<typeof import('node:module')>()),
     createRequire: () => Object.assign(() => ({}), { resolve: () => {
-      const error = new Error("cannot find module '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'")
+      const error = new Error("cannot find module '@dsh-ray/assistant-verifier/linux-behavior-runtime'")
       ;(error as NodeJS.ErrnoException).code = 'MODULE_NOT_FOUND'; throw error
     } }) }))
   try {

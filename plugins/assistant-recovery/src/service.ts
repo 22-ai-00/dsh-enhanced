@@ -4,11 +4,11 @@ import type {
   AssistantAutomationsService,
   HostAutomationDefinition,
   HostAutomationExecutorInput,
-} from '@dsh-enhanced/assistant-automations'
-import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import type { AssistantEvolutionService } from '@dsh-enhanced/assistant-evolution'
+} from '@dsh-ray/assistant-automations'
+import type { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import type { AssistantEvolutionService } from '@dsh-ray/assistant-evolution'
 import type { AssistantGoalsAdvicePort } from './goals-port.js'
-import type { AssistantHealthService } from '@dsh-enhanced/assistant-health'
+import type { AssistantHealthService } from '@dsh-ray/assistant-health'
 import {
   RECOVERY_EXECUTOR_CONTRACT_VERSION,
   RECOVERY_EXECUTOR_ID,

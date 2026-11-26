@@ -5,8 +5,8 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import proactive, {
   Config,

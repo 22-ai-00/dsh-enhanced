@@ -1,6 +1,6 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { PreferenceLearningService } from '@dsh-enhanced/preference-learning'
+import { PreferenceLearningService } from '@dsh-ray/preference-learning'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { parseDocument, isMap, isSeq } from 'yaml'
-import { createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
+import { createVerifierAuthorities } from '@dsh-ray/assistant-verifier'
 import { objective, preparation } from './autonomy-wake-model.mjs'
 import { acceptFirstRunNotice, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
@@ -36,7 +36,7 @@ for (const mode of ['resume', 'revoked', 'interrupt']) test(`installed scheduled
   const deliveryPath = join(home, 'assistant-delivery/state.sqlite'); const isolationPath = join(home, 'assistant-isolation/web/ledger.sqlite')
   const verificationRoot = join(temp, 'verification'); const verifierPath = join(temp, 'verifier.sqlite'); const automationsPath = join(temp, 'automations.sqlite')
   const port = await new Promise((resolvePort, reject) => { const server = createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const address = server.address(); server.close(error => error ? reject(error) : resolvePort(address.port)) }) })
-  const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_ENHANCED_WEB_PORT: String(port), DSH_WEB_E2E_MODEL_LOG: modelLog, DSH_WAKE_TEST_MODE: mode }
+  const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_RAY_WEB_PORT: String(port), DSH_WEB_E2E_MODEL_LOG: modelLog, DSH_WAKE_TEST_MODE: mode }
   const http = []; const transport = []; const streams = new Map(); const frames = []; const contexts = []
   let host; let activePage = page; let authenticated = false; let failed = false; let errorForEvidence; let hostNumber = 0
   const stop = async () => { if (host) { await host.stop(); await writeFile(testInfo.outputPath(`host-${hostNumber}.log`), host.log(), { mode: 0o600 }); host = undefined } }
@@ -69,7 +69,7 @@ for (const mode of ['resume', 'revoked', 'interrupt']) test(`installed scheduled
     const patchPath = join(home, 'profiles/web/cordis.patch.yml'); const installedPatch = await readFile(patchPath, 'utf8')
     await writeFile(testInfo.outputPath('installed-profile.yaml'), installedPatch, { mode: 0o600 })
     const patch = parseDocument(installedPatch)
-    const grant = config(patch, 'dsh-enhanced-assistant-isolation').get('grants').toJSON()[0]
+    const grant = config(patch, 'dsh-ray-assistant-isolation').get('grants').toJSON()[0]
     const authority = { kind: 'isolated-runner', id: 'scheduled-sum-checker', stateRoot: verificationRoot, image, dockerPath: '/usr/bin/docker',
       command: '/bin/sh /workspace/artifact < /workspace/input', expiresAt: grant.expiresAt, maxRuns: 12, maxTotalDurationMs: 240000, maxDurationMs: 20000, maxOutputBytes: 4096,
       testSets: [{ id: 'sum-cases', cases: [{ stdin: '19 23', expectedStdout: '42', expectedExitCode: 0 }, { stdin: '-8 5', expectedStdout: '-3', expectedExitCode: 0 }] }] }
@@ -77,12 +77,12 @@ for (const mode of ['resume', 'revoked', 'interrupt']) test(`installed scheduled
     const profiles = ['goal-step', 'goal-outcome'].map(taskKind => ({ id: taskKind, version: 1, taskKind, objective, scope: { workspace, preset: 'standard' },
       owner: { principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion }, validityMs: 240000, bounds: { maxDurationMs: 60000, maxEvidenceBytes: 8192 },
       criteria: [{ id: 'sum-behavior', kind: 'isolated-process-behavior', authority: { id: compiled.id, digest: compiled.digest }, artifactPath: 'answer.sh', testSetId: 'sum-cases' }] }))
-    set(patch, config(patch, 'dsh-enhanced-assistant-verifier'), { databasePath: verifierPath, tickIntervalMs: 0, authorities: [authority], profiles })
-    set(patch, config(patch, 'dsh-enhanced-assistant-goals'), { databasePath: goalsPath, verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 60000,
+    set(patch, config(patch, 'dsh-ray-assistant-verifier'), { databasePath: verifierPath, tickIntervalMs: 0, authorities: [authority], profiles })
+    set(patch, config(patch, 'dsh-ray-assistant-goals'), { databasePath: goalsPath, verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 60000,
       preauthorizedCreateMaxRounds: 1, preauthorizedSchedule: true, executionBudget: { modelCalls: 6, toolCalls: 3, inputTokens: 200, outputTokens: 6000, costUsdMicros: 0, durationMs: 240000, maxOutputTokensPerCall: 1024 },
       backgroundWake: { ownerRouteId: 'scheduled-web-owner', budgetId: 'scheduled-goal-runs', maxDelayMs: 60000, runTimeoutMs: 90000 } })
-    set(patch, config(patch, 'dsh-enhanced-assistant-delivery'), { agentProvider: 'browser-e2e', agentModel: 'scheduled-goal-proof', agentMaxOutputTokens: 1024 })
-    const personal = config(patch, 'dsh-enhanced-personal-assistant'); const automation = personal.get('assistantAutomations', true); const policy = personal.get('assistantPolicy', true)
+    set(patch, config(patch, 'dsh-ray-assistant-delivery'), { agentProvider: 'browser-e2e', agentModel: 'scheduled-goal-proof', agentMaxOutputTokens: 1024 })
+    const personal = config(patch, 'dsh-ray-personal-assistant'); const automation = personal.get('assistantAutomations', true); const policy = personal.get('assistantPolicy', true)
     if (!isMap(automation) || !isMap(policy)) throw new Error('installed personal assistant configuration missing')
     set(patch, automation, { databasePath: automationsPath, runsPath: join(temp, 'automation-runs'), schedulerEnabled: true, tickIntervalMs: 1000, reconcileIntervalMs: 0 })
     append(patch, policy, 'budgets', [{ id: 'scheduled-goal-runs', metric: 'automation-runs', limit: 3, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }])
@@ -103,7 +103,7 @@ for (const mode of ['resume', 'revoked', 'interrupt']) test(`installed scheduled
     await expect.poll(() => query(deliveryPath, 'SELECT state FROM delivery_session_leases WHERE session_id=?', sessionId)[0]?.state).toBe('released')
     await stop()
     // Explicit operator-only setup for the exact persisted conversation. No wildcard route.
-    set(patch, config(patch, 'dsh-enhanced-assistant-delivery'), { ownerRoutes: [{ id: 'scheduled-web-owner', conversation: JSON.parse(binding.conversation_json), principal: JSON.parse(binding.principal_json), workspace, agentPreset: 'standard', policyRef: binding.policy_ref, minimumGeneration: binding.generation }] })
+    set(patch, config(patch, 'dsh-ray-assistant-delivery'), { ownerRoutes: [{ id: 'scheduled-web-owner', conversation: JSON.parse(binding.conversation_json), principal: JSON.parse(binding.principal_json), workspace, agentPreset: 'standard', policyRef: binding.policy_ref, minimumGeneration: binding.generation }] })
     await writeFile(patchPath, String(patch), { mode: 0o600 })
     await open(true); await select(); await prompt(objective)
     await expect(activePage.getByText('Scheduled goal reply 4', { exact: true })).toBeVisible()
@@ -128,7 +128,7 @@ for (const mode of ['resume', 'revoked', 'interrupt']) test(`installed scheduled
       try { db.prepare("UPDATE delivery_principals SET status='revoked', version=version+1 WHERE id=?").run(binding.principal_id) } finally { db.close() }
       // The fixed-owner Web controller correctly refuses a revoked owner at startup.
       // Disable just that UI for this negative test; background services must also deny.
-      patch.add({ id: 'dsh-enhanced-assistant-web-owner', disabled: true })
+      patch.add({ id: 'dsh-ray-assistant-web-owner', disabled: true })
       await writeFile(patchPath, String(patch), { mode: 0o600 })
       host = await startHost(env); hostNumber++
     } else await open(true)

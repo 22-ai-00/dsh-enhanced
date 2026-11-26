@@ -1,4 +1,4 @@
-import { assistantT1PreferenceValues } from '@dsh-enhanced/assistant-growth-contract'
+import { assistantT1PreferenceValues } from '@dsh-ray/assistant-growth-contract'
 
 export const preferenceRiskTiers = ['T0', 'T1', 'T2', 'T3'] as const
 export type PreferenceRiskTier = typeof preferenceRiskTiers[number]

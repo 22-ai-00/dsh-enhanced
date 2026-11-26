@@ -2,11 +2,11 @@ import { beforeAll, afterAll, describe, expect, test } from 'vitest'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { isMap, isSeq, parseDocument, type Node } from 'yaml'
-import { linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
-import { normalizeControlPlaneConfig, runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
-import { normalizeConfig } from '@dsh-enhanced/assistant-growth-driver'
+import { linuxRuntimeDigest } from '@dsh-ray/assistant-isolation'
+import { normalizeControlPlaneConfig, runtimeConfigDigest } from '@dsh-ray/plugin-control-plane'
+import { normalizeConfig } from '@dsh-ray/assistant-growth-driver'
 import { compileCreationReviewConfig, compileRevisionReviewConfig, compileRevisionRegressionReviewConfig,
-  validateSourceReviewConfig } from '@dsh-enhanced/assistant-verifier'
+  validateSourceReviewConfig } from '@dsh-ray/assistant-verifier'
 import { createRsiBootstrapManifest, rawLoaderConfig,
   type RsiBootstrapManifestInput } from '../src/rsi-bootstrap-manifest.js'
 import { compileRsiProfiles, type RsiSetupManifest } from '../src/rsi-profile.js'
@@ -36,8 +36,8 @@ async function fixture() {
       runnerStates: native.runnerStates,
       git: old.sourceReviews.git, now: base.input.now, expiresAt: old.controlPlane.sourceJobs!.expiresAt,
       plugins: old.sourceReviews.plugins, hostDeploymentInputs: old.controlPlane.sourceAdoptions!.hostDeploymentInputs!,
-      observerTargets: [{ entryId: 'dsh-enhanced-assistant-delivery', module: '@dsh-enhanced/assistant-delivery',
-        configDigest: runtimeConfigDigest(rawConfig(base.profiles.targetEffective, 'dsh-enhanced-assistant-delivery')),
+      observerTargets: [{ entryId: 'dsh-ray-assistant-delivery', module: '@dsh-ray/assistant-delivery',
+        configDigest: runtimeConfigDigest(rawConfig(base.profiles.targetEffective, 'dsh-ray-assistant-delivery')),
         services: ['assistantDelivery'] }],
     }
     const compile = (manifest: RsiSetupManifest) => compileRsiProfiles({ manifest, dshHome: input.dshHome,
@@ -110,15 +110,15 @@ describe.runIf(process.platform === 'linux' && process.getuid!() > 0)('complete 
       const config = rawConfig(output.targetPatch, target.entryId) ?? rawConfig(ctx.base.profiles.targetEffective, target.entryId)
       expect(target.configDigest, target.entryId).toBe(runtimeConfigDigest(config))
     }
-    const verifier = rawConfig(output.targetPatch, 'dsh-enhanced-assistant-verifier') as Record<string, unknown>
+    const verifier = rawConfig(output.targetPatch, 'dsh-ray-assistant-verifier') as Record<string, unknown>
     expect(verifier.creationReviews).toEqual(manifest.pluginCreation!.reviews)
     expect(verifier.revisionReviews).toEqual(manifest.pluginRevision!.reviews)
     expect(verifier.revisionRegressions).toEqual(manifest.pluginRevision!.regressions)
-    expect(rawConfig(output.targetPatch, 'dsh-enhanced-plugin-control-plane')).toEqual(manifest.controlPlane)
-    const personal = rawConfig(output.targetPatch, 'dsh-enhanced-personal-assistant') as { assistantPolicy: { budgets: unknown[] } }
+    expect(rawConfig(output.targetPatch, 'dsh-ray-plugin-control-plane')).toEqual(manifest.controlPlane)
+    const personal = rawConfig(output.targetPatch, 'dsh-ray-personal-assistant') as { assistantPolicy: { budgets: unknown[] } }
     expect(new Set(personal.assistantPolicy.budgets.map(budget => (budget as { id: string }).id)).size)
       .toBe(personal.assistantPolicy.budgets.length)
-    const coordinator = rawConfig(output.coordinatorPatch, 'dsh-enhanced-plugin-control-plane') as Record<string, unknown>
+    const coordinator = rawConfig(output.coordinatorPatch, 'dsh-ray-plugin-control-plane') as Record<string, unknown>
     expect(coordinator.adoptionCoordinator).toBeDefined(); expect(coordinator.sourceJobs).toBeUndefined()
     expect(coordinator.sourceBuild).toBeUndefined(); expect(coordinator.creationCapabilities).toBeUndefined()
   })
@@ -130,7 +130,7 @@ describe.runIf(process.platform === 'linux' && process.getuid!() > 0)('complete 
     expect(manifest.controlPlane.revisionVerifications).toBeUndefined(); expect(manifest.controlPlane.revisionRegressions).toBeUndefined()
     expect(normalizeConfig(manifest.growthDriver).pluginSourceProposals).toMatchObject({ allowCreation: true, allowRevision: false })
     const output = await ctx.compile(manifest)
-    const verifier = rawConfig(output.targetPatch, 'dsh-enhanced-assistant-verifier') as Record<string, unknown>
+    const verifier = rawConfig(output.targetPatch, 'dsh-ray-assistant-verifier') as Record<string, unknown>
     expect(verifier.creationReviews).toBeDefined(); expect(verifier.revisionReviews).toBeUndefined(); expect(verifier.revisionRegressions).toBeUndefined()
     for (const target of manifest.controlPlane.runtimeObserver!.targets) {
       expect(target.configDigest).toBe(runtimeConfigDigest(rawConfig(output.targetPatch, target.entryId)

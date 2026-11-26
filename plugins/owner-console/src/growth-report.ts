@@ -175,15 +175,15 @@ function findControlPlaneDbPaths(
   serviceMounted: boolean,
 ): string[] {
   const candidates = new Set<string>()
-  const directDb = findLoaderDbPath(host, boundary, '@dsh-enhanced/plugin-control-plane')
+  const directDb = findLoaderDbPath(host, boundary, '@dsh-ray/plugin-control-plane')
   if (directDb) candidates.add(directDb)
-  const stateDir = findLoaderPathProp(host, boundary, '@dsh-enhanced/plugin-control-plane', 'statePath')
+  const stateDir = findLoaderPathProp(host, boundary, '@dsh-ray/plugin-control-plane', 'statePath')
   if (stateDir) {
     candidates.add(join(stateDir, 'control.sqlite'))
     candidates.add(join(stateDir, 'creation-adoptions.sqlite'))
     candidates.add(join(stateDir, 'revision-adoptions.sqlite'))
   }
-  const hasCpConfig = findLoaderConfig(host, '@dsh-enhanced/plugin-control-plane') !== undefined
+  const hasCpConfig = findLoaderConfig(host, '@dsh-ray/plugin-control-plane') !== undefined
   if (boundary.explicitHome && (serviceMounted || hasCpConfig)) {
     const hostHome = boundary.dshHome
     candidates.add(join(hostHome, 'plugin-control-plane', 'state.sqlite'))
@@ -305,14 +305,14 @@ function resolveGrowthScope(
   const direct = resolveOverviewScope(host, requestedWorkspace, requestedPreset)
   if (direct) return direct
 
-  const larkCfg = findLoaderConfig(host, '@dsh-enhanced/lark-channel')
+  const larkCfg = findLoaderConfig(host, '@dsh-ray/lark-channel')
   if (larkCfg) {
     const ws = typeof larkCfg['ownerWorkspace'] === 'string' ? larkCfg['ownerWorkspace'].trim() : ''
     const pr = typeof larkCfg['defaultAgentPreset'] === 'string' ? larkCfg['defaultAgentPreset'].trim() : ''
     if (ws !== '' && pr !== '') return Object.freeze({ workspace: ws, preset: pr })
   }
 
-  const deliveryCfg = findLoaderConfig(host, '@dsh-enhanced/assistant-delivery')
+  const deliveryCfg = findLoaderConfig(host, '@dsh-ray/assistant-delivery')
   if (deliveryCfg) {
     for (const route of arr(deliveryCfg['ownerRoutes'])) {
       const r = rec(route)
@@ -405,11 +405,11 @@ export function readOwnerConsoleGrowthReport(
   let scope = resolveGrowthScope(host, workspace, preset)
   const profileName = resolveProfileName(host)
   const sqliteBoundary = resolveSqliteBoundary(host)
-  const cliCommand = `dsh-rsi growth-report${profileName ? ` --profile ${profileName}` : ''} --since ${sinceDays}d`
+  const cliCommand = `dsh-ray growth-report${profileName ? ` --profile ${profileName}` : ''} --since ${sinceDays}d`
 
   // 1. Evaluation: Tasks, Owner Revisions, Suppliers, Notifications & Agreement
   const evaluation = host.get('assistantEvaluation' as never) as Record<string, unknown> | undefined
-  const evalDbPath = findLoaderDbPath(host, sqliteBoundary, '@dsh-enhanced/assistant-evaluation')
+  const evalDbPath = findLoaderDbPath(host, sqliteBoundary, '@dsh-ray/assistant-evaluation')
     ?? (sqliteBoundary.explicitHome && evaluation ? join(sqliteBoundary.dshHome, 'assistant-evaluation', 'evaluation.sqlite') : undefined)
   let tasksState: GrowthDataState = 'no-data'
   let totalTasks = 0
@@ -979,7 +979,7 @@ export function readOwnerConsoleGrowthReport(
 
   // Also check workItems intake evaluation ledger if Evaluation agreement table had 0 rows
   if (wouldAcceptTotal === 0) {
-    const wiCount = withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-enhanced/assistant-work-items'), sqliteBoundary, db => {
+    const wiCount = withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-ray/assistant-work-items'), sqliteBoundary, db => {
       if (!hasTable(db, 'work_item_intake_evaluation')) return undefined
       const row = db.prepare(`
         SELECT COUNT(*) AS n FROM work_item_intake_evaluation
@@ -998,10 +998,10 @@ export function readOwnerConsoleGrowthReport(
   const personalMemory = host.get('personalMemory' as never) as Record<string, unknown> | undefined
   const prefLearning = host.get('assistantPreferenceLearning' as never) as Record<string, unknown> | undefined
   const memLearning = host.get('assistantMemoryLearning' as never) as Record<string, unknown> | undefined
-  const memDbPath = findLoaderDbPath(host, sqliteBoundary, '@dsh-enhanced/personal-memory')
-    ?? findLoaderDbPath(host, sqliteBoundary, '@dsh-enhanced/personal-assistant', 'personalMemory')
+  const memDbPath = findLoaderDbPath(host, sqliteBoundary, '@dsh-ray/personal-memory')
+    ?? findLoaderDbPath(host, sqliteBoundary, '@dsh-ray/personal-assistant', 'personalMemory')
     ?? (sqliteBoundary.explicitHome && personalMemory ? join(sqliteBoundary.dshHome, 'personal-memory', 'memory.sqlite') : undefined)
-  const prefDbPath = findLoaderDbPath(host, sqliteBoundary, '@dsh-enhanced/preference-learning')
+  const prefDbPath = findLoaderDbPath(host, sqliteBoundary, '@dsh-ray/preference-learning')
     ?? (sqliteBoundary.explicitHome && prefLearning ? join(sqliteBoundary.dshHome, 'preference-learning', 'preferences.sqlite') : undefined)
 
   let memoryState: GrowthDataState = 'no-data'
@@ -1135,7 +1135,7 @@ export function readOwnerConsoleGrowthReport(
     let sawCandidateSource = Boolean(memLearning || growthDriver || controlPlane || skills || prefLearning || evolution || growthExperiments)
 
     // 3a. Memory Learning
-    const mlSqlite = withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-enhanced/assistant-memory-learning'), sqliteBoundary, db => {
+    const mlSqlite = withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-ray/assistant-memory-learning'), sqliteBoundary, db => {
       if (!hasTable(db, 'jobs')) return undefined
       const rows = (hasColumn(db, 'jobs', 'intent_json')
         ? db.prepare('SELECT state, intent_json FROM jobs').all()
@@ -1172,7 +1172,7 @@ export function readOwnerConsoleGrowthReport(
     }
 
     // 3b. Growth Driver usage_jobs (valid states: queued, running, reviewed, failed, unknown, superseded)
-    const gdSqlite = withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-enhanced/assistant-growth-driver', 'usageLearning'), sqliteBoundary, db => {
+    const gdSqlite = withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-ray/assistant-growth-driver', 'usageLearning'), sqliteBoundary, db => {
       if (!hasTable(db, 'usage_jobs')) return undefined
       const rows = (hasColumn(db, 'usage_jobs', 'intent_json')
         ? db.prepare('SELECT state, intent_json FROM usage_jobs').all()
@@ -1291,7 +1291,7 @@ export function readOwnerConsoleGrowthReport(
     }
 
     // 3d. Skills
-    const skSqlite = withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-enhanced/assistant-skills'), sqliteBoundary, db => {
+    const skSqlite = withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-ray/assistant-skills'), sqliteBoundary, db => {
       let saw = false, gen = 0, pass = 0, fail = 0, adopt = 0, rb = 0
       if (hasTable(db, 'skill_candidates')) {
         saw = true
@@ -1387,7 +1387,7 @@ export function readOwnerConsoleGrowthReport(
     }
 
     // 3f. Evolution & Growth Experiments
-    withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-enhanced/assistant-evolution'), sqliteBoundary, db => {
+    withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-ray/assistant-evolution'), sqliteBoundary, db => {
       if (hasTable(db, 'evolution_proposals')) {
         sawCandidateSource = true
         for (const r of db.prepare('SELECT status FROM evolution_proposals WHERE updated_at >= ? AND updated_at <= ?')
@@ -1408,7 +1408,7 @@ export function readOwnerConsoleGrowthReport(
           .get(fromAt, toAt) as { n: number }).n
       }
     })
-    withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-enhanced/assistant-growth-experiments'), sqliteBoundary, db => {
+    withReadOnlySqlite(findLoaderDbPath(host, sqliteBoundary, '@dsh-ray/assistant-growth-experiments'), sqliteBoundary, db => {
       if (hasTable(db, 'workflow_candidates')) {
         sawCandidateSource = true
         for (const r of db.prepare('SELECT state FROM workflow_candidates WHERE updated_at >= ? AND updated_at <= ?')

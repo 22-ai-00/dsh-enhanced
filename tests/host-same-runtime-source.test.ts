@@ -19,7 +19,7 @@ const current = { ...legacy, version: '0.2.0-rc.2', root: `${cache}/0.2.0-rc.2`,
 const binding = (runtime: typeof legacy) => `${JSON.stringify({ schemaVersion: 1, cacheRoot: cache,
   version: runtime.version, receiptDigest: runtime.receiptDigest })}\n`
 const sameHostPlan = { schemaVersion: 1, status: 'current', canonicalHome: home,
-  bindingPath: `${home}/.dsh-rsi-host.json`, originalBindingSource: binding(current),
+  bindingPath: `${home}/.dsh-ray-host.json`, originalBindingSource: binding(current),
   originalBindingDigest: sha256(binding(current)), originalRuntime: current,
   candidateRuntime: current, candidateBindingSource: binding(current) }
 const legacyPlan = { ...sameHostPlan, schemaVersion: 2, status: 'update',
@@ -80,7 +80,7 @@ describe('same-runtime joint source admission', () => {
     await mkdir(transactionRoot, { mode: 0o700 })
     const transaction = await lstat(transactionRoot)
     const currentPlan = { ...sameHostPlan, canonicalHome: homePath,
-      bindingPath: join(homePath, '.dsh-rsi-host.json') }
+      bindingPath: join(homePath, '.dsh-ray-host.json') }
     const source = '[Service]\nExecStart=current-host\n'
     const unit = { unit: 'dsh-profile-assistant.service', profile: 'assistant',
       path: join(root, 'dsh-profile-assistant.service'), before: source, after: source,
@@ -93,7 +93,7 @@ describe('same-runtime joint source admission', () => {
       containmentMasks: [], containmentMaskIntents: [], containmentStartBarriers: [],
       hostMigration: { plan: currentPlan, units: [unit], phase: 'initializing',
         candidateEverStarted: false, originalExternalLinksDigest: 'a'.repeat(64),
-        localSource: { protocol: 'dsh-enhanced/host-local-source-update/v1', homePath, profile: 'assistant' } } }
+        localSource: { protocol: 'dsh-ray/host-local-source-update/v1', homePath, profile: 'assistant' } } }
     const expected = { homePath, transactionPath: transactionRoot, profile: 'assistant' }
     const write = (changed: object, state = 'preparing') => lifecycleProfileTest.writeManifest(transactionRoot,
       { ...base, ...changed }, state)
@@ -137,8 +137,8 @@ describe('same-runtime joint source admission', () => {
       path: join(root, service.unit), before: source, after: source,
       beforeDigest: sha256(source), afterDigest: sha256(source), pathEnvironment: 'PATH=/usr/bin' }))
     const plan = { ...sameHostPlan, canonicalHome: homePath,
-      bindingPath: join(homePath, '.dsh-rsi-host.json') }
-    const localSource = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath, profile,
+      bindingPath: join(homePath, '.dsh-ray-host.json') }
+    const localSource = { protocol: 'dsh-ray/host-owner-source-repair/v1', homePath, profile,
       ownerRepair: { coordinatorProfile, permissionPreset: 'workspace-write' } }
     const originalReadiness = { schemaVersion: 1, services: services.map(service => ({
       unit: service.unit, profile: service.profile, invocationId: service.invocationId, mainPid: service.mainPid,

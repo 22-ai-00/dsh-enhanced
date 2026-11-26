@@ -30,7 +30,7 @@ const candidate = { ...old, version: '0.1.5-rc.4', root: '/private/hosts/0.1.5-r
 const binding = (runtime: typeof old) => JSON.stringify({ schemaVersion: 1, cacheRoot: '/private/hosts',
   version: runtime.version, receiptDigest: runtime.receiptDigest }) + '\n'
 const plan = { schemaVersion: 1, status: 'update', canonicalHome: '/private/home',
-  bindingPath: '/private/home/.dsh-rsi-host.json', originalBindingSource: binding(old),
+  bindingPath: '/private/home/.dsh-ray-host.json', originalBindingSource: binding(old),
   originalBindingDigest: digest(binding(old)), originalRuntime: old,
   candidateRuntime: candidate, candidateBindingSource: binding(candidate) }
 
@@ -124,7 +124,7 @@ process.exit(91)
     .replaceAll('__LOG__', JSON.stringify(systemdLog)).replaceAll('__HOME__', JSON.stringify(home)), { mode: 0o700 })
   await writeFile(fakeJournalctl, String.raw`#!/usr/bin/env node
 const invocation = process.argv.find(arg => arg.startsWith('_SYSTEMD_INVOCATION_ID='))?.split('=')[1]
-if (invocation?.startsWith('fresh-')) process.stdout.write('dsh-enhanced host ready: v1\n')
+if (invocation?.startsWith('fresh-')) process.stdout.write('dsh-ray host ready: v1\n')
 else process.stdout.write('old invocation\n')
 `.replace(/^#!\/usr\/bin\/env node/u, `#!${process.execPath}`), { mode: 0o700 })
 }
@@ -206,9 +206,9 @@ async function controlledHostFixture(withUnits = false, dumpLink: 'none' | 'exte
     version: originalRuntime.version, receiptDigest: originalRuntime.receiptDigest }) + '\n'
   const candidateBindingSource = JSON.stringify({ schemaVersion: 1, cacheRoot: cache,
     version: candidateRuntime.version, receiptDigest: candidateRuntime.receiptDigest }) + '\n'
-  await writeFile(join(home, '.dsh-rsi-host.json'), originalBindingSource, { mode: 0o600 })
+  await writeFile(join(home, '.dsh-ray-host.json'), originalBindingSource, { mode: 0o600 })
   const hostPlan = { schemaVersion: 1, status: 'update', canonicalHome: home,
-    bindingPath: join(home, '.dsh-rsi-host.json'), originalBindingSource,
+    bindingPath: join(home, '.dsh-ray-host.json'), originalBindingSource,
     originalBindingDigest: digest(originalBindingSource), originalRuntime, candidateRuntime, candidateBindingSource }
   const planPath = join(root, 'plan.json')
   await writeFile(planPath, JSON.stringify(hostPlan), { mode: 0o600 })
@@ -294,7 +294,7 @@ describe('managed Host transaction inputs', () => {
       await mkdir(stateRoot, { recursive: true, mode: 0o700 })
       await new Promise<void>((resolveListen, reject) => server.listen(socketPath, resolveListen).once('error', reject))
       await chmod(socketPath, 0o600)
-      const sourceProof = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', ownerRepair: {
+      const sourceProof = { protocol: 'dsh-ray/host-owner-source-repair/v1', ownerRepair: {
         homePath: home, profile, original: { resources: { stateRoot }, manifest: { controlPlane: {
           runtimeObserver: { socketPath } } } } } }
       const capture = lifecycleProfileTest.captureOwnerRepairObserverSocket
@@ -567,7 +567,7 @@ describe('managed Host transaction inputs', () => {
       await writeFile(planPath, JSON.stringify({ ...original, schemaVersion, candidateRuntime: nextRuntime,
         candidateBindingSource: nextBinding,
         ...(schemaVersion === 2 ? { originalBindingSource: null, originalBindingDigest: null } : {}) }), { mode: 0o600 })
-      if (schemaVersion === 2) await rm(join(fixture.home, '.dsh-rsi-host.json'))
+      if (schemaVersion === 2) await rm(join(fixture.home, '.dsh-ray-host.json'))
       const beforeHome = await treeSnapshot(fixture.home)
       const beforeCache = await treeSnapshot(dirname(fixture.originalRuntime.root))
       const result = fixture.run('host-update')
@@ -577,7 +577,7 @@ describe('managed Host transaction inputs', () => {
         : /cross-ABI Host migration requires a verified joint local source transaction|unbound Host migration requires a verified joint local source transaction/u)
       expect(await treeSnapshot(fixture.home)).toBe(beforeHome)
       expect(await treeSnapshot(dirname(fixture.originalRuntime.root))).toBe(beforeCache)
-      await expect(lstat(`${fixture.home}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(lstat(`${fixture.home}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
       await expect(lstat(nextRoot)).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
@@ -645,7 +645,7 @@ describe('managed Host transaction inputs', () => {
       const bindingSource = `${JSON.stringify({ schemaVersion: 1, cacheRoot: '/private/hosts',
         version: runtime.version, receiptDigest: runtime.receiptDigest })}\n`
       const sameHostPlan = { schemaVersion: 1, status: 'current', canonicalHome: home,
-        bindingPath: join(home, '.dsh-rsi-host.json'), originalBindingSource: bindingSource,
+        bindingPath: join(home, '.dsh-ray-host.json'), originalBindingSource: bindingSource,
         originalBindingDigest: digest(bindingSource), originalRuntime: runtime,
         candidateRuntime: runtime, candidateBindingSource: bindingSource }
       expect(hostLocalSourcePlanMode(sameHostPlan)).toBe('same-host')
@@ -667,7 +667,7 @@ describe('managed Host transaction inputs', () => {
         containmentMaskIntents: [], containmentStartBarriers: [],
         hostMigration: { plan: sameHostPlan, units: [unit], phase: 'initializing', candidateEverStarted: false,
           originalExternalLinksDigest: 'a'.repeat(64),
-          localSource: { protocol: 'dsh-enhanced/host-local-source-update/v1', homePath: home, profile: 'owner' } } }
+          localSource: { protocol: 'dsh-ray/host-local-source-update/v1', homePath: home, profile: 'owner' } } }
       const written = await lifecycleProfileTest.writeManifest(transactionRoot, manifest, 'preparing')
       const expected = { homePath: home, transactionPath: transactionRoot, profile: 'owner' }
       expect(() => lifecycleProfileTest.validateHostUpdateManifest(written, expected, transactionRoot)).toThrow()
@@ -692,12 +692,12 @@ describe('managed Host transaction inputs', () => {
         hostReady: false, coordinatorActivated: service.profile === coordinatorProfile ? false : null })) }
       const program = { ...manifest, services, unitUniverse: services.map(service => service.unit),
         hostMigration: { ...manifest.hostMigration, units: [unit, secondUnit], bwrapExecutable: '/usr/bin/true',
-          originalReadiness, localSource: { protocol: 'dsh-enhanced/host-owner-program-update/v1',
+          originalReadiness, localSource: { protocol: 'dsh-ray/host-owner-program-update/v1',
             homePath: home, profile: 'owner', ownerUpdate: { coordinatorProfile, hostPlan: sameHostPlan } } } }
       const programWritten = await lifecycleProfileTest.writeManifest(transactionRoot, program, 'preparing')
       expect(() => lifecycleProfileTest.validateHostUpdateManifest(programWritten, expected, transactionRoot)).not.toThrow()
       const repair = { ...program, hostMigration: { ...program.hostMigration,
-        localSource: { protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath: home, profile: 'owner',
+        localSource: { protocol: 'dsh-ray/host-owner-source-repair/v1', homePath: home, profile: 'owner',
           ownerRepair: { coordinatorProfile, permissionPreset: 'workspace-write' } } } }
       const repairWritten = await lifecycleProfileTest.writeManifest(transactionRoot, repair, 'preparing')
       expect(() => lifecycleProfileTest.validateHostUpdateManifest(repairWritten, expected, transactionRoot)).toThrow()
@@ -748,9 +748,9 @@ describe('managed Host transaction inputs', () => {
         binDirectory, integrity: old.integrity, receiptDigest: digest(JSON.stringify(receipt)) }
       const source = `${JSON.stringify({ schemaVersion: 1, cacheRoot: cache,
         version: runtime.version, receiptDigest: runtime.receiptDigest })}\n`
-      await writeFile(join(home, '.dsh-rsi-host.json'), source, { mode: 0o600 })
+      await writeFile(join(home, '.dsh-ray-host.json'), source, { mode: 0o600 })
       const currentPlan = { schemaVersion: 1, status: 'current', canonicalHome: home,
-        bindingPath: join(home, '.dsh-rsi-host.json'), originalBindingSource: source,
+        bindingPath: join(home, '.dsh-ray-host.json'), originalBindingSource: source,
         originalBindingDigest: digest(source), originalRuntime: runtime,
         candidateRuntime: runtime, candidateBindingSource: source }
       const path = join(root, 'plan.json')
@@ -763,8 +763,8 @@ describe('managed Host transaction inputs', () => {
       { encoding: 'utf8', timeout: 30_000 })
       expect(result.status, result.stderr).toBe(0)
       expect(result.stdout).toContain('managed Host already current')
-      expect(await readFile(join(home, '.dsh-rsi-host.json'), 'utf8')).toBe(source)
-      await expect(readFile(`${home}.dsh-enhanced-transaction/manifest.json`)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await readFile(join(home, '.dsh-ray-host.json'), 'utf8')).toBe(source)
+      await expect(readFile(`${home}.dsh-ray-transaction/manifest.json`)).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await rm(root, { recursive: true, force: true }) }
   }, 35_000)
 
@@ -792,9 +792,9 @@ describe('managed Host transaction inputs', () => {
       const result = fixture.run('host-update')
       expect(result.status, result.stderr).toBe(0)
       expect(result.stdout).toContain('managed Host updated: 0.1.5-rc.3 -> 0.1.5-rc.4')
-      expect(await readFile(join(fixture.home, '.dsh-rsi-host.json'), 'utf8'))
+      expect(await readFile(join(fixture.home, '.dsh-ray-host.json'), 'utf8'))
         .toBe(fixture.candidateBindingSource)
-      await expect(lstat(`${fixture.home}.dsh-enhanced-transaction`))
+      await expect(lstat(`${fixture.home}.dsh-ray-transaction`))
         .rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
@@ -815,7 +815,7 @@ describe('managed Host transaction inputs', () => {
         expect(source).toContain(`Environment="PATH=${fixture.candidateRuntime.binDirectory}:`)
         expect(source).not.toContain(fixture.originalRuntime.root)
       }
-      expect(await readFile(join(fixture.home, '.dsh-rsi-host.json'), 'utf8'))
+      expect(await readFile(join(fixture.home, '.dsh-ray-host.json'), 'utf8'))
         .toBe(fixture.candidateBindingSource)
       const commands = (await readFile(fixture.systemdLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
       expect(commands.some(args => args[1] === 'start' && args.includes('dsh-profile-web.service'))).toBe(true)
@@ -851,7 +851,7 @@ describe('managed Host transaction inputs', () => {
       const result = fixture.run('host-update')
       expect(result.status).not.toBe(0)
       expect(result.stderr).toMatch(/DSH_HOME 包含指向外部的符号链接|unapproved external package link/u)
-      expect(await readFile(join(fixture.home, '.dsh-rsi-host.json'), 'utf8'))
+      expect(await readFile(join(fixture.home, '.dsh-ray-host.json'), 'utf8'))
         .toBe(fixture.originalBindingSource)
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
@@ -861,7 +861,7 @@ describe('managed Host transaction inputs', () => {
     try {
       const result = fixture.run('host-update')
       expect(result.status, result.stderr).toBe(0)
-      expect(await readFile(join(fixture.home, '.dsh-rsi-host.json'), 'utf8'))
+      expect(await readFile(join(fixture.home, '.dsh-ray-host.json'), 'utf8'))
         .toBe(fixture.candidateBindingSource)
       expect(await readlink(join(fixture.home, 'profiles', 'web', 'node_modules', 'host-native')))
         .toBe(join(fixture.candidateRuntime.root, 'node_modules', '@deepseek-ai', 'dsh'))
@@ -879,9 +879,9 @@ describe('managed Host transaction inputs', () => {
       expect(homeAfterCrash, crashEvidence).toBe('ENOENT')
       const recovered = fixture.run('host-recover')
       expect(recovered.status, recovered.stderr).toBe(0)
-      expect(await readFile(join(fixture.home, '.dsh-rsi-host.json'), 'utf8'))
+      expect(await readFile(join(fixture.home, '.dsh-ray-host.json'), 'utf8'))
         .toBe(fixture.originalBindingSource)
-      await expect(lstat(`${fixture.home}.dsh-enhanced-transaction`))
+      await expect(lstat(`${fixture.home}.dsh-ray-transaction`))
         .rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
@@ -910,7 +910,7 @@ describe('managed Host transaction inputs', () => {
           .toBe(before[index])
         expect(before[index]).toContain(legacyStartLimit)
       }
-      expect(await readFile(join(fixture.home, '.dsh-rsi-host.json'), 'utf8'))
+      expect(await readFile(join(fixture.home, '.dsh-ray-host.json'), 'utf8'))
         .toBe(fixture.originalBindingSource)
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
@@ -919,7 +919,7 @@ describe('managed Host transaction inputs', () => {
     const fixture = await controlledHostFixture(true)
     try {
       expect(fixture.run('host-update', true).status).not.toBe(0)
-      const backupManifest = join(`${fixture.home}.dsh-enhanced-transaction`, 'original-home',
+      const backupManifest = join(`${fixture.home}.dsh-ray-transaction`, 'original-home',
         'profiles', 'web', 'package.json')
       await writeFile(backupManifest, `${await readFile(backupManifest, 'utf8')}\n`)
       const recovered = fixture.run('host-recover')
@@ -930,7 +930,7 @@ describe('managed Host transaction inputs', () => {
         starts: 0 })
       expect(await readlink(join(dirname(fixture.unitDirectory), 'user.control', 'dsh-profile-web.service')))
         .toBe('/dev/null')
-      expect((await lstat(`${fixture.home}.dsh-enhanced-transaction`)).isDirectory()).toBe(true)
+      expect((await lstat(`${fixture.home}.dsh-ray-transaction`)).isDirectory()).toBe(true)
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
 
@@ -944,7 +944,7 @@ describe('managed Host transaction inputs', () => {
       expect(first.status).not.toBe(0)
       const afterFirst = JSON.parse(await readFile(fixture.systemdState, 'utf8'))
       expect(afterFirst.units['dsh-profile-web.service'].starts).toBeGreaterThan(0)
-      expect(await readFile(join(fixture.home, '.dsh-rsi-host.json'), 'utf8'))
+      expect(await readFile(join(fixture.home, '.dsh-ray-host.json'), 'utf8'))
         .toBe(fixture.candidateBindingSource)
       const recovered = fixture.run('host-recover')
       expect(recovered.status, recovered.stderr).toBe(0)
@@ -952,7 +952,7 @@ describe('managed Host transaction inputs', () => {
       expect(finalState.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active' })
       expect(finalState.units['dsh-profile-web.service'].invocationId).toMatch(/^fresh-web-/u)
       expect(finalState.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', starts: 0 })
-      expect(await readFile(join(fixture.home, '.dsh-rsi-host.json'), 'utf8'))
+      expect(await readFile(join(fixture.home, '.dsh-ray-host.json'), 'utf8'))
         .toBe(fixture.candidateBindingSource)
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)

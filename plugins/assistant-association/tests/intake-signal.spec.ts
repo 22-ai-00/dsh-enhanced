@@ -10,7 +10,7 @@ import {
   classifyIntake,
   type Config as WorkItemsConfig,
   type WorkItemIntakeEvaluatorRegistration,
-} from '@dsh-enhanced/assistant-work-items'
+} from '@dsh-ray/assistant-work-items'
 import {
   DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG,
   emitAssociationIntakeSignal,

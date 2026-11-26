@@ -4,10 +4,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GoalView } from '@deepseek-ai/dsh-goal'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionObservation, SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
-import type { AssistantDeliveryService, OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { AssistantDeliveryService, OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '@dsh-ray/assistant-delivery'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import Schema from '@deepseek-ai/schemastery'
-import { acceptanceCanonicalJson, acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { GoalStore } from './store.js'
@@ -18,13 +18,13 @@ import { buildGoalFeedback, type GoalFeedback } from './feedback.js'
 import { GoalBudgetRuntime, validateGoalBudgetConfig } from './budget.js'
 import type { GoalBudgetConfig, GoalBudgetMeter } from './budget.js'
 import type { GoalBudgetSnapshot } from './budget-store.js'
-import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
-import type { TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
+import type { TaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
+import type { TaskAcceptanceRegistration } from '@dsh-ray/assistant-verifier'
 import { GoalWakeRuntime, validateGoalWakeConfig, type GoalWakeConfig } from './wake.js'
 import type { GoalWake, GoalWakeIntent } from './wake-store.js'
 import { GoalEventWaitRuntime, type PreparationAuthority } from './event-wait.js'
 import type { GoalEventSourceSnapshot, GoalEventWaitIntent } from './event-wait-store.js'
-import type { DeliveryGoalWakeInput } from '@dsh-enhanced/assistant-delivery'
+import type { DeliveryGoalWakeInput } from '@dsh-ray/assistant-delivery'
 import { GoalOutcomeRuntime, type GoalOutcomeView } from './outcome.js'
 import type { GoalOutcomeAssessment } from './outcome-store.js'
 import { GoalStrategyRuntime, validateGoalStrategyConfig, validateGoalStrategyInput, type GoalStrategyConfigInput } from './strategy.js'
@@ -297,7 +297,7 @@ function ownerAuthorizedRepairResumeInput(value: unknown): value is OwnerAuthori
 export class AssistantGoalsService extends Service {
   // A direct class mount and the published bundle must carry the same trusted
   // Cordis identity when registering their owned tools with Policy.
-  static { Object.defineProperty(this, 'name', { value: 'dsh-enhanced-assistant-goals' }) }
+  static { Object.defineProperty(this, 'name', { value: 'dsh-ray-assistant-goals' }) }
   static Config = Config
   #store: GoalStore
   #active = true

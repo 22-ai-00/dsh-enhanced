@@ -10,7 +10,7 @@ import {
   DeliveryAdapterRegistryStoppedError,
   type OwnerSelfIterationControlRequest,
   type OwnerSelfIterationControlResult,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import { isMap, isScalar, isSeq, parseDocument, type YAMLMap } from 'yaml'
 import { LarkDeliveryAdapter } from './adapter.js'
 import { Config } from './config.js'
@@ -22,15 +22,15 @@ const execFileAsync = promisify(execFile)
 const requireOptionalPeer = createRequire(import.meta.url)
 
 const SELF_ITERATION_TOGGLE_SPECS = [
-  { rowId: 'dsh-enhanced-assistant-work-items', pkgName: '@dsh-enhanced/assistant-work-items' },
-  { rowId: 'dsh-enhanced-assistant-proactive', pkgName: '@dsh-enhanced/assistant-proactive' },
-  { rowId: 'dsh-enhanced-assistant-growth-driver', pkgName: '@dsh-enhanced/assistant-growth-driver' },
-  { rowId: 'dsh-enhanced-assistant-dreaming', pkgName: '@dsh-enhanced/assistant-dreaming' },
-  { rowId: 'dsh-enhanced-assistant-memory-learning', pkgName: '@dsh-enhanced/assistant-memory-learning' },
-  { rowId: 'dsh-enhanced-assistant-association', pkgName: '@dsh-enhanced/assistant-association' },
-  { rowId: 'dsh-enhanced-assistant-evaluation', pkgName: '@dsh-enhanced/assistant-evaluation' },
-  { rowId: 'dsh-enhanced-assistant-evolution', pkgName: '@dsh-enhanced/assistant-evolution' },
-  { rowId: 'dsh-enhanced-preference-learning', pkgName: '@dsh-enhanced/preference-learning' },
+  { rowId: 'dsh-ray-assistant-work-items', pkgName: '@dsh-ray/assistant-work-items' },
+  { rowId: 'dsh-ray-assistant-proactive', pkgName: '@dsh-ray/assistant-proactive' },
+  { rowId: 'dsh-ray-assistant-growth-driver', pkgName: '@dsh-ray/assistant-growth-driver' },
+  { rowId: 'dsh-ray-assistant-dreaming', pkgName: '@dsh-ray/assistant-dreaming' },
+  { rowId: 'dsh-ray-assistant-memory-learning', pkgName: '@dsh-ray/assistant-memory-learning' },
+  { rowId: 'dsh-ray-assistant-association', pkgName: '@dsh-ray/assistant-association' },
+  { rowId: 'dsh-ray-assistant-evaluation', pkgName: '@dsh-ray/assistant-evaluation' },
+  { rowId: 'dsh-ray-assistant-evolution', pkgName: '@dsh-ray/assistant-evolution' },
+  { rowId: 'dsh-ray-preference-learning', pkgName: '@dsh-ray/preference-learning' },
 ] as const
 
 const SELF_ITERATION_TOGGLE_BY_ID = new Map<string, (typeof SELF_ITERATION_TOGGLE_SPECS)[number]>(
@@ -41,23 +41,23 @@ const SELF_ITERATION_TOGGLE_BY_PKG = new Map<string, (typeof SELF_ITERATION_TOGG
 )
 
 const PROTECTED_CONTROL_ROW_IDS = new Set([
-  'dsh-enhanced-assistant-web-owner',
-  'dsh-enhanced-owner-console',
-  'dsh-enhanced-lark-channel',
-  'dsh-enhanced-assistant-delivery',
-  'dsh-enhanced-personal-assistant',
-  'dsh-enhanced-assistant-policy',
-  'dsh-enhanced-assistant-goals',
+  'dsh-ray-assistant-web-owner',
+  'dsh-ray-owner-console',
+  'dsh-ray-lark-channel',
+  'dsh-ray-assistant-delivery',
+  'dsh-ray-personal-assistant',
+  'dsh-ray-assistant-policy',
+  'dsh-ray-assistant-goals',
 ])
 
 const PROTECTED_CONTROL_PACKAGE_NAMES = new Set([
-  '@dsh-enhanced/assistant-web-owner',
-  '@dsh-enhanced/owner-console',
-  '@dsh-enhanced/lark-channel',
-  '@dsh-enhanced/assistant-delivery',
-  '@dsh-enhanced/personal-assistant',
-  '@dsh-enhanced/assistant-policy',
-  '@dsh-enhanced/assistant-goals',
+  '@dsh-ray/assistant-web-owner',
+  '@dsh-ray/owner-console',
+  '@dsh-ray/lark-channel',
+  '@dsh-ray/assistant-delivery',
+  '@dsh-ray/personal-assistant',
+  '@dsh-ray/assistant-policy',
+  '@dsh-ray/assistant-goals',
 ])
 
 const DREAMING_REQUIRED_STRING_FIELDS = ['provider', 'model', 'budgetId'] as const
@@ -572,26 +572,26 @@ export async function applySelfIterationProfileToggle(input: Readonly<{
           row.delete('disabled')
           if (isMap(cfg)) {
             const cfgMap = cfg as YAMLMap
-            if (rowId === 'dsh-enhanced-assistant-dreaming') {
+            if (rowId === 'dsh-ray-assistant-dreaming') {
               if (hasDreamingRequiredFields(cfgMap)) {
                 cfgMap.set('enabled', true)
               }
               if (cfgMap.has('retired')) {
                 cfgMap.delete('retired')
               }
-            } else if (cfgMap.get('enabled') === false || rowId === 'dsh-enhanced-assistant-work-items') {
+            } else if (cfgMap.get('enabled') === false || rowId === 'dsh-ray-assistant-work-items') {
               cfgMap.set('enabled', true)
             }
-          } else if (rowId === 'dsh-enhanced-assistant-work-items') {
+          } else if (rowId === 'dsh-ray-assistant-work-items') {
             row.set('config', document.createNode({ enabled: true }))
           }
         } else {
           row.set('disabled', true)
           if (isMap(cfg)) {
-            if (rowId === 'dsh-enhanced-assistant-work-items' || cfg.has('enabled')) {
+            if (rowId === 'dsh-ray-assistant-work-items' || cfg.has('enabled')) {
               (cfg as YAMLMap).set('enabled', false)
             }
-          } else if (rowId === 'dsh-enhanced-assistant-work-items') {
+          } else if (rowId === 'dsh-ray-assistant-work-items') {
             row.set('config', document.createNode({ enabled: false }))
           }
         }
@@ -624,7 +624,7 @@ async function runDefaultAssistantUpgrade(input: Readonly<{
   env: Readonly<Record<string, string | undefined>>
 }>): Promise<OwnerSelfIterationControlResult> {
   try {
-    const cliPath = requireOptionalPeer.resolve('@dsh-enhanced/dsh-rsi-cli')
+    const cliPath = requireOptionalPeer.resolve('dsh-ray')
     const cliMod = await import(cliPath) as {
       upgradeAssistantAndRecover?: (opts: Record<string, unknown>) => Promise<{
         ok: boolean
@@ -655,11 +655,11 @@ async function runDefaultAssistantUpgrade(input: Readonly<{
       }
     }
   } catch {
-    // Fall back to invoking `dsh-rsi` CLI executable when programmatic import is unavailable.
+    // Fall back to invoking `dsh-ray` CLI executable when programmatic import is unavailable.
   }
   try {
     const { stdout } = await execFileAsync(
-      'dsh-rsi',
+      'dsh-ray',
       ['upgrade', '--profile', input.profile, '--dsh-home', input.dshHome, '--yes', '--json'],
       { env: input.env as NodeJS.ProcessEnv, timeout: 120_000 },
     )
@@ -673,7 +673,7 @@ async function runDefaultAssistantUpgrade(input: Readonly<{
     }
     return {
       ok: false,
-      error: parsed.error ?? 'dsh-rsi upgrade 未返回健康就绪状态。',
+      error: parsed.error ?? 'dsh-ray upgrade 未返回健康就绪状态。',
       reason: 'upgrade-failed',
     }
   } catch (error) {

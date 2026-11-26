@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { GoalStoreError } from '../src/types.ts'
 import { GoalWakeStore, type GoalWakeIntent } from '../src/wake-store.ts'
 

@@ -28,7 +28,7 @@ async function fixture() {
 }
 
 async function withProfileFallback(input: Awaited<ReturnType<typeof fixture>>) {
-  const name = '@dsh-enhanced/assistant-policy'
+  const name = '@dsh-ray/assistant-policy'
   const target = join(input.originalHome, 'profiles', 'assistant', 'node_modules', '.pnpm', 'node_modules', name)
   const projection = join(input.originalHome, 'profiles', 'assistant', '.dsh-module-fallback', 'node_modules', name)
   for (const home of [input.originalHome, input.stagedHome]) {
@@ -94,7 +94,7 @@ test('retires exact profile projections and wrapper while retaining the original
   expect(proof.profileCaches.assistant.projections).toHaveLength(1)
   await retireHostLocalSharedFallback({ proof, stagedHome: input.stagedHome })
   await verifyRetiredHostLocalSharedFallback({ proof, stagedHome: input.stagedHome })
-  expect(await readlink(join(input.originalHome, 'profiles', 'assistant', 'node_modules', '@dsh-enhanced', 'assistant-policy')))
+  expect(await readlink(join(input.originalHome, 'profiles', 'assistant', 'node_modules', '@dsh-ray', 'assistant-policy')))
     .toBe(input.projection)
   expect(await lstat(join(input.stagedHome, 'profiles', 'assistant', '.dsh-module-fallback')).catch(() => undefined))
     .toBeUndefined()
@@ -103,7 +103,7 @@ test('retires exact profile projections and wrapper while retaining the original
 test('rejects changed projection links and custom profile wrapper files', async () => {
   const input = await withProfileFallback(await fixture())
   const proof = await prepareHostLocalSharedFallback(input)
-  const link = join(input.stagedHome, 'profiles', 'assistant', 'node_modules', '@dsh-enhanced', 'assistant-policy')
+  const link = join(input.stagedHome, 'profiles', 'assistant', 'node_modules', '@dsh-ray', 'assistant-policy')
   await rm(link)
   await symlink(join(input.root, 'outside'), link)
   await expect(retireHostLocalSharedFallback({ proof, stagedHome: input.stagedHome }))

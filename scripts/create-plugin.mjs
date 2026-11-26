@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const templateRoot = join(repoRoot, 'templates', 'plugin')
 const pluginsRoot = join(repoRoot, 'plugins')
-const packageScope = '@dsh-enhanced'
+const packageScope = '@dsh-ray'
 const catalogMarker = '<!-- plugin-catalog:end -->'
 
 function fail(message) {
@@ -51,7 +51,7 @@ try {
 const replacements = new Map([
   ['{{PLUGIN_NAME}}', slug],
   ['{{PLUGIN_TITLE}}', titleFromSlug(slug)],
-  ['{{PLUGIN_ID}}', `dsh-enhanced-${slug}`],
+  ['{{PLUGIN_ID}}', `dsh-ray-${slug}`],
   ['{{PACKAGE_NAME}}', `${packageScope}/${slug}`],
 ])
 

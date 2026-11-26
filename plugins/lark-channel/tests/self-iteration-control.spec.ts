@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,70 +14,70 @@ const roots: string[] = []
 afterEach(async () => Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))))
 
 const samplePatch = [
-  '- id: dsh-enhanced-assistant-web-owner',
-  '  name: "@dsh-enhanced/assistant-web-owner"',
-  '- id: dsh-enhanced-owner-console',
-  '  name: "@dsh-enhanced/owner-console"',
-  '- id: dsh-enhanced-lark-channel',
-  '  name: "@dsh-enhanced/lark-channel"',
-  '- id: dsh-enhanced-assistant-delivery',
-  '  name: "@dsh-enhanced/assistant-delivery"',
+  '- id: dsh-ray-assistant-web-owner',
+  '  name: "@dsh-ray/assistant-web-owner"',
+  '- id: dsh-ray-owner-console',
+  '  name: "@dsh-ray/owner-console"',
+  '- id: dsh-ray-lark-channel',
+  '  name: "@dsh-ray/lark-channel"',
+  '- id: dsh-ray-assistant-delivery',
+  '  name: "@dsh-ray/assistant-delivery"',
   '  config:',
   '    ownerRoutes:',
   '      - id: owner-route-1',
   '        conversation: { channel: lark, account: primary-bot, tenant: tenant-a, kind: dm, chat: oc_dm }',
-  '- id: dsh-enhanced-personal-assistant',
-  '  name: "@dsh-enhanced/personal-assistant"',
+  '- id: dsh-ray-personal-assistant',
+  '  name: "@dsh-ray/personal-assistant"',
   '  config:',
   '    personalMemory:',
   "      databasePath: !!js dshHomePath('personal-memory/memory.sqlite')",
-  '- id: dsh-enhanced-assistant-policy',
-  '  name: "@dsh-enhanced/assistant-policy"',
-  '- id: dsh-enhanced-assistant-goals',
-  '  name: "@dsh-enhanced/assistant-goals"',
-  '- id: dsh-enhanced-assistant-work-items',
-  '  name: "@dsh-enhanced/assistant-work-items"',
+  '- id: dsh-ray-assistant-policy',
+  '  name: "@dsh-ray/assistant-policy"',
+  '- id: dsh-ray-assistant-goals',
+  '  name: "@dsh-ray/assistant-goals"',
+  '- id: dsh-ray-assistant-work-items',
+  '  name: "@dsh-ray/assistant-work-items"',
   '  config:',
   '    enabled: true',
   '    mode: auto',
-  '- id: dsh-enhanced-assistant-proactive',
-  '  name: "@dsh-enhanced/assistant-proactive"',
-  '- id: dsh-enhanced-assistant-growth-driver',
-  '  name: "@dsh-enhanced/assistant-growth-driver"',
-  '- id: dsh-enhanced-assistant-dreaming',
-  '  name: "@dsh-enhanced/assistant-dreaming"',
-  '- id: dsh-enhanced-assistant-memory-learning',
-  '  name: "@dsh-enhanced/assistant-memory-learning"',
-  '- id: dsh-enhanced-assistant-association',
-  '  name: "@dsh-enhanced/assistant-association"',
-  '- id: dsh-enhanced-assistant-evaluation',
-  '  name: "@dsh-enhanced/assistant-evaluation"',
-  '- id: dsh-enhanced-assistant-evolution',
-  '  name: "@dsh-enhanced/assistant-evolution"',
-  '- id: dsh-enhanced-preference-learning',
-  '  name: "@dsh-enhanced/preference-learning"',
+  '- id: dsh-ray-assistant-proactive',
+  '  name: "@dsh-ray/assistant-proactive"',
+  '- id: dsh-ray-assistant-growth-driver',
+  '  name: "@dsh-ray/assistant-growth-driver"',
+  '- id: dsh-ray-assistant-dreaming',
+  '  name: "@dsh-ray/assistant-dreaming"',
+  '- id: dsh-ray-assistant-memory-learning',
+  '  name: "@dsh-ray/assistant-memory-learning"',
+  '- id: dsh-ray-assistant-association',
+  '  name: "@dsh-ray/assistant-association"',
+  '- id: dsh-ray-assistant-evaluation',
+  '  name: "@dsh-ray/assistant-evaluation"',
+  '- id: dsh-ray-assistant-evolution',
+  '  name: "@dsh-ray/assistant-evolution"',
+  '- id: dsh-ray-preference-learning',
+  '  name: "@dsh-ray/preference-learning"',
 ].join('\n') + '\n'
 
 const protectedIds = [
-  'dsh-enhanced-assistant-web-owner',
-  'dsh-enhanced-owner-console',
-  'dsh-enhanced-lark-channel',
-  'dsh-enhanced-assistant-delivery',
-  'dsh-enhanced-personal-assistant',
-  'dsh-enhanced-assistant-policy',
-  'dsh-enhanced-assistant-goals',
+  'dsh-ray-assistant-web-owner',
+  'dsh-ray-owner-console',
+  'dsh-ray-lark-channel',
+  'dsh-ray-assistant-delivery',
+  'dsh-ray-personal-assistant',
+  'dsh-ray-assistant-policy',
+  'dsh-ray-assistant-goals',
 ]
 
 const toggledIds = [
-  'dsh-enhanced-assistant-work-items',
-  'dsh-enhanced-assistant-proactive',
-  'dsh-enhanced-assistant-growth-driver',
-  'dsh-enhanced-assistant-dreaming',
-  'dsh-enhanced-assistant-memory-learning',
-  'dsh-enhanced-assistant-association',
-  'dsh-enhanced-assistant-evaluation',
-  'dsh-enhanced-assistant-evolution',
-  'dsh-enhanced-preference-learning',
+  'dsh-ray-assistant-work-items',
+  'dsh-ray-assistant-proactive',
+  'dsh-ray-assistant-growth-driver',
+  'dsh-ray-assistant-dreaming',
+  'dsh-ray-assistant-memory-learning',
+  'dsh-ray-assistant-association',
+  'dsh-ray-assistant-evaluation',
+  'dsh-ray-assistant-evolution',
+  'dsh-ray-preference-learning',
 ]
 
 describe('Lark self-iteration NL & slash controls', () => {
@@ -96,11 +96,11 @@ describe('Lark self-iteration NL & slash controls', () => {
     for (const id of toggledIds) {
       expect(disabledRows.find(row => row.id === id)?.disabled).toBe(true)
     }
-    expect(disabledRows.find(row => row.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(false)
+    expect(disabledRows.find(row => row.id === 'dsh-ray-assistant-work-items')?.config?.enabled).toBe(false)
     for (const id of protectedIds) {
       expect(disabledRows.find(row => row.id === id)?.disabled).not.toBe(true)
     }
-    expect(disabledRows.find(row => row.id === 'dsh-enhanced-assistant-delivery')?.config?.ownerRoutes).toHaveLength(1)
+    expect(disabledRows.find(row => row.id === 'dsh-ray-assistant-delivery')?.config?.ownerRoutes).toHaveLength(1)
 
     const enabled = await applySelfIterationProfileToggle({ dshHome: home, profile: 'lark', enable: true })
     expect(enabled).toMatchObject({ ok: true, state: 'enabled' })
@@ -108,7 +108,7 @@ describe('Lark self-iteration NL & slash controls', () => {
     for (const id of toggledIds) {
       expect(enabledRows.find(row => row.id === id)?.disabled).toBeUndefined()
     }
-    expect(enabledRows.find(row => row.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(true)
+    expect(enabledRows.find(row => row.id === 'dsh-ray-assistant-work-items')?.config?.enabled).toBe(true)
   })
 
   test('toggles nested insert: sequences, clears retired flag, and guards assistant-dreaming enabled on 6 prerequisites + lineWidth: 0', async () => {
@@ -119,15 +119,15 @@ describe('Lark self-iteration NL & slash controls', () => {
     const longPath = '/data00/very/long/nested/workspace/path/exceeding/eighty/characters/to/verify/line-width-zero/no-wrap'
     const nestedPatch = [
       '- insert:',
-      '    - id: dsh-enhanced-lark-channel',
-      '      name: "@dsh-enhanced/lark-channel"',
-      '    - id: dsh-enhanced-assistant-work-items',
-      '      name: "@dsh-enhanced/assistant-work-items"',
+      '    - id: dsh-ray-lark-channel',
+      '      name: "@dsh-ray/lark-channel"',
+      '    - id: dsh-ray-assistant-work-items',
+      '      name: "@dsh-ray/assistant-work-items"',
       '      disabled: true',
       '      config:',
       '        enabled: false',
-      '    - id: dsh-enhanced-assistant-dreaming',
-      '      name: "@dsh-enhanced/assistant-dreaming"',
+      '    - id: dsh-ray-assistant-dreaming',
+      '      name: "@dsh-ray/assistant-dreaming"',
       '      disabled: true',
       '      config:',
       '        enabled: false',
@@ -145,20 +145,20 @@ describe('Lark self-iteration NL & slash controls', () => {
       insert?: Array<{ id: string; disabled?: boolean; config?: Record<string, any> }>
     }>
     const inserted = afterEnable[0]!.insert!
-    expect(inserted.find(r => r.id === 'dsh-enhanced-lark-channel')?.disabled).toBeUndefined()
-    expect(inserted.find(r => r.id === 'dsh-enhanced-assistant-work-items')).toMatchObject({
+    expect(inserted.find(r => r.id === 'dsh-ray-lark-channel')?.disabled).toBeUndefined()
+    expect(inserted.find(r => r.id === 'dsh-ray-assistant-work-items')).toMatchObject({
       config: { enabled: true },
     })
-    expect(inserted.find(r => r.id === 'dsh-enhanced-assistant-work-items')?.disabled).toBeUndefined()
-    const dreamingIncomplete = inserted.find(r => r.id === 'dsh-enhanced-assistant-dreaming')!
+    expect(inserted.find(r => r.id === 'dsh-ray-assistant-work-items')?.disabled).toBeUndefined()
+    const dreamingIncomplete = inserted.find(r => r.id === 'dsh-ray-assistant-dreaming')!
     expect(dreamingIncomplete.disabled).toBeUndefined()
     expect(dreamingIncomplete.config?.enabled).toBe(false)
     expect(dreamingIncomplete.config).not.toHaveProperty('retired')
 
     // 2. Complete dreaming prerequisites (all 6 fields including map scope): enables dreaming & clears retired
     const completeDreamPatch = [
-      '- id: dsh-enhanced-assistant-dreaming',
-      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '- id: dsh-ray-assistant-dreaming',
+      '  name: "@dsh-ray/assistant-dreaming"',
       '  disabled: true',
       '  config:',
       '    enabled: false',
@@ -201,7 +201,7 @@ describe('Lark self-iteration NL & slash controls', () => {
     const homePatchLink = join(root, 'home-patch-link')
     await mkdir(join(homePatchLink, 'profiles', 'lark'), { recursive: true, mode: 0o700 })
     const victimPatch = join(root, 'victim-patch.yml')
-    const victimInitial = '- id: dsh-enhanced-assistant-work-items\n  name: "@dsh-enhanced/assistant-work-items"\n  config:\n    enabled: true\n'
+    const victimInitial = '- id: dsh-ray-assistant-work-items\n  name: "@dsh-ray/assistant-work-items"\n  config:\n    enabled: true\n'
     await writeFile(victimPatch, victimInitial, { mode: 0o600 })
     const patchSymlink = join(homePatchLink, 'profiles', 'lark', 'cordis.patch.yml')
     await symlink(victimPatch, patchSymlink)
@@ -245,8 +245,8 @@ describe('Lark self-iteration NL & slash controls', () => {
       {
         name: 'string scope',
         yaml: [
-          '- id: dsh-enhanced-assistant-dreaming',
-          '  name: "@dsh-enhanced/assistant-dreaming"',
+          '- id: dsh-ray-assistant-dreaming',
+          '  name: "@dsh-ray/assistant-dreaming"',
           '  disabled: true',
           '  config:',
           '    enabled: false',
@@ -262,8 +262,8 @@ describe('Lark self-iteration NL & slash controls', () => {
       {
         name: 'relative paths',
         yaml: [
-          '- id: dsh-enhanced-assistant-dreaming',
-          '  name: "@dsh-enhanced/assistant-dreaming"',
+          '- id: dsh-ray-assistant-dreaming',
+          '  name: "@dsh-ray/assistant-dreaming"',
           '  disabled: true',
           '  config:',
           '    enabled: false',
@@ -282,8 +282,8 @@ describe('Lark self-iteration NL & slash controls', () => {
       {
         name: 'non-canonical workspace and oversized budgetAmount',
         yaml: [
-          '- id: dsh-enhanced-assistant-dreaming',
-          '  name: "@dsh-enhanced/assistant-dreaming"',
+          '- id: dsh-ray-assistant-dreaming',
+          '  name: "@dsh-ray/assistant-dreaming"',
           '  disabled: true',
           '  config:',
           '    enabled: false',
@@ -449,7 +449,7 @@ describe('Lark self-iteration NL & slash controls', () => {
     if (nonOwnerGroup.outcome === 'accept') await delivery.acceptInbound(nonOwnerGroup.envelope)
     await drive()
     expect(sends.at(-1)?.text).toContain('当前身份不是此会话的 owner')
-    expect(parse(await readFile(patchPath, 'utf8')).find((r: { id: string }) => r.id === 'dsh-enhanced-assistant-work-items').disabled).toBeUndefined()
+    expect(parse(await readFile(patchPath, 'utf8')).find((r: { id: string }) => r.id === 'dsh-ray-assistant-work-items').disabled).toBeUndefined()
 
     // Owner group @bot uppercase slash command disables self-iteration
     const ownerUpperDisable = normalizeLarkMessage(inboundConfig, {
@@ -468,7 +468,7 @@ describe('Lark self-iteration NL & slash controls', () => {
     if (ownerUpperDisable.outcome === 'accept') await delivery.acceptInbound(ownerUpperDisable.envelope)
     await drive()
     expect(sends.at(-1)?.text).toContain('已关闭')
-    expect(parse(await readFile(patchPath, 'utf8')).find((r: { id: string }) => r.id === 'dsh-enhanced-assistant-work-items').disabled).toBe(true)
+    expect(parse(await readFile(patchPath, 'utf8')).find((r: { id: string }) => r.id === 'dsh-ray-assistant-work-items').disabled).toBe(true)
 
     // Re-enable before testing lowercase /autonomy disable
     const ownerRestore = normalizeLarkMessage(inboundConfig, {
@@ -486,7 +486,7 @@ describe('Lark self-iteration NL & slash controls', () => {
     expect(ownerRestore.outcome).toBe('accept')
     if (ownerRestore.outcome === 'accept') await delivery.acceptInbound(ownerRestore.envelope)
     await drive()
-    expect(parse(await readFile(patchPath, 'utf8')).find((r: { id: string }) => r.id === 'dsh-enhanced-assistant-work-items').disabled).toBeUndefined()
+    expect(parse(await readFile(patchPath, 'utf8')).find((r: { id: string }) => r.id === 'dsh-ray-assistant-work-items').disabled).toBeUndefined()
 
     // Owner group @bot slash command disables self-iteration
     const ownerDisable = normalizeLarkMessage(inboundConfig, {
@@ -505,7 +505,7 @@ describe('Lark self-iteration NL & slash controls', () => {
     if (ownerDisable.outcome === 'accept') await delivery.acceptInbound(ownerDisable.envelope)
     await drive()
     expect(sends.at(-1)?.text).toContain('已关闭')
-    expect(parse(await readFile(patchPath, 'utf8')).find((r: { id: string }) => r.id === 'dsh-enhanced-assistant-work-items').disabled).toBe(true)
+    expect(parse(await readFile(patchPath, 'utf8')).find((r: { id: string }) => r.id === 'dsh-ray-assistant-work-items').disabled).toBe(true)
 
     // Owner DM NL command re-enables self-iteration
     const ownerEnable = normalizeLarkMessage(inboundConfig, {
@@ -524,7 +524,7 @@ describe('Lark self-iteration NL & slash controls', () => {
     if (ownerEnable.outcome === 'accept') await delivery.acceptInbound(ownerEnable.envelope)
     await drive()
     expect(sends.at(-1)?.text).toContain('已开启')
-    expect(parse(await readFile(patchPath, 'utf8')).find((r: { id: string }) => r.id === 'dsh-enhanced-assistant-work-items').disabled).toBeUndefined()
+    expect(parse(await readFile(patchPath, 'utf8')).find((r: { id: string }) => r.id === 'dsh-ray-assistant-work-items').disabled).toBeUndefined()
 
     // Owner DM NL upgrade invokes runUpgrade
     const ownerUpgrade = normalizeLarkMessage(inboundConfig, {
@@ -800,7 +800,7 @@ describe('Lark self-iteration NL & slash controls', () => {
       if (normalized.outcome === 'accept') await delivery.acceptInbound(normalized.envelope)
       await drive()
       const reply = sends.at(-1)?.text ?? ''
-      expect(reply).toContain('助手版本：dsh-enhanced v')
+      expect(reply).toContain('助手版本：dsh-ray v')
       expect(reply).toContain('自迭代演进统计')
       expect(reply).not.toContain('自迭代控制服务尚未启用')
     }
@@ -808,9 +808,9 @@ describe('Lark self-iteration NL & slash controls', () => {
     // 2. With ownerConsole.versionInfo registered: delegates cleanly
     const versionInfo = vi.fn(async () => ({
       schemaVersion: 1 as const,
-      protocol: 'dsh-rsi/version/v1' as const,
+      protocol: 'dsh-ray/version/v1' as const,
       generatedAt: now + 100,
-      assistant: { name: 'dsh-enhanced' as const, version: '0.1.83' },
+      assistant: { name: 'dsh-ray' as const, version: '0.1.83' },
       host: { packageName: '@deepseek-ai/dsh' as const, boundVersion: '0.2.2-rc.5', boundStatus: 'ready', runningVersion: '0.2.2-rc.5' },
       profile: 'lark',
       plugins: { state: 'ok' as const, coreCount: 36, evolvedCount: 2, activeEvolvedCount: 2, core: [], evolved: [] },

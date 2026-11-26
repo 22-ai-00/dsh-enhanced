@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type {
   HostAutomationExecutionSpec,
   HostAutomationExecutorInput,
-} from '@dsh-enhanced/assistant-automations'
+} from '@dsh-ray/assistant-automations'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   RECOVERY_EXECUTOR_CONTRACT_VERSION,

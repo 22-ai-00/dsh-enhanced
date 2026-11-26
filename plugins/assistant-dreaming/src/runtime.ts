@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput,
-  HostAutomationExecutorResult, SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+  HostAutomationExecutorResult, SystemAutomationReconcileInput } from '@dsh-ray/assistant-automations'
+import type { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
+import type { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import type { AssistantGoalsService } from '@dsh-ray/assistant-goals'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import type { AssistantSkillsService } from '@dsh-ray/assistant-skills'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { Config, normalizeConfig, type DreamingConfig, type NormalizedDreamingConfig } from './config.js'
 import { DreamStore, ownData, type DreamIdea, type IdeaEvent, type IdeaState } from './store.js'
 import { decideTrigger, localDayKey, assignTicket, rollLottery, matchTickets, type LotterySubject } from './trigger.js'
@@ -295,7 +295,7 @@ export class AssistantDreamingService extends Service {
   }
 
   #automationId(): string {
-    return `dsh-enhanced-assistant-dreaming:${this.#lane}`
+    return `dsh-ray-assistant-dreaming:${this.#lane}`
   }
 
   #configDigest(): string {

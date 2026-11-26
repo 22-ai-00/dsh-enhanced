@@ -3,13 +3,13 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import { SessionStore } from '@deepseek-ai/dsh-session'
-import { resolveLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import { resolveLlmRouteCapability } from '@dsh-ray/llm-route-capabilities'
 import { describe, expect, it } from 'vitest'
 import * as Plugin from '../src/index.ts'
 
-describe('dsh-enhanced-traex-acp-provider', () => {
+describe('dsh-ray-traex-acp-provider', () => {
   it('exposes stable plugin and injection identity', () => {
-    expect(Plugin.name).toBe('dsh-enhanced-traex-acp-provider')
+    expect(Plugin.name).toBe('dsh-ray-traex-acp-provider')
     expect(Plugin.inject).toEqual(['llm', 'sessions', 'agents'])
     expect(Plugin.probeTraexReadiness).toBeTypeOf('function')
     expect(Plugin.probeAcpReadiness).toBeTypeOf('function')

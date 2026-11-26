@@ -55,7 +55,7 @@ function clientContext() {
 describe('owner console client bundle', () => {
   it('registers the sidebar entry and keyed main panel from the emitted bundle', async () => {
     const registration = loadBundle()
-    expect(registration.id).toBe('@dsh-enhanced/owner-console')
+    expect(registration.id).toBe('@dsh-ray/owner-console')
     const React = require('react') as unknown
     const jsxRuntime = require('react/jsx-runtime') as unknown
     const module = registration.factory(id => {
@@ -75,13 +75,13 @@ describe('owner console client bundle', () => {
       { name: 'settings.section.icon', id: 'wenyao-assistant' },
       { name: 'settings.general.item', id: 'wenyao-coding-tool', order: 20 },
       { name: 'settings.models.footer', id: 'wenyao-coding-agents', order: 20 },
-      { name: 'settings.models.provider-card', key: 'dsh-enhanced-traex-acp-provider' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/traex-acp-provider' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/lark-channel' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-proactive' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-dreaming' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-growth-driver' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-memory-learning' },
+      { name: 'settings.models.provider-card', key: 'dsh-ray-traex-acp-provider' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/traex-acp-provider' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/lark-channel' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/assistant-proactive' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/assistant-dreaming' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/assistant-growth-driver' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/assistant-memory-learning' },
     ])
     expect((fake.registrations[0]!.options['label'] as () => string)()).toBe('文鳐')
     expect((fake.registrations[3]!.options['label'] as () => string)()).toBe('文鳐助手')
@@ -109,13 +109,13 @@ describe('owner console client bundle', () => {
     expect(source).not.toMatch(/https?:\/\/[^\s'"]+\.(?:png|jpe?g|webp|gif|svg)/i)
     await release()
     expect(fake.disposed).toEqual([
-      'plugins.bundle.config', '@dsh-enhanced/assistant-memory-learning',
-      'plugins.bundle.config', '@dsh-enhanced/assistant-growth-driver',
-      'plugins.bundle.config', '@dsh-enhanced/assistant-dreaming',
-      'plugins.bundle.config', '@dsh-enhanced/assistant-proactive',
-      'plugins.bundle.config', '@dsh-enhanced/lark-channel',
-      'plugins.bundle.config', '@dsh-enhanced/traex-acp-provider',
-      'settings.models.provider-card', 'dsh-enhanced-traex-acp-provider',
+      'plugins.bundle.config', '@dsh-ray/assistant-memory-learning',
+      'plugins.bundle.config', '@dsh-ray/assistant-growth-driver',
+      'plugins.bundle.config', '@dsh-ray/assistant-dreaming',
+      'plugins.bundle.config', '@dsh-ray/assistant-proactive',
+      'plugins.bundle.config', '@dsh-ray/lark-channel',
+      'plugins.bundle.config', '@dsh-ray/traex-acp-provider',
+      'settings.models.provider-card', 'dsh-ray-traex-acp-provider',
       'settings.models.footer', 'wenyao-coding-agents',
       'settings.general.item', 'wenyao-coding-tool',
       'settings.section.icon', 'wenyao-assistant',

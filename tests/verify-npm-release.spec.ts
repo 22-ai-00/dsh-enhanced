@@ -112,7 +112,7 @@ describe('verify-npm-release', () => {
     expect(packages).toHaveLength(40)
     expect(pluginCount).toBe(36)
     expect(packageCount).toBe(4)
-    expect(packages.some((pkg: { name: string }) => pkg.name === '@dsh-enhanced/assistant-association')).toBe(true)
+    expect(packages.some((pkg: { name: string }) => pkg.name === '@dsh-ray/assistant-association')).toBe(true)
 
     const fixtureRoot = await createTempDir()
     await mkdir(join(fixtureRoot, 'plugins', 'public-one'), { recursive: true })
@@ -257,7 +257,7 @@ describe('verify-npm-release', () => {
     expect(seenHeaders[0]?.['cache-control']).toBe('no-cache')
   })
 
-  test('fails 39/40 without short-circuiting when @dsh-enhanced/assistant-association returns 404', async () => {
+  test('fails 39/40 without short-circuiting when @dsh-ray/assistant-association returns 404', async () => {
     const queriedPackages = new Set<string>()
     const { url } = await startMockRegistry((req, res) => {
       const packageName = extractRequestedPackage(req.url ?? '/')
@@ -267,7 +267,7 @@ describe('verify-npm-release', () => {
         return
       }
       queriedPackages.add(packageName)
-      if (packageName === '@dsh-enhanced/assistant-association') {
+      if (packageName === '@dsh-ray/assistant-association') {
         res.statusCode = 404
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify({ error: 'Not found' }))
@@ -294,7 +294,7 @@ describe('verify-npm-release', () => {
     expect(report.failed).toHaveLength(1)
     expect(report.failed[0]).toMatchObject({
       ok: false,
-      name: '@dsh-enhanced/assistant-association',
+      name: '@dsh-ray/assistant-association',
       status: 404,
       attempts: 2,
     })
@@ -312,24 +312,24 @@ describe('verify-npm-release', () => {
       const attempt = (counts.get(packageName) ?? 0) + 1
       counts.set(packageName, attempt)
 
-      if (packageName === '@dsh-enhanced/assistant-association' && attempt <= 2) {
+      if (packageName === '@dsh-ray/assistant-association' && attempt <= 2) {
         res.statusCode = 404
         res.end('Not found yet')
         return
       }
-      if (packageName === '@dsh-enhanced/acp' && attempt <= 2) {
+      if (packageName === '@dsh-ray/acp' && attempt <= 2) {
         res.statusCode = 503
         res.setHeader('retry-after', '0')
         res.end('Unavailable')
         return
       }
-      if (packageName === '@dsh-enhanced/dsh-rsi-cli' && attempt === 1) {
+      if (packageName === 'dsh-ray' && attempt === 1) {
         res.statusCode = 200
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify(makePackument(url, packageName, ['0.1.83'], '0.1.83')))
         return
       }
-      if (packageName === '@dsh-enhanced/assistant-actions' && attempt === 1) {
+      if (packageName === '@dsh-ray/assistant-actions' && attempt === 1) {
         res.statusCode = 200
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify(makePackument(url, packageName, ['0.1.83', '0.1.84'], '0.1.83')))
@@ -352,10 +352,10 @@ describe('verify-npm-release', () => {
 
     expect(report.ok).toBe(true)
     expect(report.passed).toBe(40)
-    expect(counts.get('@dsh-enhanced/assistant-association')).toBe(3)
-    expect(counts.get('@dsh-enhanced/acp')).toBe(3)
-    expect(counts.get('@dsh-enhanced/dsh-rsi-cli')).toBe(2)
-    expect(counts.get('@dsh-enhanced/assistant-actions')).toBe(2)
+    expect(counts.get('@dsh-ray/assistant-association')).toBe(3)
+    expect(counts.get('@dsh-ray/acp')).toBe(3)
+    expect(counts.get('dsh-ray')).toBe(2)
+    expect(counts.get('@dsh-ray/assistant-actions')).toBe(2)
   })
 
   test('fails on exhausted retries, non-retryable 4xx/mismatches, dist-tag mismatch, and missing tarball', async () => {
@@ -533,7 +533,7 @@ describe('verify-npm-release', () => {
         res.end()
         return
       }
-      if (failAssociation && packageName === '@dsh-enhanced/assistant-association') {
+      if (failAssociation && packageName === '@dsh-ray/assistant-association') {
         res.statusCode = 404
         res.end('not found')
         return
@@ -573,7 +573,7 @@ describe('verify-npm-release', () => {
     )
     expect(failRun.status).toBe(1)
     expect(failRun.stdout).toContain('Verified 39/40 packages at 0.1.84')
-    expect(failRun.stderr).toContain('@dsh-enhanced/assistant-association')
+    expect(failRun.stderr).toContain('@dsh-ray/assistant-association')
     expect(failRun.stderr).toContain('HTTP 404')
 
     const jsonFailRun = await runVerifyCli([
@@ -592,7 +592,7 @@ describe('verify-npm-release', () => {
     expect(parsedJson.ok).toBe(false)
     expect(parsedJson.total).toBe(40)
     expect(parsedJson.passed).toBe(39)
-    expect(parsedJson.failed[0]?.name).toBe('@dsh-enhanced/assistant-association')
+    expect(parsedJson.failed[0]?.name).toBe('@dsh-ray/assistant-association')
 
     const badArgRun = await runVerifyCli(['--unknown-flag'])
     expect(badArgRun.status).toBe(1)

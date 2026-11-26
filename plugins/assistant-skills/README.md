@@ -3,15 +3,15 @@
 Save a successfully verified Goal's tool workflow and reuse it in a new Goal. The optional bundle publishes private, versioned skills through the native DSH skill catalog and executes fixed steps through the current Agent's native ToolRuntime.
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-skills
+dsh plugin --profile web add @dsh-ray/assistant-skills
 ```
 
-Install the Goals, Delivery and Policy bundles and native Skills/Tools services in the same Host (see the repository [compatibility baseline](../../docs/compatibility.md)). Use matching release versions of `@dsh-enhanced/assistant-goals` with native execution and independent whole-goal verification configured; this supplies the Host-only failure-evidence and exact-run-proof APIs used by failure candidates and causal canary watches. This bundle never enables those services or creates acceptance profiles automatically.
+Install the Goals, Delivery and Policy bundles and native Skills/Tools services in the same Host (see the repository [compatibility baseline](../../docs/compatibility.md)). Use matching release versions of `@dsh-ray/assistant-goals` with native execution and independent whole-goal verification configured; this supplies the Host-only failure-evidence and exact-run-proof APIs used by failure candidates and causal canary watches. This bundle never enables those services or creates acceptance profiles automatically.
 
 Configuration:
 
 ```yaml
-- id: dsh-enhanced-assistant-skills
+- id: dsh-ray-assistant-skills
   config:
     databasePath: /private/state/assistant-skills.sqlite
     allowedTools: [read, write, edit]
@@ -36,9 +36,9 @@ Skills declare one of four closed `SkillCompensationKind` modes (defaulting to `
 - `stop-and-report`: stops remaining steps on failure and leaves effects unchanged for explicit owner-directed repair.
 - `rollback-state`: captures bounded preimages (`<= 256 KiB`, rejecting symlinks and workspace escapes) before mutating `write`, `edit`, and multi-file `apply_patch` steps and restores confirmed succeeded steps (as well as preimaged partial `apply_patch` failures settled as `failed`) in reverse execution order on run failure (writing back prior file content via `write` or contained `O_NOFOLLOW` restoration when `apply_patch`/`edit` is allowed, or removing newly created regular files via registered/contained undo, skipping read-only observation probes in `NON_MUTATING_OBSERVATION_TOOLS`). Partial `apply_patch` commits returning `unknown` operations settle conservatively as `unknown` (`skipped-unknown` without speculative rollback).
 - `compensating-action`: executes statically declared `compensationPlan` undo tool steps in reverse order of confirmed succeeded steps through `ToolRuntime` subject to `Config.allowedTools`, Policy, and `AbortSignal`.
-- `compensate-via-registry`: delegates reverse-order compensation of confirmed succeeded steps (with optional structured target snapshot preimages when `capturePreimage: true`) to a locally registered `SkillCompensationHandler` (`registerCompensator`) or the optional `@dsh-enhanced/assistant-recovery` service (`ctx.get('assistantCompensation', false) ?? ctx.get('assistantRecovery', false)`); if neither exists, it fails closed with `compensation-registry-unavailable` without blocking standalone activation.
+- `compensate-via-registry`: delegates reverse-order compensation of confirmed succeeded steps (with optional structured target snapshot preimages when `capturePreimage: true`) to a locally registered `SkillCompensationHandler` (`registerCompensator`) or the optional `@dsh-ray/assistant-recovery` service (`ctx.get('assistantCompensation', false) ?? ctx.get('assistantRecovery', false)`); if neither exists, it fails closed with `compensation-registry-unavailable` without blocking standalone activation.
 
-All non-default compensation modes persist a durable `skill_compensations` audit trail keyed by deterministic idempotency keys (`skill_status(run_id)` surfaces `compensations`), recover interrupted `pending` compensations as `unknown` on restart without replay, and **never** auto-compensate `unknown` steps or runs (recording `skipped-unknown` instead). `@dsh-enhanced/assistant-recovery` is an optional peer dependency only and is never required in `cordis.patch.yml` or runtime `dependencies`.
+All non-default compensation modes persist a durable `skill_compensations` audit trail keyed by deterministic idempotency keys (`skill_status(run_id)` surfaces `compensations`), recover interrupted `pending` compensations as `unknown` on restart without replay, and **never** auto-compensate `unknown` steps or runs (recording `skipped-unknown` instead). `@dsh-ray/assistant-recovery` is an optional peer dependency only and is never required in `cordis.patch.yml` or runtime `dependencies`.
 
 ### Workflow families, preconditions, and bounded replay
 
@@ -70,7 +70,7 @@ For an iterative Goal, the owner bridge may provide contiguous native-round `seg
 
 A successful `goal_checkpoint` with the exact source Goal ID and strictly validated planning parameters remains in the immutable source trace but is excluded from executable steps. These are historical planning notes, not read-only observations, acceptance or future authority. They cannot receive input bindings, and their IDs and bytes still count toward the full trace bounds. Planning-only traces, failed checkpoints, foreign Goal IDs and other Goal controls remain rejected. Dependencies between executable steps skip these non-replayed notes.
 
-Background capture requires a separate explicit Policy `capture` rule for subject `{ kind: background, id: dsh-enhanced-assistant-skills, workspace, principal }` and the exact evolution resource, plus a stable capture authorization budget key. Route, Policy, parent, and definition are checked before and after the Goals Host read. Revocation, expiry, parent/definition drift, and unsupported traces stop the record. The typed Goals bridge reports `pending` or `unavailable` while a source may still become complete; `unknown` and `rejected` bridge failures are recorded as terminal capture `unknown` and never replayed automatically. Captured candidates remain private and pending until the existing owner-requested trial/activation flow runs.
+Background capture requires a separate explicit Policy `capture` rule for subject `{ kind: background, id: dsh-ray-assistant-skills, workspace, principal }` and the exact evolution resource, plus a stable capture authorization budget key. Route, Policy, parent, and definition are checked before and after the Goals Host read. Revocation, expiry, parent/definition drift, and unsupported traces stop the record. The typed Goals bridge reports `pending` or `unavailable` while a source may still become complete; `unknown` and `rejected` bridge failures are recorded as terminal capture `unknown` and never replayed automatically. Captured candidates remain private and pending until the existing owner-requested trial/activation flow runs.
 
 ## Failure-driven candidates
 
@@ -80,7 +80,7 @@ The repair's successful trace supplies the pending candidate definition; the fai
 
 ## Finite outcome watches
 
-An owner may explicitly create `skill_watch` for one current version and its immediate-parent fallback metadata. It requires the current authenticated owner request, Policy `watch` permission, a configured `owner_route_id`, an absolute `expires_at`, `max_runs`, and `failure_threshold`. The lifetime is at most seven days, `max_runs` is 1–100, and `failure_threshold` is 1–`max_runs`. Policy must also explicitly allow background `watch` on `{ kind: evolution, id: verified-workflows }` for subject `{ kind: background, id: dsh-enhanced-assistant-skills, workspace, principal }`, with background initiator. The route is revalidated before every durable evidence read. A revoked or changed route, expiry, retirement, or any version/digest change stops the watch; it does not follow a newer version.
+An owner may explicitly create `skill_watch` for one current version and its immediate-parent fallback metadata. It requires the current authenticated owner request, Policy `watch` permission, a configured `owner_route_id`, an absolute `expires_at`, `max_runs`, and `failure_threshold`. The lifetime is at most seven days, `max_runs` is 1–100, and `failure_threshold` is 1–`max_runs`. Policy must also explicitly allow background `watch` on `{ kind: evolution, id: verified-workflows }` for subject `{ kind: background, id: dsh-ray-assistant-skills, workspace, principal }`, with background initiator. The route is revalidated before every durable evidence read. A revoked or changed route, expiry, retirement, or any version/digest change stops the watch; it does not follow a newer version.
 
 The watch records a durable run watermark at creation and observes only later `skill_run` calls that actually succeed and whose native Goal execution-run binding was durably recorded. A Verifier receipt is merely a nudge: the service rereads Goals' owner-scoped snapshot, matches the exact execution run and immutable Goal definition, then accepts only a fresh, unexpired independent whole-goal `achieved` or `not-achieved` receipt. Each invocation and receipt digest is counted once, up to the first `max_runs` attached runs; it stops as exhausted when all of those runs have qualifying outcomes without reaching the failure threshold. Repeated receipts, old receipts, wrong Goals/runs, old skill versions and unknown evidence do not count. Reconciliation also runs after restart; it creates no scheduler or polling loop.
 
@@ -197,7 +197,7 @@ whole-goal acceptance, and a compatible registered budget meter. The selected
 preset and model must support the required native tool protocol. Background
 Policy must permit both identities: the configured preset's background Agent
 needs Goal `create/observe/execute`, its allowed file tools, and Skills
-`draft/compare/canary/watch`; the `dsh-enhanced-assistant-skills` background
+`draft/compare/canary/watch`; the `dsh-ray-assistant-skills` background
 service needs `draft/compare/canary/promote/watch/rollback`. Scope both to the
 authorized principal and workspace. `notify: true` additionally requires the
 service's background message `send` permission. Allowing only the service does

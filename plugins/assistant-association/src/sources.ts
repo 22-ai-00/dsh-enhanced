@@ -4,44 +4,44 @@ import type {
   AutomationDefinitionChangeEvent,
   AutomationRecord,
   AssistantAutomationsService,
-} from '@dsh-enhanced/assistant-automations'
+} from '@dsh-ray/assistant-automations'
 import type {
   AssistantDeliveryService,
   OwnerForegroundTaskSourceContent,
   OwnerForegroundTaskSourceCursor,
   OwnerRouteScopeSummary,
-} from '@dsh-enhanced/assistant-delivery'
-import type { AssistantDreamingService } from '@dsh-enhanced/assistant-dreaming'
+} from '@dsh-ray/assistant-delivery'
+import type { AssistantDreamingService } from '@dsh-ray/assistant-dreaming'
 import type {
   AssistantEvaluationService,
   TrustedTaskLearningProjectionReceipt,
-} from '@dsh-enhanced/assistant-evaluation'
+} from '@dsh-ray/assistant-evaluation'
 import type {
   AssistantGoalsService,
   GoalRecord,
   GoalRecordChangeEvent,
-} from '@dsh-enhanced/assistant-goals'
-import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
+} from '@dsh-ray/assistant-goals'
+import type { AssistantSkillsService } from '@dsh-ray/assistant-skills'
 import type {
   AssistantWorkItemsService,
   WorkItemChangeEvent,
   WorkItemSummaryForHost,
-} from '@dsh-enhanced/assistant-work-items'
+} from '@dsh-ray/assistant-work-items'
 import type {
   EventTriggersService,
   OwnerOutboxEventSummary,
-} from '@dsh-enhanced/event-triggers'
+} from '@dsh-ray/event-triggers'
 import type {
   MemoryAgentContext,
   MemoryRecord,
   MemoryRecordChangeEvent,
   PersonalMemoryService,
-} from '@dsh-enhanced/personal-memory'
+} from '@dsh-ray/personal-memory'
 import type {
   PersonalWikiService,
   WikiPage,
   WikiPageChangeEvent,
-} from '@dsh-enhanced/personal-wiki'
+} from '@dsh-ray/personal-wiki'
 import {
   DEFAULT_ASSOCIATION_DREAMING_CONFIG,
   projectDreamIdeasToAssociation,

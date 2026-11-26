@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { linuxPluginBehaviorRuntimeDigest, prepareLinuxPluginBehaviorRuntime, readLinuxPluginBehaviorPreparation, readLinuxPluginBehaviorRuntime,
   validateLinuxPluginBehaviorRuntime, verifyLinuxPluginBehaviorAdoptionRuntime, verifyLinuxPluginBehaviorRuntime, type LinuxPluginBehaviorRuntime } from '../src/linux-behavior-runtime.js'

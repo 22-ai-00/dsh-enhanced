@@ -59,7 +59,7 @@ describe('web owner real route preparation', () => {
     const patch: any = { contents: { add: (node: unknown) => calls.push(node) }, createNode: (node: unknown) => node }
     prepared.configurePatch(patch, (...args: unknown[]) => calls.push(args))
     expect(prepared).toMatchObject({ provider: 'codex-subscription', model: 'gpt-5.6-terra', bundles: ['coding-subscription-provider'], proof: { provider: 'codex-subscription', model: 'gpt-5.6-terra', api: 'direct-responses' } })
-    expect(calls).toContainEqual([patch, 'dsh-enhanced-coding-subscription-provider', '@dsh-enhanced/coding-subscription-provider', expect.objectContaining({ codex: { enabled: true, transport: 'direct-responses', directModel: 'gpt-5.6-terra' } })])
+    expect(calls).toContainEqual([patch, 'dsh-ray-coding-subscription-provider', '@dsh-ray/coding-subscription-provider', expect.objectContaining({ codex: { enabled: true, transport: 'direct-responses', directModel: 'gpt-5.6-terra' } })])
     expect(calls).toContainEqual({ id: 'agent-default-model', config: { provider: 'codex-subscription', model: 'default' } })
   })
 
@@ -73,7 +73,7 @@ describe('web owner real route preparation', () => {
     const patch: any = { contents: { add: (node: unknown) => calls.push(node) }, createNode: (node: unknown) => node }
     prepared.configurePatch(patch, (...args: unknown[]) => calls.push(args))
     expect(prepared).toMatchObject({ provider: 'traex-agent', model, bundles: ['traex-acp-provider'], proof: { provider: 'traex-agent', model, api: 'acp', command: 'traex', cwd: resolve(workspace) } })
-    expect(calls).toContainEqual([patch, 'dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', { enabled: true, cwd: resolve(workspace), models: [model] }])
+    expect(calls).toContainEqual([patch, 'dsh-ray-traex-acp-provider', '@dsh-ray/traex-acp-provider', { enabled: true, cwd: resolve(workspace), models: [model] }])
     expect(calls).toContainEqual({ id: 'agent-default-model', config: { provider: 'traex-agent', model } })
   })
 })

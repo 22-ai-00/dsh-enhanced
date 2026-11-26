@@ -2,7 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import { SessionStore } from '@deepseek-ai/dsh-session'
-import { resolveLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import { resolveLlmRouteCapability } from '@dsh-ray/llm-route-capabilities'
 import { describe, expect, it } from 'vitest'
 import * as Plugin from '../src/index.ts'
 
@@ -17,9 +17,9 @@ async function mountRuntime(): Promise<Context> {
   return ctx
 }
 
-describe('dsh-enhanced-coding-subscription-provider', () => {
+describe('dsh-ray-coding-subscription-provider', () => {
   it('exposes stable plugin and injection identity', () => {
-    expect(Plugin.name).toBe('dsh-enhanced-coding-subscription-provider')
+    expect(Plugin.name).toBe('dsh-ray-coding-subscription-provider')
     expect(Plugin.inject).toEqual(['llm', 'sessions', 'agents'])
   })
 

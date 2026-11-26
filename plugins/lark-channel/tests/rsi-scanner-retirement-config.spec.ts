@@ -6,12 +6,12 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
-import { RECOVERY_CATALOG_DIGEST } from '@dsh-enhanced/assistant-recovery'
-import { externalPrincipalId, ownerRouteAuthorityHash } from '@dsh-enhanced/assistant-delivery'
-import { normalizeConfig } from '@dsh-enhanced/assistant-growth-driver'
-import { Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
-import { Config as AutomationsConfig } from '@dsh-enhanced/assistant-automations'
-import { controlPlaneDigest } from '@dsh-enhanced/plugin-control-plane'
+import { RECOVERY_CATALOG_DIGEST } from '@dsh-ray/assistant-recovery'
+import { externalPrincipalId, ownerRouteAuthorityHash } from '@dsh-ray/assistant-delivery'
+import { normalizeConfig } from '@dsh-ray/assistant-growth-driver'
+import { Config as PolicyConfig } from '@dsh-ray/assistant-policy'
+import { Config as AutomationsConfig } from '@dsh-ray/assistant-automations'
+import { controlPlaneDigest } from '@dsh-ray/plugin-control-plane'
 import { compileRsiProfiles, type RsiSetupManifest } from '../src/rsi-profile.ts'
 import { configureSupervisedGrowthProfilePatch } from '../src/supervised-growth-profile.ts'
 import { createRsiMemoryLearningSetup } from '../src/rsi-memory-learning.ts'
@@ -51,7 +51,7 @@ function fixture(home = '/unavailable/dsh-retirement-test') {
   const delivery = { databasePath: join(home, 'delivery.sqlite'), defaultWorkspace: owner.workspace, defaultAgentPreset: owner.agentPreset,
     ownerRoutes: [authority] }
   const verifier = { sourceReviews: { owner, expiresAt: 1 }, memoryReviews: memorySetup.reviews }
-  const row = (name: string, config: unknown) => ({ id: `dsh-enhanced-${name}`, name: `@dsh-enhanced/${name}`, config })
+  const row = (name: string, config: unknown) => ({ id: `dsh-ray-${name}`, name: `@dsh-ray/${name}`, config })
   const rows: Array<Record<string, unknown>> = [row('personal-assistant', personal), row('assistant-delivery', delivery),
     row('lark-channel', { enabled: true, account: 'primary', tenant: 'personal' }), row('assistant-growth-driver', growth),
     row('plugin-control-plane', control), row('assistant-memory-learning', memorySetup.learning), row('assistant-verifier', verifier)]
@@ -101,10 +101,10 @@ describe('frozen target configuration scanner retirement derivation', () => {
       'withOwnerForegroundTaskSourcesFence', 'inspectOwnerForegroundLearningTask'])
     const evaluation = methods(['canonicalHostScope', 'listTrustedTaskLearningProjections', 'withTrustedCanonicalTaskWriterFence',
       'onTrustedTaskChange', 'withTrustedCanonicalScopeWriterFence', 'getTrustedForegroundLearningProjection', 'inspectTrustedTaskOwnerRevision'])
-    const Usage = await runtime('@dsh-enhanced/assistant-growth-driver', 'usage-runtime', 'UsageLearningRuntime')
-    const Memory = await runtime('@dsh-enhanced/assistant-memory-learning', 'runtime', 'MemoryLearningRuntime')
-    const Task = await runtime('@dsh-enhanced/plugin-control-plane', 'task-observation-runtime', 'TaskObservationRuntime')
-    const Live = await runtime('@dsh-enhanced/plugin-control-plane', 'live-qualification-runtime', 'LiveQualificationRuntime')
+    const Usage = await runtime('@dsh-ray/assistant-growth-driver', 'usage-runtime', 'UsageLearningRuntime')
+    const Memory = await runtime('@dsh-ray/assistant-memory-learning', 'runtime', 'MemoryLearningRuntime')
+    const Task = await runtime('@dsh-ray/plugin-control-plane', 'task-observation-runtime', 'TaskObservationRuntime')
+    const Live = await runtime('@dsh-ray/plugin-control-plane', 'live-qualification-runtime', 'LiveQualificationRuntime')
     const instances = [
       ['assistant-growth-usage', new Usage(normalizeConfig(f.growth), { automations, delivery, evaluation, review: noCall })],
       ['assistant-memory-learning', new Memory(f.memorySetup.learning, { automations, delivery, evaluation,
@@ -137,7 +137,7 @@ describe('frozen target configuration scanner retirement derivation', () => {
       ['assistant-growth-experiments', { databasePath: join(f.home, 'experiments.sqlite') }],
       ['assistant-evaluation', { databasePath: join(f.home, 'evaluation.sqlite') }],
       ['preference-learning', { enabled: true }], ['assistant-goals', {}], ['assistant-skills', {}],
-    ] as const) f.rows.push({ id: `dsh-enhanced-${name}`, name: `@dsh-enhanced/${name}`, config })
+    ] as const) f.rows.push({ id: `dsh-ray-${name}`, name: `@dsh-ray/${name}`, config })
     const activeBinding = { id: 'binding_rsi', conversation: f.authority.conversation, principal: f.authority.principal,
       workspace: f.owner.workspace, agentPreset: f.owner.agentPreset, sessionId: 'rsi-session', generation: 1,
       policyRef: f.authority.policyRef, status: 'active' as const, createdAt: 1, updatedAt: 1, version: 1,
@@ -176,7 +176,7 @@ describe('frozen target configuration scanner retirement derivation', () => {
         sourceAdoptions: { profile: f.profile, planTtlMs: 60_000, timeoutMs: 1000, authority: adapter,
           handoff: { schemaVersion: 1, coordinatorId: 'coordinator', maximumWindowMs: 1000, commit: 'target-host' } },
         runtimeObserver: { socketPath: join(privateRoot, 'observer.sock'), keyPath, profilePath,
-          targets: [{ entryId: 'control', module: '@dsh-enhanced/plugin-control-plane', configDigest: 'c'.repeat(64), services: [] }] },
+          targets: [{ entryId: 'control', module: '@dsh-ray/plugin-control-plane', configDigest: 'c'.repeat(64), services: [] }] },
         foregroundDeployments: { attestorJournalPath: join(root, 'attestor.sqlite') },
         taskObservations: { ...f.task, policy: { ...f.task.policy, expiresAt } } },
       growthDriver: { ...f.growth, pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository: root, offline: true, allowCreation: false, allowRevision: false } },
@@ -187,14 +187,14 @@ describe('frozen target configuration scanner retirement derivation', () => {
       limits: { periodMs: 60_000, reviews: 1, discovery: 1, source: 1, observations: 1, coordinator: 1 },
     }
     const coordinatorRows = [
-      { id: 'dsh-enhanced-assistant-policy', name: '@dsh-enhanced/assistant-policy', config: { databasePath: join(root, 'old-policy.sqlite'), budgets: [], rules: [] } },
-      { id: 'dsh-enhanced-assistant-automations', name: '@dsh-enhanced/assistant-automations', config: { databasePath: join(root, 'old-auto.sqlite'), runsPath: join(root, 'old-runs'), schedulerEnabled: false, allowUnbudgetedExecution: false } },
-      { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {} },
+      { id: 'dsh-ray-assistant-policy', name: '@dsh-ray/assistant-policy', config: { databasePath: join(root, 'old-policy.sqlite'), budgets: [], rules: [] } },
+      { id: 'dsh-ray-assistant-automations', name: '@dsh-ray/assistant-automations', config: { databasePath: join(root, 'old-auto.sqlite'), runsPath: join(root, 'old-runs'), schedulerEnabled: false, allowUnbudgetedExecution: false } },
+      { id: 'dsh-ray-plugin-control-plane', name: '@dsh-ray/plugin-control-plane', config: {} },
     ]
     const compiled = await compileRsiProfiles({ manifest, dshHome: f.home, targetPatch: overlay, targetEffective: yaml(supervisedRows),
       coordinatorPatch: '[]', coordinatorEffective: yaml(coordinatorRows), coordinatorBase: yaml([{ insert: [{ id: 'tool-web', name: '@deepseek-ai/tool-web' }] }]), owner: activeBinding })
     const effectiveRows = merge(supervisedRows, compiled.targetPatch)
-    const delivery = object(effectiveRows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config)
+    const delivery = object(effectiveRows.find(row => row.id === 'dsh-ray-assistant-delivery')!.config)
     expect((delivery.ownerRoutes as Array<{ id: string }>).map(route => route.id)).toEqual(['rsi-owner', 'supervised-growth-owner'])
     const result = deriveScannerRetirementConfiguration({ effectiveConfig: yaml(effectiveRows), dshHome: f.home,
       profile: f.profile, owner: manifest.sourceReviews.owner })
@@ -213,7 +213,7 @@ describe('frozen target configuration scanner retirement derivation', () => {
   })
 
   test('skips the formal stock disabled unconfigured Memory bundle, while rejecting disabled configured grants', () => {
-    const f = fixture(); const stock = f.rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!
+    const f = fixture(); const stock = f.rows.find(row => row.id === 'dsh-ray-assistant-memory-learning')!
     delete stock.config; stock.disabled = true
     stock.inject = ['assistantDelivery', 'assistantAutomations', 'personalMemory']
     expect(deriveScannerRetirementConfiguration(input(f)).targets).toHaveLength(3)
@@ -245,7 +245,7 @@ describe('frozen target configuration scanner retirement derivation', () => {
   test('returns a subset only for absent lanes and checks a present inactive-lane scope', () => {
     const f = fixture()
     delete f.control.liveQualification
-    f.rows = f.rows.filter(row => row.id !== 'dsh-enhanced-assistant-memory-learning')
+    f.rows = f.rows.filter(row => row.id !== 'dsh-ray-assistant-memory-learning')
     expect(deriveScannerRetirementConfiguration(input(f)).targets.map(target => target.owner)).toEqual([
       'assistant-growth-usage', 'plugin-control-plane-task-observations'])
     f.growth.usageLearning.enabled = false
@@ -256,7 +256,7 @@ describe('frozen target configuration scanner retirement derivation', () => {
 
   test('permits no optional lane, without inferring targets from user-provided IDs or prefix-looking text', () => {
     const f = fixture()
-    f.rows = f.rows.filter(row => !['assistant-growth-driver', 'plugin-control-plane', 'assistant-memory-learning'].some(name => row.id === `dsh-enhanced-${name}`))
+    f.rows = f.rows.filter(row => !['assistant-growth-driver', 'plugin-control-plane', 'assistant-memory-learning'].some(name => row.id === `dsh-ray-${name}`))
     f.personal.assistantAutomations = { ...f.automations }
     const raw = input(f)
     expect(deriveScannerRetirementConfiguration(raw).targets).toEqual([])
@@ -300,8 +300,8 @@ describe('frozen target configuration scanner retirement derivation', () => {
     ['duplicate row ID', f => { f.rows.push(f.rows[0]!) }],
     ['same provider with other ID', f => { f.rows.push({ ...f.rows[0]!, id: 'another-personal' }) }],
     ['wrong package name', f => { f.rows[0]!.name = '@other/personal-assistant' }],
-    ['standalone Policy', f => { f.rows.push({ id: 'standalone', name: '@dsh-enhanced/assistant-policy', config: f.policy }) }],
-    ['standalone Automations', f => { f.rows.push({ id: 'standalone', name: '@dsh-enhanced/assistant-automations', config: f.automations }) }],
+    ['standalone Policy', f => { f.rows.push({ id: 'standalone', name: '@dsh-ray/assistant-policy', config: f.policy }) }],
+    ['standalone Automations', f => { f.rows.push({ id: 'standalone', name: '@dsh-ray/assistant-automations', config: f.automations }) }],
     ['missing Personal', f => { f.rows.splice(0, 1) }],
     ['missing Delivery', f => { f.rows.splice(1, 1) }],
     ['missing Lark', f => { f.rows.splice(2, 1) }],

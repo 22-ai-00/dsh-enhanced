@@ -59,7 +59,7 @@ export async function readGitHubRepositoryObservation(input: { repository: strin
   const timer = setTimeout(() => controller.abort(new Error('event-triggers: GitHub sensor timeout')), input.timeoutMs); timer.unref?.()
   const options = { ...(input.lookup === undefined ? {} : { lookup: input.lookup }), ...(input.fetcher === undefined ? {} : { fetcher: input.fetcher }), ...(input.allowIpv6 === undefined ? {} : { allowIpv6: input.allowIpv6 }), ...(input.trackOperation === undefined ? {} : { trackOperation: input.trackOperation }) }
   const read = async (path: string): Promise<unknown> => { await input.beforeRequest?.(); const value = await readHttpJsonValue({ url: `${API}/repos/${input.repository.split('/').map(encodeURIComponent).join('/')}${path}`, maxBodyBytes: input.maxBodyBytes, timeoutMs: input.timeoutMs,
-    allowedOrigins: new Set([API]), signal: controller.signal, rejectPagination: true, ...options, headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-enhanced-event-triggers', authorization: `Bearer ${input.token}` } }); await input.beforeRequest?.(); return value }
+    allowedOrigins: new Set([API]), signal: controller.signal, rejectPagination: true, ...options, headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-ray-event-triggers', authorization: `Bearer ${input.token}` } }); await input.beforeRequest?.(); return value }
   try {
     if (commitMode) {
       const headOid = branchHead(await read(`/branches/${encodeURIComponent(input.branch)}`), input.branch)

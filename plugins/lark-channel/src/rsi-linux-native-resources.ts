@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util'
 import {
   migrateLinuxVerifierRunnerState, prepareLinuxRepositoryHandoverState, prepareLinuxVerifierHandoverState,
   prepareLinuxVerifierStagingState,
-} from '@dsh-enhanced/assistant-isolation'
+} from '@dsh-ray/assistant-isolation'
 import { rsiBuildResources as io } from './rsi-build.js'
 import type { LinuxRsiBuildEnvironment } from './rsi-linux-runtime-bootstrap.js'
 import type { NativeRsiReleaseBuildEnvironment } from './rsi-release-build.js'
@@ -34,7 +34,7 @@ export {
   prepareRsiLinuxRunnerStates,
   validateRsiLinuxRunnerStates,
 }
-export { freezeLinuxRuntimeSource } from '@dsh-enhanced/assistant-isolation/native-resources'
+export { freezeLinuxRuntimeSource } from '@dsh-ray/assistant-isolation/native-resources'
 export type { LinuxRsiNativeRelocatedFamily, LinuxRsiNativeRelocationProof, LinuxRsiNativeBaseRelocationProof }
 export { openLinuxRsiNativeRelocatedBase, openLinuxRsiNativeRelocatedBaseAt, inspectLinuxRsiNativeBaseAt }
 

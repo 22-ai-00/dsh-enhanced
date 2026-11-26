@@ -16,7 +16,7 @@ const pathWithoutTraex = (process.env.PATH ?? '').split(':').filter(directory =>
 afterEach(async () => { await Promise.all(temporaryRoots.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 
 async function fixture() {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-rsi-installer-')))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ray-installer-')))
   temporaryRoots.push(root)
   const home = join(root, 'dsh home')
   const bin = join(home, 'profiles', 'web', 'node_modules', '.bin')
@@ -25,14 +25,14 @@ async function fixture() {
   const fakeBin = join(root, 'fake-bin')
   await mkdir(fakeBin)
   await writeFile(join(fakeBin, 'dsh'), '#!/bin/bash\nexit 1\n', { mode: 0o755 })
-  const setup = join(bin, 'dsh-rsi-setup')
+  const setup = join(bin, 'dsh-ray-setup')
   await writeFile(setup, '#!/bin/bash\nprintf "%s\\n" "$@" > "$RSI_ARGS_LOG"\nexit "${RSI_EXIT_CODE:-0}"\n')
   await chmod(setup, 0o755)
   return { root, home, setup, log }
 }
 
 function invokeHelper(home: string, mode: 'local' | 'npm', repository: string, dryRun: boolean, log: string, exitCode = 0) {
-  return spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_prepare_rsi_source "$@"', 'bash',
+  return spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_ray_prepare_rsi_source "$@"', 'bash',
     common, 'web', home, mode, repository, dryRun ? '1' : '0'], {
     cwd: repoRoot, encoding: 'utf8', env: { ...process.env, PATH: `${join(dirname(home), 'fake-bin')}:${process.env.PATH ?? ''}`,
       RSI_ARGS_LOG: log, RSI_EXIT_CODE: String(exitCode) },
@@ -60,15 +60,15 @@ describe('supervised RSI source and build preparation', () => {
     const failed = invokeHelper(home, 'npm', repoRoot, false, log, 17)
     expect(failed.status).toBe(17)
     expect(failed.stderr).toContain('自迭代源码和构建环境准备失败，安装已停止')
-    await rm(join(home, 'profiles', 'web', 'node_modules', '.bin', 'dsh-rsi-setup'))
+    await rm(join(home, 'profiles', 'web', 'node_modules', '.bin', 'dsh-ray-setup'))
     const missing = invokeHelper(home, 'npm', repoRoot, false, log)
     expect(missing.status).toBe(1)
-    expect(missing.stderr).toContain('找不到安装后的 dsh-rsi-setup')
+    expect(missing.stderr).toContain('找不到安装后的 dsh-ray-setup')
   })
 
   it('propagates the owner installer not-ready status instead of reporting success', async () => {
     const {home,log} = await fixture()
-    const result = spawnSync('/bin/bash',['-c','source "$1"; shift; dsh_enhanced_install_rsi_owner "$@"','bash',
+    const result = spawnSync('/bin/bash',['-c','source "$1"; shift; dsh_ray_install_rsi_owner "$@"','bash',
       common,'web',home,'local',repoRoot,'0'],{cwd:repoRoot,encoding:'utf8',env:{...process.env,
         PATH:`${join(dirname(home), 'fake-bin')}:${process.env.PATH ?? ''}`,RSI_ARGS_LOG:log,RSI_EXIT_CODE:'3'}})
     expect(result.status).toBe(3)
@@ -80,7 +80,7 @@ describe('supervised RSI source and build preparation', () => {
 
   it('forwards an explicit existing-automation acknowledgement only to owner setup', async () => {
     const { home, log } = await fixture()
-    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_install_rsi_owner "$@"', 'bash',
+    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_ray_install_rsi_owner "$@"', 'bash',
       common, 'web', home, 'npm', repoRoot, '0', '1'], {
       cwd: repoRoot, encoding: 'utf8', env: { ...process.env,
         PATH: `${join(dirname(home), 'fake-bin')}:${process.env.PATH ?? ''}`, RSI_ARGS_LOG: log },
@@ -93,7 +93,7 @@ describe('supervised RSI source and build preparation', () => {
 
   it('forwards the explicit persisted learning decision to owner setup', async () => {
     const { home, log } = await fixture()
-    const invoke = (learning: string) => spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_install_rsi_owner "$@"', 'bash',
+    const invoke = (learning: string) => spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_ray_install_rsi_owner "$@"', 'bash',
       common, 'web', home, 'npm', repoRoot, '0', '0', learning], {
       cwd: repoRoot, encoding: 'utf8', env: { ...process.env,
         PATH: `${join(dirname(home), 'fake-bin')}:${process.env.PATH ?? ''}`, RSI_ARGS_LOG: log },
@@ -132,7 +132,7 @@ describe('supervised RSI source and build preparation', () => {
     expect(result.stdout).toContain('--skip-memory-learning')
     expect(result.stdout).not.toContain('--enable-ordinary-use-learning')
     expect(result.stdout).toContain('学习授权：已跳过')
-    const install = result.stdout.indexOf('dsh-rsi-setup --install-owner')
+    const install = result.stdout.indexOf('dsh-ray-setup --install-owner')
     expect(install).toBeGreaterThanOrEqual(0)
     expect(result.stdout.slice(install)).toContain('--skip-memory-learning')
   })
@@ -147,8 +147,8 @@ describe('supervised RSI source and build preparation', () => {
     for (const slug of ['assistant-skills', 'assistant-verifier', 'assistant-growth-driver', 'assistant-memory-learning']) {
       expect(result.stdout).toContain(join(repoRoot, 'plugins', slug))
     }
-    const install = result.stdout.indexOf('dsh-rsi-setup.js --install-local-cohort')
-    const source = result.stdout.indexOf('dsh-rsi-setup --prepare-build --optional-build')
+    const install = result.stdout.indexOf('dsh-ray-setup.js --install-local-cohort')
+    const source = result.stdout.indexOf('dsh-ray-setup --prepare-build --optional-build')
     expect(install).toBeGreaterThanOrEqual(0)
     expect(result.stdout).toContain('--bundle assistant-growth-driver')
     expect(result.stdout).toContain('--bundle assistant-memory-learning')
@@ -159,7 +159,7 @@ describe('supervised RSI source and build preparation', () => {
     expect(result.stdout).toContain(`--source-repository ${repoRoot}`)
     expect(await readdir(home)).toEqual(['profiles'])
 
-    const ownerInstall = result.stdout.indexOf('dsh-rsi-setup --install-owner')
+    const ownerInstall = result.stdout.indexOf('dsh-ray-setup --install-owner')
     expect(ownerInstall).toBeGreaterThan(source)
     expect(ownerInstall).toBeGreaterThan(result.stdout.indexOf('doctor：将验证'))
 
@@ -167,7 +167,7 @@ describe('supervised RSI source and build preparation', () => {
       cwd: repoRoot, encoding: 'utf8', env: { ...process.env, DSH_HOME: home, PATH: pathWithoutTraex },
     })
     expect(standard.status, standard.stderr).toBe(0)
-    expect(standard.stdout).not.toContain('dsh-rsi-setup --prepare-build')
-    expect(standard.stdout).not.toContain('dsh-rsi-setup --install-owner')
+    expect(standard.stdout).not.toContain('dsh-ray-setup --prepare-build')
+    expect(standard.stdout).not.toContain('dsh-ray-setup --install-owner')
   })
 })

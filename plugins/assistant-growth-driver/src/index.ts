@@ -3,12 +3,12 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantGoalsService, OwnerGoalExecutionSnapshotInput } from '@dsh-enhanced/assistant-goals'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
+import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-ray/assistant-delivery'
+import type { AssistantGoalsService, OwnerGoalExecutionSnapshotInput } from '@dsh-ray/assistant-goals'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import type { AssistantSkillsService } from '@dsh-ray/assistant-skills'
 import { SourceGrowthRunUnavailableError, type AnySourceGrowthRunProducer,
-  type SourceGrowthRunRequest, type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  type SourceGrowthRunRequest, type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import { Config, normalizeConfig, type AssistantGrowthDriverConfig } from './config.js'
 import { mintGrowthAuthority, type GrowthAuthority, type GrowthDeliveryPort } from './deposit.js'
 import {
@@ -26,7 +26,7 @@ import { version } from './version.js'
 import type { GrowthSourceGap, GrowthSourcePlanePort } from './source-port.js'
 import { UsageLearningRuntime, type UsageReviewInput, type AnyUsageReviewInput, type UsageReviewResult } from './usage-runtime.js'
 
-export const name = 'dsh-enhanced-assistant-growth-driver'
+export const name = 'dsh-ray-assistant-growth-driver'
 export { version, Config, normalizeConfig }
 export type {
   AssistantGrowthDriverConfig,
@@ -150,7 +150,7 @@ export class AssistantGrowthDriverService extends Service {
           inspectWorkItemToolPreauthorization: () => {
             try {
               const policy = unwrapService(usageCtx.get('assistantPolicy'))
-              return this.ctx.fiber.name === 'dsh-enhanced-assistant-growth-driver'
+              return this.ctx.fiber.name === 'dsh-ray-assistant-growth-driver'
                 && policy?.workItemGrowthToolPreauthorizationVersion?.() === 1 && typeof policy.registerPreauthorizedTool === 'function'
             } catch { return false }
           },

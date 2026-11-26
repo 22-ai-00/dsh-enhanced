@@ -17,7 +17,7 @@ if (bundled === undefined) throw new Error('owner-console: client bundle emitted
 const directory = new URL('../lib/', import.meta.url)
 await mkdir(directory, { recursive: true })
 await writeFile(new URL('client.js', directory), `window.__ModuleLoader__.load({
-  id: '@dsh-enhanced/owner-console',
+  id: '@dsh-ray/owner-console',
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;

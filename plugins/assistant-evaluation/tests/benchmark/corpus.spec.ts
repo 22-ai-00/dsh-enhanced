@@ -1,4 +1,4 @@
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { describe, expect, it } from 'vitest'
 import {
   developmentCases, developmentCorpus, developmentDataset, developmentPrompt, judgeDevelopmentResponse,

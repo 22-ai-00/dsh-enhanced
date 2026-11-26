@@ -6,8 +6,8 @@ import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from
 import { isAbsolute } from 'node:path'
 import type { DatabaseSync, StatementSync } from 'node:sqlite'
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
-import type { ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import type { ApprovalDispatchRouteV2 } from '@dsh-ray/assistant-policy'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import {
   ASSISTANT_GROWTH_CONTRACT_VERSION,
   WORKFLOW_TRACE_SOURCE_ID,
@@ -27,7 +27,7 @@ import {
   type WorkflowStepFingerprint,
   type WorkflowTraceRevision,
   type WorkflowTraceSourceAttestation,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import {
   bindingMatchesOwnerRoute,
   canonicalBackgroundSourceId,

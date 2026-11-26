@@ -16,10 +16,10 @@ const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 const home = '/srv/dsh'
 const base = [
-  { id: 'assistant', name: '@dsh-enhanced/personal-assistant', config: { assistantAutomations: { schedulerEnabled: false } } },
-  { id: 'recovery', name: '@dsh-enhanced/assistant-recovery', config: { jobs: [], databasePath: `${home}/state/recovery.sqlite` } },
-  { id: 'control', name: '@dsh-enhanced/plugin-control-plane', config: { sourceJobs: null, sourceAdoptions: null, statePath: `${home}/state/control` } },
-  { id: 'delivery', name: '@dsh-enhanced/assistant-delivery', config: { schedulerEnabled: true, ownerRoutes: [] } },
+  { id: 'assistant', name: '@dsh-ray/personal-assistant', config: { assistantAutomations: { schedulerEnabled: false } } },
+  { id: 'recovery', name: '@dsh-ray/assistant-recovery', config: { jobs: [], databasePath: `${home}/state/recovery.sqlite` } },
+  { id: 'control', name: '@dsh-ray/plugin-control-plane', config: { sourceJobs: null, sourceAdoptions: null, statePath: `${home}/state/control` } },
+  { id: 'delivery', name: '@dsh-ray/assistant-delivery', config: { schedulerEnabled: true, ownerRoutes: [] } },
 ]
 function check(rows = base, extra: Record<string, string> = {}) {
   return assertPreOwnerEffectiveConfigs({ assistant: yaml.stringify(rows), ...extra }, home, 'assistant', yaml)
@@ -78,19 +78,19 @@ export async function healProfilesModuleFallback({ installAnchor, profile, home 
 describe('pre-owner local source maintenance admission', () => {
   test('permits ordinary base Recovery/Control Plane and Delivery scheduling without source authority', () => {
     expect(Object.keys(check())).toEqual(['assistant'])
-    expect(check(base, { web: yaml.stringify([{ id: 'retained', name: '@dsh-enhanced/assistant-delivery', disabled: true, config: { schedulerEnabled: true } }]) })).toHaveProperty('web')
+    expect(check(base, { web: yaml.stringify([{ id: 'retained', name: '@dsh-ray/assistant-delivery', disabled: true, config: { schedulerEnabled: true } }]) })).toHaveProperty('web')
   })
   test.each(['sourceJobs', 'sourceApprovals', 'sourceReleases', 'sourceReleaseExecution', 'sourceAdoptions', 'sourceBuild', 'runtimeObserver', 'foregroundDeployments', 'taskObservations', 'adoptionCoordinator', 'memoryReviews', 'automaticLearning'])('rejects active or retained %s in any profile', field => {
-    expect(() => check(base, { other: yaml.stringify([{ id: 'other', name: '@dsh-enhanced/plugin-control-plane', disabled: true, config: { [field]: {} } }]) })).toThrow('owner/source')
+    expect(() => check(base, { other: yaml.stringify([{ id: 'other', name: '@dsh-ray/plugin-control-plane', disabled: true, config: { [field]: {} } }]) })).toThrow('owner/source')
   })
   test.each([
-    { id: 'auto', name: '@dsh-enhanced/assistant-automations', config: { schedulerEnabled: true } },
-    { id: 'assistant', name: '@dsh-enhanced/personal-assistant', config: { assistantAutomations: { schedulerEnabled: true } } },
-    { id: 'recovery', name: '@dsh-enhanced/assistant-recovery', config: { jobs: [{ id: 'historical' }] } },
-    { id: 'control', name: '@dsh-enhanced/plugin-control-plane', config: { trustPath: `${home}/rsi-authorities/assistant/config/trust.json` } },
+    { id: 'auto', name: '@dsh-ray/assistant-automations', config: { schedulerEnabled: true } },
+    { id: 'assistant', name: '@dsh-ray/personal-assistant', config: { assistantAutomations: { schedulerEnabled: true } } },
+    { id: 'recovery', name: '@dsh-ray/assistant-recovery', config: { jobs: [{ id: 'historical' }] } },
+    { id: 'control', name: '@dsh-ray/plugin-control-plane', config: { trustPath: `${home}/rsi-authorities/assistant/config/trust.json` } },
   ])('rejects automatic work or retained grant configuration: $id', row => { expect(() => check([row])).toThrow() })
   test('rejects unresolved dynamic config and malformed effective rows', () => {
-    expect(() => assertPreOwnerEffectiveConfigs({ assistant: '- id: a\n  name: "@dsh-enhanced/plugin-control-plane"\n  config: !!js ownerConfig()\n' }, home, 'assistant', yaml)).toThrow('dynamic owner-sensitive')
+    expect(() => assertPreOwnerEffectiveConfigs({ assistant: '- id: a\n  name: "@dsh-ray/plugin-control-plane"\n  config: !!js ownerConfig()\n' }, home, 'assistant', yaml)).toThrow('dynamic owner-sensitive')
     expect(() => check([{ config: {} }] as never)).toThrow('row identity')
   })
   test('permits inert native JS paths and scripts while rejecting dynamic authority', () => {
@@ -109,7 +109,7 @@ describe('pre-owner local source maintenance admission', () => {
   test('binds the exact disabled learner row and old YAML AST, including JS tags and row order', () => {
     const original = '- id: ordinary\n  name: x\n  config:\n    path: !!js process.env.DSH_HOME + "/state"\n'
     const learner = yaml.stringify([rsiMemoryLearningInitialRow])
-    const other = yaml.stringify([{ id: 'web', name: '@dsh-enhanced/assistant-delivery', disabled: true }])
+    const other = yaml.stringify([{ id: 'web', name: '@dsh-ray/assistant-delivery', disabled: true }])
     const targetProfile = 'assistant'
     const expectedCandidateSemanticDigest = expectedMemoryLearningSemanticDigest(original, yaml, rsiMemoryLearningInitialRow)
     const admission = { original: { configDigests: {
@@ -273,7 +273,7 @@ describe('pre-owner local source maintenance admission', () => {
       resources: Object.fromEntries(['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes'].map(name => [name, hash])),
       metadata: Object.fromEntries(['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml', 'pnpm-lock.yaml'].map(name => [name, hash])), configDigests: { assistant: hash }, rawConfiguration: { profiles: ['assistant'], files: { 'cordis.yml': null, 'cordis.patch.yml': null, 'profiles/assistant/cordis.yml': hash, 'profiles/assistant/cordis.patch.yml': hash } } }
     const manifest = { version: 5, homePath: home, operation: 'upgrade', state: 'validated', localSourceMaintenance: {
-      protocol: 'dsh-enhanced/pre-owner-source-maintenance/v1', installer: await bindLocalSourceInstaller(root),
+      protocol: 'dsh-ray/pre-owner-source-maintenance/v1', installer: await bindLocalSourceInstaller(root),
       preparationRoot: '/srv/candidate', preparationDigest: hash, original: selected, candidate: selected,
       bwrapExecutable: '/usr/bin/bwrap', driverDigest: hash,
     } }
@@ -283,7 +283,7 @@ describe('pre-owner local source maintenance admission', () => {
     expect(lifecycleProfileTest.validLocalSourceManifest({ ...manifest, localSourceMaintenance: { ...manifest.localSourceMaintenance, candidate: null } })).toBe(false)
     expect(lifecycleProfileTest.validLocalSourceManifest({ ...manifest, localSourceMaintenance: { ...manifest.localSourceMaintenance, extra: true } })).toBe(false)
     const extended = { ...manifest, localSourceMaintenance: { ...manifest.localSourceMaintenance,
-      protocol: 'dsh-enhanced/pre-owner-source-maintenance/v2', extension: 'memory-learning', expectedCandidateSemanticDigest: hash } }
+      protocol: 'dsh-ray/pre-owner-source-maintenance/v2', extension: 'memory-learning', expectedCandidateSemanticDigest: hash } }
     expect(lifecycleProfileTest.validLocalSourceManifest(extended)).toBe(true)
     expect(lifecycleProfileTest.validLocalSourceManifest({ ...extended, localSourceMaintenance: { ...extended.localSourceMaintenance, extension: 'other' } })).toBe(false)
     expect(lifecycleProfileTest.validLocalSourceManifest({ ...extended, localSourceMaintenance: { ...extended.localSourceMaintenance, expectedCandidateSemanticDigest: 'bad' } })).toBe(false)

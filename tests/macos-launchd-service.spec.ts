@@ -5,9 +5,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from 'vitest'
-import { inspectLaunchdDefinition, inspectLoadedLaunchd } from '../packages/dsh-rsi-cli/src/launchd-service.ts'
-import { controlManagedService, stopManagedService } from '../packages/dsh-rsi-cli/src/services.ts'
-import { defaultRunner } from '../packages/dsh-rsi-cli/src/run.ts'
+import { inspectLaunchdDefinition, inspectLoadedLaunchd } from '../packages/dsh-ray/src/launchd-service.ts'
+import { controlManagedService, stopManagedService } from '../packages/dsh-ray/src/services.ts'
+import { defaultRunner } from '../packages/dsh-ray/src/run.ts'
 import { installDshLaunchAgent, launchAgentPaths } from '../plugins/lark-channel/src/launchd.ts'
 
 test.skipIf(process.platform !== 'darwin' || process.env.DSH_NATIVE_LAUNCHD_TEST !== '1')(
@@ -68,7 +68,7 @@ test.skipIf(process.platform !== 'darwin' || process.env.DSH_NATIVE_LAUNCHD_TEST
     } finally {
       if (attempted) spawnSync('/bin/launchctl', ['bootout', target], { encoding: 'utf8', timeout: 10_000 })
       await rm(home, { recursive: true, force: true })
-      if (attempted) await rm(`/tmp/.dsh-enhanced-launchd-${uid}-${profile}.lock`, { force: true })
+      if (attempted) await rm(`/tmp/.dsh-ray-launchd-${uid}-${profile}.lock`, { force: true })
     }
   }, 150_000,
 )

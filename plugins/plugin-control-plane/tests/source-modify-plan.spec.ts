@@ -25,7 +25,7 @@ function validEvidence(overrides?: Partial<DockerSourcePreparedEvidence>): Docke
       { command: 'pnpm', args: ['check'], exitCode: 0, durationMs: 8100, logDigest: hex('b') },
       { command: 'pnpm', args: ['pack'], exitCode: 0, durationMs: 600, logDigest: hex('c') },
     ],
-    pack: { name: 'dsh-enhanced-health-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: 12_345, sha256: hex('d') },
+    pack: { name: 'dsh-ray-health-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: 12_345, sha256: hex('d') },
     preparedAt: 1_800_000_000_500, ...overrides,
   }
 }

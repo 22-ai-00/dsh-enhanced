@@ -4,8 +4,8 @@ import type {
   HostAutomationExecutor,
   HostAutomationExecutorInput,
   SystemAutomationReconcileInput,
-} from '@dsh-enhanced/assistant-automations'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/assistant-automations'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -168,7 +168,7 @@ describe('assistant-dreaming onIdeaChange host seam', () => {
       const def = automations.lastDefinition!
       const input: HostAutomationExecutorInput = {
         occurrenceId,
-        automationId: `dsh-enhanced-assistant-dreaming:${'lane'.padEnd(40, '0')}`,
+        automationId: `dsh-ray-assistant-dreaming:${'lane'.padEnd(40, '0')}`,
         definitionHash: 'a'.repeat(64),
         executionMode: 'production',
         targetScope: def.execution.targetScope,

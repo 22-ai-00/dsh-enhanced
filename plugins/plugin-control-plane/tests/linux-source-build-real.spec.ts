@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from 'vitest'
-import type { LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { runLinuxPreparedChecks } from '../src/linux-source-build.js'
 import type { LinuxSourceBuildConfig } from '../src/source-build.js'
 
@@ -13,7 +13,7 @@ const runtimeFile = process.env.DSH_LINUX_SOURCE_RUNTIME_JSON
 
 test.skipIf(process.env.DSH_NATIVE_CGROUP_REAL !== '1' || !runtimeFile)(
   'installs a real retained dependency offline from the configured pnpm store and returns a binary pack', async () => {
-    const { LinuxRepositoryRunner } = await import('@dsh-enhanced/assistant-isolation')
+    const { LinuxRepositoryRunner } = await import('@dsh-ray/assistant-isolation')
     const value = JSON.parse(await readFile(runtimeFile!, 'utf8')) as LinuxRuntime | { runtime: LinuxRuntime }
     const runtime = 'runtime' in value ? value.runtime : value
     const runtimeLockLines = (await readFile(join(runtime.root.path, 'pnpm-lock.yaml'), 'utf8')).split('\n')
@@ -60,12 +60,12 @@ assert.equal(execFileSync('pnpm',['store','path'],{encoding:'utf8'}).trim(), '/w
 assert.equal(createRequire(import.meta.url)('typescript').version, ${JSON.stringify(runtime.versions.typescript)});
 mkdirSync('plugins/helper/lib',{recursive:true}); writeFileSync('plugins/helper/lib/index.js','export const answer = 42\\n'); writeFileSync('plugins/helper/lib/index.d.ts','export declare const answer = 42\\n');
 `)
-    await writeFile(join(plugin, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/helper', version: '1.0.0',
+    await writeFile(join(plugin, 'package.json'), JSON.stringify({ name: '@dsh-ray/helper', version: '1.0.0',
       type: 'module', main: './lib/index.js', types: './lib/index.d.ts', files: ['lib', 'README.md', 'LICENSE', 'cordis.patch.yml'],
       exports: { '.': { types: './lib/index.d.ts', default: './lib/index.js' } }, dsh: { bundle: { patch: './cordis.patch.yml' } } }) + '\n')
     await writeFile(join(plugin, 'README.md'), '# Real Linux fixture\n')
     await writeFile(join(plugin, 'LICENSE'), 'MIT\n')
-    await writeFile(join(plugin, 'cordis.patch.yml'), 'mount: "@dsh-enhanced/helper"\n')
+    await writeFile(join(plugin, 'cordis.patch.yml'), 'mount: "@dsh-ray/helper"\n')
     await writeFile(join(plugin, 'src', 'index.ts'), 'export const answer = 42\n')
     const environment = { PATH: process.env.PATH, HOME: root }
     const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: worktree, env: environment, encoding: 'utf8' }).trim()

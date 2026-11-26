@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { inspectAutomationRetirementSnapshot, type AutomationRetirementSnapshot } from '@dsh-enhanced/assistant-automations'
+import { inspectAutomationRetirementSnapshot, type AutomationRetirementSnapshot } from '@dsh-ray/assistant-automations'
 import { ActiveLarkOwnerBindingsSnapshotError, inspectActiveLarkOwnerBindingsLocally, inspectRevokedOwnerRouteLocally,
-  type RevokedOwnerRouteSnapshot } from '@dsh-enhanced/assistant-delivery'
-import { validateMemoryLearningOwner, type MemoryLearningOwner } from '@dsh-enhanced/assistant-growth-contract'
+  type RevokedOwnerRouteSnapshot } from '@dsh-ray/assistant-delivery'
+import { validateMemoryLearningOwner, type MemoryLearningOwner } from '@dsh-ray/assistant-growth-contract'
 import { deriveScannerRetirementConfiguration, type ScannerRetirementConfiguration, type ScannerRetirementConfigurationInput } from './rsi-scanner-retirement-config.js'
 import { applyScannerRetirementMaintenance } from './rsi-scanner-retirement-runtime.js'
 import { prepareScannerRetirementOperations, verifyScannerRetirementTransition,

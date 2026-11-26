@@ -7,10 +7,10 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { linuxRuntimeFixture, spendLinuxRepositoryRun } from './helpers/linux-source-preflight-runtime-fixture.ts'
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { linuxRuntimeDigest, type LinuxRuntime, type LinuxRepositoryRunner } from '@dsh-enhanced/assistant-isolation'
-import type { LinuxRepositoryRunnerConfig } from '@dsh-enhanced/assistant-isolation'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { linuxRuntimeDigest, type LinuxRuntime, type LinuxRepositoryRunner } from '@dsh-ray/assistant-isolation'
+import type { LinuxRepositoryRunnerConfig } from '@dsh-ray/assistant-isolation'
 import { afterEach, expect, it, vi } from 'vitest'
 import { PluginControlPlaneService, type Config } from '../src/service.ts'
 import { ControlPlaneStore } from '../src/store.ts'
@@ -27,7 +27,7 @@ import { sourceBuildDiagnostics } from '../src/source-build-diagnostics.ts'
 const transport = vi.hoisted(() => ({ realConfig: undefined as LinuxRepositoryRunnerConfig | undefined, realConstruct: undefined as ((config: LinuxRepositoryRunnerConfig) => LinuxRepositoryRunner) | undefined, construct: vi.fn(), macConstruct: vi.fn(), instances: [] as Array<{
   config: LinuxRepositoryRunnerConfig; close: ReturnType<typeof vi.fn>; inspectQuiescence: ReturnType<typeof vi.fn>
 }> }))
-vi.mock('@dsh-enhanced/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-enhanced/assistant-isolation')>(),
+vi.mock('@dsh-ray/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-ray/assistant-isolation')>(),
   verifyLinuxRuntime: vi.fn(async (runtime: LinuxRuntime) => runtime),
   LinuxRepositoryRunner: class {
     readonly runtimeDigest!: string
@@ -103,7 +103,7 @@ async function fixture(options: { constructorFailure?: boolean; registrationFail
     hostPolicy: trust.defaultHostAttestationPolicy, releaseReceiptTtlMs: 30_000, approvalKeys: [], hostAttestationKeys: [], releaseKeys: [], releaseAuthorizationKeys: [] })
   const realRuntime = options.realAdmission ? await linuxRuntimeFixture(root) : undefined
   if (realRuntime) {
-    const actual = await vi.importActual<typeof import('@dsh-enhanced/assistant-isolation')>('@dsh-enhanced/assistant-isolation')
+    const actual = await vi.importActual<typeof import('@dsh-ray/assistant-isolation')>('@dsh-ray/assistant-isolation')
     transport.realConstruct = config => { transport.realConfig = config; return new actual.LinuxRepositoryRunner(config) }
   }
   const sourceBuild: builds.LinuxSourceBuildConfig = { ...linuxSourceConfig(), timeoutMs: options.timeoutMs ?? 60_000,

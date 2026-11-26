@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { HostAgentExecutionContract, HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-enhanced/assistant-automations'
+import type { HostAgentExecutionContract, HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-ray/assistant-automations'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
 import { WorkItemContinuation } from '../src/continuation.ts'

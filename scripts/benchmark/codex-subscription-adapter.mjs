@@ -1,8 +1,8 @@
 // Operator-selected adapter for public development benchmarks; never loaded by a candidate.
 import { appendFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { CodingSubscriptionAdapter, Config } from '@dsh-enhanced/coding-subscription-provider'
-import { createAgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
+import { CodingSubscriptionAdapter, Config } from '@dsh-ray/coding-subscription-provider'
+import { createAgentLoopRequestAttestor } from '@dsh-ray/llm-route-capabilities'
 
 export function createNativeAdapter(model, { ctx, workspace }) {
   if (model.provider !== 'codex-subscription' || model.temperature !== null

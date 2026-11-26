@@ -3,7 +3,7 @@ import { AssistantVerifierService, Config } from './service.js'
 import type { AcceptanceObjectivesSelection, AcceptanceProfileInspection, AcceptanceProfileSelection } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-verifier'
+export const name = 'dsh-ray-assistant-verifier'
 export { AssistantVerifierService, Config, version }
 export type { AcceptanceObjectivesSelection, AcceptanceProfileInspection, AcceptanceProfileSelection }
 export * from './drivers.js'

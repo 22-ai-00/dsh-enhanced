@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { AssistantHeartbeatService, Config } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-heartbeat'
+export const name = 'dsh-ray-assistant-heartbeat'
 export { AssistantHeartbeatService, Config, version }
 export * from './config.js'
 export * from './service.js'

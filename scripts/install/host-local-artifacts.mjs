@@ -67,7 +67,7 @@ function assertPreparation(preparation, input, bundles) {
     || bundles.some(name => preparation.cohort.bundles.includes(name))) fail('auxiliary source preparation differs')
 }
 function proofBody(input, installer, preparation, auxiliaryProfileName, cohort) {
-  return { protocol: 'dsh-enhanced/host-local-artifacts/v1', homePath: input.homePath, profile: input.profile,
+  return { protocol: 'dsh-ray/host-local-artifacts/v1', homePath: input.homePath, profile: input.profile,
     sourcePreparationRoot: input.sourcePreparationRoot, preparationDigest: preparation.receiptDigest,
     installer, root: input.root, auxiliaryProfile: auxiliaryProfileName, bundles: [...input.bundles].sort(),
     candidateRepository: preparation.source.repository, sourceCommit: preparation.source.sourceCommit,
@@ -141,7 +141,7 @@ export async function prepareHostLocalArtifacts(input, ports = {}) {
 }
 
 export async function verifyHostLocalArtifactsFinal({ proof, homePath }, ports = {}) {
-  if (proof?.protocol !== 'dsh-enhanced/host-local-artifacts/v1' || proof.homePath !== homePath
+  if (proof?.protocol !== 'dsh-ray/host-local-artifacts/v1' || proof.homePath !== homePath
     || !HASH.test(proof.receiptDigest)) fail('invalid auxiliary proof protocol')
   const input = { homePath, profile: proof.profile, sourcePreparationRoot: proof.sourcePreparationRoot,
     installerRoot: proof.installer?.root, root: proof.root, bundles: proof.bundles }

@@ -3,7 +3,7 @@ import type { ScopedPluginFile } from './source-workspace.js'
 import type { SourceBaselineConfig } from './source-baseline.js'
 import type { CandidatePluginKind, SourceCreationBinding, SourceCreationGrant } from './source-creation.js'
 import type { SourceRevisionBinding, SourceRevisionGrant } from './source-revision.js'
-import type { RevisionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
+import type { RevisionAcceptanceAuthorityRef } from '@dsh-ray/assistant-growth-contract'
 
 /** Owner-configured authority for background checks, separate from an Agent wake. */
 export interface SourceJobsConfig {
@@ -24,7 +24,7 @@ export interface SourceJobsConfig {
    * revision grants that pin a benefit digest gate auto-adoption on a recorded
    * non-inferior outcome evaluated under this exact contract.
    */
-  revisionBenefit?: import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitContract
+  revisionBenefit?: import('@dsh-ray/assistant-growth-contract').RevisionBenefitContract
   /**
    * Explicit owner opt-in: with a pinned benefit contract, allow exactly one
    * review-only first adoption before candidate evidence can exist. Default

@@ -6,12 +6,12 @@ import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
-import { inspectAutomationRetirementSnapshot } from '@dsh-enhanced/assistant-automations'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
-import type { LearningConfig } from '@dsh-enhanced/assistant-memory-learning'
-import type { AutomationDefinition, AutomationRecord } from '@dsh-enhanced/assistant-automations'
-import { externalPrincipalId, inspectRevokedOwnerRouteLocally } from '@dsh-enhanced/assistant-delivery'
-import type { DeliveryPrincipal, OwnerRouteAuthority, RevokedOwnerRouteSnapshot } from '@dsh-enhanced/assistant-delivery'
+import { inspectAutomationRetirementSnapshot } from '@dsh-ray/assistant-automations'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
+import type { LearningConfig } from '@dsh-ray/assistant-memory-learning'
+import type { AutomationDefinition, AutomationRecord } from '@dsh-ray/assistant-automations'
+import { externalPrincipalId, inspectRevokedOwnerRouteLocally } from '@dsh-ray/assistant-delivery'
+import type { DeliveryPrincipal, OwnerRouteAuthority, RevokedOwnerRouteSnapshot } from '@dsh-ray/assistant-delivery'
 import {
   ScannerRetirementTransitionError,
   prepareScannerRetirementOperations,
@@ -56,10 +56,10 @@ interface DeliveryStoreFixture {
 
 async function stores() {
   // Use the package's built formal writers without adding a production subpath export.
-  const automations = await import(pathToFileURL(join(dirname(require.resolve('@dsh-enhanced/assistant-automations/package.json')), 'lib/store.js')).href) as {
+  const automations = await import(pathToFileURL(join(dirname(require.resolve('@dsh-ray/assistant-automations/package.json')), 'lib/store.js')).href) as {
     AutomationStore: new (options: { path: string; now: () => number }) => AutomationStoreFixture
   }
-  const delivery = await import(pathToFileURL(join(dirname(require.resolve('@dsh-enhanced/assistant-delivery/package.json')), 'lib/store.js')).href) as {
+  const delivery = await import(pathToFileURL(join(dirname(require.resolve('@dsh-ray/assistant-delivery/package.json')), 'lib/store.js')).href) as {
     DeliveryStore: new (options: { path: string; codeGenerator: () => string }) => DeliveryStoreFixture
   }
   return { ...automations, ...delivery }
@@ -326,7 +326,7 @@ describe('pure exact scanner retirement transition verification', () => {
         principalVersion: config.owner.principalVersion } }
     const forbidden = () => { throw new Error('revoked runtime must stop before this port is used') }
     const methods = (names: readonly string[]) => Object.fromEntries(names.map(name => [name, forbidden]))
-    const { MemoryLearningRuntime } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-enhanced/assistant-memory-learning/package.json')),
+    const { MemoryLearningRuntime } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-ray/assistant-memory-learning/package.json')),
       'lib/runtime.js')).href) as { MemoryLearningRuntime: new (config: LearningConfig, ports: unknown) => {
         start(): void; close(): Promise<void>; health(): { connected: boolean }
       } }
@@ -387,9 +387,9 @@ describe('pure exact scanner retirement transition verification', () => {
     const input = await fixture()
     const receipt = verifyScannerRetirementTransition(input)
     for (const [packageName, target] of [
-      ['@dsh-enhanced/assistant-memory-learning', input.targets[0]!],
-      ['@dsh-enhanced/assistant-growth-driver', input.targets[1]!],
-      ['@dsh-enhanced/plugin-control-plane', input.targets[2]!],
+      ['@dsh-ray/assistant-memory-learning', input.targets[0]!],
+      ['@dsh-ray/assistant-growth-driver', input.targets[1]!],
+      ['@dsh-ray/plugin-control-plane', input.targets[2]!],
     ] as const) {
       const { ScannerOwnerGuard } = await import(pathToFileURL(join(dirname(require.resolve(`${packageName}/package.json`)),
         'lib/scanner-owner-runtime.js')).href) as { ScannerOwnerGuard: new (...args: unknown[]) => { check(): unknown } }

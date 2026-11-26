@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-personal-memory
-      name: '@dsh-enhanced/personal-memory'
+    - id: dsh-ray-personal-memory
+      name: '@dsh-ray/personal-memory'
       inject:
         - assistantPolicy
       config:

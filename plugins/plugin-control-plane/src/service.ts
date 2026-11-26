@@ -33,9 +33,9 @@ import { lstat, readFile, realpath } from 'node:fs/promises'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { createHash, createPublicKey, randomBytes } from 'node:crypto'
-import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
+import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-ray/assistant-delivery'
+import type { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import type { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
 import { isSourceOwnerContinuation, isPluginRevisionTaskSource, anySourceGrowthRunDigest as sourceGrowthRunDigest, validateAnySourceGrowthRunBinding as validateSourceGrowthRunBinding, validateWorkItemGrowthAuthorityPins, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
   validateRevisionAcceptanceAuthorityRef, verifyPluginRevisionVerificationCertificate, type RevisionAcceptanceAuthorityRef,
   validateRevisionRegressionAcceptanceAuthorityRef, verifyPluginRevisionRegressionCertificate,
@@ -45,12 +45,12 @@ import { isSourceOwnerContinuation, isPluginRevisionTaskSource, anySourceGrowthR
   type PluginCreationVerificationRequest, type PluginCreationVerificationResult,
   type AnySourceGrowthRunBinding as SourceGrowthRunBinding, type AnySourceGrowthRunProducer as SourceGrowthRunProducer, type WorkItemSourceGrowthRunBinding, type WorkItemGrowthAuthorityPins,
   type WorkItemRevisionSourceGrowthRunBinding, type WorkItemRevisionAuthorityPins, validateWorkItemRevisionAuthorityPins,
-  revisionBenefitContractDigest } from '@dsh-enhanced/assistant-growth-contract'
+  revisionBenefitContractDigest } from '@dsh-ray/assistant-growth-contract'
 import { TaskObservationRuntime, validateTaskObservationConfig } from './task-observation-runtime.js'
 import { LiveQualificationRuntime, validateLiveQualificationConfig, type LiveQualificationConfig } from './live-qualification-runtime.js'
 import type { TaskObservationConfig } from './task-observation-types.js'
 import { rollbackPluginWatch } from './cli.js'
-import type { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
+import type { AssistantVerifierService } from '@dsh-ray/assistant-verifier'
 import { assertWorkItemRunReference, assertWorkItemRevisionRunReference, inertCreationData, WORK_ITEM_ENGINEERING_PROTOCOL, type WorkItemEngineeringSource } from './work-item-creation-contract.js'
 import { OwnerTaskFailureGaps } from './owner-task-gaps.js'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -79,7 +79,7 @@ import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest, createO
 import { validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { runNativePreparedChecks } from './native-source-build.js'
 import { LINUX_PREPARED_SOURCE_BUILD_SCRIPT, LINUX_SOURCE_PACK_PATH, runLinuxPreparedChecks } from './linux-source-build.js'
-import { LinuxRepositoryRunner, NativeMacVerifierRunner, linuxRuntimeDigest, verifyLinuxRuntime, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { LinuxRepositoryRunner, NativeMacVerifierRunner, linuxRuntimeDigest, verifyLinuxRuntime, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { NATIVE_SOURCE_COMPILER } from './native-source-build-worker.js'
 import { awaitSourceSignal, inspectSourceContext, inspectSourceTargetsContext, type SourceInspection, type SourceTargetsInspection } from './source-context.js'
 import { inspectSourceRevisionContext, prepareRevisedPluginWorkspace, verifyRevisedPluginWorkspace } from './source-revision.js'
@@ -1277,7 +1277,7 @@ export class PluginControlPlaneService extends Service {
       const policy = authorization.releasePolicy
       if (policy.registryId !== trust.releaseRegistry.id || policy.registryLocator !== trust.releaseRegistry.locator
         || policy.catalogId !== trust.catalog.id || policy.catalogPath !== trust.catalog.path
-        || policy.packageName !== `@dsh-enhanced/${plan.name}` || policy.packagePath !== `plugins/${plan.name}`
+        || policy.packageName !== `@dsh-ray/${plan.name}` || policy.packagePath !== `plugins/${plan.name}`
         || policy.packageVersion !== plan.preparedEvidence!.pack.version) throw new Error('source release policy differs from configured trust or prepared package')
       const key = resolveTrustKey(trust, 'release-authorization', authorization.authority, authorization.keyId)
       return (await this.store.startSourceRelease({ planId: plan.id, expectedRevision: plan.revision, authorization,

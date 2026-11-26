@@ -7,9 +7,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 }
 const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
 
-describe('dsh-enhanced-assistant-recovery', () => {
+describe('dsh-ray-assistant-recovery', () => {
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-assistant-recovery')
+    expect(name).toBe('dsh-ray-assistant-recovery')
     expect(version).toBe(manifest.version)
   })
 

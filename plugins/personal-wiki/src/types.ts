@@ -1,4 +1,4 @@
-import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-ray/assistant-policy'
 
 export type WikiPageType = 'concept' | 'decision' | 'meta' | 'person' | 'project' | 'question' | 'source'
 export type WikiPageAuthority = 'curated' | 'derived'

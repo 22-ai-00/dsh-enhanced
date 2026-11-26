@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { DeliveryPreferencePrincipalAttestation } from '@dsh-enhanced/assistant-delivery'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import type { DeliveryPreferencePrincipalAttestation } from '@dsh-ray/assistant-delivery'
 import { GoalStoreError } from './types.js'
 import type { GoalDefinition, GoalDependencyBinding, GoalScope, NativeGoalState } from './types.js'
 import { prepareGoalStoreDatabaseFile } from './store.js'

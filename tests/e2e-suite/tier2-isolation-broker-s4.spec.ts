@@ -1013,7 +1013,7 @@ describe('Tier 2 — F08–F11: Isolation, Broker, S4 Web Learning & Sandbox Rep
         credential: {
           id: 'h1',
           provider: 'linux-protected-file',
-          consumers: ['dsh-enhanced-assistant-actions', 'dsh-enhanced-event-triggers'],
+          consumers: ['dsh-ray-assistant-actions', 'dsh-ray-event-triggers'],
           purposes: ['github.commit', 'github.observe'],
           maxLeaseMs: 60_000,
           reference: { path: secretFile },
@@ -1280,7 +1280,7 @@ describe('Tier 2 — F08–F11: Isolation, Broker, S4 Web Learning & Sandbox Rep
         credential: {
           id: 'live-gh-handle',
           provider: 'linux-protected-file',
-          consumers: ['dsh-enhanced-assistant-actions', 'dsh-enhanced-event-triggers'],
+          consumers: ['dsh-ray-assistant-actions', 'dsh-ray-event-triggers'],
           purposes: ['github.commit', 'github.observe'],
           maxLeaseMs: 60_000,
           reference: { path: secretFile },

@@ -16,7 +16,7 @@ describe('assistant-isolation bundle', () => {
     const ctx = new Context()
     try {
       expect(plugin.name).toBe(name)
-      expect(name).toBe('dsh-enhanced-assistant-isolation')
+      expect(name).toBe('dsh-ray-assistant-isolation')
       expect(version).toBe(manifest.version)
       expect(manifest.files).toContain('runtime')
       expect(plugin.apply).toBe(apply)

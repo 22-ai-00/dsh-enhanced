@@ -52,7 +52,7 @@ function ensurePnpm(f: Awaited<ReturnType<typeof fixture>>, privateHost: boolean
   const path = privateInitiallyOnPath ? `${f.hostBin}:${f.fakeBin}` : f.fakeBin
   return spawnSync('/bin/bash', [
     '-c',
-    'set -euo pipefail; export PATH="$FIXTURE_PATH"; source "$1"; dsh_enhanced_ensure_pnpm 0; printf "RESULT_PATH=%s\\n" "$PATH"; printf "RESULT_PNPM=%s\\n" "$(pnpm --version)"; printf "RESULT_DSH=%s\\n" "$(dsh --version)"; printf "RESULT_DSH_PATH=%s\\n" "$(command -v dsh)"',
+    'set -euo pipefail; export PATH="$FIXTURE_PATH"; source "$1"; dsh_ray_ensure_pnpm 0; printf "RESULT_PATH=%s\\n" "$PATH"; printf "RESULT_PNPM=%s\\n" "$(pnpm --version)"; printf "RESULT_DSH=%s\\n" "$(dsh --version)"; printf "RESULT_DSH_PATH=%s\\n" "$(command -v dsh)"',
     'private-host-path-test', common,
   ], {
     cwd: repoRoot,
@@ -62,7 +62,7 @@ function ensurePnpm(f: Awaited<ReturnType<typeof fixture>>, privateHost: boolean
       FIXTURE_PATH: path,
       FAKE_GLOBAL_PREFIX: f.globalPrefix,
       FAKE_NPM_LOG: f.npmLog,
-      ...(privateHost ? { DSH_ENHANCED_HOST_BIN: f.hostBin } : {}),
+      ...(privateHost ? { DSH_RAY_HOST_BIN: f.hostBin } : {}),
     },
   })
 }

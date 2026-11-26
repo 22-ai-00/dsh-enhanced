@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Config, MemoryWikiBridgeService } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-memory-wiki-bridge'
+export const name = 'dsh-ray-memory-wiki-bridge'
 export { Config, MemoryWikiBridgeService, version }
 export * from './service.js'
 

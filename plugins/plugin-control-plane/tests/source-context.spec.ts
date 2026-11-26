@@ -37,7 +37,7 @@ function inspect(repository: string, paths: readonly string[] = [], baseCommit?:
 
 async function targetFixture() {
   const value = await fixture()
-  await writeFile(join(value.root, 'plugins/health-helper/package.json'), JSON.stringify({ name: '@dsh-enhanced/health-helper', description: 'Committed helper' }))
+  await writeFile(join(value.root, 'plugins/health-helper/package.json'), JSON.stringify({ name: '@dsh-ray/health-helper', description: 'Committed helper' }))
   execFileSync('/usr/bin/git', ['-C', value.root, 'add', '.'])
   execFileSync('/usr/bin/git', ['-C', value.root, 'commit', '-m', 'plugin manifest'])
   return { root: value.root, head: execFileSync('/usr/bin/git', ['-C', value.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() }
@@ -173,17 +173,17 @@ describe('committed source targets', () => {
   it('lists only eligible committed plugin identities and ignores dirty, untracked, protected, and linked manifests', async () => {
     const { root, head } = await targetFixture()
     await mkdir(join(root, 'plugins/assistant-policy'))
-    await writeFile(join(root, 'plugins/assistant-policy/package.json'), '{"name":"@dsh-enhanced/assistant-policy"}')
+    await writeFile(join(root, 'plugins/assistant-policy/package.json'), '{"name":"@dsh-ray/assistant-policy"}')
     await mkdir(join(root, 'plugins/Bad_Name'))
-    await writeFile(join(root, 'plugins/Bad_Name/package.json'), '{"name":"@dsh-enhanced/Bad_Name"}')
+    await writeFile(join(root, 'plugins/Bad_Name/package.json'), '{"name":"@dsh-ray/Bad_Name"}')
     await mkdir(join(root, 'plugins/linked-helper'))
     await symlink('../health-helper/package.json', join(root, 'plugins/linked-helper/package.json'))
     await mkdir(join(root, 'plugins/new-helper'))
-    await writeFile(join(root, 'plugins/new-helper/package.json'), '{"name":"@dsh-enhanced/new-helper"}')
+    await writeFile(join(root, 'plugins/new-helper/package.json'), '{"name":"@dsh-ray/new-helper"}')
     execFileSync('/usr/bin/git', ['-C', root, 'add', 'plugins/assistant-policy', 'plugins/Bad_Name', 'plugins/linked-helper'])
     execFileSync('/usr/bin/git', ['-C', root, 'update-index', '--add', '--cacheinfo', `160000,${head},plugins/gitlink-helper`])
     execFileSync('/usr/bin/git', ['-C', root, 'commit', '-m', 'ineligible plugin roots'])
-    await writeFile(join(root, 'plugins/health-helper/package.json'), '{"name":"@dsh-enhanced/health-helper","description":"dirty"}')
+    await writeFile(join(root, 'plugins/health-helper/package.json'), '{"name":"@dsh-ray/health-helper","description":"dirty"}')
     const result = await targets(root)
     expect(result.plugins).toEqual([{ name: 'health-helper', description: 'Committed helper' }])
     expect(result.baseCommit).toBe(execFileSync('/usr/bin/git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim())
@@ -192,10 +192,10 @@ describe('committed source targets', () => {
 
   it('uses the resolved managed commit without changing checkout and rejects stale bases or noncanonical roots', async () => {
     const { root, head } = await targetFixture()
-    await writeFile(join(root, 'plugins/health-helper/package.json'), '{"name":"@dsh-enhanced/health-helper","description":"released"}')
+    await writeFile(join(root, 'plugins/health-helper/package.json'), '{"name":"@dsh-ray/health-helper","description":"released"}')
     const released = commit(root, 'released plugin')
     execFileSync('/usr/bin/git', ['-C', root, 'checkout', '--detach', head])
-    await writeFile(join(root, 'plugins/health-helper/package.json'), '{"name":"@dsh-enhanced/health-helper","description":"dirty"}')
+    await writeFile(join(root, 'plugins/health-helper/package.json'), '{"name":"@dsh-ray/health-helper","description":"dirty"}')
     expect(await targets(root, { baselineCommit: released, baseCommit: released })).toEqual({
       baseCommit: released, plugins: [{ name: 'health-helper', description: 'released' }],
     })
@@ -207,9 +207,9 @@ describe('committed source targets', () => {
 
   it.each([
     ['malformed JSON', '{'],
-    ['mismatched identity', JSON.stringify({ name: '@dsh-enhanced/other-helper' })],
-    ['description control characters', JSON.stringify({ name: '@dsh-enhanced/health-helper', description: 'a\nb' })],
-    ['oversized description', JSON.stringify({ name: '@dsh-enhanced/health-helper', description: '界'.repeat(171) })],
+    ['mismatched identity', JSON.stringify({ name: '@dsh-ray/other-helper' })],
+    ['description control characters', JSON.stringify({ name: '@dsh-ray/health-helper', description: 'a\nb' })],
+    ['oversized description', JSON.stringify({ name: '@dsh-ray/health-helper', description: '界'.repeat(171) })],
     ['binary bytes', Buffer.from([0x7b, 0x80, 0x7d])],
   ] as const)('rejects %s plugin manifest', async (_case, content) => {
     const { root } = await targetFixture()
@@ -222,14 +222,14 @@ describe('committed source targets', () => {
   it('rejects per-manifest, aggregate and eligible count bounds rather than returning a partial directory', async () => {
     const { root } = await targetFixture()
     const path = join(root, 'plugins/health-helper/package.json')
-    await writeFile(path, JSON.stringify({ name: '@dsh-enhanced/health-helper', padding: 'x'.repeat(16_384) }))
+    await writeFile(path, JSON.stringify({ name: '@dsh-ray/health-helper', padding: 'x'.repeat(16_384) }))
     commit(root, 'oversized manifest')
     await expect(targets(root)).rejects.toThrow('bound')
-    await writeFile(path, JSON.stringify({ name: '@dsh-enhanced/health-helper' }))
+    await writeFile(path, JSON.stringify({ name: '@dsh-ray/health-helper' }))
     for (let i = 0; i < 129; i++) {
       const name = `helper-${i}`
       await mkdir(join(root, 'plugins', name))
-      await writeFile(join(root, 'plugins', name, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${name}` }))
+      await writeFile(join(root, 'plugins', name, 'package.json'), JSON.stringify({ name: `@dsh-ray/${name}` }))
     }
     commit(root, 'too many plugins')
     await expect(targets(root)).rejects.toThrow('count')
@@ -237,7 +237,7 @@ describe('committed source targets', () => {
     for (let i = 0; i < 33; i++) {
       const name = `aggregate-${i}`
       await mkdir(join(root, 'plugins', name))
-      await writeFile(join(root, 'plugins', name, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${name}`, padding: 'x'.repeat(16_000) }))
+      await writeFile(join(root, 'plugins', name, 'package.json'), JSON.stringify({ name: `@dsh-ray/${name}`, padding: 'x'.repeat(16_000) }))
     }
     commit(root, 'too many manifest bytes')
     await expect(targets(root)).rejects.toThrow('aggregate')

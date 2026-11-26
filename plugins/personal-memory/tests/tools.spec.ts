@@ -6,7 +6,7 @@ import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-ses
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolBatchInput } from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -94,7 +94,7 @@ async function harness(ownerRequest?: { text: string; decision: 'execute' | 'ask
   })
   const route = {
       routeVersion: 2 as const,
-      sourceId: 'dsh-enhanced-personal-memory',
+      sourceId: 'dsh-ray-personal-memory',
       bindingId: 'binding-owner-dm',
       bindingVersion: 1,
       bindingGeneration: 1,

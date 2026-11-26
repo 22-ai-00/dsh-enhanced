@@ -309,13 +309,13 @@ async function reviewedSource(target: Awaited<ReturnType<typeof fixture>>, suffi
     checkedTreeDigest: 'c'.repeat(64), checkedPatchDigest: 'd'.repeat(64) })
 }
 
-function releaseAuthorization(plan: PluginSourcePlan, now: number, root: string, registryReference = '@dsh-enhanced/health-helper@0.1.0') {
+function releaseAuthorization(plan: PluginSourcePlan, now: number, root: string, registryReference = '@dsh-ray/health-helper@0.1.0') {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   const unsigned: Omit<SourceReleaseAuthorization, 'signature'> = { schemaVersion: 1, kind: 'dsh-source-release-authorization',
     authorizationId: `release-auth-${plan.id.slice(-12)}`, authority: 'release-owner', keyId: 'release-owner-key',
     planId: plan.id, planDigest: plan.digest, baseCommit: plan.baseCommit, checkedTreeDigest: plan.sourceCheck!.treeDigest,
     checkedPatchDigest: plan.sourceCheck!.patchDigest, scope: plan.scope, releasePolicy: { targetBranch: 'main',
-      candidateId: plan.name, packageName: '@dsh-enhanced/health-helper', packageVersion: '0.1.0', packagePath: 'plugins/health-helper',
+      candidateId: plan.name, packageName: '@dsh-ray/health-helper', packageVersion: '0.1.0', packagePath: 'plugins/health-helper',
       dshBaseline: '0.1.0', capabilities: ['health'], authorities: ['read-only: health'], requires: [], registryId: 'npm',
       registryLocator: 'https://registry.example.test', registryReference,
       catalogId: 'owner-catalog', catalogPath: join(root, 'catalog.json'), minimumReproducibleBuilds: 2 },

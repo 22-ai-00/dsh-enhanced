@@ -27,7 +27,7 @@ test(`installed Web owner CLI admits one private verified Goal after a stopped p
   const temp = await mkdtemp(join(tmpdir(), 'dsh-goal-setup-e2e-'))
   const home = join(temp, 'home'); const workspace = join(temp, 'workspace'); const taskPath = join(temp, 'private-goal-admission.json')
   const modelLog = join(temp, 'model.jsonl'); const runtimePort = await port()
-  const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_ENHANCED_WEB_PORT: String(runtimePort), DSH_WEB_E2E_MODEL_LOG: modelLog,
+  const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_RAY_WEB_PORT: String(runtimePort), DSH_WEB_E2E_MODEL_LOG: modelLog,
     DSH_AUTONOMY_GOAL_SETUP_TEST: '1', DSH_AUTONOMY_GOAL_SETUP_STRATEGY: strategy ? '1' : '0', DEEPSEEK_API_KEY: 'test-only-not-a-credential' }
   const http = []; const transport = []; const streams = new Map(); const frames = []; let host; let hostCount = 0; let authenticated = false; let failed = false; let currentPage = page
   const stop = async () => { if (host) { await host.stop(); await writeFile(testInfo.outputPath(`host-${hostCount}.log`), host.log(), { mode: 0o600 }); host = undefined } }
@@ -83,9 +83,9 @@ test(`installed Web owner CLI admits one private verified Goal after a stopped p
     await writeFile(testInfo.outputPath('goal-setup-second.log'), sanitize(second), { mode: 0o600 })
     await writeFile(testInfo.outputPath('installed-profile.yaml'), configured, { mode: 0o600 })
     const finalProfile = parseDocument(configured)
-    const goals = row(finalProfile, 'dsh-enhanced-assistant-goals').get('config', true).toJSON()
-    const verifier = row(finalProfile, 'dsh-enhanced-assistant-verifier').get('config', true).toJSON()
-    const delivery = row(finalProfile, 'dsh-enhanced-assistant-delivery').get('config', true).toJSON()
+    const goals = row(finalProfile, 'dsh-ray-assistant-goals').get('config', true).toJSON()
+    const verifier = row(finalProfile, 'dsh-ray-assistant-verifier').get('config', true).toJSON()
+    const delivery = row(finalProfile, 'dsh-ray-assistant-delivery').get('config', true).toJSON()
     expect(goals).toMatchObject({ verifyNativeRounds: true, verifyGoalOutcome: true, preauthorizedCreateMaxRounds: 3, preauthorizedSchedule: true, executionBudget: task.executionBudget, ...(strategy ? { strategy: task.strategy } : {}) })
     expect(verifier.profiles.some(profile => profile.objective === objective && profile.taskKind === 'goal-step')).toBe(true)
     expect(delivery.ownerRoutes).toEqual(expect.arrayContaining([expect.objectContaining({ conversation: JSON.parse(binding.conversation_json), workspace, minimumGeneration: binding.generation })]))

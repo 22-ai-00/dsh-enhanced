@@ -1,4 +1,4 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { SkillDefinition } from './definition.js'
 import { validateCanaryAdmission, type CanaryAdmission } from './holdout-qualification.js'
 

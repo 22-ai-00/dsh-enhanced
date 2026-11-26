@@ -21,7 +21,7 @@ const installationId = '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00'
 const now = 1_800_000_000_000
 
 const exact: WatchExactTarget = {
-  package: '@dsh-enhanced/assistant-health',
+  package: '@dsh-ray/assistant-health',
   version: '0.1.3',
   integrity: 'sha512-GcNqvjjSul+jrx52dFzxsKASPXUeMDi+ia40DXXI77rZQaqWc6O49iOPCXkrbo43pbsZmCY5cpjb1zLtWLkuQA==',
 }

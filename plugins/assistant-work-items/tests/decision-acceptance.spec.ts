@@ -6,7 +6,7 @@ import {
   type TaskAcceptanceContract,
   type TaskAcceptanceContractV1Input,
   type TaskVerificationReceipt,
-} from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/task-acceptance-contract'
 import { describe, expect, test } from 'vitest'
 import { acceptanceIsIndependent, settleAcceptance } from '../src/acceptance-binding.ts'
 import { MALFORMED_AUTHORITY_REASON } from '../src/authority.ts'

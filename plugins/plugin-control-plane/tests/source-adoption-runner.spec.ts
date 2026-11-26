@@ -22,7 +22,7 @@ afterEach(async () => { vi.clearAllMocks(); for (const root of roots.splice(0)) 
 
 async function fixture(status: PluginActivationPlan['status'] = 'pending-approval', rollbackProfileRestored = false) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'source-adoption-runner-')); roots.push(root); const dshHome = join(root, 'dsh'); await mkdir(join(dshHome, 'profiles'), { recursive: true })
-  const candidate: CatalogEntry = { id: 'health-helper', package: '@dsh-enhanced/health-helper', version: '1.2.3', integrity: 'sha512-YQ==', dshBaseline: '0.1.0', registry: { id: 'registry', locator: 'https://registry.example/', reference: 'https://registry.example/health-helper-1.2.3.tgz' }, capabilities: ['health'], authorities: ['network'], requires: [] }
+  const candidate: CatalogEntry = { id: 'health-helper', package: '@dsh-ray/health-helper', version: '1.2.3', integrity: 'sha512-YQ==', dshBaseline: '0.1.0', registry: { id: 'registry', locator: 'https://registry.example/', reference: 'https://registry.example/health-helper-1.2.3.tgz' }, capabilities: ['health'], authorities: ['network'], requires: [] }
   const target = { dshHome, profile: 'default', profilePath: join(dshHome, 'profiles', 'default') }
   const trust = { installationId: 'installation', dshHome, ledger: { id: 'ledger', path: '/ledger' }, executor: { id: 'executor', version: '1.0.0', path: '/bin/executor', sha256: hex('a') }, catalog: { id: 'catalog', path: '/catalog' } } as unknown as PluginControlTrustConfig
   const source = { id: 'source-plan', status: 'release-complete', mode: 'modify', gapId: 'gap', gapSnapshot: { capability: 'health' } }

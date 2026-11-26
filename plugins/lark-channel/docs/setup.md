@@ -7,8 +7,8 @@
 还没安装时，在本机终端运行：
 
 ```sh
-npm install --global @dsh-enhanced/dsh-rsi-cli
-dsh-rsi install
+npm install --global dsh-ray
+dsh-ray install
 ```
 
 已经跟随[首页安装](../../../README.md#开始使用)的用户，继续当前向导即可。默认配置名为 `web`，无需手工安装每个飞书插件、填写 App Secret 或配置公网回调地址。
@@ -18,7 +18,7 @@ dsh-rsi install
 3. **选择模型**：常驻服务启动后，用同一个飞书账号私聊发送 `/model`，在卡片里选择模型并确认。这条消息也会建立首次聊天会话。
 4. **确认可用**：发一句普通消息，确认收到回复。如果安装器提示 `exactly one current owner DM is required`，完成第 3 步后用原安装命令继续，无需删除配置或重新配对。
 
-只需要飞书消息助理、不启用完整学习场景时，可在首次安装选择 `dsh-rsi install --scenario lark`。Mac 原生运行无需 Docker；平台准备见[安装指南](../../../scripts/install/README.md)。
+只需要飞书消息助理、不启用完整学习场景时，可在首次安装选择 `dsh-ray install --scenario lark`。Mac 原生运行无需 Docker；平台准备见[安装指南](../../../scripts/install/README.md)。
 
 ## 业务权限可以单独处理
 
@@ -27,16 +27,16 @@ dsh-rsi install
 暂时不需要业务工具时，可以不批准这一步。若向导因此中断，先确认终端已经显示「消息通道已配置」，再用**原安装命令加 `--lark keep`** 继续，保留已绑定的应用和本人身份。例如默认安装：
 
 ```sh
-dsh-rsi install --lark keep
+dsh-ray install --lark keep
 ```
 
-这不会重新申请业务授权。若消息通道尚未配置完成，仍需先完成前面的绑定。独立插件向导的 `--no-business-tools` 只属于 `dsh-lark-setup`，不是 `dsh-rsi install` 的参数，详见下方高级参考。
+这不会重新申请业务授权。若消息通道尚未配置完成，仍需先完成前面的绑定。独立插件向导的 `--no-business-tools` 只属于 `dsh-lark-setup`，不是 `dsh-ray install` 的参数，详见下方高级参考。
 
 ## 没有回复时
 
 ```sh
-dsh-rsi status
-dsh-rsi logs --profile web --lines 100
+dsh-ray status
+dsh-ray logs --profile web --lines 100
 ```
 
 | 现象 | 处理 |
@@ -47,19 +47,19 @@ dsh-rsi logs --profile web --lines 100
 | `/model` 没有卡片或点了没反应 | 核查应用的消息权限和 `card.action.trigger` 回调；旧应用补权限后还需发布或审批，见下方「手工配置飞书应用」。 |
 | 有模型卡片，但对话失败 | 检查[模型登录、API Key 与接口配置](../../../docs/models.md)。 |
 
-日常重启用 `dsh-rsi restart --profile web`；已注册服务停止后用 `dsh-rsi start --profile web`。重启不会重新授权飞书。
+日常重启用 `dsh-ray restart --profile web`；已注册服务停止后用 `dsh-ray start --profile web`。重启不会重新授权飞书。
 
 <details>
 <summary>高级参考：独立插件、手工应用配置、凭据与系统服务</summary>
 
-以下保留独立部署和源码开发入口。`dsh-lark-setup` 的直接命令要求插件能解析对应 Host 的依赖，且 PATH 中的 `dsh` 就是目标 Host。通过 `dsh-rsi` 安装的私有 Host 会由安装器处理这些依赖；这类安装请优先沿用上面的安装器入口，裸运行 profile 下的 `.bin/dsh-lark-setup` 可能缺少依赖或选错 Host。
+以下保留独立部署和源码开发入口。`dsh-lark-setup` 的直接命令要求插件能解析对应 Host 的依赖，且 PATH 中的 `dsh` 就是目标 Host。通过 `dsh-ray` 安装的私有 Host 会由安装器处理这些依赖；这类安装请优先沿用上面的安装器入口，裸运行 profile 下的 `.bin/dsh-lark-setup` 可能缺少依赖或选错 Host。
 
 ## 安装
 
-先安装并配置 `@dsh-enhanced/assistant-policy` 与 `@dsh-enhanced/assistant-delivery`，再安装本包：
+先安装并配置 `@dsh-ray/assistant-policy` 与 `@dsh-ray/assistant-delivery`，再安装本包：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/lark-channel
+dsh plugin --profile web add @dsh-ray/lark-channel
 dsh --profile web --dump-config
 ```
 
@@ -78,9 +78,9 @@ dsh --profile web --dump-config
 源码工作区可运行：
 
 ```sh
-cd /path/to/dsh-enhanced
-pnpm --filter @dsh-enhanced/lark-channel build
-pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
+cd /path/to/dsh-ray
+pnpm --filter @dsh-ray/lark-channel build
+pnpm --filter @dsh-ray/lark-channel run onboard --profile web --create-app
 ```
 
 向导依次完成：
@@ -99,7 +99,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 
 `DSH-CONNECT-...` 仅用于临时长连接上的 owner 身份绑定，绑定阶段不会自动回复，也不会建立 Delivery 聊天会话。应在当前向导的等待窗口内发送最新短语；向导超时退出后，旧短语不再有效。以终端的绑定成功结果判断，不以聊天中是否回复判断。
 
-全新或完整重装的 Home 在常驻服务启动后，还需要 owner 私聊发送一条普通消息或 `/model`，以建立真实会话；`/model` 可同时验证模型卡片与选择回调。交互式安装器会在配置 owner 学习前提示这一步并自动等待（默认最长 600 秒，`--owner-wait-seconds` 调整，`0` 关闭）；等待只读取本地绑定快照，不发送消息，也不改变 owner 授权。也可单独运行 `dsh-rsi-setup --wait-owner-dm --profile web --dsh-home <绝对路径> --timeout-seconds 600`，出现唯一 owner 私聊时以 `{"mode":"ready"}` 退出，超时或存在多个绑定时退出码为 3。若后续原生学习配置报告 `exactly one current owner DM is required`，先完成这一步，再通过安装器的 Host-aware 入口续跑 owner 配置。此时已有身份绑定和普通服务会保留，无需重新配对或授予额外业务权限。
+全新或完整重装的 Home 在常驻服务启动后，还需要 owner 私聊发送一条普通消息或 `/model`，以建立真实会话；`/model` 可同时验证模型卡片与选择回调。交互式安装器会在配置 owner 学习前提示这一步并自动等待（默认最长 600 秒，`--owner-wait-seconds` 调整，`0` 关闭）；等待只读取本地绑定快照，不发送消息，也不改变 owner 授权。也可单独运行 `dsh-ray-setup --wait-owner-dm --profile web --dsh-home <绝对路径> --timeout-seconds 600`，出现唯一 owner 私聊时以 `{"mode":"ready"}` 退出，超时或存在多个绑定时退出码为 3。若后续原生学习配置报告 `exactly one current owner DM is required`，先完成这一步，再通过安装器的 Host-aware 入口续跑 owner 配置。此时已有身份绑定和普通服务会保留，无需重新配对或授予额外业务权限。
 
 ### 官方一键授权的范围
 
@@ -119,7 +119,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 
 ### 自动业务工具接入
 
-安装器优先复用满足契约的本机 CLI，缺失时下载官方 npm `latest` 对应的精确稳定版本到 `$DSH_HOME/.dsh-enhanced/tools/lark-cli`。优先下载 GitHub release，失败时尝试官方安装器使用的镜像；两条路径都验证 npm SHA512 与包内记录的 release SHA256，不执行 npm 安装脚本或修改全局 npm。已验证的受管 CLI 可在后续安装中复用。
+安装器优先复用满足契约的本机 CLI，缺失时下载官方 npm `latest` 对应的精确稳定版本到 `$DSH_HOME/.dsh-ray/tools/lark-cli`。优先下载 GitHub release，失败时尝试官方安装器使用的镜像；两条路径都验证 npm SHA512 与包内记录的 release SHA256，不执行 npm 安装脚本或修改全局 npm。已验证的受管 CLI 可在后续安装中复用。
 
 每个 DSH profile/account 的配置与授权记录保存在 `$DSH_HOME/lark-business`；App Secret 仅通过 stdin 交给 CLI。每次 CLI 调用都固定绝对命令、named profile、配置目录，并清除会抢占身份的外部 Agent/CLI 环境变量。Linux 凭据数据也存入专用目录；macOS/Windows 使用 CLI 的原生系统钥匙环，同一应用/用户的条目可能与其它 CLI 实例共享，不能视为独立凭据隔离。
 
@@ -201,7 +201,7 @@ config:
   imageDownloadTimeoutMs: 30000
 ```
 
-credential handle 由 `@dsh-enhanced/credentials-keychain` 提供，并应只允许 consumer `dsh-enhanced-lark-channel`、purpose `connect`。兼容部署可不激活 keychain service，改为只设置 `appSecretEnv`，再通过进程环境或操作系统 service manager 注入：
+credential handle 由 `@dsh-ray/credentials-keychain` 提供，并应只允许 consumer `dsh-ray-lark-channel`、purpose `connect`。兼容部署可不激活 keychain service，改为只设置 `appSecretEnv`，再通过进程环境或操作系统 service manager 注入：
 
 ```sh
 LARK_APP_SECRET='...' dsh --profile web

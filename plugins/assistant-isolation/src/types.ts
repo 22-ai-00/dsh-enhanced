@@ -1,4 +1,4 @@
-import type { GoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
+import type { GoalArtifactAdmission } from '@dsh-ray/task-acceptance-contract'
 import type { LinuxExecutionContract, LinuxExecutionIntent, LinuxExecutionResources } from './linux-execution-contract.js'
 export type { IsolationBackend, IsolationBackendConfig } from './platform.js'
 

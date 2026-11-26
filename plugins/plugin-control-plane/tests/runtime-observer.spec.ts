@@ -358,7 +358,7 @@ test('the platform gate lives in the runtime shell, not in configuration validat
     const keyPath = join(privateRoot, 'observer.key')
     await writeFile(keyPath, Buffer.alloc(32, 7), { mode: 0o600 }); await chmod(keyPath, 0o600)
     const config: RuntimeObserverConfig = { socketPath: join(privateRoot, 'observer.sock'), keyPath, profilePath,
-      targets: [{ entryId: 'control', module: '@dsh-enhanced/plugin-control-plane', configDigest: 'c'.repeat(64), services: [] }] }
+      targets: [{ entryId: 'control', module: '@dsh-ray/plugin-control-plane', configDigest: 'c'.repeat(64), services: [] }] }
 
     const platform = vi.spyOn(process, 'platform', 'get')
     try {

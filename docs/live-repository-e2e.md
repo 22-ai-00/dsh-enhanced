@@ -28,7 +28,7 @@ file; the file contents are never read by the harness.
   "credential": {
     "id": "github-live-e2e",
     "provider": "environment",
-    "consumers": ["dsh-enhanced-assistant-actions", "dsh-enhanced-event-triggers"],
+    "consumers": ["dsh-ray-assistant-actions", "dsh-ray-event-triggers"],
     "purposes": ["github.commit", "github.observe"],
     "maxLeaseMs": 30000,
     "reference": { "environmentName": "DSH_E2E_GITHUB_TOKEN" }

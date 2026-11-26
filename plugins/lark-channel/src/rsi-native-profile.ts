@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import type { ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
-import { normalizeConfig, type AssistantGrowthDriverConfig } from '@dsh-enhanced/assistant-growth-driver'
+import type { ActiveLarkOwnerBinding } from '@dsh-ray/assistant-delivery'
+import { normalizeConfig, type AssistantGrowthDriverConfig } from '@dsh-ray/assistant-growth-driver'
 import { defaultHostAttestationPolicy, normalizeControlPlaneConfig, runtimeConfigDigest,
-  type Config as ControlPlaneConfig, type PluginControlTrustConfig, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
+  type Config as ControlPlaneConfig, type PluginControlTrustConfig, type RuntimeObserverTarget } from '@dsh-ray/plugin-control-plane'
 import { isMap, isScalar, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { NativeRsiBuildEnvironment, NativeRsiCreationBuildEnvironment } from './rsi-native-runtime-bootstrap.js'
@@ -20,11 +20,11 @@ import { SELF_ITERATION_MANAGED_ROW_IDS } from './rsi-profile.js'
 const day = 86_400_000
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const managed = {
-  personal: '@dsh-enhanced/personal-assistant', delivery: '@dsh-enhanced/assistant-delivery',
-  verifier: '@dsh-enhanced/assistant-verifier', growth: '@dsh-enhanced/assistant-growth-driver',
-  control: '@dsh-enhanced/plugin-control-plane', memory: '@dsh-enhanced/assistant-memory-learning',
+  personal: '@dsh-ray/personal-assistant', delivery: '@dsh-ray/assistant-delivery',
+  verifier: '@dsh-ray/assistant-verifier', growth: '@dsh-ray/assistant-growth-driver',
+  control: '@dsh-ray/plugin-control-plane', memory: '@dsh-ray/assistant-memory-learning',
 } as const
-const ids = Object.fromEntries(Object.entries(managed).map(([key, name]) => [key, `dsh-enhanced-${name.slice('@dsh-enhanced/'.length)}`])) as Record<keyof typeof managed, string>
+const ids = Object.fromEntries(Object.entries(managed).map(([key, name]) => [key, `dsh-ray-${name.slice('@dsh-ray/'.length)}`])) as Record<keyof typeof managed, string>
 const prefix = 'rsi-native-'
 
 export interface NativeRsiProfileInput {
@@ -232,13 +232,13 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   for (const key of Object.keys(managed) as (keyof typeof managed)[]) {
     effectiveRow(effective.byId, key, key === 'memory' || (upgrading && SELF_ITERATION_MANAGED_ROW_IDS.has(ids[key])))
   }
-  for (const [id, row] of effective.byId) if (id.startsWith('dsh-enhanced-')) {
+  for (const [id, row] of effective.byId) if (id.startsWith('dsh-ray-')) {
     const name = row.get('name')
-    if (typeof name !== 'string' || id !== `dsh-enhanced-${name.replace(/^@dsh-enhanced\//u, '')}` || !name.startsWith('@dsh-enhanced/')) fail(`bundle ${id} package identity differs`)
+    if (typeof name !== 'string' || id !== `dsh-ray-${name.replace(/^@dsh-ray\//u, '')}` || !name.startsWith('@dsh-ray/')) fail(`bundle ${id} package identity differs`)
   }
-  const standalone = effective.byId.get('dsh-enhanced-assistant-automations')
+  const standalone = effective.byId.get('dsh-ray-assistant-automations')
   if (standalone && standalone.get('disabled') !== true) fail('standalone Automations conflicts with embedded provider')
-  const standaloneMemory = effective.byId.get('dsh-enhanced-personal-memory')
+  const standaloneMemory = effective.byId.get('dsh-ray-personal-memory')
   if (standaloneMemory && standaloneMemory.get('disabled') !== true) fail('standalone Memory conflicts with embedded provider')
   const delivery = options(effectiveRow(effective.byId, 'delivery'), 'delivery')
   const deliveryConfig = plain(delivery, 'delivery')
@@ -429,16 +429,16 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   }
   out.byId.get(ids.control)!.set('config', out.document.createNode(control))
   if (ordinary) {
-    const proactive = copyNamedConfig(out, effective, 'dsh-enhanced-assistant-proactive',
-      '@dsh-enhanced/assistant-proactive', 'assistant-proactive', upgrading)
+    const proactive = copyNamedConfig(out, effective, 'dsh-ray-assistant-proactive',
+      '@dsh-ray/assistant-proactive', 'assistant-proactive', upgrading)
     if (upgrading) {
       if (proactive.get('enabled') === false) proactive.set('enabled', true)
       proactive.set('intakeEvaluation', out.document.createNode(ordinary.intakeEvaluation))
     } else {
       setExact(out.document, proactive, 'intakeEvaluation', ordinary.intakeEvaluation, 'intake evaluation')
     }
-    const workItems = copyNamedConfig(out, effective, 'dsh-enhanced-assistant-work-items',
-      '@dsh-enhanced/assistant-work-items', 'assistant-work-items', upgrading)
+    const workItems = copyNamedConfig(out, effective, 'dsh-ray-assistant-work-items',
+      '@dsh-ray/assistant-work-items', 'assistant-work-items', upgrading)
     if (upgrading && workItems.get('enabled') === false) workItems.set('enabled', true)
     if (workItems.get('enabled') !== true) fail('ordinary-use learning requires assistant-work-items.enabled: true')
     const ledger = workItems.get('intakeLedger', true) as Node | undefined
@@ -456,14 +456,14 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
     const finalRow = final.byId.get(ids[key]) ?? effectiveRow(effective.byId, key)
     targets.push({ entryId: ids[key], module: managed[key], configDigest: runtimeConfigDigest(rawLoaderConfig(finalRow.get('config', true) as Node, key)), services: [...services] })
   }
-  const larkRow = effective.byId.get('dsh-enhanced-lark-channel')
-  if (!larkRow || larkRow.get('disabled') === true || larkRow.get('name') !== '@dsh-enhanced/lark-channel') fail('active Lark channel is required')
-  targets.push({ entryId: 'dsh-enhanced-lark-channel', module: '@dsh-enhanced/lark-channel',
+  const larkRow = effective.byId.get('dsh-ray-lark-channel')
+  if (!larkRow || larkRow.get('disabled') === true || larkRow.get('name') !== '@dsh-ray/lark-channel') fail('active Lark channel is required')
+  targets.push({ entryId: 'dsh-ray-lark-channel', module: '@dsh-ray/lark-channel',
     configDigest: runtimeConfigDigest(rawLoaderConfig(larkRow.get('config', true) as Node, 'lark-channel')),
     services: ['larkChannel'] })
   if (ordinary) {
-    for (const [id, name, services] of [['dsh-enhanced-assistant-proactive', '@dsh-enhanced/assistant-proactive',
-      ['assistantProactive']], ['dsh-enhanced-assistant-work-items', '@dsh-enhanced/assistant-work-items',
+    for (const [id, name, services] of [['dsh-ray-assistant-proactive', '@dsh-ray/assistant-proactive',
+      ['assistantProactive']], ['dsh-ray-assistant-work-items', '@dsh-ray/assistant-work-items',
       ['assistantWorkItems']]] as const) {
       const finalRow = final.byId.get(id)
       if (!finalRow || finalRow.get('disabled') === true

@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
-import { runtimeConfigDigest, type RuntimeObservation, type RuntimeObserverConfig } from '@dsh-enhanced/plugin-control-plane'
+import { runtimeConfigDigest, type RuntimeObservation, type RuntimeObserverConfig } from '@dsh-ray/plugin-control-plane'
 import { createLaunchAgent, inspectDshLaunchAgent, installDshLaunchAgent, launchAgentPaths } from '../src/launchd.ts'
 import { assertNativeLaunchdPlist, assertNativeRuntimeObservation, inspectNativeLaunchd, startNativeLaunchd, stopNativeLaunchd,
   type NativeLaunchdCommand, type NativeLaunchdIdentity } from '../src/rsi-native-launchd.ts'
@@ -156,7 +156,7 @@ describe('native launchd service identity', () => {
 test('runtime readiness compares PID, profile path, entry module, config and service instances', () => {
   const observer: RuntimeObserverConfig = { socketPath: '/Users/owner/.dsh/observe.sock', keyPath: '/Users/owner/.dsh/observe.key',
     profilePath: '/Users/owner/.dsh/profiles/web/cordis.patch.yml',
-    targets: [{ entryId: 'dsh-enhanced-personal-assistant', module: '@dsh-enhanced/personal-assistant',
+    targets: [{ entryId: 'dsh-ray-personal-assistant', module: '@dsh-ray/personal-assistant',
       configDigest: 'a'.repeat(64), services: ['personalMemory'] }] }
   const now = Date.now(), instance = { uid: 1, epoch: 1 }
   const observation = { schemaVersion: 1, kind: 'dsh-runtime-observation', observerId: 'observer', challenge: 'b'.repeat(64),

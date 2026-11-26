@@ -54,16 +54,16 @@ async function fixture(options: { unsafeBin?: string; nonExecutableBin?: boolean
   const scripts = options.scripts === 'none' ? undefined : options.scripts === 'hooks-only'
     ? { prepack: 'pnpm build', prepublishOnly: 'node release.js' }
     : { test: 'vitest run', prepack: 'pnpm build', build: 'tsc', prepublishOnly: 'node release.js', typecheck: 'tsc --noEmit' }
-  await writeFile(join(plugin, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/helper', version: '1.0.0',
+  await writeFile(join(plugin, 'package.json'), JSON.stringify({ name: '@dsh-ray/helper', version: '1.0.0',
     packageManager: 'pnpm@11.7.0', pnpm: { overrides: { fixture: '1.0.0' } }, scripts,
     bin: { helper: options.unsafeBin ?? './run.sh', alternate: './bin/alternate.js', generated: './lib/generated-cli.js' },
     dsh: { bundle: { patch: './cordis.patch.yml' } }, files: ['bin', 'run.sh', 'lib', 'cordis.patch.yml', 'README.md', 'LICENSE'],
     main: './lib/index.js', types: './lib/index.d.ts',
     exports: { '.': { types: './lib/index.d.ts', default: './lib/index.js' }, './cordis.patch.yml': './cordis.patch.yml' },
     imports: { '#entry': { import: './lib/index.js', default: './lib/index.js' } },
-    dependencies: { '@deepseek-ai/cordis': 'catalog:', '@dsh-enhanced/helper-lib': 'workspace:*' },
+    dependencies: { '@deepseek-ai/cordis': 'catalog:', '@dsh-ray/helper-lib': 'workspace:*' },
     devDependencies: { '@types/node': 'catalog:tooling' } }) + '\n')
-  await writeFile(join(plugin, 'cordis.patch.yml'), 'mount: "@dsh-enhanced/helper"\n')
+  await writeFile(join(plugin, 'cordis.patch.yml'), 'mount: "@dsh-ray/helper"\n')
   await writeFile(join(plugin, 'README.md'), '# Helper\n')
   await writeFile(join(plugin, 'LICENSE'), 'MIT\n')
   await writeFile(join(plugin, 'src', 'index.ts'), 'export const answer = 42\n')
@@ -71,7 +71,7 @@ async function fixture(options: { unsafeBin?: string; nonExecutableBin?: boolean
   await writeFile(join(plugin, 'tests', 'index.spec.ts'), 'export {}\n')
   await mkdir(join(source, 'packages', 'helper-lib'), { recursive: true })
   await mkdir(join(source, 'packages', 'helper-lib', 'bin'))
-  await writeFile(join(source, 'packages', 'helper-lib', 'package.json'), '{"name":"@dsh-enhanced/helper-lib","version":"2.3.4","bin":"./bin/helper-lib.js"}\n')
+  await writeFile(join(source, 'packages', 'helper-lib', 'package.json'), '{"name":"@dsh-ray/helper-lib","version":"2.3.4","bin":"./bin/helper-lib.js"}\n')
   await writeFile(join(source, 'packages', 'helper-lib', 'bin', 'helper-lib.js'), '#!/usr/bin/env node\n')
   await chmod(join(source, 'packages', 'helper-lib', 'bin', 'helper-lib.js'), 0o755)
   await writeFile(join(plugin, 'bin', 'alternate.js'), '#!/usr/bin/env node\n')
@@ -145,11 +145,11 @@ case "$1" in
     if [ "$TEST_MUTATION" = pack-archive ]; then set -- "$TEST_SCRATCH"/dsh-source-input.*; printf altered >> "$1"; fi
     if [ "$TEST_MUTATION" = pack-transient-manifest ]; then
       cp "$TEST_WORKSPACE/plugins/helper/package.json" "$TEST_SCRATCH/original-package.json"
-      printf '{"name":"@dsh-enhanced/foreign","version":"9.0.0"}\n' > "$TEST_WORKSPACE/plugins/helper/package.json"
+      printf '{"name":"@dsh-ray/foreign","version":"9.0.0"}\n' > "$TEST_WORKSPACE/plugins/helper/package.json"
     fi
     if [ "$TEST_MUTATION" = pack-transient-patch ]; then
       cp "$TEST_WORKSPACE/plugins/helper/cordis.patch.yml" "$TEST_SCRATCH/original-patch"
-      printf 'mount: "@dsh-enhanced/foreign"\n' > "$TEST_WORKSPACE/plugins/helper/cordis.patch.yml"
+      printf 'mount: "@dsh-ray/foreign"\n' > "$TEST_WORKSPACE/plugins/helper/cordis.patch.yml"
     fi
     if [ "$TEST_MUTATION" = pack-transient-readme ]; then
       cp "$TEST_WORKSPACE/plugins/helper/README.md" "$TEST_SCRATCH/original-readme"
@@ -170,7 +170,7 @@ case "$1" in
           for(const [key,value] of Object.entries(source.scripts)) if(!omitted.has(key)) scripts[key]=value
           x.scripts=scripts
         }
-        if(x.dependencies){x.dependencies["@deepseek-ai/cordis"]="4.0.2";x.dependencies["@dsh-enhanced/helper-lib"]="2.3.4"}
+        if(x.dependencies){x.dependencies["@deepseek-ai/cordis"]="4.0.2";x.dependencies["@dsh-ray/helper-lib"]="2.3.4"}
         if(x.devDependencies)x.devDependencies["@types/node"]="22.20.0"
         if(mutation==="pack-transient-deps")x.dependencies["@deepseek-ai/cordis"]="99.0.0"
         if(mutation==="pack-transient-exports")x.exports["."]={default:"./lib/index.js",types:"./lib/index.d.ts"}

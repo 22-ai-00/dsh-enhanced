@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { PolicyRequest, PolicyRule } from '@dsh-enhanced/assistant-policy'
+import type { PolicyRequest, PolicyRule } from '@dsh-ray/assistant-policy'
 import {
   authorizeAgentWithWp08,
   evaluateBrokerWp08Constraints,

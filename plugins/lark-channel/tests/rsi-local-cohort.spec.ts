@@ -18,24 +18,24 @@ describe('frozen local tarball cohort', () => {
     expect(cohort.sourceCommit).toBe(f.source.sourceCommit)
     expect(cohort.allowBuilds).toEqual({ esbuild: true, koffi: true, protobufjs: false })
     expect(cohort.packages.map(item => item.name)).toEqual([
-      '@dsh-enhanced/assistant-automations', '@dsh-enhanced/assistant-policy', '@dsh-enhanced/optional-plugin',
-      '@dsh-enhanced/plugin-control-plane', '@dsh-enhanced/shared-lib', '@dsh-enhanced/target'])
-    expect(cohort.packages.find(item => item.name === '@dsh-enhanced/target')?.runtimeDependencies)
-      .toEqual(['@dsh-enhanced/optional-plugin', '@dsh-enhanced/shared-lib'])
-    expect(cohort.packages.find(item => item.name === '@dsh-enhanced/target')?.files.some(item => item.path === 'lib/index.js')).toBe(true)
-    expect(cohort.packages.find(item => item.name === '@dsh-enhanced/target')?.files.map(item => item.path))
+      '@dsh-ray/assistant-automations', '@dsh-ray/assistant-policy', '@dsh-ray/optional-plugin',
+      '@dsh-ray/plugin-control-plane', '@dsh-ray/shared-lib', '@dsh-ray/target'])
+    expect(cohort.packages.find(item => item.name === '@dsh-ray/target')?.runtimeDependencies)
+      .toEqual(['@dsh-ray/optional-plugin', '@dsh-ray/shared-lib'])
+    expect(cohort.packages.find(item => item.name === '@dsh-ray/target')?.files.some(item => item.path === 'lib/index.js')).toBe(true)
+    expect(cohort.packages.find(item => item.name === '@dsh-ray/target')?.files.map(item => item.path))
       .toEqual(['LICENSE', 'README.md', 'cordis.patch.yml', 'lib/index.js', 'package.json'])
     const installed = await installFixture(f, cohort)
-    expect(await readFile(join(installed, 'node_modules', '@dsh-enhanced', 'target', 'lib', 'index.js'), 'utf8'))
+    expect(await readFile(join(installed, 'node_modules', '@dsh-ray', 'target', 'lib', 'index.js'), 'utf8'))
       .toBe("export const identity = 'target-committed'\n")
     await verifyRsiLocalInstalledPackages({ cohort, profilePath: installed })
-    await chmod(join(installed, 'node_modules', '@dsh-enhanced', 'target', 'README.md'), 0o600)
+    await chmod(join(installed, 'node_modules', '@dsh-ray', 'target', 'README.md'), 0o600)
     await verifyRsiLocalInstalledPackages({ cohort, profilePath: installed })
     const targetOnly = await installFixture(f, cohort, ['target', 'shared-lib', 'optional-plugin'], 'target-only')
-    const nested = join(targetOnly, 'node_modules', '@dsh-enhanced', 'target', 'node_modules', '@dsh-enhanced')
+    const nested = join(targetOnly, 'node_modules', '@dsh-ray', 'target', 'node_modules', '@dsh-ray')
     await mkdir(nested, { recursive: true })
     for (const slug of ['shared-lib', 'optional-plugin']) {
-      await rename(join(targetOnly, 'node_modules', '@dsh-enhanced', slug), join(nested, slug))
+      await rename(join(targetOnly, 'node_modules', '@dsh-ray', slug), join(nested, slug))
     }
     await verifyRsiLocalInstalledPackages({ cohort, profilePath: targetOnly })
     const coordinatorOnly = await installFixture(f, cohort, ['assistant-policy', 'assistant-automations', 'plugin-control-plane'], 'coordinator-only')
@@ -51,7 +51,7 @@ describe('frozen local tarball cohort', () => {
     const cohort = await prepareRsiLocalCohort(input, f.ports)
     await expect(prepareRsiLocalCohort({ ...input, bundles: [] }, f.ports)).rejects.toThrow('bundle selection differs')
     const installed = await installFixture(f, cohort)
-    const code = join(installed, 'node_modules', '@dsh-enhanced', 'target', 'lib', 'index.js')
+    const code = join(installed, 'node_modules', '@dsh-ray', 'target', 'lib', 'index.js')
     await writeFile(code, 'altered\n')
     await expect(verifyRsiLocalInstalledPackages({ cohort, profilePath: installed })).rejects.toThrow('installed package file differs')
     await rm(code)
@@ -87,7 +87,7 @@ describe('frozen local tarball cohort', () => {
     const f = await fixture(), input = { dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }
     const cohort = await prepareRsiLocalCohort(input, f.ports)
     const installed = await installFixture(f, cohort)
-    const code = join(installed, 'node_modules', '@dsh-enhanced', 'target', 'lib', 'index.js')
+    const code = join(installed, 'node_modules', '@dsh-ray', 'target', 'lib', 'index.js')
     // Model pnpm's isolated linker: the package file becomes a hard link to a
     // content-addressed store entry outside the profile (nlink becomes 2).
     const storeDir = join(f.root, 'pnpm-store')
@@ -134,9 +134,9 @@ describe('frozen internal peers', () => {
     const f = await localCohortFixture(true); roots.push(f.root)
     const cohort = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile,
       source: f.source, bundles: ['target'] }, f.ports)
-    const artifact = cohort.packages.find(item => item.name === '@dsh-enhanced/target')!
+    const artifact = cohort.packages.find(item => item.name === '@dsh-ray/target')!
     const item = { ...artifact, version: cohort.version }
-    expect((await readRsiLocalArtifactManifest(item)).peerDependencies['@dsh-enhanced/shared-lib']).toBeDefined()
+    expect((await readRsiLocalArtifactManifest(item)).peerDependencies['@dsh-ray/shared-lib']).toBeDefined()
     await expect(readRsiLocalArtifactManifest({ ...item, runtimeDependencies: [] }))
       .rejects.toThrow('installed package identity differs')
     await expect(readRsiLocalArtifactManifest({ ...item, files: item.files.slice(1) }))
@@ -149,14 +149,14 @@ describe('frozen internal peers', () => {
     const f = await localCohortFixture(true); roots.push(f.root)
     const cohort = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }, f.ports)
     const before = await readFile(join(cohort.root, 'receipt.json'), 'utf8')
-    const provider = cohort.packages.find(item => item.name === '@dsh-enhanced/shared-lib')!
+    const provider = cohort.packages.find(item => item.name === '@dsh-ray/shared-lib')!
     expect(await rsiLocalPeerOverrides({ cohort, bundles: ['target'] })).toEqual({
-      '@dsh-enhanced/target@0.1.48>@dsh-enhanced/shared-lib': `file:${provider.tarball}`,
-      '@dsh-enhanced/optional-plugin@0.1.48>@dsh-enhanced/shared-lib': `file:${provider.tarball}`,
+      '@dsh-ray/target@0.1.48>@dsh-ray/shared-lib': `file:${provider.tarball}`,
+      '@dsh-ray/optional-plugin@0.1.48>@dsh-ray/shared-lib': `file:${provider.tarball}`,
     })
-    const policy = cohort.packages.find(item => item.name === '@dsh-enhanced/assistant-policy')!
+    const policy = cohort.packages.find(item => item.name === '@dsh-ray/assistant-policy')!
     expect(await rsiLocalPeerOverrides({ cohort, bundles: ['assistant-policy', 'assistant-automations', 'plugin-control-plane'] })).toEqual({
-      '@dsh-enhanced/assistant-automations@0.1.48>@dsh-enhanced/assistant-policy': `file:${policy.tarball}`,
+      '@dsh-ray/assistant-automations@0.1.48>@dsh-ray/assistant-policy': `file:${policy.tarball}`,
     })
     expect(await readFile(join(cohort.root, 'receipt.json'), 'utf8')).toBe(before)
     const installed = await installFixture(f, cohort, ['target', 'shared-lib', 'optional-plugin'])
@@ -171,9 +171,9 @@ describe('frozen internal peers', () => {
       bundles: ['target'] }, f.ports)
     // target and optional-plugin reach shared-lib through two distinct consumers.
     const installed = await installFixture(f, cohort, ['target', 'shared-lib', 'optional-plugin'])
-    const nested = join(installed, 'node_modules', '@dsh-enhanced', 'target', 'node_modules', '@dsh-enhanced', 'shared-lib')
+    const nested = join(installed, 'node_modules', '@dsh-ray', 'target', 'node_modules', '@dsh-ray', 'shared-lib')
     await mkdir(join(nested, '..'), { recursive: true })
-    await cp(join(installed, 'node_modules', '@dsh-enhanced', 'shared-lib'), nested, { recursive: true })
+    await cp(join(installed, 'node_modules', '@dsh-ray', 'shared-lib'), nested, { recursive: true })
     if (changed) await writeFile(join(nested, 'lib', 'index.js'), 'registry same-version bytes\n')
     await expect(verifyRsiLocalInstalledPackages({ cohort, profilePath: installed }))
       .rejects.toThrow(changed ? /file differs|identity split/u : /identity split/u)

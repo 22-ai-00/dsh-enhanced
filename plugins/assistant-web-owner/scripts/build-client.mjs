@@ -17,7 +17,7 @@ const bundled = (await build({
 })).outputFiles[0]?.text
 if (bundled === undefined) throw new Error('assistant-web-owner: notice client bundle emitted no output')
 const output = `window.__ModuleLoader__.load({
-  id: '@dsh-enhanced/assistant-web-owner',
+  id: '@dsh-ray/assistant-web-owner',
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;

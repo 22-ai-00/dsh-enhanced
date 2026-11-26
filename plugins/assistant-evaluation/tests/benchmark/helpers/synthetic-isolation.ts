@@ -7,7 +7,7 @@
 // starts a process. Live tests keep the real module.
 import Schema from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type * as isolation from '@dsh-enhanced/assistant-isolation'
+import type * as isolation from '@dsh-ray/assistant-isolation'
 
 const nonLinuxConfig = Schema.transform(Schema.any(), (value: unknown, options) => {
   const record = value as { backend?: unknown; linux?: { runtime?: unknown; cgroupRoots?: unknown } } | null | undefined

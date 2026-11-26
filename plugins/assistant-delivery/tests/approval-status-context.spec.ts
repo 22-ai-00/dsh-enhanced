@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import type { ApprovalProposalRouteStates } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalProposalRouteStates } from '@dsh-ray/assistant-policy'
 import { renderOwnerApprovalStatus } from '../src/approval-status-context.js'
 
 const uuid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'

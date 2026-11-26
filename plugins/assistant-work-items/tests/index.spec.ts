@@ -47,9 +47,9 @@ function active(overrides: Record<string, unknown> = {}): Config {
   } as Config
 }
 
-describe('dsh-enhanced-assistant-work-items entrypoint', () => {
+describe('dsh-ray-assistant-work-items entrypoint', () => {
   test('exposes stable identity, service and config', () => {
-    expect(entrypoint.name).toBe('dsh-enhanced-assistant-work-items')
+    expect(entrypoint.name).toBe('dsh-ray-assistant-work-items')
     expect(version).toBe(manifest.version)
     expect(entrypoint.default).toBe(AssistantWorkItemsService)
     expect(ConfigSchema).toBe(AssistantWorkItemsService.Config)

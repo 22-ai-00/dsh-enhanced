@@ -4,7 +4,7 @@ import { chmod, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { PluginCreationVerificationCertificate, SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import type { PluginCreationVerificationCertificate, SourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest'
 import { captureCreationCapabilitySource } from '../src/creation-capability-source.js'
 import { verifySourcePreparation } from '../src/source-build.js'
@@ -17,8 +17,8 @@ import { createSourceCreationFixture } from './helpers/source-creation-fixture.j
 import { runLinuxPreparedChecks } from '../src/linux-source-build.js'
 import { linuxSourceConfig, linuxMockRunner } from './helpers/linux-source-build-fixture.js'
 
-vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
-  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+vi.mock('@dsh-ray/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-ray/assistant-isolation')>()
   return { ...actual, verifyLinuxRuntime: vi.fn(async value => value) }
 })
 

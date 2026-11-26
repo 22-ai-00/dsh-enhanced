@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import type { BenchmarkPlan } from '@dsh-enhanced/assistant-evaluation/benchmark'
-import type { OutcomeEnvelope } from '@dsh-enhanced/assistant-evaluation'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import type { BenchmarkPlan } from '@dsh-ray/assistant-evaluation/benchmark'
+import type { OutcomeEnvelope } from '@dsh-ray/assistant-evaluation'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
 import { DEFAULT_HOLDOUT_RATE_BPS, evaluateHoldout } from './holdout.js'
 import { normalizeEntityKey } from './tokenize.js'
 import type { AssociationNodeMetadata } from './types.js'
@@ -416,12 +416,12 @@ export async function assertWp04CandidateOrigin(
   if (input.benchmarkPlan !== undefined) {
     let assertCandidateGenerationInput: ((plan: BenchmarkPlan) => unknown) | undefined
     try {
-      const mod = await import('@dsh-enhanced/assistant-evaluation/benchmark')
+      const mod = await import('@dsh-ray/assistant-evaluation/benchmark')
       assertCandidateGenerationInput = mod.assertCandidateGenerationInput
     } catch {
       throw new Wp04OriginError(
         'benchmark-guard-unavailable',
-        'WP04 guard: @dsh-enhanced/assistant-evaluation/benchmark is unavailable',
+        'WP04 guard: @dsh-ray/assistant-evaluation/benchmark is unavailable',
       )
     }
     if (typeof assertCandidateGenerationInput !== 'function') {

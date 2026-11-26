@@ -104,13 +104,13 @@ function createHostContext(opts: {
   const descriptors = (opts.descriptors ?? []).map(d => ({ ns: d.ns, revision: d.revision ?? 1, value: d.value }))
   const mutate = vi.fn(opts.mutateFn ?? (async () => {}))
   const installedList = (opts.bundles ?? [
-    { name: '@dsh-enhanced/traex-acp-provider', installed: true },
-    { name: '@dsh-enhanced/personal-assistant', installed: true },
-    { name: '@dsh-enhanced/assistant-delivery', installed: true },
-    { name: '@dsh-enhanced/assistant-memory-learning', installed: true },
-    { name: '@dsh-enhanced/assistant-verifier', installed: true },
-    { name: '@dsh-enhanced/assistant-dreaming', installed: true },
-    { name: '@dsh-enhanced/assistant-growth-driver', installed: true },
+    { name: '@dsh-ray/traex-acp-provider', installed: true },
+    { name: '@dsh-ray/personal-assistant', installed: true },
+    { name: '@dsh-ray/assistant-delivery', installed: true },
+    { name: '@dsh-ray/assistant-memory-learning', installed: true },
+    { name: '@dsh-ray/assistant-verifier', installed: true },
+    { name: '@dsh-ray/assistant-dreaming', installed: true },
+    { name: '@dsh-ray/assistant-growth-driver', installed: true },
   ]).map(b => ({ name: b.name, installed: b.installed, version: '0.1.73', entries: [] }))
 
   const services = new Map<string, unknown>([
@@ -139,13 +139,13 @@ describe('autonomy-setup wizard', () => {
     dirs.push(root)
 
     writeFileSync(join(profileDir, 'cordis.patch.yml'), `
-- id: dsh-enhanced-assistant-delivery
-  name: "@dsh-enhanced/assistant-delivery"
+- id: dsh-ray-assistant-delivery
+  name: "@dsh-ray/assistant-delivery"
   config:
     ownerRoutes:
       - ${JSON.stringify(makeWebOwnerRoute('web', workspace))}
-- id: dsh-enhanced-assistant-dreaming
-  name: "@dsh-enhanced/assistant-dreaming"
+- id: dsh-ray-assistant-dreaming
+  name: "@dsh-ray/assistant-dreaming"
   config:
     enabled: false
     databasePath: "~/.dsh/dreaming.sqlite"
@@ -181,8 +181,8 @@ describe('autonomy-setup wizard', () => {
     dirs.push(root)
 
     writeFileSync(join(profileDir, 'cordis.patch.yml'), `
-- id: dsh-enhanced-assistant-delivery
-  name: "@dsh-enhanced/assistant-delivery"
+- id: dsh-ray-assistant-delivery
+  name: "@dsh-ray/assistant-delivery"
   config:
     databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')
     ownerRoutes:
@@ -215,8 +215,8 @@ describe('autonomy-setup wizard', () => {
     dirs.push(root)
     seedDeliveryOwnerSqlite(join(dshHome, 'assistant-delivery', 'state.sqlite'), 'web', 'principal_abc12345', 3)
 
-    const initialYaml = `- id: dsh-enhanced-assistant-delivery
-  name: "@dsh-enhanced/assistant-delivery"
+    const initialYaml = `- id: dsh-ray-assistant-delivery
+  name: "@dsh-ray/assistant-delivery"
   config:
     databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')
     ownerRoutes:
@@ -236,12 +236,12 @@ describe('autonomy-setup wizard', () => {
         agentPreset: standard
         policyRef: web-owner-policy
         minimumGeneration: 1
-- id: dsh-enhanced-lark-channel
-  name: "@dsh-enhanced/lark-channel"
+- id: dsh-ray-lark-channel
+  name: "@dsh-ray/lark-channel"
   config:
     appSecret: !!js process.env.LARK_APP_SECRET
-- id: dsh-enhanced-traex-acp-provider
-  name: "@dsh-enhanced/traex-acp-provider"
+- id: dsh-ray-traex-acp-provider
+  name: "@dsh-ray/traex-acp-provider"
   config:
     enabled: false
 `
@@ -252,7 +252,7 @@ describe('autonomy-setup wizard', () => {
       dshHome,
       profileDir,
       descriptors: [
-        { ns: 'dsh-enhanced-traex-acp-provider', revision: 7, value: { enabled: false, agyEnabled: false } },
+        { ns: 'dsh-ray-traex-acp-provider', revision: 7, value: { enabled: false, agyEnabled: false } },
         { ns: 'dsh-deepseek-agent-default-model', revision: 4, value: { provider: 'deepseek', model: 'deepseek-chat' } },
       ],
     })
@@ -288,7 +288,7 @@ describe('autonomy-setup wizard', () => {
     expect(statSync(patchPath).mode & 0o777).toBe(0o600)
 
     // Volatile route updates applied after disk write
-    expect(mutate).toHaveBeenCalledWith('dsh-enhanced-traex-acp-provider', [{ op: 'set', path: ['enabled'], value: true }], 7)
+    expect(mutate).toHaveBeenCalledWith('dsh-ray-traex-acp-provider', [{ op: 'set', path: ['enabled'], value: true }], 7)
     expect(mutate).toHaveBeenCalledWith('dsh-deepseek-agent-default-model', [
       { op: 'set', path: ['provider'], value: 'traex-agent' },
       { op: 'set', path: ['model'], value: 'default' },
@@ -305,11 +305,11 @@ describe('autonomy-setup wizard', () => {
     const parsedRows = parse(updatedRaw, { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; disabled?: boolean; config: Record<string, unknown> }>
     const byId = new Map(parsedRows.map(r => [r.id, r]))
 
-    const memRow = byId.get('dsh-enhanced-assistant-memory-learning')!
-    const verifierRow = byId.get('dsh-enhanced-assistant-verifier')!
-    const paRow = byId.get('dsh-enhanced-personal-assistant')!
-    const dreamRow = byId.get('dsh-enhanced-assistant-dreaming')!
-    const growthRow = byId.get('dsh-enhanced-assistant-growth-driver')!
+    const memRow = byId.get('dsh-ray-assistant-memory-learning')!
+    const verifierRow = byId.get('dsh-ray-assistant-verifier')!
+    const paRow = byId.get('dsh-ray-personal-assistant')!
+    const dreamRow = byId.get('dsh-ray-assistant-dreaming')!
+    const growthRow = byId.get('dsh-ray-assistant-growth-driver')!
 
     expect(memRow.disabled).toBe(false)
     // Validate full AssistantVerifier Config schema (Cordis patch config is whole-value replacement; databasePath is required).
@@ -382,10 +382,10 @@ describe('autonomy-setup wizard', () => {
     expect(paused.applied).toBe(true)
     const afterPauseRows = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; disabled?: boolean; config: Record<string, unknown> }>
     const pauseById = new Map(afterPauseRows.map(r => [r.id, r]))
-    expect(pauseById.get('dsh-enhanced-assistant-dreaming')!.config['enabled']).toBe(true)
-    expect(pauseById.get('dsh-enhanced-assistant-dreaming')!.config['retired']).toBe(true)
-    expect(pauseById.get('dsh-enhanced-assistant-memory-learning')!.disabled).toBe(true)
-    expect(pauseById.get('dsh-enhanced-assistant-growth-driver')!.config['enabled']).toBe(false)
+    expect(pauseById.get('dsh-ray-assistant-dreaming')!.config['enabled']).toBe(true)
+    expect(pauseById.get('dsh-ray-assistant-dreaming')!.config['retired']).toBe(true)
+    expect(pauseById.get('dsh-ray-assistant-memory-learning')!.disabled).toBe(true)
+    expect(pauseById.get('dsh-ray-assistant-growth-driver')!.config['enabled']).toBe(false)
 
     // Safe disable clears `retired` before setting dreaming enabled=false
     const disabled = await applyAutonomyWizardSetup(host, {
@@ -404,9 +404,9 @@ describe('autonomy-setup wizard', () => {
     expect(disabled.applied).toBe(true)
     const afterDisableRows = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; disabled?: boolean; config: Record<string, unknown> }>
     const disableById = new Map(afterDisableRows.map(r => [r.id, r]))
-    expect(disableById.get('dsh-enhanced-assistant-dreaming')!.config['retired']).toBeUndefined()
-    expect(disableById.get('dsh-enhanced-assistant-dreaming')!.config['enabled']).toBe(false)
-    expect(disableById.get('dsh-enhanced-assistant-dreaming')!.disabled).toBe(true)
+    expect(disableById.get('dsh-ray-assistant-dreaming')!.config['retired']).toBeUndefined()
+    expect(disableById.get('dsh-ray-assistant-dreaming')!.config['enabled']).toBe(false)
+    expect(disableById.get('dsh-ray-assistant-dreaming')!.disabled).toBe(true)
   })
 
   it('refuses symlinked cordis.patch.yml and invalid custom budgets', async () => {
@@ -435,7 +435,7 @@ describe('autonomy-setup wizard', () => {
     const root2 = createTempProfile()
     dirs.push(root2.root)
     seedDeliveryOwnerSqlite(join(root2.dshHome, 'assistant-delivery', 'state.sqlite'))
-    writeFileSync(join(root2.profileDir, 'cordis.patch.yml'), `- id: dsh-enhanced-assistant-delivery\n  config:\n    ownerRoutes:\n      - ${JSON.stringify(makeWebOwnerRoute('web', workspace))}\n`, { encoding: 'utf8', mode: 0o600 })
+    writeFileSync(join(root2.profileDir, 'cordis.patch.yml'), `- id: dsh-ray-assistant-delivery\n  config:\n    ownerRoutes:\n      - ${JSON.stringify(makeWebOwnerRoute('web', workspace))}\n`, { encoding: 'utf8', mode: 0o600 })
     const { host: host2 } = createHostContext({ dshHome: root2.dshHome, profileDir: root2.profileDir })
     const badBudget = await applyAutonomyWizardSetup(host2, {
       action: 'enable',
@@ -457,13 +457,13 @@ describe('autonomy-setup wizard', () => {
     const { root, dshHome, profileDir, workspace } = createTempProfile()
     dirs.push(root)
     seedDeliveryOwnerSqlite(join(dshHome, 'assistant-delivery', 'state.sqlite'))
-    writeFileSync(join(profileDir, 'cordis.patch.yml'), `- id: dsh-enhanced-assistant-delivery\n  name: "@dsh-enhanced/assistant-delivery"\n  config:\n    ownerRoutes:\n      - ${JSON.stringify(makeWebOwnerRoute('web', workspace))}\n`, { encoding: 'utf8', mode: 0o600 })
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), `- id: dsh-ray-assistant-delivery\n  name: "@dsh-ray/assistant-delivery"\n  config:\n    ownerRoutes:\n      - ${JSON.stringify(makeWebOwnerRoute('web', workspace))}\n`, { encoding: 'utf8', mode: 0o600 })
     const ctx = new Context()
     await ctx.plugin(TypertRegistry)
     ctx.provide('profileContext' as never, { dir: profileDir, home: dshHome, name: 'web' } as never)
     ctx.provide('settings' as never, {
       describe: () => [
-        { ns: 'dsh-enhanced-traex-acp-provider', revision: 1, value: { enabled: true } },
+        { ns: 'dsh-ray-traex-acp-provider', revision: 1, value: { enabled: true } },
         { ns: 'dsh-deepseek-agent-default-model', revision: 1, value: { provider: 'traex-agent', model: 'default' } },
       ],
       mutate: vi.fn(async () => {}),
@@ -501,8 +501,8 @@ describe('autonomy-setup wizard', () => {
     expect(ownerRouteAuthorityHashLocal(scrambledRoute)).toBe(expectedHash)
 
     writeFileSync(join(profileDir, 'cordis.patch.yml'), [
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       '    ownerRoutes:',
       `      - ${JSON.stringify(scrambledRoute)}`,
@@ -531,23 +531,23 @@ describe('autonomy-setup wizard', () => {
         if (name === 'pluginManager') {
           return {
             listBundles: async () => [
-              '@dsh-enhanced/assistant-delivery',
-              '@dsh-enhanced/personal-assistant',
-              '@dsh-enhanced/assistant-verifier',
-              '@dsh-enhanced/assistant-memory-learning',
-              '@dsh-enhanced/assistant-dreaming',
-              '@dsh-enhanced/assistant-growth-driver',
-              '@dsh-enhanced/traex-acp-provider',
+              '@dsh-ray/assistant-delivery',
+              '@dsh-ray/personal-assistant',
+              '@dsh-ray/assistant-verifier',
+              '@dsh-ray/assistant-memory-learning',
+              '@dsh-ray/assistant-dreaming',
+              '@dsh-ray/assistant-growth-driver',
+              '@dsh-ray/traex-acp-provider',
             ].map(pkg => ({ name: pkg, installed: true, enabled: true })),
           }
         }
         if (name === 'settings') {
           return {
             describe: () => [
-              { ns: 'dsh-enhanced-traex-acp-provider', revision: 1, value: { enabled: true } },
+              { ns: 'dsh-ray-traex-acp-provider', revision: 1, value: { enabled: true } },
               { ns: 'dsh-deepseek-agent-default-model', revision: 1, value: { provider: 'traex-agent', model: 'default' } },
               {
-                ns: 'dsh-enhanced-personal-assistant',
+                ns: 'dsh-ray-personal-assistant',
                 revision: 1,
                 value: {
                   assistantPolicy: {
@@ -594,11 +594,11 @@ describe('autonomy-setup wizard', () => {
       disabled?: boolean
       config?: Record<string, any>
     }>
-    const learningCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
-    const verifierCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!
-    const paCfg = rows.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!
-    const dreamCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')!.config!
-    const growthCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-growth-driver')!.config!
+    const learningCfg = rows.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config!
+    const verifierCfg = rows.find(r => r.id === 'dsh-ray-assistant-verifier')!.config!
+    const paCfg = rows.find(r => r.id === 'dsh-ray-personal-assistant')!.config!
+    const dreamCfg = rows.find(r => r.id === 'dsh-ray-assistant-dreaming')!.config!
+    const growthCfg = rows.find(r => r.id === 'dsh-ray-assistant-growth-driver')!.config!
 
     const validatedLearning = validateLearningConfig(learningCfg)
     const validatedReviews = validateMemoryReviewConfig(verifierCfg['memoryReviews'])
@@ -668,8 +668,8 @@ describe('autonomy-setup wizard', () => {
       id: string
       config?: Record<string, any>
     }>
-    expect(validateDreamingConfig(pausedRows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')!.config!).retired).toBe(true)
-    expect(validateGrowthConfig(pausedRows.find(r => r.id === 'dsh-enhanced-assistant-growth-driver')!.config!).enabled).toBe(false)
+    expect(validateDreamingConfig(pausedRows.find(r => r.id === 'dsh-ray-assistant-dreaming')!.config!).retired).toBe(true)
+    expect(validateGrowthConfig(pausedRows.find(r => r.id === 'dsh-ray-assistant-growth-driver')!.config!).enabled).toBe(false)
 
     // Disabling all modules sets `disabled: true` while keeping configs structurally valid.
     const disableRes = await applyAutonomyWizardSetup(host, {
@@ -690,11 +690,11 @@ describe('autonomy-setup wizard', () => {
       disabled?: boolean
       config?: Record<string, any>
     }>
-    expect(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')?.disabled).toBe(true)
-    expect(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')?.disabled).toBe(true)
-    expect(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-growth-driver')?.disabled).toBe(true)
-    expect(validateDreamingConfig(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')!.config!).enabled).toBe(false)
-    expect(validateGrowthConfig(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-growth-driver')!.config!).enabled).toBe(false)
+    expect(disabledRows.find(r => r.id === 'dsh-ray-assistant-memory-learning')?.disabled).toBe(true)
+    expect(disabledRows.find(r => r.id === 'dsh-ray-assistant-dreaming')?.disabled).toBe(true)
+    expect(disabledRows.find(r => r.id === 'dsh-ray-assistant-growth-driver')?.disabled).toBe(true)
+    expect(validateDreamingConfig(disabledRows.find(r => r.id === 'dsh-ray-assistant-dreaming')!.config!).enabled).toBe(false)
+    expect(validateGrowthConfig(disabledRows.find(r => r.id === 'dsh-ray-assistant-growth-driver')!.config!).enabled).toBe(false)
   })
 
   it('preserves valid policy rules and verifier databasePath across autonomy setup followed by Feishu vault setup (zero YAML alias corruption)', async () => {
@@ -704,8 +704,8 @@ describe('autonomy-setup wizard', () => {
 
     const patchPath = join(profileDir, 'cordis.patch.yml')
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
       "    defaultWorkspace: !!js dshHomePath('assistant-workspace')",
@@ -754,14 +754,14 @@ describe('autonomy-setup wizard', () => {
     expect(finalYaml).not.toContain('source: a1')
     expect(finalYaml).not.toMatch(/&a\d+|\*a\d+/u)
     const rows = parse(finalYaml, { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config?: Record<string, any> }>
-    const verifierCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!
+    const verifierCfg = rows.find(r => r.id === 'dsh-ray-assistant-verifier')!.config!
     expect(verifierCfg['databasePath']).toBe("dshHomePath('assistant-verifier/verification.sqlite')")
     expect(() => AssistantVerifierConfig({
       ...verifierCfg,
       databasePath: join(dshHome, 'assistant-verifier', 'verification.sqlite'),
     } as never)).not.toThrow()
 
-    const paCfg = rows.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!
+    const paCfg = rows.find(r => r.id === 'dsh-ray-personal-assistant')!.config!
     const adoptAuthorityId = (paCfg['personalMemory']['automaticLearning'] as { authorityId: string }).authorityId
     const ctx = new Context()
     try {
@@ -796,8 +796,8 @@ describe('autonomy-setup wizard', () => {
     const memoryDb = join(dshHome, 'personal-memory', 'memory.sqlite')
     seedDeliveryOwnerSqlite(deliveryDb, 'web', 'principal_rot_1', 1)
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
@@ -809,8 +809,8 @@ describe('autonomy-setup wizard', () => {
       "      databasePath: !!js dshHomePath('assistant-automations/state.sqlite')",
       '      schedulerEnabled: true',
       '      allowUnbudgetedExecution: false',
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
       '    ownerRoutes:',
@@ -850,8 +850,8 @@ describe('autonomy-setup wizard', () => {
     })
     expect(run1.applied).toBe(true)
     const rows1 = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config?: Record<string, any> }>
-    const adopt1 = rows1.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['personalMemory']['automaticLearning']
-    const mem1 = rows1.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+    const adopt1 = rows1.find(r => r.id === 'dsh-ray-personal-assistant')!.config!['personalMemory']['automaticLearning']
+    const mem1 = rows1.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config!
     expect(adopt1['authorityId']).toBe('web-memory-adopt-web')
     expect(mem1['authorityId']).toBe('web-memory-extract-web')
 
@@ -860,8 +860,8 @@ describe('autonomy-setup wizard', () => {
     try {
       await ctx1.plugin(AssistantPolicyService, {
         databasePath: join(dshHome, 'assistant-policy', 'policy-rot-1.sqlite'),
-        rules: rows1.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['assistantPolicy']['rules'],
-        budgets: rows1.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['assistantPolicy']['budgets'],
+        rules: rows1.find(r => r.id === 'dsh-ray-personal-assistant')!.config!['assistantPolicy']['rules'],
+        budgets: rows1.find(r => r.id === 'dsh-ray-personal-assistant')!.config!['assistantPolicy']['budgets'],
       }).await()
       await ctx1.plugin(PersonalMemoryService, { databasePath: memoryDb, automaticLearning: adopt1, reconcileIntervalMs: 0 }).await()
       expect(ctx1.get('personalMemory')).toBeDefined()
@@ -885,10 +885,10 @@ describe('autonomy-setup wizard', () => {
     })
     expect(run2.applied).toBe(true)
     const rows2 = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config?: Record<string, any> }>
-    const pa2 = rows2.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!
+    const pa2 = rows2.find(r => r.id === 'dsh-ray-personal-assistant')!.config!
     const adopt2 = pa2['personalMemory']['automaticLearning']
-    const review2 = rows2.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!['memoryReviews']
-    const mem2 = rows2.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+    const review2 = rows2.find(r => r.id === 'dsh-ray-assistant-verifier')!.config!['memoryReviews']
+    const mem2 = rows2.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config!
     expect(adopt2['authorityId']).toBe('web-memory-adopt-web-g2')
     expect(review2['authorityId']).toBe('web-memory-review-web-g2')
     expect(mem2['authorityId']).toBe('web-memory-extract-web-g2')
@@ -935,8 +935,8 @@ describe('autonomy-setup wizard', () => {
     })
     expect(run3.applied).toBe(true)
     const rows3 = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config?: Record<string, any> }>
-    expect(rows3.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['personalMemory']['automaticLearning']['authorityId']).toBe('web-memory-adopt-web-g3')
-    expect(String(rows3.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!['databasePath'])).toContain(join('assistant-memory-learning', 'web-g3.sqlite'))
+    expect(rows3.find(r => r.id === 'dsh-ray-personal-assistant')!.config!['personalMemory']['automaticLearning']['authorityId']).toBe('web-memory-adopt-web-g3')
+    expect(String(rows3.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config!['databasePath'])).toContain(join('assistant-memory-learning', 'web-g3.sqlite'))
   })
 
   it('rotates away from an existing assistant-memory-learning sqlite grant_record when config_digest differs even if cordis.patch.yml row was removed', async () => {
@@ -958,8 +958,8 @@ describe('autonomy-setup wizard', () => {
     }
 
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
@@ -971,8 +971,8 @@ describe('autonomy-setup wizard', () => {
       "      databasePath: !!js dshHomePath('assistant-automations/state.sqlite')",
       '      schedulerEnabled: true',
       '      allowUnbudgetedExecution: false',
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
       '    ownerRoutes:',
@@ -1008,24 +1008,24 @@ describe('autonomy-setup wizard', () => {
     })
     expect(res.applied).toBe(true)
     const rows = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config?: Record<string, any> }>
-    const learnerCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+    const learnerCfg = rows.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config!
     expect(learnerCfg['authorityId']).toBe('web-memory-extract-web-g2')
     expect(String(learnerCfg['databasePath'])).toContain(join('assistant-memory-learning', 'web-g2.sqlite'))
     expect(() => validateLearningConfig(learnerCfg)).not.toThrow()
   })
 
   it('preserves explicit requireAcceptance: false opt-out in ensureVerifierDefaults', () => {
-    const doc = parseDocument('- id: dsh-enhanced-assistant-verifier\n  config:\n    requireAcceptance: false\n')
+    const doc = parseDocument('- id: dsh-ray-assistant-verifier\n  config:\n    requireAcceptance: false\n')
     const cfgNode = doc.getIn([0, 'config']) as import('yaml').YAMLMap
     ensureVerifierDefaults(doc, cfgNode, { requireAcceptance: true })
     expect(cfgNode.get('requireAcceptance')).toBe(false)
 
-    const docFromRuntime = parseDocument('- id: dsh-enhanced-assistant-verifier\n  config: {}\n')
+    const docFromRuntime = parseDocument('- id: dsh-ray-assistant-verifier\n  config: {}\n')
     const runtimeCfgNode = docFromRuntime.getIn([0, 'config']) as import('yaml').YAMLMap
     ensureVerifierDefaults(docFromRuntime, runtimeCfgNode, { requireAcceptance: false })
     expect(runtimeCfgNode.get('requireAcceptance')).toBe(false)
 
-    const docDefault = parseDocument('- id: dsh-enhanced-assistant-verifier\n  config: {}\n')
+    const docDefault = parseDocument('- id: dsh-ray-assistant-verifier\n  config: {}\n')
     const defaultCfgNode = docDefault.getIn([0, 'config']) as import('yaml').YAMLMap
     ensureVerifierDefaults(docDefault, defaultCfgNode, undefined)
     expect(defaultCfgNode.get('requireAcceptance')).toBe(true)
@@ -1038,8 +1038,8 @@ describe('autonomy-setup wizard', () => {
     const deliveryDb = join(dshHome, 'assistant-delivery', 'state.sqlite')
     seedDeliveryOwnerSqlite(deliveryDb, 'web', 'principal_work_item_exp_false', 1)
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
@@ -1051,8 +1051,8 @@ describe('autonomy-setup wizard', () => {
       "      databasePath: !!js dshHomePath('assistant-automations/state.sqlite')",
       '      schedulerEnabled: true',
       '      allowUnbudgetedExecution: false',
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
       '    ownerRoutes:',
@@ -1090,9 +1090,9 @@ describe('autonomy-setup wizard', () => {
     expect(first.applied).toBe(true)
 
     const rowsAfterFirst = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config: Record<string, any> }>
-    const learnCfg = rowsAfterFirst.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config
-    const reviewCfg = rowsAfterFirst.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config['memoryReviews'] as Record<string, unknown>
-    const adoptCfg = (rowsAfterFirst.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config['personalMemory'] as Record<string, unknown>)['automaticLearning'] as Record<string, unknown>
+    const learnCfg = rowsAfterFirst.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config
+    const reviewCfg = rowsAfterFirst.find(r => r.id === 'dsh-ray-assistant-verifier')!.config['memoryReviews'] as Record<string, unknown>
+    const adoptCfg = (rowsAfterFirst.find(r => r.id === 'dsh-ray-personal-assistant')!.config['personalMemory'] as Record<string, unknown>)['automaticLearning'] as Record<string, unknown>
 
     expect(learnCfg['workItemExperiences']).toBe(false)
     expect(Object.hasOwn(reviewCfg, 'workItemExperiences')).toBe(false)
@@ -1133,7 +1133,7 @@ describe('autonomy-setup wizard', () => {
     })
     expect(second.applied).toBe(true)
     const rowsAfterSecond = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config: Record<string, any> }>
-    const learnCfgSecond = rowsAfterSecond.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config
+    const learnCfgSecond = rowsAfterSecond.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config
     expect(learnCfgSecond['authorityId']).toBe('web-memory-extract-web')
     expect(learnCfgSecond['workItemExperiences']).toBe(false)
   })
@@ -1145,8 +1145,8 @@ describe('autonomy-setup wizard', () => {
     const deliveryDb = join(dshHome, 'assistant-delivery', 'state.sqlite')
     seedDeliveryOwnerSqlite(deliveryDb, 'web', 'principal_work_item_exp_undef', 1)
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
@@ -1158,8 +1158,8 @@ describe('autonomy-setup wizard', () => {
       "      databasePath: !!js dshHomePath('assistant-automations/state.sqlite')",
       '      schedulerEnabled: true',
       '      allowUnbudgetedExecution: false',
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
       '    ownerRoutes:',
@@ -1197,9 +1197,9 @@ describe('autonomy-setup wizard', () => {
     expect(first.applied).toBe(true)
 
     const rowsAfterFirst = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config: Record<string, any> }>
-    const learnCfg = rowsAfterFirst.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config
-    const reviewCfg = rowsAfterFirst.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config['memoryReviews'] as Record<string, unknown>
-    const adoptCfg = (rowsAfterFirst.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config['personalMemory'] as Record<string, unknown>)['automaticLearning'] as Record<string, unknown>
+    const learnCfg = rowsAfterFirst.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config
+    const reviewCfg = rowsAfterFirst.find(r => r.id === 'dsh-ray-assistant-verifier')!.config['memoryReviews'] as Record<string, unknown>
+    const adoptCfg = (rowsAfterFirst.find(r => r.id === 'dsh-ray-personal-assistant')!.config['personalMemory'] as Record<string, unknown>)['automaticLearning'] as Record<string, unknown>
 
     expect(learnCfg['authorityId']).toBe('web-memory-extract-web')
     expect(learnCfg['workItemExperiences']).toBe(true)
@@ -1221,7 +1221,7 @@ describe('autonomy-setup wizard', () => {
     })
     expect(second.applied).toBe(true)
     const rowsAfterSecond = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config: Record<string, any> }>
-    const learnCfgSecond = rowsAfterSecond.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config
+    const learnCfgSecond = rowsAfterSecond.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config
     expect(learnCfgSecond['authorityId']).toBe('web-memory-extract-web')
     expect(learnCfgSecond['workItemExperiences']).toBe(true)
   })

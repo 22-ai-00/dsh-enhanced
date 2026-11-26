@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { AssistantAssociationService } from '../src/index.js'
 import {
   canRunDreaming,

@@ -541,7 +541,7 @@ export class OwnerConsoleService extends TypertRemoteService {
       const loader = this.host.get('loader' as never) as Partial<LoaderService> | undefined
       if (typeof loader?.entries === 'function') {
         for (const entry of loader.entries()) {
-          if (entry.options.name === '@dsh-enhanced/lark-channel' || LARK.test(entry.options.id)) {
+          if (entry.options.name === '@dsh-ray/lark-channel' || LARK.test(entry.options.id)) {
             loaderCfg = configFacts(entry.options.config)
             break
           }
@@ -556,7 +556,7 @@ export class OwnerConsoleService extends TypertRemoteService {
       if (paths.patchExists && paths.patchPath !== null) {
         const doc = readPatchDocument(paths.patchPath)
         if (isSeq(doc.contents)) {
-          const rawPatch = getPatchRowConfig(doc.contents, 'dsh-enhanced-lark-channel', doc)
+          const rawPatch = getPatchRowConfig(doc.contents, 'dsh-ray-lark-channel', doc)
           if (Object.keys(rawPatch).length > 0) patchCfg = configFacts(rawPatch)
         }
       }
@@ -574,7 +574,7 @@ export class OwnerConsoleService extends TypertRemoteService {
       if (detectFrozenSystemdProfile(paths.dshHome, paths.profileName, process.platform, process.env)) return false
       const doc = readPatchDocument(paths.patchPath)
       if (!isSeq(doc.contents)) return false
-      const rowId = `dsh-enhanced-${packageName.replace(/^@dsh-enhanced\//u, '')}`
+      const rowId = `dsh-ray-${packageName.replace(/^@dsh-ray\//u, '')}`
       const candidates: YAMLMap[] = []
       const direct = findPatchRow(doc.contents, rowId)
       if (direct !== undefined) candidates.push(direct)
@@ -635,7 +635,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     const installed = (name: string) => inventory.phases.bundles === 'ok'
       && inventory.bundles.some(bundle => bundle.name === name && bundle.installed)
     const larkHealth = readLarkHealth(this.host.get('larkChannel' as never))
-    const traexInstalled = installed('@dsh-enhanced/traex-acp-provider')
+    const traexInstalled = installed('@dsh-ray/traex-acp-provider')
     const activeLarkAppId = isAppId(larkValue['appId']) && larkValue['appId'] !== PLACEHOLDER_LARK_APP_ID
       ? (larkValue['appId'] as string)
       : undefined
@@ -646,7 +646,7 @@ export class OwnerConsoleService extends TypertRemoteService {
           || (larkValue['secretSource'] === undefined && typeof larkValue['credentialHandle'] === 'string' && larkValue['credentialHandle'].trim() !== '')
           ? 'handle'
           : 'env',
-        installed: installed('@dsh-enhanced/lark-channel'),
+        installed: installed('@dsh-ray/lark-channel'),
         enabled: larkValue['enabled'] === true,
         appIdConfigured: activeLarkAppId !== undefined,
         ...(activeLarkAppId === undefined ? {} : { appId: activeLarkAppId }),
@@ -734,7 +734,7 @@ export class OwnerConsoleService extends TypertRemoteService {
 
   /** Select or remove one installed project bundle layer; dependencies stay installed. */
   async setBundleEnabled(name: string, enabled: boolean): Promise<OwnerConsoleWriteResult> {
-    if (!isProjectPackage(name)) return refuse('', '只允许管理本项目的 @dsh-enhanced/* bundle')
+    if (!isProjectPackage(name)) return refuse('', '只允许管理本项目的 @dsh-ray/* bundle')
     const manager = this.manager()
     const result = applyChange(await manager.setBundleEnabled(name, enabled))
     if (result.applied) {
@@ -763,7 +763,7 @@ export class OwnerConsoleService extends TypertRemoteService {
 
   /** Remove one project bundle layer after the owner confirms the destructive step. */
   async removeProjectBundle(name: string): Promise<OwnerConsoleWriteResult> {
-    if (!isProjectPackage(name)) return refuse('', '只允许移除本项目的 @dsh-enhanced/* bundle')
+    if (!isProjectPackage(name)) return refuse('', '只允许移除本项目的 @dsh-ray/* bundle')
     const manager = this.manager()
     const result = applyChange(await manager.removeBundle(name))
     if (result.applied) this.catalogReader.invalidate()
@@ -779,7 +779,7 @@ export class OwnerConsoleService extends TypertRemoteService {
   async installProjectBundle(spec: string, approvedBuilds: readonly string[] = []): Promise<OwnerConsoleWriteResult> {
     const trimmed = spec.trim()
     if (!isProjectPackage(trimmed)) {
-      return refuse('', '只允许安装本项目的 @dsh-enhanced/<name> 包；本地路径和 git 地址不在此面板处理')
+      return refuse('', '只允许安装本项目的 @dsh-ray/<name> 包；本地路径和 git 地址不在此面板处理')
     }
     const approvals = [...new Set(approvedBuilds.map(name => name.trim()))]
     if (approvedBuilds.length > MAX_BUILD_NAMES
@@ -810,7 +810,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     const settings = this.settings()
     const lark = findEntry(this.descriptors(), ns => LARK.test(ns))
     if (lark === undefined) {
-      return await this.targetRefusal('dsh-enhanced-lark-channel', '@dsh-enhanced/lark-channel', 'lark-channel')
+      return await this.targetRefusal('dsh-ray-lark-channel', '@dsh-ray/lark-channel', 'lark-channel')
     }
     const current = configFacts(lark.value)
     const configured = isAppId(this.config.feishuAppId) ? this.config.feishuAppId : undefined
@@ -877,7 +877,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     const settings = this.settings()
     const traex = findEntry(this.descriptors(), ns => TRAEX.test(ns))
     if (traex === undefined) {
-      return await this.targetRefusal('dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', 'traex-acp-provider')
+      return await this.targetRefusal('dsh-ray-traex-acp-provider', '@dsh-ray/traex-acp-provider', 'traex-acp-provider')
     }
     const value = command.trim()
     if (value !== '' && (value.length > 1_024 || /[\r\n]/u.test(value))) {
@@ -899,13 +899,13 @@ export class OwnerConsoleService extends TypertRemoteService {
   async configureBundle(entry: string, config: Readonly<Record<string, unknown>>): Promise<OwnerConsoleWriteResult> {
     const settings = this.settings()
     if (!isEntryId(entry) || !isProjectBundle(entry)) {
-      return refuse('', '只允许修改本项目的 dsh-enhanced 条目')
+      return refuse('', '只允许修改本项目的 dsh-ray 条目')
     }
     const target = findEntry(this.descriptors(), ns => ns === entry)
     if (target === undefined) {
       const status = await this.status()
       const packageName = status.bundles.find(bundle => bundle.rows.some(row => row.rowId === entry))?.name
-        ?? entry.replace(/^dsh-enhanced-/u, '@dsh-enhanced/')
+        ?? entry.replace(/^dsh-ray-/u, '@dsh-ray/')
       return await this.targetRefusal(entry, packageName, entry)
     }
     let patch: Readonly<Record<string, unknown>>
@@ -931,7 +931,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     const settings = this.settings()
     const traex = findEntry(this.descriptors(), ns => TRAEX.test(ns))
     if (traex === undefined) {
-      return await this.targetRefusal('dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', 'traex-acp-provider')
+      return await this.targetRefusal('dsh-ray-traex-acp-provider', '@dsh-ray/traex-acp-provider', 'traex-acp-provider')
     }
     const value = command.trim()
     if (value !== '' && !isSingleLineCommand(value)) {
@@ -990,7 +990,7 @@ export class OwnerConsoleService extends TypertRemoteService {
       const descriptors = this.descriptors()
       const traex = findEntry(descriptors, ns => TRAEX.test(ns))
       if (traex === undefined) {
-        return await this.targetRefusal('dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', 'traex-acp-provider')
+        return await this.targetRefusal('dsh-ray-traex-acp-provider', '@dsh-ray/traex-acp-provider', 'traex-acp-provider')
       }
       const facts = configFacts(traex.value)
       const tool: CodingToolId = cleanProvider === 'traex-agent' ? 'traex' : 'agy'
@@ -1136,9 +1136,9 @@ export class OwnerConsoleService extends TypertRemoteService {
     try {
       const bundles = await manager.listBundles()
       const targets: string[] = []
-      if (enableMemoryLearning) targets.push('@dsh-enhanced/assistant-memory-learning')
-      if (enableDreaming) targets.push('@dsh-enhanced/assistant-dreaming')
-      if (enableGrowth) targets.push('@dsh-enhanced/assistant-growth-driver')
+      if (enableMemoryLearning) targets.push('@dsh-ray/assistant-memory-learning')
+      if (enableDreaming) targets.push('@dsh-ray/assistant-dreaming')
+      if (enableGrowth) targets.push('@dsh-ray/assistant-growth-driver')
       for (const pkg of targets) {
         const entry = bundles.find(b => b.name === pkg)
         if (entry?.installed === true && !entry.enabled) {
@@ -1150,7 +1150,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     }
   }
 
-  /** Check current @dsh-enhanced / bound Host versions and latest npm release safely with TTL cache. */
+  /** Check current @dsh-ray / bound Host versions and latest npm release safely with TTL cache. */
   async checkSelfUpgrade(force: boolean): Promise<SelfUpgradeStatus> {
     return this.upgradeProber.check(this.host, force)
   }
@@ -1316,7 +1316,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     })
   }
 
-  /** Read-only assistant/Host/plugin version & self-iteration statistics (`dsh-rsi/version/v1`). */
+  /** Read-only assistant/Host/plugin version & self-iteration statistics (`dsh-ray/version/v1`). */
   async versionInfo(): Promise<AssistantVersionReport> {
     return collectOwnerConsoleVersionInfo(this.host)
   }
@@ -1682,7 +1682,7 @@ export function readIntakeAgreementHistory(provider: unknown, workspace: string,
   }
 }
 
-const EVALUATION_MODULE = '@dsh-enhanced/assistant-evaluation'
+const EVALUATION_MODULE = '@dsh-ray/assistant-evaluation'
 
 /** Scope-free and read-only: whether `intakeAgreement` can answer at all. Nothing on Evaluation is
  * called, so no notification is scanned; the switch comes from the one enabled Evaluation loader

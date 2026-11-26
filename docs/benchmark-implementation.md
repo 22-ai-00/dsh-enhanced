@@ -15,7 +15,7 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 
 ## 独立留出 provider 协议与 Host 生命周期
 
-`@dsh-enhanced/assistant-evaluation/benchmark/holdout` 现在提供独立留出 provider 的实验性 Host SDK。该子入口是 inert module：import 不会挂载插件、启动子进程、打开数据库或注册模型工具；plain `runIndependentHoldout()` 也必须由可信 Host 显式传入 plan、stores、authority factory 与 delegate factory。插件内调用使用 `runIndependentHoldoutInContext(ctx, options)`，由当前 Cordis Fiber 的 `ctx.effect()` 持有 journal/evidence descriptors、authority/delegate session 和 AbortController。卸载时 effect abort 运行、等待有界清理并关闭两个 store；自然完成后同样释放资源和 effect。Cordis 只负责生命周期所有权，不提供 OS、凭据或隐藏数据隔离。
+`@dsh-ray/assistant-evaluation/benchmark/holdout` 现在提供独立留出 provider 的实验性 Host SDK。该子入口是 inert module：import 不会挂载插件、启动子进程、打开数据库或注册模型工具；plain `runIndependentHoldout()` 也必须由可信 Host 显式传入 plan、stores、authority factory 与 delegate factory。插件内调用使用 `runIndependentHoldoutInContext(ctx, options)`，由当前 Cordis Fiber 的 `ctx.effect()` 持有 journal/evidence descriptors、authority/delegate session 和 AbortController。卸载时 effect abort 运行、等待有界清理并关闭两个 store；自然完成后同样释放资源和 effect。Cordis 只负责生命周期所有权，不提供 OS、凭据或隐藏数据隔离。
 
 协议固定为 `dsh-benchmark/independent-holdout/v1`，operator 先固定 exact dataset `{id, version, digest}` 和 Ed25519 public key，Host 再验证有序的 signed `manifest → input → verdict → finish`：
 

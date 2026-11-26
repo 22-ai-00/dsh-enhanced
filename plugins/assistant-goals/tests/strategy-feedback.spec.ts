@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import { createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
 import { buildGoalStrategyHistory } from '../src/strategy-feedback.ts'
 import type { GoalExecutionRun, GoalRecord } from '../src/types.ts'
 import type { StrategyRecord } from '../src/strategy-store.ts'

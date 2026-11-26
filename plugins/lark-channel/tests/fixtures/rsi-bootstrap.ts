@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { stringify } from 'yaml'
-import { runtimeConfigDigest, type SourceReleaseAuthorityConfig } from '@dsh-enhanced/plugin-control-plane'
-import type { ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
+import { runtimeConfigDigest, type SourceReleaseAuthorityConfig } from '@dsh-ray/plugin-control-plane'
+import type { ActiveLarkOwnerBinding } from '@dsh-ray/assistant-delivery'
 
 import { prepareRsiAuthorityResources } from '../../src/rsi-authority-resources.js'
 import { prepareRsiAuthorityRuntime } from '../../src/rsi-authority-runtime.js'
@@ -48,7 +48,7 @@ export async function rsiBootstrapFixture(): Promise<{
     const local = join(root, 'source')
     await privateDirectory(local)
     git(['init', '--quiet', '--initial-branch=main', local])
-    await file(join(local, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version }))
+    await file(join(local, 'package.json'), JSON.stringify({ name: 'dsh-ray', version }))
     git(['-C', local, 'add', 'package.json'])
     git(['-C', local, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@dsh.invalid', 'commit', '--quiet', '-m', 'fixture source'])
     const source = await prepareRsiSourceWorkspace({ dshHome: home, profile, version, sourceRepository: local })
@@ -56,7 +56,7 @@ export async function rsiBootstrapFixture(): Promise<{
     const native = await nativePreparedFixture(resources, source)
     const runtime = await prepareRsiAuthorityRuntime({ dshHome: home, profile })
     const require = createRequire(import.meta.url)
-    const cpRoot = dirname(require.resolve('@dsh-enhanced/plugin-control-plane/package.json'))
+    const cpRoot = dirname(require.resolve('@dsh-ray/plugin-control-plane/package.json'))
     const localAdapter = await import(pathToFileURL(join(cpRoot, 'bin', 'dsh-local-release-adapter.js')).href) as {
       inspectLocalReleaseBuildEnvironment(value: { pnpmRoot: string; storeRoot: string; cacheRoot: string }): RsiAuthorityConfigInput['releaseBuild']
     }
@@ -84,26 +84,26 @@ export async function rsiBootstrapFixture(): Promise<{
       conversation: binding.conversation, principal: binding.principal, workspace,
       agentPreset: 'primary', policyRef: 'owner-policy', minimumGeneration: 1 }] }
     const targetEffective = stringify([
-      { id: 'dsh-enhanced-personal-assistant', name: '@dsh-enhanced/personal-assistant', config: {
+      { id: 'dsh-ray-personal-assistant', name: '@dsh-ray/personal-assistant', config: {
         assistantPolicy: { databasePath: join(home, 'policy.sqlite'), budgets: [], rules: [] },
         personalMemory: { databasePath: join(home, 'memory.sqlite') },
         assistantAutomations: { schedulerEnabled: false, allowUnbudgetedExecution: false } } },
-      { id: 'dsh-enhanced-assistant-delivery', name: '@dsh-enhanced/assistant-delivery', config: deliveryConfig },
-      { id: 'dsh-enhanced-lark-channel', name: '@dsh-enhanced/lark-channel', config: { enabled: true } },
-      { id: 'dsh-enhanced-assistant-evaluation', name: '@dsh-enhanced/assistant-evaluation', config: {} },
-      { id: 'dsh-enhanced-assistant-goals', name: '@dsh-enhanced/assistant-goals', config: {} },
-      { id: 'dsh-enhanced-assistant-skills', name: '@dsh-enhanced/assistant-skills', config: {} },
-      { id: 'dsh-enhanced-assistant-verifier', name: '@dsh-enhanced/assistant-verifier', config: { databasePath: join(home, 'verifier.sqlite') } },
-      { id: 'dsh-enhanced-assistant-growth-driver', name: '@dsh-enhanced/assistant-growth-driver' },
-      { id: 'dsh-enhanced-assistant-memory-learning', name: '@dsh-enhanced/assistant-memory-learning', disabled: true },
-      { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {} },
-      { id: 'dsh-enhanced-hello', name: '@dsh-enhanced/hello', config: {} },
+      { id: 'dsh-ray-assistant-delivery', name: '@dsh-ray/assistant-delivery', config: deliveryConfig },
+      { id: 'dsh-ray-lark-channel', name: '@dsh-ray/lark-channel', config: { enabled: true } },
+      { id: 'dsh-ray-assistant-evaluation', name: '@dsh-ray/assistant-evaluation', config: {} },
+      { id: 'dsh-ray-assistant-goals', name: '@dsh-ray/assistant-goals', config: {} },
+      { id: 'dsh-ray-assistant-skills', name: '@dsh-ray/assistant-skills', config: {} },
+      { id: 'dsh-ray-assistant-verifier', name: '@dsh-ray/assistant-verifier', config: { databasePath: join(home, 'verifier.sqlite') } },
+      { id: 'dsh-ray-assistant-growth-driver', name: '@dsh-ray/assistant-growth-driver' },
+      { id: 'dsh-ray-assistant-memory-learning', name: '@dsh-ray/assistant-memory-learning', disabled: true },
+      { id: 'dsh-ray-plugin-control-plane', name: '@dsh-ray/plugin-control-plane', config: {} },
+      { id: 'dsh-ray-hello', name: '@dsh-ray/hello', config: {} },
     ])
     const coordinatorEffective = stringify([
-      { id: 'dsh-enhanced-assistant-policy', name: '@dsh-enhanced/assistant-policy', config: { databasePath: join(home, 'old.sqlite'), budgets: [], rules: [] } },
-      { id: 'dsh-enhanced-assistant-automations', name: '@dsh-enhanced/assistant-automations', config: {
+      { id: 'dsh-ray-assistant-policy', name: '@dsh-ray/assistant-policy', config: { databasePath: join(home, 'old.sqlite'), budgets: [], rules: [] } },
+      { id: 'dsh-ray-assistant-automations', name: '@dsh-ray/assistant-automations', config: {
         databasePath: join(home, 'old-auto.sqlite'), runsPath: join(home, 'old-runs'), schedulerEnabled: false, allowUnbudgetedExecution: false } },
-      { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {} },
+      { id: 'dsh-ray-plugin-control-plane', name: '@dsh-ray/plugin-control-plane', config: {} },
       { id: 'tool-web', name: '@deepseek-ai/tool-web', config: {} },
     ])
     const profiles = { targetPatch: '[]\n', targetEffective, coordinatorPatch: '[]\n', coordinatorEffective,
@@ -111,8 +111,8 @@ export async function rsiBootstrapFixture(): Promise<{
         { id: 'agent-loop', name: '@deepseek-ai/agent-loop' }] }]) }
     const plugins = ['personal-assistant', 'assistant-goals', 'assistant-growth-driver', 'assistant-memory-learning', 'hello']
     const hostDeploymentInputs = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml',
-      ...[...plugins, 'personal-memory'].flatMap(plugin => [`node_modules/@dsh-enhanced/${plugin}/package.json`,
-        `node_modules/@dsh-enhanced/${plugin}/cordis.patch.yml`, `node_modules/@dsh-enhanced/${plugin}/lib/index.js`])]
+      ...[...plugins, 'personal-memory'].flatMap(plugin => [`node_modules/@dsh-ray/${plugin}/package.json`,
+        `node_modules/@dsh-ray/${plugin}/cordis.patch.yml`, `node_modules/@dsh-ray/${plugin}/lib/index.js`])]
     for (const name of hostDeploymentInputs) await file(join(targetPath, name), `fixture ${name}\n`)
     const now = Date.now(), expiresAt = now + 3_600_000
     const manifest = createRsiBootstrapManifest({ dshHome: home, targetProfile: profile, coordinatorProfile: coordinator,
@@ -121,10 +121,10 @@ export async function rsiBootstrapFixture(): Promise<{
       runnerStates: { sourceBuild: native.runnerStates.sourceBuild },
       enableRevision: false,
       git: gitPin, now, expiresAt, plugins, hostDeploymentInputs,
-      observerTargets: [{ entryId: 'dsh-enhanced-assistant-delivery', module: '@dsh-enhanced/assistant-delivery',
+      observerTargets: [{ entryId: 'dsh-ray-assistant-delivery', module: '@dsh-ray/assistant-delivery',
         configDigest: runtimeConfigDigest(deliveryConfig), services: ['assistantDelivery'] }] })
     const policies: SourceReleaseAuthorityConfig['grant']['policies'] = plugins.map(plugin => ({ targetBranch: source.baseline.targetBranch,
-      candidateId: plugin, packageName: `@dsh-enhanced/${plugin}`, packagePath: `plugins/${plugin}`, dshBaseline: '0.1.5-rc.3',
+      candidateId: plugin, packageName: `@dsh-ray/${plugin}`, packagePath: `plugins/${plugin}`, dshBaseline: '0.1.5-rc.3',
       capabilities: [plugin], authorities: ['network'], requires: [], registryId: resources.registry.id,
       registryLocator: resources.registry.locator, catalogId: resources.catalog.id, catalogPath: resources.catalog.path,
       minimumReproducibleBuilds: 2 }))

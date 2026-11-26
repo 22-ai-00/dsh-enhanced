@@ -2,7 +2,7 @@ import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } f
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
-import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_INPUT_TOKEN_UPPER_BOUND, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
+import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_INPUT_TOKEN_UPPER_BOUND, DEEPSEEK_PROVIDER } from '@dsh-ray/assistant-deepseek-budget'
 import { createNativeAdapter } from '../../src/benchmark/deepseek.js'
 import { createStrategyBenchmarkExecutor, createStrategyBenchmarkPlan, verifyStrategyBenchmarkResults } from '../../src/benchmark/strategy-executor.js'
 import { strategyBenchmarkJournalPlan } from '../../src/benchmark/strategy-plan.js'
@@ -151,7 +151,7 @@ test.skipIf(!process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME)('runs the real DeepS
       const runtimeSources = sources['common.runtime']
       expect(runtimeSources).toBeDefined()
       const runtimePackages = runtimeSources!.map(source => source.packageName)
-      expect(runtimePackages).toContain('@dsh-enhanced/assistant-deepseek-budget')
+      expect(runtimePackages).toContain('@dsh-ray/assistant-deepseek-budget')
       expect(runtimePackages).toContain('@deepseek-ai/dsh-credentials')
       expect(cell.capabilities.requests).toHaveLength(native.meter.modelCalls)
     }

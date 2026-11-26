@@ -5,7 +5,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { ToolExecutionPipeline } from '@deepseek-ai/dsh-tools/pipeline'
 import { createHash } from 'node:crypto'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import type { EvidenceAnchor } from './evidence-ledger.js'
 import type { OriginalToolEvidence } from './evidence-runtime.js'
 

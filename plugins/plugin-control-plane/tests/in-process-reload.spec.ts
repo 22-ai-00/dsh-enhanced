@@ -6,13 +6,13 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { EntryGroup, EntryTree, Loader } from '@deepseek-ai/cordis-plugin-loader'
-import * as assistantDeliveryPlugin from '@dsh-enhanced/assistant-delivery'
+import * as assistantDeliveryPlugin from '@dsh-ray/assistant-delivery'
 import {
   computeInProcessArtifactDigest,
   computeInProcessPatchDigest,
-} from '@dsh-enhanced/assistant-delivery'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import type { HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-enhanced/assistant-automations'
+} from '@dsh-ray/assistant-delivery'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import type { HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-ray/assistant-automations'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import * as releaseModule from '../src/release.ts'
 
@@ -54,7 +54,7 @@ const digest = (fill: string): string => fill.repeat(64)
 const now = 1_800_000_000_000
 
 const target: InProcessReloadSnapshot['target'] = {
-  package: '@dsh-enhanced/assistant-health', version: '0.1.65',
+  package: '@dsh-ray/assistant-health', version: '0.1.65',
   artifactDigest: digest('a'), patchDigest: digest('b'),
   changesProcessSubtree: false, holdsUnprovenProcessAuthority: false,
 }
@@ -426,8 +426,8 @@ describe('artifact-replace mode, store isolation, and Host control-plane handoff
     // Still refuses denylist and unproven authority even in artifact-replace mode,
     // while allowing changesProcessSubtree: true under artifact-replace.
     expect(IN_PROCESS_RELOAD_DENYLIST).toEqual([
-      '@dsh-enhanced/plugin-control-plane',
-      '@dsh-enhanced/assistant-delivery',
+      '@dsh-ray/plugin-control-plane',
+      '@dsh-ray/assistant-delivery',
     ])
     for (const pkg of IN_PROCESS_RELOAD_DENYLIST) {
       await expect(Promise.resolve().then(() => prepareInProcessReload({
@@ -444,7 +444,7 @@ describe('artifact-replace mode, store isolation, and Host control-plane handoff
       snapshot: snapshot({
         mode: 'artifact-replace',
         running: { artifactDigest: digest('f'), patchDigest: digest('d') },
-        target: { ...target, package: '@dsh-enhanced/assistant-isolation', changesProcessSubtree: true, artifact: artifactSpec },
+        target: { ...target, package: '@dsh-ray/assistant-isolation', changesProcessSubtree: true, artifact: artifactSpec },
       }),
       requestedAt: now,
       ttlMs: 10_000,
@@ -456,12 +456,12 @@ describe('artifact-replace mode, store isolation, and Host control-plane handoff
       snapshot: snapshot({
         mode: 'artifact-replace',
         running: { artifactDigest: digest('f'), patchDigest: digest('d') },
-        target: { ...target, package: '@dsh-enhanced/lark-channel', changesProcessSubtree: true, artifact: artifactSpec },
+        target: { ...target, package: '@dsh-ray/lark-channel', changesProcessSubtree: true, artifact: artifactSpec },
       }),
       requestedAt: now,
       ttlMs: 10_000,
     })
-    expect(larkChannelWarrant.target.package).toBe('@dsh-enhanced/lark-channel')
+    expect(larkChannelWarrant.target.package).toBe('@dsh-ray/lark-channel')
 
     // Tampered artifact spec after warrant issuance is rejected without calling Host port.
     const { port: host, calls } = port()
@@ -796,7 +796,7 @@ describe('artifact-replace mode, store isolation, and Host control-plane handoff
     const writePkg = async (dir: string, version: string, body: string) => {
       await mkdir(join(dir, 'lib'), { recursive: true })
       await writeFile(join(dir, 'package.json'), JSON.stringify({
-        name: '@dsh-enhanced/demo-plugin', version, type: 'module', exports: { '.': './lib/index.js' },
+        name: '@dsh-ray/demo-plugin', version, type: 'module', exports: { '.': './lib/index.js' },
       }))
       await writeFile(join(dir, 'lib', 'index.js'), body, 'utf8')
       return computeInProcessArtifactDigest({ sourceDir: dir })
@@ -815,7 +815,7 @@ export function apply(ctx, config) {
 `)
     await mkdir(join(siblingDir, 'lib'), { recursive: true })
     await writeFile(join(siblingDir, 'package.json'), JSON.stringify({
-      name: '@dsh-enhanced/sibling-plugin', version: '0.1.0', type: 'module', exports: { '.': './lib/index.js' },
+      name: '@dsh-ray/sibling-plugin', version: '0.1.0', type: 'module', exports: { '.': './lib/index.js' },
     }))
     await writeFile(join(siblingDir, 'lib', 'index.js'), `
 export function apply(ctx) {
@@ -915,7 +915,7 @@ export function apply(ctx, config) {
         running: { artifactDigest: v1Digest, patchDigest: digest('0') },
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/demo-plugin',
+          package: '@dsh-ray/demo-plugin',
           version: '0.2.0',
           artifactDigest: v2Digest,
           patchDigest: v2Patch,
@@ -953,7 +953,7 @@ export function apply() {}
         running: { artifactDigest: v2Digest, patchDigest: v2Patch },
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/demo-plugin',
+          package: '@dsh-ray/demo-plugin',
           version: '0.3.0',
           artifactDigest: v3Digest,
           patchDigest: v3Patch,
@@ -1034,7 +1034,7 @@ export function apply() {}
     expect(reloadedCoord.status).toBe('commit-pending')
   })
 
-  test('hot-reloads @dsh-enhanced/lark-channel with omitted profilePath and changesProcessSubtree: true, rolling back on broken inject', async () => {
+  test('hot-reloads @dsh-ray/lark-channel with omitted profilePath and changesProcessSubtree: true, rolling back on broken inject', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-pcp-lark-sub-')))
     cleanupCallbacks.push(async () => { await rm(root, { recursive: true, force: true }) })
 
@@ -1067,7 +1067,7 @@ export function apply() {}
     const writePkg = async (dir: string, version: string, body: string) => {
       await mkdir(join(dir, 'lib'), { recursive: true })
       await writeFile(join(dir, 'package.json'), JSON.stringify({
-        name: '@dsh-enhanced/lark-channel', version, type: 'module', exports: { '.': './lib/index.js' },
+        name: '@dsh-ray/lark-channel', version, type: 'module', exports: { '.': './lib/index.js' },
       }))
       await writeFile(join(dir, 'lib', 'index.js'), body, 'utf8')
       return computeInProcessArtifactDigest({ sourceDir: dir })
@@ -1147,7 +1147,7 @@ export function apply() {}
         running: { artifactDigest: v1Digest, patchDigest: digest('0') },
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/lark-channel',
+          package: '@dsh-ray/lark-channel',
           version: '0.2.0',
           artifactDigest: v2Digest,
           patchDigest: v2Patch,
@@ -1173,7 +1173,7 @@ export function apply() {}
         running: { artifactDigest: v2Digest, patchDigest: v2Patch },
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/lark-channel',
+          package: '@dsh-ray/lark-channel',
           version: '0.3.0',
           artifactDigest: v3Digest,
           patchDigest: v3Patch,

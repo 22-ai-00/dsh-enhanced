@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { revisionBenefitContractDigest, type RevisionBenefitContract } from '@dsh-enhanced/assistant-growth-contract'
+import { revisionBenefitContractDigest, type RevisionBenefitContract } from '@dsh-ray/assistant-growth-contract'
 import { validateSourceJobsConfig } from '../src/source-jobs.js'
 import type { SourceJobsConfig } from '../src/source-job-types.js'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.js'

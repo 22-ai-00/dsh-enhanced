@@ -122,7 +122,7 @@ export interface OwnerGoalRunProof {
   traceDigest: string
 }
 
-export type { OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '@dsh-enhanced/assistant-delivery'
+export type { OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '@dsh-ray/assistant-delivery'
 
 export interface OwnerFailureCaptureSummaryInput {
   ownerRouteId: string

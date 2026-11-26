@@ -31,9 +31,9 @@ export async function fixture(ownerBound = false, input: { repository?: string; 
   await writeFile(catalogPath, JSON.stringify(catalog), { mode: 0o600 })
   const reviewDecisionRoot = join(root, 'review'); await mkdir(reviewDecisionRoot, { mode: 0o700 })
   const keys = Object.fromEntries(['owner', 'releaseOwner', 'host', ...phases].map(phase => [phase, generateKeyPairSync('ed25519')]))
-  const policy = { targetBranch: 'repairs', candidateId: 'health-helper', packageName: '@dsh-enhanced/health-helper', packageVersion: '0.1.1',
+  const policy = { targetBranch: 'repairs', candidateId: 'health-helper', packageName: '@dsh-ray/health-helper', packageVersion: '0.1.1',
     packagePath: 'plugins/health-helper', dshBaseline: '0.1.5', capabilities: ['health'], authorities: ['filesystem'], requires: [],
-    registryId: 'local', registryLocator: pathToFileURL(join(root, 'registry')).href, registryReference: pathToFileURL(join(root, 'registry', 'packages', encodeURIComponent('@dsh-enhanced/health-helper'), '0.1.1', 'package.tgz')).href,
+    registryId: 'local', registryLocator: pathToFileURL(join(root, 'registry')).href, registryReference: pathToFileURL(join(root, 'registry', 'packages', encodeURIComponent('@dsh-ray/health-helper'), '0.1.1', 'package.tgz')).href,
     catalogId: 'catalog', catalogPath, minimumReproducibleBuilds: 2 }
   const owner = { receiptVersion: 2 as const, authorityId: 'owner-route', authorityHash: 'a'.repeat(64), principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', bindingVersion: 1, generation: 1 }
   const gap = ownerBound ? store.recordOwnerTaskFailureGap({ schemaVersion: 1, owner, outcomeId: 'outcome', projection: { subjectKind: 'foreground-turn', subjectRef: 'task', version: 1, digest: 'b'.repeat(64), disposition: 'upsert' }, sourceDigest: 'c'.repeat(64) }) : store.recordGap({ idempotencyKey: 'gap', capability: 'health', context: 'repair', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
@@ -192,7 +192,7 @@ export async function fixture(ownerBound = false, input: { repository?: string; 
     second = store.verifyPreparedSourcePlan({ planId: second.id, expectedRevision: second.revision,
       recheckedTreeDigest: second.sourceCheck!.treeDigest, recheckedPatchDigest: second.sourceCheck!.patchDigest, withSourceFence: secondFence }).result
     const secondPolicy = { ...policy, packageVersion: '0.1.2',
-      registryReference: pathToFileURL(join(root, 'registry', 'packages', encodeURIComponent('@dsh-enhanced/health-helper'), '0.1.2', 'package.tgz')).href }
+      registryReference: pathToFileURL(join(root, 'registry', 'packages', encodeURIComponent('@dsh-ray/health-helper'), '0.1.2', 'package.tgz')).href }
     const secondAuthorization: Omit<SourceReleaseAuthorization, 'signature'> = { schemaVersion: 1, kind: 'dsh-source-release-authorization',
       authorizationId: `auth-${second.id}`, authority: 'release-owner', keyId: 'release-owner', planId: second.id, planDigest: second.digest,
       baseCommit: second.baseCommit, scope: second.scope, checkedTreeDigest: second.sourceCheck!.treeDigest,

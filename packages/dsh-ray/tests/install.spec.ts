@@ -1,0 +1,610 @@
+import { describe, expect, test, vi } from 'vitest'
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { hasPendingHostRecovery, runInstall } from '../src/install.ts'
+import { PurgeError } from '../src/purge.ts'
+import { main, parseArgs, type MainDeps } from '../src/index.ts'
+
+const fakeReport = {
+  scope: 'full' as const,
+  profiles: ['web'],
+  serviceProfiles: ['web'],
+  removedPaths: ['/.dsh'],
+  removedCredentials: [],
+  credentialErrors: [],
+  skippedServiceFiles: [],
+  serviceErrors: [],
+  keptCheckouts: [],
+  hostRemoved: false,
+  dryRun: false,
+  terminatedPids: [],
+  failedPids: [],
+  foreignProcesses: [],
+}
+
+type InstallFn = NonNullable<MainDeps['install']>
+type PurgeFn = NonNullable<MainDeps['purge']>
+type SelfUpdateFn = NonNullable<MainDeps['selfUpdate']>
+
+function makeDeps(installCalls: unknown[], purgeCalls: unknown[] = []): Required<MainDeps> {
+  return {
+    install: (async options => {
+      installCalls.push(options)
+      return 0
+    }) as InstallFn,
+    purge: (async options => {
+      purgeCalls.push(options)
+      return fakeReport
+    }) as PurgeFn,
+    // 这些测试不走 update 路径；注入假实现只为满足 Required<MainDeps>，
+    // 同时确保任何意外调用都不会打到真实 npm registry。
+    selfUpdate: (async () => ({
+      fromVersion: '0.0.0', selector: 'latest', alreadyCurrent: true, actions: [],
+    })) as SelfUpdateFn,
+    findRunning: () => ({ active: [] }),
+    managedServicePids: async () => ({ pids: [], errors: [] }),
+  }
+}
+
+describe('runInstall（薄委托）', () => {
+  test.each(['npm', 'local'] as const)('%s 默认 install 委派 supervised，且不修改原参数', async mode => {
+    const passthrough = Object.freeze(['--yes', '--dry-run'])
+    const runInherited = vi.fn(async (_command: string, _args: readonly string[]) => 0)
+    const download = vi.fn(async () => '#!/usr/bin/env bash\n')
+    await runInstall({
+      mode,
+      ...(mode === 'local' ? { localRepositoryRoot: '/repo' } : {}),
+      releaseRef: 'v0.1.48', passthrough,
+      executor: { download, runInherited },
+    })
+    expect(runInherited.mock.calls[0]![1].slice(1)).toEqual(['--yes', '--dry-run', '--scenario', 'supervised'])
+    expect(passthrough).toEqual(['--yes', '--dry-run'])
+    expect(download).toHaveBeenCalledTimes(mode === 'npm' ? 1 : 0)
+  })
+
+  test('explicit --operation install still selects the supervised default', async () => {
+    const runInherited = vi.fn(async (_command: string, _args: readonly string[]) => 0)
+    await runInstall({
+      mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+      passthrough: ['--operation', 'install', '--dry-run'],
+      executor: { download: vi.fn(), runInherited },
+    })
+    expect(runInherited.mock.calls[0]![1].slice(1)).toEqual([
+      '--operation', 'install', '--dry-run', '--scenario', 'supervised',
+    ])
+  })
+
+  test.each([
+    { label: 'explicit scenario', args: ['--scenario', 'core', '--yes'] },
+    { label: 'explicit supervised with Lark skip', args: ['--scenario', 'supervised', '--lark', 'skip'] },
+    { label: 'explicit supervised with no service', args: ['--scenario', 'supervised', '--no-service'] },
+    { label: 'explicit legacy standard mode', args: ['--mode', 'standard', '--yes'] },
+    { label: 'explicit supervised mode', args: ['--mode', 'supervised-growth', '--yes'] },
+    { label: 'explicit auto scenario', args: ['--scenario', 'auto', '--dry-run'] },
+    { label: 'repeated explicit scenario', args: ['--scenario', 'core', '--scenario', 'web'] },
+    { label: 'repeated explicit mode', args: ['--mode', 'standard', '--mode', 'supervised-growth'] },
+    { label: 'upgrade', args: ['--operation', 'upgrade', '--dry-run'] },
+    { label: 'uninstall', args: ['--operation', 'uninstall', '--dry-run'] },
+    { label: 'recover', args: ['--operation', 'recover', '--dry-run'] },
+    { label: 'help', args: ['--help'] },
+  ])('$label remains delegated without an injected scenario', async ({ args }) => {
+    const runInherited = vi.fn(async (_command: string, _args: readonly string[]) => 0)
+    await runInstall({
+      mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48', passthrough: args,
+      executor: { download: vi.fn(), runInherited },
+    })
+    expect(runInherited.mock.calls[0]![1].slice(1)).toEqual(args)
+  })
+
+  test.each(['npm', 'local'] as const)('%s limited opt-outs preserve shell auto selection', async mode => {
+    for (const args of [['--lark', 'skip'], ['--no-service']]) {
+      const passthrough = Object.freeze(['--yes', '--dry-run', ...args])
+      const runInherited = vi.fn(async (_command: string, _args: readonly string[]) => 0)
+      await runInstall({
+        mode,
+        ...(mode === 'local' ? { localRepositoryRoot: '/repo' } : {}),
+        releaseRef: 'v0.1.48', passthrough,
+        executor: { download: vi.fn(async () => '#!/usr/bin/env bash\n'), runInherited },
+      })
+      expect(runInherited.mock.calls[0]![1].slice(1)).toEqual(passthrough)
+    }
+  })
+
+  test.each([
+    { args: ['--lark', 'skip', '--lark', 'configure'], expectedSuffix: ['--scenario', 'supervised'] },
+    { args: ['--lark', 'configure', '--lark', 'skip'], expectedSuffix: [] },
+    { args: ['--no-service', '--lark', 'skip', '--lark', 'configure'], expectedSuffix: [] },
+  ])('repeated Lark choice delegates the final value and service opt-out: $args', async ({ args, expectedSuffix }) => {
+    const runInherited = vi.fn(async (_command: string, _args: readonly string[]) => 0)
+    await runInstall({
+      mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+      passthrough: ['--dry-run', ...args],
+      executor: { download: vi.fn(), runInherited },
+    })
+    expect(runInherited.mock.calls[0]![1].slice(1)).toEqual(['--dry-run', ...args, ...expectedSuffix])
+  })
+
+  test.each([['--scenario'], ['--mode'], ['--scenario', '--yes'], ['--mode', '--yes']])
+  ('missing selector values fail before Host preparation or installer invocation: %j', async (...passthrough) => {
+    const prepareHost = vi.fn(async () => ({}))
+    const runInherited = vi.fn(async () => 0)
+    await expect(runInstall({
+      mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48', passthrough,
+      executor: { prepareHost, download: vi.fn(), runInherited },
+    })).rejects.toThrow('必须提供')
+    expect(prepareHost).not.toHaveBeenCalled()
+    expect(runInherited).not.toHaveBeenCalled()
+  })
+
+  test('npm 形态：按 release ref 拼 URL 下载，bash 执行并透传参数与 DSH_HOME', async () => {
+    const downloads: string[] = []
+    const runs: Array<{ command: string; args: readonly string[]; env: NodeJS.ProcessEnv }> = []
+    const code = await runInstall({
+      mode: 'npm',
+      releaseRef: 'v0.1.37',
+      passthrough: ['--scenario', 'core', '--yes'],
+      dshHome: '/custom/.dsh',
+      executor: {
+        download: vi.fn(async url => {
+          downloads.push(url)
+          return '#!/usr/bin/env bash\n'
+        }),
+        runInherited: vi.fn(async (command, args, options) => {
+          runs.push({ command, args, env: options.env })
+          return 0
+        }),
+      },
+    })
+    expect(code).toBe(0)
+    expect(downloads).toEqual([
+      'https://raw.githubusercontent.com/22-ai-00/dsh-ray/v0.1.37/scripts/install/install-npm.sh',
+    ])
+    expect(runs).toHaveLength(1)
+    expect(runs[0]!.command).toBe('bash')
+    expect(runs[0]!.args.slice(1)).toEqual(['--scenario', 'core', '--yes'])
+    expect(runs[0]!.args[0]).toMatch(/install-npm\.sh$/u)
+    expect(runs[0]!.env.DSH_HOME).toBe('/custom/.dsh')
+  })
+
+  test('local 形态：执行 checkout 内 install-local.sh，不下载', async () => {
+    const download = vi.fn(async () => '')
+    const runs: Array<{ command: string; args: readonly string[] }> = []
+    const code = await runInstall({
+      mode: 'local',
+      localRepositoryRoot: '/repo/dsh-ray',
+      releaseRef: 'v0.1.37',
+      passthrough: ['--scenario', 'web'],
+      executor: {
+        download,
+        runInherited: vi.fn(async (command, args) => {
+          runs.push({ command, args })
+          return 0
+        }),
+      },
+    })
+    expect(code).toBe(0)
+    expect(download).not.toHaveBeenCalled()
+    expect(runs[0]!.command).toBe('bash')
+    expect(runs[0]!.args[0]).toBe('/repo/dsh-ray/scripts/install/install-local.sh')
+    expect(runs[0]!.args.slice(1)).toEqual(['--scenario', 'web'])
+  })
+
+  test('local 形态缺 checkout 目录时报 PurgeError', async () => {
+    await expect(
+      runInstall({
+        mode: 'local',
+        releaseRef: 'v0.1.37',
+        passthrough: [],
+        executor: { download: vi.fn(), runInherited: vi.fn() },
+      }),
+    ).rejects.toBeInstanceOf(PurgeError)
+  })
+
+  test('非法 release ref 拒绝执行', async () => {
+    await expect(
+      runInstall({
+        mode: 'npm',
+        releaseRef: 'latest',
+        passthrough: [],
+        executor: { download: vi.fn(), runInherited: vi.fn() },
+      }),
+    ).rejects.toBeInstanceOf(PurgeError)
+  })
+
+  test('下载失败包装为中文 PurgeError', async () => {
+    await expect(
+      runInstall({
+        mode: 'npm',
+        releaseRef: 'v0.1.37',
+        passthrough: [],
+        executor: {
+          download: vi.fn(async () => {
+            throw new Error('HTTP 404')
+          }),
+          runInherited: vi.fn(),
+        },
+      }),
+    ).rejects.toThrow(/下载 install-npm\.sh 失败/u)
+  })
+
+  test('安装器非零退出码原样返回', async () => {
+    const code = await runInstall({
+      mode: 'local',
+      localRepositoryRoot: '/repo',
+      releaseRef: 'v0.1.37',
+      passthrough: [],
+      executor: {
+        download: vi.fn(),
+        runInherited: vi.fn(async () => 3),
+      },
+    })
+    expect(code).toBe(3)
+  })
+
+  test.each([false, true])('upgrade delegates cross-ABI (0.1->0.2) or darwin Host update transactionally and keeps 0.2->0.2 on Linux installer (legacy=%s)', async legacy => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ray-host-plan-test-')))
+    try {
+      const home = join(root, 'home')
+      await mkdir(home)
+      await writeFile(join(home, '.dsh-ray-host.json'), '{}', { mode: 0o600 })
+      const plan = { schemaVersion: 1 as const, status: 'update' as const, canonicalHome: home,
+        bindingPath: join(home, '.dsh-ray-host.json'), originalBindingSource: '{}', originalBindingDigest: 'a'.repeat(64),
+        originalRuntime: { version: legacy ? '0.1.5-rc.3' : '0.2.0-rc.2', root: '/hosts/old', dshPath: '/hosts/old/dsh',
+          binDirectory: '/hosts/old', integrity: 'sha512-old', receiptDigest: 'a'.repeat(64) },
+        candidateRuntime: { version: '0.2.0-rc.2', root: '/hosts/new', dshPath: '/hosts/new/dsh',
+          binDirectory: '/hosts/new', integrity: 'sha512-new', receiptDigest: 'b'.repeat(64) },
+        candidateBindingSource: '{}',
+      }
+      let planPath = ''
+      const runInherited = vi.fn(async (_command: string, _args: readonly string[], options: { env: NodeJS.ProcessEnv }) => {
+        planPath = options.env.DSH_RAY_HOST_UPDATE_PLAN!
+        expect(options.env.DSH_RAY_HOST_BIN).toBe('/hosts/old')
+        expect(options.env.DSH_RAY_HOST_UPDATE_BIN).toBe('/hosts/new')
+        expect(JSON.parse(await readFile(planPath, 'utf8'))).toEqual(plan)
+        return 0
+      })
+      const runTransactionalUpgrade = vi.fn(async () => ({
+        report: {
+          schemaVersion: 1 as const,
+          command: 'upgrade' as const,
+          action: 'apply' as const,
+          ok: true,
+          ready: true,
+          dshHome: home,
+          mode: (process.platform === 'darwin' ? 'macos-launchd' : 'standard-local') as 'macos-launchd' | 'standard-local',
+          frozenSystemd: { detected: false, profiles: [] },
+          packages: {
+            cliPackageVersion: '0.1.83',
+            upgradeAvailable: true,
+            boundHost: { status: 'ready' as const, installedVersion: plan.originalRuntime.version, targetVersion: '0.2.0-rc.2', upgradeAvailable: true },
+            profiles: [],
+          },
+          registry: { url: 'https://registry.npmjs.org', checked: false, status: 'skipped' as const },
+          readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+          plan: { canExecute: true, steps: [], rollbackSupported: true, backupFiles: [] },
+          execution: { executed: true, dryRun: false, healthCheckPassed: true, rolledBack: false },
+        },
+        exitCode: 0,
+      }))
+      const prepareHostUpdate = vi.fn(async () => plan)
+      const install = runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade', '--allow-non-empty-history-migration'], dshHome: home,
+        executor: { download: vi.fn(), runInherited, prepareHost: async ({ environment }) =>
+          ({ ...environment, DSH_HOME: home, DSH_RAY_HOST_BIN: '/hosts/old' }),
+        prepareHostUpdate,
+        runTransactionalUpgrade },
+      })
+      if (legacy || process.platform === 'darwin') {
+        expect(await install).toBe(0)
+        expect(runTransactionalUpgrade).toHaveBeenCalledWith(expect.objectContaining({
+          dshHome: home,
+          action: 'apply',
+          dshVersion: '0.2.0-rc.2',
+          allowNonEmptyHistoryMigration: true,
+        }))
+        expect(runInherited).not.toHaveBeenCalled()
+
+        const failingUpgrade = vi.fn(async () => ({
+          report: {
+            ...(await runTransactionalUpgrade.mock.results[0]!.value).report,
+            ok: false,
+            ready: false,
+            execution: { executed: true, dryRun: false, rolledBack: true, rollbackSucceeded: true, error: '事务回滚测试' },
+          },
+          exitCode: 1,
+        }))
+        await expect(runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+          passthrough: ['--operation', 'upgrade'], dshHome: home,
+          executor: { download: vi.fn(), runInherited, prepareHost: async ({ environment }) =>
+            ({ ...environment, DSH_HOME: home, DSH_RAY_HOST_BIN: '/hosts/old' }),
+          prepareHostUpdate,
+          runTransactionalUpgrade: failingUpgrade },
+        })).rejects.toThrow('事务回滚测试')
+        expect(await readFile(join(home, '.dsh-ray-host.json'), 'utf8')).toBe('{}')
+        return
+      }
+      expect(await install).toBe(0)
+      expect(runTransactionalUpgrade).not.toHaveBeenCalled()
+      expect(prepareHostUpdate).toHaveBeenCalledWith({ dshHome: home, selector: 'latest' })
+      await expect(readFile(planPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(runInherited).toHaveBeenCalledTimes(1)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('upgrade preserves an unbound Home and dry-run never prepares a Host', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ray-unbound-test-')))
+    try {
+      const home = join(root, 'home')
+      await mkdir(home)
+      const prepareHostUpdate = vi.fn()
+      const executor = { download: vi.fn(), runInherited: vi.fn(async () => 0),
+        prepareHost: async ({ environment }: { environment?: NodeJS.ProcessEnv }) => ({ ...environment, DSH_HOME: home }),
+        prepareHostUpdate }
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade'], dshHome: home, executor })).toBe(0)
+      expect(prepareHostUpdate).not.toHaveBeenCalled()
+      await expect(runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade', '--dsh-version', '0.1.5-rc.4'], dshHome: home, executor }))
+        .rejects.toThrow('没有私有 Host 绑定')
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade', '--dry-run'], dshHome: home, executor })).toBe(0)
+      expect(prepareHostUpdate).not.toHaveBeenCalled()
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('v4 rename gap invokes recovery before Host preparation and returns for preflight', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ray-host-recovery-test-')))
+    try {
+      const home = join(root, 'home')
+      const transaction = `${home}.dsh-ray-transaction`
+      await mkdir(transaction, { mode: 0o700 })
+      await writeFile(join(transaction, 'manifest.json'), '{"version":4,"profile":"owner"}\n', { mode: 0o600 })
+      const alias = join(root, 'alias')
+      await symlink(home, alias)
+      expect(await hasPendingHostRecovery(alias)).toBe(true)
+      const prepareHost = vi.fn()
+      const runInherited = vi.fn(async (_command: string, _args: readonly string[], options: { env: NodeJS.ProcessEnv }) => {
+        expect(options.env.DSH_HOME).toBe(home)
+        expect(options.env.DSH_RAY_HOST_RECOVERY_ONLY).toBe('1')
+        expect(options.env.DSH_RAY_HOST_RECOVERY_PROFILE).toBe('owner')
+        return 0
+      })
+      const result = await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade'], dshHome: alias, recoveryOnly: true,
+        executor: { download: vi.fn(), runInherited, prepareHost },
+      })
+      expect(result).toBe(0)
+      expect(runInherited).toHaveBeenCalledTimes(1)
+      expect(prepareHost).not.toHaveBeenCalled()
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('large pending manifests admit only the exact v4 program Host recovery', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ray-large-recovery-test-')))
+    try {
+      const home = join(root, 'home')
+      const transaction = `${home}.dsh-ray-transaction`
+      await mkdir(transaction, { mode: 0o700 })
+      const path = join(transaction, 'manifest.json')
+      const base = { version: 4, operation: 'host-update', profile: 'owner', hostMigration: {
+        localSource: { protocol: 'dsh-ray/host-owner-program-update/v1' },
+      } }
+      const large = { ...base, padding: 'x'.repeat(2 * 1024 * 1024) }
+      await writeFile(path, JSON.stringify(large), { mode: 0o600 })
+      expect(await hasPendingHostRecovery(home)).toBe(true)
+      const prepareHost = vi.fn(), runInherited = vi.fn(async () => 0)
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.56',
+        passthrough: ['--operation', 'upgrade'], dshHome: home, recoveryOnly: true,
+        executor: { download: vi.fn(), runInherited, prepareHost },
+      })).toBe(0)
+      expect(runInherited).toHaveBeenCalledTimes(1)
+      expect(prepareHost).not.toHaveBeenCalled()
+      const exactLimit = 8 * 1024 * 1024 - Buffer.byteLength(JSON.stringify({ ...base, padding: '' }))
+      await writeFile(path, JSON.stringify({ ...base, padding: 'x'.repeat(exactLimit) }))
+      expect(await hasPendingHostRecovery(home)).toBe(true)
+      for (const change of [
+        { ...large, operation: 'upgrade' },
+        { ...large, hostMigration: { localSource: { protocol: 'unknown' } } },
+      ]) {
+        await writeFile(path, JSON.stringify(change))
+        await expect(hasPendingHostRecovery(home)).rejects.toThrow('超过其允许大小')
+      }
+      await writeFile(path, JSON.stringify({ ...base, padding: 'x'.repeat(8 * 1024 * 1024) }))
+      await expect(hasPendingHostRecovery(home)).rejects.toThrow('文件不安全')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('normal install and dry-run ignore ambient Host transaction markers', async () => {
+    const markers = ['DSH_RAY_HOST_UPDATE_PLAN', 'DSH_RAY_HOST_UPDATE_BIN',
+      'DSH_RAY_HOST_SELECTOR_VALIDATED', 'DSH_RAY_HOST_RECOVERY_ONLY',
+      'DSH_RAY_HOST_RECOVERY_PROFILE']
+    try {
+      for (const marker of markers) vi.stubEnv(marker, 'ambient-value')
+      const runInherited = vi.fn(async (_command: string, _args: readonly string[], options: { env: NodeJS.ProcessEnv }) => {
+        for (const marker of markers) expect(options.env[marker]).toBeUndefined()
+        return 0
+      })
+      const executor = { download: vi.fn(), runInherited }
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: [], executor })).toBe(0)
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade', '--dry-run'], executor })).toBe(0)
+      expect(runInherited).toHaveBeenCalledTimes(2)
+    } finally { vi.unstubAllEnvs() }
+  })
+})
+
+describe('parseArgs：install/reinstall 透传', () => {
+  test('install 后安装器参数（含带值）原样透传，未知参数不报错', () => {
+    const args = parseArgs(
+      ['install', '--scenario', 'core', '--workspace', 'ws-a', '--yes', '--bogus-flag', 'x'],
+      { HOME: '/h' },
+    )
+    expect(args.command).toBe('install')
+    expect(args.passthrough).toEqual([
+      '--scenario', 'core', '--workspace', 'ws-a', '--yes', '--bogus-flag', 'x',
+    ])
+  })
+
+  test('--local 由 rsi 消费不透传，--dsh-home 经环境变量', () => {
+    const args = parseArgs(['install', '--local', '/repo', '--scenario', 'lark'], { HOME: '/h' })
+    expect(args.local).toBe('/repo')
+    expect(args.passthrough).toEqual(['--scenario', 'lark'])
+  })
+
+  test('命令位置之前的全局选项也生效', () => {
+    const args = parseArgs(['--dsh-home', '/x/.dsh', '--yes', 'install', '--dry-run'], { HOME: '/h' })
+    expect(args.dshHome).toBe('/x/.dsh')
+    expect(args.yes).toBe(true)
+    expect(args.passthrough).toEqual(['--dry-run'])
+  })
+
+  test('reinstall 的 purge 选项被 rsi 消费，--yes/--dry-run 同时透传', () => {
+    const args = parseArgs(
+      ['reinstall', '--yes', '--no-backup', '--profile', 'web', '--scenario', 'core'],
+      { HOME: '/h' },
+    )
+    expect(args.command).toBe('reinstall')
+    expect(args.yes).toBe(true)
+    expect(args.backup).toBe(false)
+    expect(args.profile).toBe('web')
+    // --profile 被 rsi 作为 purge 范围消费，buildInstallOptions 再补透传给安装器。
+    expect(args.passthrough).toEqual(['--yes', '--scenario', 'core'])
+  })
+
+  test('--local 缺值时报错', () => {
+    expect(() => parseArgs(['install', '--local'], { HOME: '/h' })).toThrow(/需要一个值/u)
+  })
+
+  test('install --help/-h 透传给安装器（薄委托展示安装器帮助），reinstall --help 显示 rsi 帮助', () => {
+    expect(parseArgs(['install', '--help'], { HOME: '/h' }).passthrough).toEqual(['--help'])
+    expect(parseArgs(['install', '-h'], { HOME: '/h' }).passthrough).toEqual(['-h'])
+    const reinstall = parseArgs(['reinstall', '--help'], { HOME: '/h' })
+    expect(reinstall.help).toBe(true)
+    expect(reinstall.passthrough).toEqual([])
+  })
+})
+
+describe('main：install / reinstall 分发', () => {
+  test.each([
+    { command: ['install', '--dry-run'], expected: ['--dry-run', '--scenario', 'supervised'] },
+    { command: ['reinstall', '--yes', '--dry-run'], expected: ['--yes', '--dry-run', '--scenario', 'supervised'] },
+  ])('public $command entry delegates the supervised default', async ({ command, expected }) => {
+    const delegated: string[][] = []
+    const install: InstallFn = async options => runInstall({
+      ...options,
+      executor: {
+        download: async () => '#!/usr/bin/env bash\n',
+        runInherited: async (_command, args) => { delegated.push(args.slice(1)); return 0 },
+      },
+    })
+    const code = await main(command, { HOME: '/h' }, { ...makeDeps([]), install })
+    expect(code).toBe(0)
+    expect(delegated).toEqual([expected])
+  })
+
+  test.each([
+    ['--lark', 'skip'],
+    ['--no-service'],
+  ])('public install passes limited opt-out %j to shell auto selection', async (...args) => {
+    const delegated: string[][] = []
+    const install: InstallFn = async options => runInstall({
+      ...options,
+      executor: {
+        download: async () => '#!/usr/bin/env bash\n',
+        runInherited: async (_command, invocation) => { delegated.push(invocation.slice(1)); return 0 },
+      },
+    })
+    const code = await main(['install', ...args, '--dry-run'], { HOME: '/h' }, { ...makeDeps([]), install })
+    expect(code).toBe(0)
+    expect(delegated).toEqual([[...args, '--dry-run']])
+  })
+
+  test('install：npm 形态，releaseRef 锁自身版本，参数完整透传', async () => {
+    const installCalls: unknown[] = []
+    const code = await main(
+      ['--dsh-home', '/x/.dsh', 'install', '--scenario', 'core', '--yes'],
+      { HOME: '/h' },
+      makeDeps(installCalls),
+    )
+    expect(code).toBe(0)
+    const options = installCalls[0] as Record<string, unknown>
+    expect(options.mode).toBe('npm')
+    expect(options.releaseRef).toMatch(/^v\d+\.\d+\.\d+$/u)
+    expect(options.dshHome).toBe('/x/.dsh')
+    expect(options.passthrough).toEqual(['--scenario', 'core', '--yes'])
+  })
+
+  test('install --local：local 形态带 checkout 根', async () => {
+    const installCalls: unknown[] = []
+    const code = await main(
+      ['install', '--local', '/repo/dsh-ray', '--scenario', 'web'],
+      { HOME: '/h' },
+      makeDeps(installCalls),
+    )
+    expect(code).toBe(0)
+    const options = installCalls[0] as Record<string, unknown>
+    expect(options.mode).toBe('local')
+    expect(options.localRepositoryRoot).toBe('/repo/dsh-ray')
+    expect(options.passthrough).toEqual(['--scenario', 'web'])
+  })
+
+  test('reinstall --yes：先 purge（同 profile/备份开关）后 install', async () => {
+    const order: string[] = []
+    const installCalls: unknown[] = []
+    const purgeCalls: unknown[] = []
+    const code = await main(
+      ['reinstall', '--yes', '--profile', 'web', '--no-backup'],
+      { HOME: '/h' },
+      {
+        install: (async options => {
+          order.push('install')
+          installCalls.push(options)
+          return 0
+        }) as InstallFn,
+        purge: (async options => {
+          order.push('purge')
+          purgeCalls.push(options)
+          return fakeReport
+        }) as PurgeFn,
+      },
+    )
+    expect(code).toBe(0)
+    expect(order).toEqual(['purge', 'install'])
+    expect(purgeCalls[0]).toMatchObject({ profile: 'web', backup: false, dryRun: false })
+    const options = installCalls[0] as Record<string, unknown>
+    expect(options.passthrough).toEqual(['--yes', '--profile', 'web'])
+  })
+
+  test('reinstall --dry-run：purge 与 install 均为 dry-run', async () => {
+    const installCalls: unknown[] = []
+    const purgeCalls: unknown[] = []
+    const code = await main(
+      ['reinstall', '--dry-run'],
+      { HOME: '/h' },
+      makeDeps(installCalls, purgeCalls),
+    )
+    expect(code).toBe(0)
+    expect(purgeCalls[0]).toMatchObject({ dryRun: true })
+    expect((installCalls[0] as Record<string, unknown>).passthrough).toEqual(['--dry-run'])
+  })
+
+  test('install 失败（安装器退出码 42）透传退出码', async () => {
+    const code = await main(['install', '--scenario', 'core'], { HOME: '/h' }, {
+      install: (async () => 42) as InstallFn,
+      purge: makeDeps([]).purge,
+    })
+    expect(code).toBe(42)
+  })
+
+  test('install 抛 PurgeError 时退出码 1', async () => {
+    const code = await main(['install'], { HOME: '/h' }, {
+      install: (async () => {
+        throw new PurgeError('下载 install-npm.sh 失败：x')
+      }) as InstallFn,
+      purge: makeDeps([]).purge,
+    })
+    expect(code).toBe(1)
+  })
+})

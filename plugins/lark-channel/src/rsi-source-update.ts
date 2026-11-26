@@ -107,7 +107,7 @@ async function noAlternates(repository: string, bare = false): Promise<void> {
 async function packageVersion(repository: string, ref: string, signal: AbortSignal): Promise<string> {
   const manifest = parseJson(Buffer.from(await git(repository, ['show', `${ref}:package.json`], signal)), 'candidate source package manifest')
   const candidateVersion = manifest.version
-  if (manifest.name !== 'dsh-enhanced' || typeof candidateVersion !== 'string' || !EXACT_VERSION.test(candidateVersion)) {
+  if (manifest.name !== 'dsh-ray' || typeof candidateVersion !== 'string' || !EXACT_VERSION.test(candidateVersion)) {
     fail('candidate source package name or version is invalid')
   }
   return candidateVersion as string

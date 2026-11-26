@@ -33,7 +33,7 @@ async function fixture(ready = true, backend: 'docker' | 'linux-native' = 'docke
   const worktreeToken = createHash('sha256').update('one').digest('hex')
   const worktree = join(worktreeRoot, backend === 'linux-native' ? `worktree-job-${worktreeToken}` : 'prepared')
   await mkdir(join(plugin, 'src'), { recursive: true, mode: 0o700 }); const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: repository, env, encoding: 'utf8' }).trim()
-  await writeFile(join(plugin, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '0.1.0', dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { build: 'tsc' } }, null, 2) + '\n', { mode: 0o600 }); await writeFile(join(plugin, 'src/version.ts'), "export const version = '0.1.0'\n", { mode: 0o600 }); await writeFile(join(plugin, 'src/tool.ts'), 'export const value = 1\n', { mode: 0o600 })
+  await writeFile(join(plugin, 'package.json'), JSON.stringify({ name: '@dsh-ray/health-helper', version: '0.1.0', dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { build: 'tsc' } }, null, 2) + '\n', { mode: 0o600 }); await writeFile(join(plugin, 'src/version.ts'), "export const version = '0.1.0'\n", { mode: 0o600 }); await writeFile(join(plugin, 'src/tool.ts'), 'export const value = 1\n', { mode: 0o600 })
   git('init', '-q'); git('config', 'user.email', 'tests@example.invalid'); git('config', 'user.name', 'Tests'); git('add', '.'); git('commit', '-qm', 'base'); const baseCommit = git('rev-parse', 'HEAD'); await mkdir(worktreeRoot, { mode: 0o700 }); git('worktree', 'add', '--detach', worktree, baseCommit); await chmod(worktree, 0o700)
   const version = await managedPatchVersionFiles({ worktree, baseCommit, name: 'health-helper', environment: env }); for (const file of version.files) await writeFile(join(worktree, 'plugins/health-helper', file.path), file.content, { mode: 0o600 }); await writeFile(join(worktree, 'plugins/health-helper/src/tool.ts'), 'export const value = 2\n', { mode: 0o600 })
   const now = Date.now(); const controlDatabasePath = join(root, 'control.sqlite'); const store = new ControlPlaneStore({ path: controlDatabasePath, now: () => now }); stores.push(store); const key = generateKeyPairSync('ed25519'); const keyPath = join(root, 'key.pem'); await writeFile(keyPath, key.privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 }); await chmod(keyPath, 0o600)
@@ -82,7 +82,7 @@ async function fixture(ready = true, backend: 'docker' | 'linux-native' = 'docke
   const reviewed = ready ? store.verifyPreparedSourcePlan({ planId: approved.id, expectedRevision: approved.revision, recheckedTreeDigest: snapshot.checkedTreeDigest,
     recheckedPatchDigest: snapshot.checkedPatchDigest, withSourceFence: callback => store.withOwnerTaskFailureGapAdmission(gap.id, callback) }).result : approved
   const registry = join(root, 'registry'); await mkdir(registry, { mode: 0o700 }); const catalogPath = join(root, 'catalog.json'); await writeFile(catalogPath, '{}\n', { mode: 0o600 })
-  const release: SourceReleaseAuthorityConfig = { schemaVersion: 1, authority: 'release', keyId: 'key', keyPath, statePath: join(root, 'release.sqlite'), controlDatabasePath, grant: { ...common, maxReleases: 1, policies: [{ targetBranch: 'dev', candidateId: 'health-helper', packageName: '@dsh-enhanced/health-helper', packagePath: 'plugins/health-helper', dshBaseline: '0.1.0', capabilities: ['health'], authorities: ['network'], requires: [], registryId: 'local', registryLocator: pathToFileURL(registry).href, catalogId: 'catalog', catalogPath, minimumReproducibleBuilds: 2 }] } }
+  const release: SourceReleaseAuthorityConfig = { schemaVersion: 1, authority: 'release', keyId: 'key', keyPath, statePath: join(root, 'release.sqlite'), controlDatabasePath, grant: { ...common, maxReleases: 1, policies: [{ targetBranch: 'dev', candidateId: 'health-helper', packageName: '@dsh-ray/health-helper', packagePath: 'plugins/health-helper', dshBaseline: '0.1.0', capabilities: ['health'], authorities: ['network'], requires: [], registryId: 'local', registryLocator: pathToFileURL(registry).href, catalogId: 'catalog', catalogPath, minimumReproducibleBuilds: 2 }] } }
   const request = { protocol: 'dsh-source-release-authorization/v1' as const, planId: plan.id, planDigest: plan.digest, sourceReferenceDigest: controlPlaneDigest(source) }
   const second = async () => {
     const secondSource = { ...source, outcomeId: 'outcome-two', projection: { ...source.projection, subjectRef: 'turn-two' } }
@@ -105,7 +105,7 @@ async function fixture(ready = true, backend: 'docker' | 'linux-native' = 'docke
 
 localTest('signs exactly one ready owner source release and replays the immutable authorization', async () => {
   const f = await fixture(); const authorization = await authorizePreparedSourceRelease(f.release, f.request); const replay = await authorizePreparedSourceRelease(f.release, f.request)
-  expect(replay).toEqual(authorization); expect(authorization.releasePolicy).toMatchObject({ packageVersion: '0.1.1', packageName: '@dsh-enhanced/health-helper', registryReference: expect.stringContaining('/packages/%2540dsh-enhanced%252Fhealth-helper/0.1.1/package.tgz') })
+  expect(replay).toEqual(authorization); expect(authorization.releasePolicy).toMatchObject({ packageVersion: '0.1.1', packageName: '@dsh-ray/health-helper', registryReference: expect.stringContaining('/packages/%2540dsh-ray%252Fhealth-helper/0.1.1/package.tgz') })
   const verifier = new Ed25519SourceReleaseAuthorizationAuthority(f.key.publicKey.export({ format: 'pem', type: 'spki' }), 'release', 'key', () => Date.now())
   await expect(verifier.verify(authorization, f.plan)).resolves.toMatchObject({ planId: f.plan.id })
 })
@@ -113,7 +113,7 @@ localTest('signs exactly one ready owner source release and replays the immutabl
 localTest('authorizes a linux-native schema3 ready plan for release without any Docker evidence', async () => {
   const f = await fixture(true, 'linux-native')
   const authorization = await authorizePreparedSourceRelease(f.release, f.request)
-  expect(authorization.releasePolicy).toMatchObject({ packageVersion: f.version.version, packageName: '@dsh-enhanced/health-helper' })
+  expect(authorization.releasePolicy).toMatchObject({ packageVersion: f.version.version, packageName: '@dsh-ray/health-helper' })
   const verifier = new Ed25519SourceReleaseAuthorizationAuthority(f.key.publicKey.export({ format: 'pem', type: 'spki' }), 'release', 'key', () => Date.now())
   await expect(verifier.verify(authorization, f.plan)).resolves.toMatchObject({ planId: f.plan.id })
 })

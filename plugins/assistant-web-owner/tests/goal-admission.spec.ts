@@ -6,12 +6,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT } from '@dsh-enhanced/assistant-deepseek-budget'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT } from '@dsh-ray/assistant-deepseek-budget'
 import { parseDocument, isSeq, isMap, isScalar, type YAMLMap, type YAMLSeq } from 'yaml'
-import * as eventSupport from '@dsh-enhanced/event-triggers'
+import * as eventSupport from '@dsh-ray/event-triggers'
 import { DeliveryStore } from '../../assistant-delivery/lib/store.js'
-import type { LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { IsolationLedger } from '../../assistant-isolation/lib/ledger.js'
 import { compilePolicy, evaluatePolicy } from '../../assistant-policy/lib/evaluator.js'
 import type { PolicyRule } from '../../assistant-policy/lib/types.js'
@@ -89,25 +89,25 @@ function repositoryTask(repositoryDelivery: Record<string, unknown> = {}): strin
   value.repositoryDelivery = { repository: 'octo/example', baseBranch: 'main', branch: 'automation/result', paths: ['result.txt'], credentialHandle: 'github', expiresAt: Date.now() + 300_000, maxActions: 3, maxTotalBytes: 4096, openPullRequest: true, ...repositoryDelivery }
   return JSON.stringify(value)
 }
-function repositoryEffective(source: string, handles: unknown[] = [{ id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }]): string {
+function repositoryEffective(source: string, handles: unknown[] = [{ id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-ray-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }]): string {
   const document = parseDocument(source, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
   if (!isSeq(document.contents)) throw new Error('fixture expected rows')
   const rows = document.contents as YAMLSeq
   rows.add(document.createNode({ id: 'agent-default-model', config: repositoryRoute }))
-  const keychain = rows.items.find(row => isMap(row) && row.get('id') === 'dsh-enhanced-credentials-keychain')
+  const keychain = rows.items.find(row => isMap(row) && row.get('id') === 'dsh-ray-credentials-keychain')
   if (!isMap(keychain)) throw new Error('fixture expected keychain')
   const config = keychain.get('config', true)
   if (!isMap(config)) throw new Error('fixture expected config')
   config.set('handles', document.createNode(handles))
   return String(document)
 }
-function repositorySource(source: string, handles: unknown[] = [{ id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }]): string {
+function repositorySource(source: string, handles: unknown[] = [{ id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-ray-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }]): string {
   const document = parseDocument(source)
   if (!isSeq(document.contents)) throw new Error('fixture expected source rows')
   let keychain: YAMLMap | undefined
   for (const row of document.contents.items) {
     const id = isMap(row) ? row.get('id', true) : undefined
-    if (isMap(row) && isScalar(id) && typeof id.value === 'string' && id.value === 'dsh-enhanced-credentials-keychain') { keychain = row; break }
+    if (isMap(row) && isScalar(id) && typeof id.value === 'string' && id.value === 'dsh-ray-credentials-keychain') { keychain = row; break }
   }
   if (!isMap(keychain)) throw new Error('fixture expected keychain')
   const keychainConfig = keychain.get('config', true)
@@ -118,7 +118,7 @@ function repositorySource(source: string, handles: unknown[] = [{ id: 'github', 
 function withoutKeychain(source: string): string {
   const document = parseDocument(source)
   if (!isSeq(document.contents)) throw new Error('fixture expected source rows')
-  const index = document.contents.items.findIndex(row => yamlId(row) === 'dsh-enhanced-credentials-keychain')
+  const index = document.contents.items.findIndex(row => yamlId(row) === 'dsh-ray-credentials-keychain')
   if (index < 0) throw new Error('fixture expected keychain')
   document.contents.items.splice(index, 1)
   return document.toString()
@@ -130,7 +130,7 @@ function externalRepositoryEffective(source: string, input: WebOwnerSetupInput, 
   change?: (grant: Record<string, unknown>) => void): string {
   const document = parseDocument(repositoryEffective(source))
   if (!isSeq(document.contents)) throw new Error('fixture expected rows')
-  const actions = document.contents.items.find(row => yamlId(row) === 'dsh-enhanced-assistant-actions')
+  const actions = document.contents.items.find(row => yamlId(row) === 'dsh-ray-assistant-actions')
   if (!isMap(actions)) throw new Error('fixture expected actions')
   const admissionId = externalAdmissionId(input, snapshot)
   const grant: Record<string, unknown> = {
@@ -161,14 +161,14 @@ describe('goal admission planning', () => {
   test('native Goal authority copies the persistent descriptor and exact finite terms without Docker fields', async () => {
     const f = await fixture(Date.now())
     const plan = prepareGoalAdmission(f.input,f.prepared.patch,f.effective,task(),f.snapshot,Date.now())
-    const verifier = config(plan.patch,'dsh-enhanced-assistant-verifier')
+    const verifier = config(plan.patch,'dsh-ray-assistant-verifier')
     expect(verifier.authorities).toHaveLength(1)
     expect(verifier.authorities[0]).toEqual({kind:'isolated-runner',id:`${plan.admissionId}-verify`,stateRoot:join(f.input.dshHome,'assistant-goal-verification',f.input.profile,plan.admissionId),
       backend:'linux-native',runtime:f.runtime,cgroupRoots:f.cgroupRoots,command:'node verify.mjs',expiresAt:f.profile.grant.expiresAt,maxRuns:4,maxTotalDurationMs:100000,maxDurationMs:20000,maxOutputBytes:4096,
       testSets:[{id:'cases',cases:[{stdin:'one\n',expectedStdout:'one\n',expectedExitCode:0}]}]})
     expect(verifier.authorities[0]).not.toHaveProperty('image')
     expect(verifier.authorities[0]).not.toHaveProperty('dockerPath')
-    expect(config(plan.patch,'dsh-enhanced-assistant-isolation')).toEqual(config(f.prepared.patch,'dsh-enhanced-assistant-isolation'))
+    expect(config(plan.patch,'dsh-ray-assistant-isolation')).toEqual(config(f.prepared.patch,'dsh-ray-assistant-isolation'))
     expect(verifier.profiles).toHaveLength(2)
     expect(verifier.profiles.every((profile: {owner: unknown; scope: unknown}) => JSON.stringify(profile.owner) === JSON.stringify({principalRecordId:f.snapshot.owner.id,principalVersion:f.snapshot.owner.version})
       && JSON.stringify(profile.scope) === JSON.stringify({workspace:f.input.workspace,preset:f.input.preset}))).toBe(true)
@@ -209,7 +209,7 @@ describe('goal admission planning', () => {
     const f = await fixture(Date.now())
     const first = prepareGoalAdmission(f.input,f.prepared.patch,f.effective,task(),f.snapshot,Date.now())
     const change = (callback: (document: ReturnType<typeof parseDocument>) => void) => { const document = parseDocument(first.patch); callback(document); return document.toString() }
-    const isolateIndex = (document: ReturnType<typeof parseDocument>) => {if (!isSeq(document.contents)) throw new Error('rows');return document.contents.items.findIndex(row => yamlId(row) === 'dsh-enhanced-assistant-isolation')}
+    const isolateIndex = (document: ReturnType<typeof parseDocument>) => {if (!isSeq(document.contents)) throw new Error('rows');return document.contents.items.findIndex(row => yamlId(row) === 'dsh-ray-assistant-isolation')}
     for (const changed of [
       change(doc => doc.setIn([isolateIndex(doc),'config','linux','runtime','root','sha256'],'e'.repeat(64))),
       change(doc => doc.setIn([isolateIndex(doc),'config','linux','runtime','sourceCommit'],'e'.repeat(40))),
@@ -240,8 +240,8 @@ llm-pi-ai:
 `, { mode: 0o600 })
     await expect(configureGoalAdmission(f.input, f.effective, taskPath)).resolves.toMatchObject({ sessionId: 'session-a' })
     const configured = await readFile(f.patchPath, 'utf8')
-    expect(config(configured, 'dsh-enhanced-assistant-goals').executionBudget).toMatchObject({ mode: 'calls', routes: [route] })
-    expect(config(configured, 'dsh-enhanced-assistant-delivery')).toMatchObject({ agentProvider: route.provider, agentModel: route.model, agentMaxOutputTokens: 8192 })
+    expect(config(configured, 'dsh-ray-assistant-goals').executionBudget).toMatchObject({ mode: 'calls', routes: [route] })
+    expect(config(configured, 'dsh-ray-assistant-delivery')).toMatchObject({ agentProvider: route.provider, agentModel: route.model, agentMaxOutputTokens: 8192 })
     expect(configured).not.toContain('PRIVATE_DO_NOT_READ')
     expect(parseSettingsDefaultModelRoute('{ agent-default-model: { provider: custom-gateway, model: configured-model } }')).toEqual(route)
     for (const source of ['[]', 'agent-default-model: custom-gateway', 'agent-default-model: { provider: custom-gateway }', 'agent-default-model: { provider: 3, model: configured-model }']) {
@@ -263,7 +263,7 @@ llm-pi-ai:
       if (previousEffective === undefined) delete process.env.DSH_WEB_OWNER_EFFECTIVE
       else process.env.DSH_WEB_OWNER_EFFECTIVE = previousEffective
     }
-    expect(config(await readFile(cli.patchPath, 'utf8'), 'dsh-enhanced-assistant-goals').executionBudget).toMatchObject({ mode: 'calls', routes: [route] })
+    expect(config(await readFile(cli.patchPath, 'utf8'), 'dsh-ray-assistant-goals').executionBudget).toMatchObject({ mode: 'calls', routes: [route] })
   })
 
   test('v2 admits only the exact already configured route and calls budget without writing a credential', async () => {
@@ -273,8 +273,8 @@ llm-pi-ai:
     const input = task({ version: 2, route: { provider: 'custom-gateway', model: 'relay-v2' }, model: undefined,
       executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'custom-gateway', model: 'relay-v2' }] } })
     const plan = prepareGoalAdmission(f.input, f.prepared.patch, configured, input, f.snapshot)
-    expect(config(plan.patch, 'dsh-enhanced-assistant-goals').executionBudget).toEqual({ mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'custom-gateway', model: 'relay-v2' }] })
-    expect(config(plan.patch, 'dsh-enhanced-assistant-delivery')).toMatchObject({ agentProvider: 'custom-gateway', agentModel: 'relay-v2', agentMaxOutputTokens: 8192 })
+    expect(config(plan.patch, 'dsh-ray-assistant-goals').executionBudget).toEqual({ mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'custom-gateway', model: 'relay-v2' }] })
+    expect(config(plan.patch, 'dsh-ray-assistant-delivery')).toMatchObject({ agentProvider: 'custom-gateway', agentModel: 'relay-v2', agentMaxOutputTokens: 8192 })
     expect(() => parseGoalAdmissionTask(task({ version: 2, route: { provider: 'custom-gateway', model: 'wrong' }, model: undefined,
       executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'custom-gateway', model: 'relay-v2' }] } }))).toThrow(/budget route/)
     expect(() => prepareGoalAdmission(f.input, f.prepared.patch, configured, task({ version: 2, route: { provider: 'custom-gateway', model: 'wrong' }, model: undefined,
@@ -285,13 +285,13 @@ llm-pi-ai:
     const now = Date.now(); const f = await fixture(now); const effective = repositoryEffective(f.effective); const source = withoutKeychain(f.prepared.patch)
     const plan = prepareGoalAdmission(f.input, source, effective, repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)
     expect(plan.repositoryDelivery).toEqual({ repository: 'octo/example', branch: 'automation/result', paths: ['result.txt'], acceptance: 'goal-outcome' })
-    expect((parseDocument(plan.patch).toJS() as Array<{ id: string }>).some(row => row.id === 'dsh-enhanced-credentials-keychain')).toBe(false)
-    expect(config(plan.patch, 'dsh-enhanced-assistant-goals').backgroundWake).toMatchObject({ ownerRouteId: plan.admissionId, budgetId: `${plan.admissionId}-runs`, maxDelayMs: 60_000, runTimeoutMs: 60_000 })
-    const grant = config(plan.patch, 'dsh-enhanced-assistant-actions').grants.find((entry: { id: string }) => entry.id === `${plan.admissionId}-repository`)
+    expect((parseDocument(plan.patch).toJS() as Array<{ id: string }>).some(row => row.id === 'dsh-ray-credentials-keychain')).toBe(false)
+    expect(config(plan.patch, 'dsh-ray-assistant-goals').backgroundWake).toMatchObject({ ownerRouteId: plan.admissionId, budgetId: `${plan.admissionId}-runs`, maxDelayMs: 60_000, runTimeoutMs: 60_000 })
+    const grant = config(plan.patch, 'dsh-ray-assistant-actions').grants.find((entry: { id: string }) => entry.id === `${plan.admissionId}-repository`)
     expect(grant).toMatchObject({ revision: 1, principalRecordId: f.snapshot.owner.id, principalVersion: f.snapshot.owner.version, workspace: f.input.workspace, agentPreset: f.input.preset,
       repository: 'octo/example', branch: 'automation/result', paths: ['result.txt'], credentialHandle: 'github', maxActions: 3, maxTotalBytes: 4096,
       repoWorkflow: { baseBranch: 'main', allowBranchCreate: false, allowPullRequest: true }, verifiedDelivery: { ownerRouteId: plan.admissionId, budgetId: `${plan.admissionId}-runs` } })
-    const rules = config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy.rules as PolicyRule[]
+    const rules = config(plan.patch, 'dsh-ray-personal-assistant').assistantPolicy.rules as PolicyRule[]
     const policy = compilePolicy(rules)
     const agent = { kind: 'agent' as const, id: f.input.preset, workspace: f.input.workspace, principal: 'web/web/local/operator' }
     for (const initiator of ['external', 'background'] as const) {
@@ -299,9 +299,9 @@ llm-pi-ai:
         expect(evaluatePolicy(policy, { subject: agent, action: 'execute', resource: { kind: 'tool', id }, context: { initiator } }).effect).toBe('allow')
       }
     }
-    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions', workspace: f.input.workspace, principal: 'web/web/local/operator' }, action: 'execute', resource: { kind: 'tool', id: `action:github:${grant.id}` }, context: { initiator: 'background' } }).effect).toBe('allow')
-    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, action: 'credential.use', resource: { kind: 'credential', id: 'github' }, context: { initiator: 'background' } }).effect).toBe('allow')
-    expect(rules.find(rule => rule.id === `${plan.admissionId}-repository-credential`)?.subject).toEqual({ kind: 'background', id: 'dsh-enhanced-assistant-actions' })
+    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-ray-assistant-actions', workspace: f.input.workspace, principal: 'web/web/local/operator' }, action: 'execute', resource: { kind: 'tool', id: `action:github:${grant.id}` }, context: { initiator: 'background' } }).effect).toBe('allow')
+    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-ray-assistant-actions' }, action: 'credential.use', resource: { kind: 'credential', id: 'github' }, context: { initiator: 'background' } }).effect).toBe('allow')
+    expect(rules.find(rule => rule.id === `${plan.admissionId}-repository-credential`)?.subject).toEqual({ kind: 'background', id: 'dsh-ray-assistant-actions' })
   })
 
   it.each([
@@ -310,36 +310,36 @@ llm-pi-ai:
     { provider: 'linux-secret-service', service: 'dsh/github', account: 'operator' },
   ])('accepts an existing literal $provider credential handle without copying it to the target', async handleShape => {
     const now = Date.now(); const f = await fixture(now)
-    const handle = { id: 'github', ...handleShape, consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }
+    const handle = { id: 'github', ...handleShape, consumers: ['dsh-ray-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }
     const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), repositoryEffective(f.effective, [handle]), repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)
-    expect((parseDocument(plan.patch).toJS() as Array<{ id: string }>).some(row => row.id === 'dsh-enhanced-credentials-keychain')).toBe(false)
-    expect(config(plan.patch, 'dsh-enhanced-assistant-actions').grants).toEqual(expect.arrayContaining([expect.objectContaining({ credentialHandle: 'github' })]))
+    expect((parseDocument(plan.patch).toJS() as Array<{ id: string }>).some(row => row.id === 'dsh-ray-credentials-keychain')).toBe(false)
+    expect(config(plan.patch, 'dsh-ray-assistant-actions').grants).toEqual(expect.arrayContaining([expect.objectContaining({ credentialHandle: 'github' })]))
   })
 
   test('intermediate repository delivery requires an explicit accepted-step choice', async () => {
     const now = Date.now(), f = await fixture(now)
     const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), repositoryEffective(f.effective), repositoryTask({ expiresAt: now + 300_000, acceptance: 'goal-step' }), f.snapshot, now)
     expect(plan.repositoryDelivery?.acceptance).toBe('goal-step')
-    const grants = config(plan.patch, 'dsh-enhanced-assistant-actions').grants
+    const grants = config(plan.patch, 'dsh-ray-assistant-actions').grants
     expect(grants.find((entry: { id: string }) => entry.id === `${plan.admissionId}-repository`).verifiedDelivery.acceptance).toBe('goal-step')
     expect(() => parseGoalAdmissionTask(repositoryTask({ acceptance: 'model-says-done' }))).toThrow('invalid repository acceptance')
   })
 
   test('formal repository events create a finite owner-bound source and exact wake/credential permissions', async () => {
     const now = Date.now(), f = await fixture(now)
-    const handle = { id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-enhanced-assistant-actions', 'dsh-enhanced-event-triggers'], purposes: ['github.commit', 'github.observe'], maxLeaseMs: 30_000 }
+    const handle = { id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-ray-assistant-actions', 'dsh-ray-event-triggers'], purposes: ['github.commit', 'github.observe'], maxLeaseMs: 30_000 }
     const effective = repositoryEffective(f.effective, [handle])
     const events = { credentialHandle: 'github', maxPolls: 12, maxFires: 2, pollIntervalMs: 5000, requestTimeoutMs: 10000 }
     const outcome = { requiredChecks: [{ name: 'tests', appId: 7 }], reviewerIds: [42], minApprovals: 1, timeoutMs: 10000, freshnessMs: 30000 }
     const task = repositoryTask({ expiresAt: now + 300_000, acceptance: 'goal-step', maxActions: 30, outcome, events })
     const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), effective, task, f.snapshot, now, undefined, eventSupport)
-    const source = config(plan.patch, 'dsh-enhanced-event-triggers'), trigger = source.triggers[0]
+    const source = config(plan.patch, 'dsh-ray-event-triggers'), trigger = source.triggers[0]
     expect(source.databasePath).toBe("dshHomePath('event-triggers/state.sqlite')")
     expect(source).toMatchObject({ pollerEnabled: true, pollIntervalMs: 5000, requestTimeoutMs: 10000 })
     expect(trigger).toMatchObject({ kind: 'github-repository', observerLifetime: 'goal', repository: 'octo/example', branch: 'automation/result', maxFires: 2,
       observer: { principalRecordId: f.snapshot.owner.id, principalVersion: f.snapshot.owner.version, ownerRouteId: plan.admissionId, expiresAt: now + 300_000 } })
-    expect(config(plan.patch, 'dsh-enhanced-assistant-goals')).toMatchObject({ eventWaits: true, preauthorizedSchedule: true })
-    const policy = config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy
+    expect(config(plan.patch, 'dsh-ray-assistant-goals')).toMatchObject({ eventWaits: true, preauthorizedSchedule: true })
+    const policy = config(plan.patch, 'dsh-ray-personal-assistant').assistantPolicy
     expect(policy.budgets).toEqual(expect.arrayContaining([expect.objectContaining({ id: `${trigger.id}-polls`, limit: 12 }), expect.objectContaining({ id: `${plan.admissionId}-runs`, limit: 3 })]))
     expect(policy.rules).toEqual(expect.arrayContaining([expect.objectContaining({ actions: ['wait-for-event'], resource: { kind: 'automation', id: trigger.automationId } }), expect.objectContaining({ resource: { kind: 'network', id: 'https://api.github.com/repos/octo/example' }, budget: { id: `${trigger.id}-polls`, amount: 1 } })]))
     const beforeNativeWait = compilePolicy(policy.rules.filter((rule: PolicyRule) => rule.id !== `${trigger.id}-native-wait`))
@@ -369,7 +369,7 @@ llm-pi-ai:
     const outcome = { requiredChecks: [{ name: 'tests', appId: 42 }], reviewerIds: [7], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 30_000 }
     const value = repositoryTask({ expiresAt: now + 300_000, acceptance: 'goal-step', maxActions: 20, outcome })
     const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), repositoryEffective(f.effective), value, f.snapshot, now)
-    const verifier = config(plan.patch, 'dsh-enhanced-assistant-verifier')
+    const verifier = config(plan.patch, 'dsh-ray-assistant-verifier')
     expect(verifier.authorities).toContainEqual(expect.objectContaining({ ...outcome, kind: 'repository-readback', grantId: `${plan.admissionId}-repository`, grantRevision: 1 }))
     expect(verifier.profiles.find((p: { taskKind: string }) => p.taskKind === 'goal-step').criteria[0].kind).toBe('isolated-process-behavior')
     expect(verifier.profiles.find((p: { taskKind: string }) => p.taskKind === 'goal-outcome').criteria).toMatchObject([
@@ -387,13 +387,13 @@ llm-pi-ai:
     const delivery = { expiresAt: now + 300_000, acceptance: 'goal-step', openPullRequest: false, maxActions: 4, outcome }
     const value = repositoryTask(delivery)
     const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), repositoryEffective(f.effective), value, f.snapshot, now)
-    const verifier = config(plan.patch, 'dsh-enhanced-assistant-verifier')
+    const verifier = config(plan.patch, 'dsh-ray-assistant-verifier')
     const authority = verifier.authorities.find((a: { kind: string }) => a.kind === 'repository-commit-readback')
     expect(authority).toMatchObject({ requiredChecks: outcome.requiredChecks, repository: 'octo/example', branch: 'automation/result', grantId: `${plan.admissionId}-repository` })
     expect(authority).not.toHaveProperty('reviewerIds')
     expect(authority).not.toHaveProperty('mode')
     expect(verifier.profiles.find((p: { taskKind: string }) => p.taskKind === 'goal-step').criteria[0].kind).toBe('isolated-process-behavior')
-    expect(config(plan.patch, 'dsh-enhanced-assistant-actions').grants[0].repoWorkflow.allowPullRequest).toBe(false)
+    expect(config(plan.patch, 'dsh-ray-assistant-actions').grants[0].repoWorkflow.allowPullRequest).toBe(false)
     expect(prepareGoalAdmission(f.input, plan.patch, repositoryEffective(f.effective), value, f.snapshot, now).patch).toBe(plan.patch)
     for (const invalid of [{ openPullRequest: true }, { acceptance: 'goal-outcome' }, { maxActions: 3 },
       { outcome: { ...outcome, mode: undefined } }, { outcome: { ...outcome, mode: 'automatic' } },
@@ -413,8 +413,8 @@ llm-pi-ai:
     }
     const effective = externalRepositoryEffective(f.effective, f.input, f.snapshot, now, directGrant)
     const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), effective, repositoryTask(delivery), f.snapshot, now, undefined, eventSupport)
-    expect(config(plan.patch, 'dsh-enhanced-event-triggers').triggers[0]).toMatchObject({ deliveryMode: 'commit', baseBranch: 'main', externalGrant: { id: 'operator-repository-grant', revision: 7 } })
-    expect(config(plan.patch, 'dsh-enhanced-assistant-actions').externalGrants).toEqual(config(effective, 'dsh-enhanced-assistant-actions').externalGrants)
+    expect(config(plan.patch, 'dsh-ray-event-triggers').triggers[0]).toMatchObject({ deliveryMode: 'commit', baseBranch: 'main', externalGrant: { id: 'operator-repository-grant', revision: 7 } })
+    expect(config(plan.patch, 'dsh-ray-assistant-actions').externalGrants).toEqual(config(effective, 'dsh-ray-assistant-actions').externalGrants)
     expect(prepareGoalAdmission(f.input, plan.patch, effective, repositoryTask(delivery), f.snapshot, now + 1, undefined, eventSupport).patch).toBe(plan.patch)
     const insufficient = externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { directGrant(grant); grant.maxCostUnits = 21 })
     expect(() => prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), insufficient, repositoryTask(delivery), f.snapshot, now, undefined, eventSupport)).toThrow('observation and outcome cost')
@@ -429,14 +429,14 @@ llm-pi-ai:
     const input = repositoryTask({ credentialHandle: undefined, externalGrantId: 'operator-repository-grant', expiresAt: now + 300_000, acceptance: 'goal-step', maxActions: 20, outcome })
     const effective = externalRepositoryEffective(f.effective, f.input, f.snapshot, now)
     const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), effective, input, f.snapshot, now)
-    const actions = config(plan.patch, 'dsh-enhanced-assistant-actions')
+    const actions = config(plan.patch, 'dsh-ray-assistant-actions')
     expect(actions.grants).toEqual([])
-    expect(actions.externalGrants).toEqual(config(effective, 'dsh-enhanced-assistant-actions').externalGrants)
-    expect(actions.broker).toEqual(config(effective, 'dsh-enhanced-assistant-actions').broker)
+    expect(actions.externalGrants).toEqual(config(effective, 'dsh-ray-assistant-actions').externalGrants)
+    expect(actions.broker).toEqual(config(effective, 'dsh-ray-assistant-actions').broker)
     expect(plan.patch).not.toContain('credentials-keychain')
-    const verifier = config(plan.patch, 'dsh-enhanced-assistant-verifier')
+    const verifier = config(plan.patch, 'dsh-ray-assistant-verifier')
     expect(verifier.authorities).toContainEqual(expect.objectContaining({ kind: 'repository-readback', grantId: 'operator-repository-grant', grantRevision: 7, ...outcome }))
-    const rules = config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy.rules as PolicyRule[]
+    const rules = config(plan.patch, 'dsh-ray-personal-assistant').assistantPolicy.rules as PolicyRule[]
     expect(rules.some(rule => rule.id.endsWith('-repository-credential') || rule.actions?.includes('credential.use'))).toBe(false)
     const policy = compilePolicy(rules.filter(rule => rule.id.startsWith(`${plan.admissionId}-repository-`))), agent = { kind: 'agent' as const, id: f.input.preset, workspace: f.input.workspace, principal: 'web/web/local/operator' }
     for (const tool of ['action:github:operator-repository-grant', 'action_github_grants', 'action_github_inspect', 'action_github_deliver', 'action_github_delivery_status']) {
@@ -445,10 +445,10 @@ llm-pi-ai:
     for (const tool of ['action_github_commit', 'action_github_pr']) {
       expect(evaluatePolicy(policy, { subject: agent, action: 'execute', resource: { kind: 'tool', id: tool }, context: { initiator: 'external' } }).effect).toBe('deny')
     }
-    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions', workspace: f.input.workspace, principal: agent.principal }, action: 'execute', resource: { kind: 'tool', id: 'action:github:operator-repository-grant' }, context: { initiator: 'background' } }).effect).toBe('allow')
+    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-ray-assistant-actions', workspace: f.input.workspace, principal: agent.principal }, action: 'execute', resource: { kind: 'tool', id: 'action:github:operator-repository-grant' }, context: { initiator: 'background' } }).effect).toBe('allow')
     expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'delivery-worker', workspace: f.input.workspace, principal: agent.principal }, action: 'reconcile', resource: { kind: 'automation', id: 'verified-delivery-123' }, context: { initiator: 'background' } }).effect).toBe('allow')
     expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'assistant-actions-verified-delivery/v1', workspace: f.input.workspace, principal: agent.principal }, action: 'send', resource: { kind: 'message', id: f.snapshot.binding.id }, context: { initiator: 'background' } }).effect).toBe('allow')
-    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, action: 'credential.use', resource: { kind: 'credential', id: 'repo-fixture' }, context: { initiator: 'background' } }).effect).toBe('deny')
+    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-ray-assistant-actions' }, action: 'credential.use', resource: { kind: 'credential', id: 'repo-fixture' }, context: { initiator: 'background' } }).effect).toBe('deny')
     expect(prepareGoalAdmission(f.input, plan.patch, effective, input, f.snapshot, now + 1).patch).toBe(plan.patch)
   })
 
@@ -459,14 +459,14 @@ llm-pi-ai:
     const input = repositoryTask({ credentialHandle: undefined, externalGrantId: 'operator-repository-grant', expiresAt: now + 300_000, acceptance: 'goal-step', maxActions: 43, outcome, events })
     const effective = externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { grant.maxActions = 43; grant.maxCostUnits = 63 })
     const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), effective, input, f.snapshot, now, undefined, eventSupport)
-    const triggerId = `${plan.admissionId}-repository-events`, source = config(plan.patch, 'dsh-enhanced-event-triggers')
+    const triggerId = `${plan.admissionId}-repository-events`, source = config(plan.patch, 'dsh-ray-event-triggers')
     expect(source.triggers).toEqual([expect.objectContaining({ id: triggerId, kind: 'github-repository', observerLifetime: 'goal',
       externalGrant: { id: 'operator-repository-grant', revision: 7, digest: 'a'.repeat(64) },
       observer: expect.objectContaining({ ownerRouteId: plan.admissionId, expiresAt: now + 300_000 }) })])
     expect(source.triggers[0]).not.toHaveProperty('credentialHandle')
     expect(plan.patch).not.toContain('credentials-keychain')
-    expect(config(plan.patch, 'dsh-enhanced-assistant-actions').externalGrants).toEqual(config(effective, 'dsh-enhanced-assistant-actions').externalGrants)
-    const { rules, budgets } = config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy
+    expect(config(plan.patch, 'dsh-ray-assistant-actions').externalGrants).toEqual(config(effective, 'dsh-ray-assistant-actions').externalGrants)
+    const { rules, budgets } = config(plan.patch, 'dsh-ray-personal-assistant').assistantPolicy
     expect(rules.some((rule: PolicyRule) => rule.actions?.includes('credential.use'))).toBe(false)
     expect(budgets).toEqual(expect.arrayContaining([expect.objectContaining({ id: `${triggerId}-polls`, metric: 'repository-observations', limit: 4 })]))
     expect(prepareGoalAdmission(f.input, plan.patch, effective, input, f.snapshot, now + 1, undefined, eventSupport).patch).toBe(plan.patch)
@@ -497,7 +497,7 @@ llm-pi-ai:
     expect(() => parseGoalAdmissionTask(repositoryTask({ openPullRequest: false, maxActions: 1 }))).toThrow(/task limit/)
     expect(() => parseGoalAdmissionTask(task({ repositoryDelivery: {} }))).toThrow(/fields|repository delivery/)
     expect(() => prepareGoalAdmission(f.input, f.prepared.patch, repositoryEffective(f.effective, []), repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)).toThrow(/credential handle/)
-    expect(() => prepareGoalAdmission(f.input, repositorySource(f.prepared.patch, [{ id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 29_999 }]), effective, repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)).toThrow(/credential handle/)
+    expect(() => prepareGoalAdmission(f.input, repositorySource(f.prepared.patch, [{ id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-ray-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 29_999 }]), effective, repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)).toThrow(/credential handle/)
     expect(() => prepareGoalAdmission(f.input, source, effective, repositoryTask({ expiresAt: now + 120_000 }), f.snapshot, now)).toThrow(/deadline/)
     expect(() => prepareGoalAdmission(f.input, source, effective, repositoryTask({ expiresAt: now + 180_000 }), f.snapshot, now)).toThrow(/deadline/)
     expect(() => prepareGoalAdmission(f.input, source, effective, repositoryTask({ expiresAt: f.profile.grant.expiresAt + 1 }), f.snapshot, now)).toThrow(/deadline/)
@@ -509,7 +509,7 @@ llm-pi-ai:
     expect(second.patch).toBe(first.patch)
     const conflicting = parseDocument(first.patch)
     if (!isSeq(conflicting.contents)) throw new Error('fixture expected rows')
-    const personal = conflicting.contents.items.find(row => yamlId(row) === 'dsh-enhanced-personal-assistant')
+    const personal = conflicting.contents.items.find(row => yamlId(row) === 'dsh-ray-personal-assistant')
     if (!isMap(personal)) throw new Error('fixture expected personal assistant')
     const personalConfig = personal.get('config', true)
     if (!isMap(personalConfig)) throw new Error('fixture expected personal config')
@@ -540,13 +540,13 @@ llm-pi-ai:
     const f = await fixture()
     const document = parseDocument(f.prepared.patch)
     if (!isSeq(document.contents)) throw new Error('missing fixture rows')
-    const personalIndex = document.contents.items.findIndex(value => isMap(value) && String(value.get('id')) === 'dsh-enhanced-personal-assistant')
+    const personalIndex = document.contents.items.findIndex(value => isMap(value) && String(value.get('id')) === 'dsh-ray-personal-assistant')
     document.addIn([personalIndex, 'config', 'assistantPolicy', 'rules'], { id: 'custom-deny', effect: 'deny', subject: { kind: 'agent', id: 'standard' }, actions: ['execute'], resource: { kind: 'tool', id: 'forbidden' } })
     const source = document.toString()
     const plan = prepareGoalAdmission(f.input, source, f.effective, task(), f.snapshot, Date.now())
-    const goals = config(plan.patch, 'dsh-enhanced-assistant-goals')
-    const verifier = config(plan.patch, 'dsh-enhanced-assistant-verifier')
-    const personal = config(plan.patch, 'dsh-enhanced-personal-assistant')
+    const goals = config(plan.patch, 'dsh-ray-assistant-goals')
+    const verifier = config(plan.patch, 'dsh-ray-assistant-verifier')
+    const personal = config(plan.patch, 'dsh-ray-personal-assistant')
     const profiles = verifier.profiles.filter((profile: { id: string }) => profile.id.startsWith(plan.admissionId))
     expect(profiles).toHaveLength(2)
     expect(profiles).toEqual(expect.arrayContaining([
@@ -573,10 +573,10 @@ llm-pi-ai:
     const first = prepareGoalAdmission(f.input, f.prepared.patch, f.effective, input, f.snapshot, Date.now())
     const second = prepareGoalAdmission(f.input, first.patch, first.patch, input, f.snapshot, Date.now())
     expect(second.patch).toBe(first.patch)
-    const goals = config(first.patch, 'dsh-enhanced-assistant-goals')
+    const goals = config(first.patch, 'dsh-ray-assistant-goals')
     expect(goals.strategy).toMatchObject({ maxDurationMs: 30000, maxRunsPerGoal: 2 })
     expect(goals.executionBudget).toMatchObject({ modelCalls: 3, toolCalls: 3 })
-    const rules = config(first.patch, 'dsh-enhanced-personal-assistant').assistantPolicy.rules
+    const rules = config(first.patch, 'dsh-ray-personal-assistant').assistantPolicy.rules
     expect(rules).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: `${first.admissionId}-strategy-goal`, actions: ['delegate'], subject: expect.objectContaining({ workspace: f.input.workspace, id: f.input.preset }), resource: { kind: 'goal', id: 'business-context' } }),
       expect.objectContaining({ id: `${first.admissionId}-strategy-tool`, actions: ['execute'], resource: { kind: 'tool', id: 'goal_strategy' } }),
@@ -606,7 +606,7 @@ llm-pi-ai:
 
   test('generated background policy permits task execution but refuses unrelated tools and goal control', async () => {
     const f = await fixture(); const plan = prepareGoalAdmission(f.input, f.prepared.patch, f.effective, task(), f.snapshot)
-    const policy = compilePolicy(config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy.rules as PolicyRule[])
+    const policy = compilePolicy(config(plan.patch, 'dsh-ray-personal-assistant').assistantPolicy.rules as PolicyRule[])
     const request = { subject: { kind: 'agent', id: 'standard', workspace: f.input.workspace, principal: 'web/web/local/operator' }, action: 'execute', context: { initiator: 'background' } } as const
     for (const id of ['isolation_run', 'goal_context', `isolation:${f.profile.grant.id}`]) expect(evaluatePolicy(policy, { ...request, resource: { kind: 'tool', id } }).effect).toBe('allow')
     for (const id of ['action_github_commit', 'goal_control', 'goal_schedule', 'bash', 'unrelated', 'isolation:another-grant']) expect(evaluatePolicy(policy, { ...request, resource: { kind: 'tool', id } }).effect).toBe('deny')
@@ -616,7 +616,7 @@ llm-pi-ai:
 
   test('authorizes a textless wake completion notice only for the admitted owner binding', async () => {
     const f = await fixture(); const plan = prepareGoalAdmission(f.input, f.prepared.patch, f.effective, task(), f.snapshot)
-    const policy = compilePolicy(config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy.rules as PolicyRule[])
+    const policy = compilePolicy(config(plan.patch, 'dsh-ray-personal-assistant').assistantPolicy.rules as PolicyRule[])
     const request = { subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: f.input.workspace, principal: 'web/web/local/operator' }, action: 'send', resource: { kind: 'message', id: f.snapshot.binding.id }, context: { initiator: 'background' } } as const
     expect(evaluatePolicy(policy, request).effect).toBe('allow')
     expect(evaluatePolicy(policy, { ...request, resource: { ...request.resource, id: 'other-binding' } }).effect).toBe('deny')
@@ -684,7 +684,7 @@ llm-pi-ai:
       cases: [{ stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }, { stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 }] }
     const plan = prepareGoalAdmission(f.input, f.prepared.patch, f.effective,
       task({ stepMaxDurationMs: 120_000, executionBudget, verification }), f.snapshot)
-    const profiles = config(plan.patch, 'dsh-enhanced-assistant-verifier').profiles.filter((profile: { id: string }) => profile.id.startsWith(plan.admissionId))
+    const profiles = config(plan.patch, 'dsh-ray-assistant-verifier').profiles.filter((profile: { id: string }) => profile.id.startsWith(plan.admissionId))
     expect(profiles).toHaveLength(2)
     expect(profiles).toEqual(expect.arrayContaining([
       expect.objectContaining({ validityMs: 210_000, bounds: { maxDurationMs: 40_000, maxEvidenceBytes: 8192 } }),
@@ -695,7 +695,7 @@ llm-pi-ai:
   test('admits delegated cgroup v2 autonomy roots into verifier authority and detects unified root drift', async () => {
     const f = await fixture(Date.now(), 'v2')
     const plan = prepareGoalAdmission(f.input, f.prepared.patch, f.effective, task(), f.snapshot)
-    const verifierConfig = config(plan.patch, 'dsh-enhanced-assistant-verifier')
+    const verifierConfig = config(plan.patch, 'dsh-ray-assistant-verifier')
     expect(verifierConfig.authorities).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: `${plan.admissionId}-verify`, cgroupRoots: f.cgroupRoots }),
     ]))
@@ -703,7 +703,7 @@ llm-pi-ai:
     const drifted = parseDocument(plan.patch)
     const contents = drifted.contents
     if (!isSeq(contents)) throw new Error('expected YAML sequence')
-    const isolateIndex = contents.items.findIndex(row => yamlId(row) === 'dsh-enhanced-assistant-isolation')
+    const isolateIndex = contents.items.findIndex(row => yamlId(row) === 'dsh-ray-assistant-isolation')
     drifted.setIn([isolateIndex, 'config', 'linux', 'cgroupRoots', 'unified'], '/sys/fs/cgroup/dsh-native/uid-99999')
     expect(() => prepareGoalAdmission(f.input, drifted.toString(), drifted.toString(), task(), f.snapshot)).toThrow()
   })

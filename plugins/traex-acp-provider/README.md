@@ -1,10 +1,10 @@
-# @dsh-enhanced/traex-acp-provider
+# @dsh-ray/traex-acp-provider
 
 把同一台机器、同一 OS 用户已经登录的 **TraeX / TRAE CLI（`traex-agent`）** 与 **Google Antigravity CLI（`agy-agent`）** 注册为 DeepSeek Harness 的本地 ACP model provider。DSH 在这里是 **ACP client**：每次模型请求都会在校验 live Agent session 工作区后启动新的受限 ACP 子进程（`traex acp serve` 或 `agy acp`）、完成 ACP v1 握手、创建会话、校验模型/effort，并把握手目录作为非权威展示缓存。普通 `agent_message_chunk` 会映射为 DSH 文本；当请求带 DSH tool schema 时，后端返回受控工具信封，插件把它转换成 DSH 原生 tool call，由 Harness 执行后进入下一 step。
 
-启用时，插件会在同一个 `LlmRuntime` 上通过 `@dsh-enhanced/llm-route-capabilities` 为启用的 route（`traex-agent` / `agy-agent`）发布 `toolCalls: bridge`，并随 Cordis fiber 撤回；同时在支持时向 `LlmRuntime` 登记可配置 provider 目录，便于设置界面识别和切换。这个字段只描述 adapter 如何把模型输出投影成标准 DSH tool call，不参与 Delivery/Automations 准入，也不改变模型可见的工具或 Skill；真正的工具授权与执行仍由统一的 Agent Loop、Policy、审批和 sandbox 负责。
+启用时，插件会在同一个 `LlmRuntime` 上通过 `@dsh-ray/llm-route-capabilities` 为启用的 route（`traex-agent` / `agy-agent`）发布 `toolCalls: bridge`，并随 Cordis fiber 撤回；同时在支持时向 `LlmRuntime` 登记可配置 provider 目录，便于设置界面识别和切换。这个字段只描述 adapter 如何把模型输出投影成标准 DSH tool call，不参与 Delivery/Automations 准入，也不改变模型可见的工具或 Skill；真正的工具授权与执行仍由统一的 Agent Loop、Policy、审批和 sandbox 负责。
 
-这不是订阅 OAuth 转接，也不是模型 API provider。认证、模型供应、网络请求和可能产生的费用均由本机 TraeX / Antigravity 负责；插件不读取或托管 token。仓库中的 [`@dsh-enhanced/acp`](../acp) 方向正好相反——它让 DSH 自己成为供编辑器调用的 ACP agent。
+这不是订阅 OAuth 转接，也不是模型 API provider。认证、模型供应、网络请求和可能产生的费用均由本机 TraeX / Antigravity 负责；插件不读取或托管 token。仓库中的 [`@dsh-ray/acp`](../acp) 方向正好相反——它让 DSH 自己成为供编辑器调用的 ACP agent。
 
 ## 前置条件
 
@@ -38,7 +38,7 @@ agy models
 ## 安装
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/traex-acp-provider
+dsh plugin --profile web add @dsh-ray/traex-acp-provider
 dsh --profile web --dump-config
 ```
 
@@ -59,7 +59,7 @@ dsh-model-setup --provider traex-agent --enable-in-profile web
 ## 快速开始（5 步）
 
 1. **确认 ACP 可用**：`traex acp serve --help` 能打开、`traex login status` 输出 `Logged in using Trae`。命令名是 `trae-cli` 时用它替换下面的 `traex`。
-2. **安装插件**：`dsh plugin --profile web add @dsh-enhanced/traex-acp-provider`。
+2. **安装插件**：`dsh plugin --profile web add @dsh-ray/traex-acp-provider`。
 3. **开启 route**：本 route 默认关闭，需在配置里显式设 `enabled: true`（命令名不同则一并改 `command`）。bundle 已把 `cwd` 设为 `$DSH_HOME/assistant-workspace`，与标准 Delivery 的新会话工作区一致；若覆盖整段 `config`，必须保留该值或同时把两端改到同一目录。
 4. **落盘检查**：`dsh --profile web --dump-config` 确认 `enabled`、`command` 与 `cwd` 生效。
 5. **选择模型调用**：打开 DSH 模型选择器；首次查询会通过安全、无 prompt 的 ACP discovery 加载 `traex-agent` 完整目录。选 `default` 会沿用 TraeX 当前模型，也可直接选目录里的具体模型与 effort。
@@ -71,8 +71,8 @@ dsh-model-setup --provider traex-agent --enable-in-profile web
 完整配置如下。Cordis `config` 会整段替换，覆盖时请保留仍需使用的字段：
 
 ```yaml
-- id: dsh-enhanced-traex-acp-provider
-  name: '@dsh-enhanced/traex-acp-provider'
+- id: dsh-ray-traex-acp-provider
+  name: '@dsh-ray/traex-acp-provider'
   config:
     enabled: true
     command: traex

@@ -62,8 +62,8 @@ export const loadAssistantWebOwnerSetup = () => import('../../../plugins/assista
 export const loadAssistantHeartbeat = () => import('../../../plugins/assistant-heartbeat/src/index.ts')
 export const loadAssistantHealth = () => import('../../../plugins/assistant-health/src/index.ts')
 export const loadCredentialsKeychain = () => import('../../../plugins/credentials-keychain/src/index.ts')
-export const loadDshRsiCli = () => import('../../../packages/dsh-rsi-cli/src/index.ts')
-export const loadDshRsiUpgrade = () => import('../../../packages/dsh-rsi-cli/src/upgrade.ts')
+export const loadDshRayCli = () => import('../../../packages/dsh-ray/src/index.ts')
+export const loadDshRayUpgrade = () => import('../../../packages/dsh-ray/src/upgrade.ts')
 export const loadTaskAcceptanceContract = () => import('../../../packages/task-acceptance-contract/src/index.ts')
 export const loadAssistantGrowthContract = () => import('../../../packages/assistant-growth-contract/src/index.ts')
 export const loadUpgradeProgram = () => import('../../../scripts/install/upgrade-program.mjs')
@@ -119,8 +119,8 @@ const dynamicPackageLoaders: Readonly<Record<string, () => Promise<Record<string
   'assistant-heartbeat': loadAssistantHeartbeat,
   'assistant-health': loadAssistantHealth,
   'credentials-keychain': loadCredentialsKeychain,
-  'dsh-rsi-cli': loadDshRsiCli,
-  'dsh-rsi-cli/upgrade': loadDshRsiUpgrade,
+  'dsh-ray': loadDshRayCli,
+  'dsh-ray/upgrade': loadDshRayUpgrade,
   'task-acceptance-contract': loadTaskAcceptanceContract,
   'assistant-growth-contract': loadAssistantGrowthContract,
 }

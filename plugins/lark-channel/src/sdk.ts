@@ -1375,7 +1375,7 @@ export class OfficialLarkTransport implements LarkTransport {
   constructor(options: OfficialLarkTransportOptions) {
     const domain = options.domain === 'lark' ? Domain.Lark : Domain.Feishu
     const shared = { appId: options.appId, appSecret: options.appSecret, domain,
-      logger: silentLogger, loggerLevel: LoggerLevel.error, source: 'dsh-enhanced-lark-channel' }
+      logger: silentLogger, loggerLevel: LoggerLevel.error, source: 'dsh-ray-lark-channel' }
     this.handshakeTimeoutMs = options.handshakeTimeoutMs
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000
     this.imageDownloadTimeoutMs = options.imageDownloadTimeoutMs

@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { canonicalGrowthJson, type PluginCreationVerificationCertificate,
-  type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginRevisionVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { RevisionCapabilityJournal, verifyRevisionCapabilityAdoptionReceipt } from '../src/revision-capability-journal.js'
 import { RevisionCapabilityRuntime } from '../src/revision-capability-runtime.js'

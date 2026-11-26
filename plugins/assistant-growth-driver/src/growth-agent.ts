@@ -5,11 +5,11 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 import { createHash } from 'node:crypto'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { anySourceGrowthRunDigest, validateAnySourceGrowthRunBinding, sourceGrowthEvidenceDigest, validateCreationAcceptanceAuthorityRef, validateRevisionAcceptanceAuthorityRef,
   validateRevisionRegressionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef,
   type RevisionRegressionAcceptanceAuthorityRef, type AnySourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding,
-  type WorkItemRevisionSourceGrowthRunBinding, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  type WorkItemRevisionSourceGrowthRunBinding, type SourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -17,11 +17,11 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, projectToolSchema, RUN_CODE_NAME, type ToolDefinition, type ToolExecution, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline'
 import type { PtcExecutor as PtcExecutorInstance } from '@deepseek-ai/dsh-tool-executor-ptc'
-import type { GoalRecord, VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
-import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import type { BenchmarkPlan } from '@dsh-enhanced/assistant-evaluation/benchmark'
-import type { AssistantSkillsService, SkillBinding } from '@dsh-enhanced/assistant-skills'
+import type { GoalRecord, VerifiedWorkflowSource } from '@dsh-ray/assistant-goals'
+import type { AssistantGoalsService } from '@dsh-ray/assistant-goals'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import type { BenchmarkPlan } from '@dsh-ray/assistant-evaluation/benchmark'
+import type { AssistantSkillsService, SkillBinding } from '@dsh-ray/assistant-skills'
 import { workItemRunSource } from './work-item-source.js'
 import type { NormalizedGrowthDriverConfig } from './config.js'
 import type { GrowthAuthority } from './deposit.js'
@@ -309,7 +309,7 @@ export interface GrowthAgentInput {
   associationCandidates?: readonly AssociationSkillCandidateInput[]
   signal?: AbortSignal
   /** Actual task context is data, never authority or independent success proof. */
-  feedback?: import('@dsh-enhanced/assistant-delivery').OwnerForegroundLearningTask | import('./work-item-source.js').WorkItemUsageSource
+  feedback?: import('@dsh-ray/assistant-delivery').OwnerForegroundLearningTask | import('./work-item-source.js').WorkItemUsageSource
   assertFirstModelAdmission?: () => void
   workItemAuthorization?: { runId: string; intentDigest: string; definitionHash: string; occurrenceId: string; assertCurrent(): void }
   /** Host-only callback after the real Agent realm, model, tools and guards are pinned. */
@@ -1161,7 +1161,7 @@ export async function assertCandidateGenerationOrigin(input: {
     // entry is invoked but before any ctx, Agent, model or candidate write.
     let assertCandidateGenerationInput: ((plan: BenchmarkPlan) => unknown) | undefined
     try {
-      ;({ assertCandidateGenerationInput } = await import('@dsh-enhanced/assistant-evaluation/benchmark'))
+      ;({ assertCandidateGenerationInput } = await import('@dsh-ray/assistant-evaluation/benchmark'))
     } catch {
       throw new Error('assistant-growth-driver: benchmark holdout guard is unavailable; refusing to generate candidates')
     }
@@ -1360,7 +1360,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
   }
   const assertWorkItemPolicy = (): void => {
     if (!workItemSource) return
-    if (ctx.fiber.name !== 'dsh-enhanced-assistant-growth-driver' || !workItemPolicyIsLive()
+    if (ctx.fiber.name !== 'dsh-ray-assistant-growth-driver' || !workItemPolicyIsLive()
       || typeof policy.registerPreauthorizedTool !== 'function') throw new Error('assistant-growth-driver: live WorkItem tool preauthorization is unavailable')
   }
   if (workItemSource && (!config.usageLearning.workItemFailures || !input.workItemAuthorization || !input.onSourceExecution

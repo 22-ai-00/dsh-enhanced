@@ -12,9 +12,9 @@ import { runLarkSetup } from '../src/setup.ts'
 
 function effectiveFreshProfile(): string {
   return `
-# == @dsh-enhanced/assistant-delivery
-- id: dsh-enhanced-assistant-delivery
-  name: '@dsh-enhanced/assistant-delivery'
+# == @dsh-ray/assistant-delivery
+- id: dsh-ray-assistant-delivery
+  name: '@dsh-ray/assistant-delivery'
   inject: [assistantPolicy]
   config:
     databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')
@@ -22,9 +22,9 @@ function effectiveFreshProfile(): string {
     schedulerEnabled: true
     defaultWorkspace: !!js dshHomePath('assistant-workspace')
     defaultAgentPreset: standard
-# == @dsh-enhanced/personal-assistant
-- id: dsh-enhanced-personal-assistant
-  name: '@dsh-enhanced/personal-assistant'
+# == @dsh-ray/personal-assistant
+- id: dsh-ray-personal-assistant
+  name: '@dsh-ray/personal-assistant'
   config:
     assistantPolicy:
       databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
@@ -35,7 +35,7 @@ function effectiveFreshProfile(): string {
           actions: [execute]
           resource: { kind: tool, id: bash }
           context: { initiators: [background] }
-        - id: dsh-enhanced-foreground-capability-*
+        - id: dsh-ray-foreground-capability-*
           effect: allow
           subject: { kind: agent, id: '*', workspace: '*' }
           actions: ['*']
@@ -74,8 +74,8 @@ function mountManagedRows(profilePatch: string): string {
   const document = parseDocument(profilePatch)
   if (!isSeq(document.contents)) throw new Error('expected profile patch sequence')
   for (const [id, name] of [
-    ['dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant'],
-    ['dsh-enhanced-assistant-delivery', '@dsh-enhanced/assistant-delivery'],
+    ['dsh-ray-personal-assistant', '@dsh-ray/personal-assistant'],
+    ['dsh-ray-assistant-delivery', '@dsh-ray/assistant-delivery'],
   ] as const) {
     const row = document.contents.items.find(item => isMap(item)
       && (item.get('id') as unknown) === id)
@@ -88,7 +88,7 @@ function mountManagedRows(profilePatch: string): string {
 
 describe('fresh profile setup', () => {
   const identityOnlyPatch = `
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   config:
     assistantPolicy:
       rules:
@@ -97,7 +97,7 @@ describe('fresh profile setup', () => {
           subject: { kind: agent, id: '*' }
           actions: [execute]
           resource: { kind: tool, id: bash }
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config:
     databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')
     spoolPath: !!js dshHomePath('assistant-delivery/spool')
@@ -111,7 +111,7 @@ describe('fresh profile setup', () => {
       profilePatch: identityOnlyPatch,
       effectiveProfile: effectiveFreshProfile(),
     })
-    const personal = rowConfig(materialized, 'dsh-enhanced-personal-assistant')
+    const personal = rowConfig(materialized, 'dsh-ray-personal-assistant')
     expect(isMap(personal.get('personalMemory', true) as Node | undefined)).toBe(true)
     expect(isMap(personal.get('personalWiki', true) as Node | undefined)).toBe(true)
     expect(isMap(personal.get('assistantAutomations', true) as Node | undefined)).toBe(true)
@@ -125,12 +125,12 @@ describe('fresh profile setup', () => {
   test('fails closed when the composed row cannot supply missing sibling configs', () => {
     const incompleteEffective = identityOnlyPatch
       .replace(
-        '- id: dsh-enhanced-personal-assistant',
-        "- id: dsh-enhanced-personal-assistant\n  name: '@dsh-enhanced/personal-assistant'",
+        '- id: dsh-ray-personal-assistant',
+        "- id: dsh-ray-personal-assistant\n  name: '@dsh-ray/personal-assistant'",
       )
       .replace(
-        '- id: dsh-enhanced-assistant-delivery',
-        "- id: dsh-enhanced-assistant-delivery\n  name: '@dsh-enhanced/assistant-delivery'",
+        '- id: dsh-ray-assistant-delivery',
+        "- id: dsh-ray-assistant-delivery\n  name: '@dsh-ray/assistant-delivery'",
       )
     expect(() => materializeManagedProfileOverride({
       profilePatch: identityOnlyPatch,
@@ -177,7 +177,7 @@ describe('fresh profile setup', () => {
     }
 
     const output = await readFile(patchPath, 'utf8')
-    const personal = rowConfig(output, 'dsh-enhanced-personal-assistant')
+    const personal = rowConfig(output, 'dsh-ray-personal-assistant')
     const policy = personal.get('assistantPolicy', true) as Node | undefined
     expect(isMap(policy)).toBe(true)
     if (!isMap(policy)) throw new Error('missing assistantPolicy config')
@@ -185,7 +185,7 @@ describe('fresh profile setup', () => {
     expect(isSeq(rules)).toBe(true)
     if (!isSeq(rules)) throw new Error('missing assistantPolicy rules')
     expect(rules.items.some(item => isMap(item)
-      && (item.get('id') as unknown) === 'dsh-enhanced-foreground-capability-*')).toBe(enabled)
+      && (item.get('id') as unknown) === 'dsh-ray-foreground-capability-*')).toBe(enabled)
     expect(rules.items.some(item => isMap(item)
       && (item.get('id') as unknown) === 'deployment-deny-background-shell')).toBe(true)
     expect(policy.get('databasePath')).toBe("dshHomePath('assistant-policy/policy.sqlite')")
@@ -194,14 +194,14 @@ describe('fresh profile setup', () => {
     expect(isMap(personal.get('personalWiki', true) as Node | undefined)).toBe(true)
     expect(isMap(personal.get('assistantAutomations', true) as Node | undefined)).toBe(true)
 
-    const delivery = rowConfig(output, 'dsh-enhanced-assistant-delivery')
+    const delivery = rowConfig(output, 'dsh-ray-assistant-delivery')
     expect(delivery.get('databasePath')).toBe("dshHomePath('assistant-delivery/state.sqlite')")
     expect(delivery.get('spoolPath')).toBe("dshHomePath('assistant-delivery/spool')")
     expect(delivery.get('schedulerEnabled')).toBe(true)
     expect(delivery.get('defaultAgentPreset')).toBe('standard')
     expect(delivery.get('defaultWorkspace')).toBe("dshHomePath('assistant-workspace')")
     expect(output).not.toContain('inject:')
-    expect(output).not.toContain('dsh-enhanced-lark-channel')
+    expect(output).not.toContain('dsh-ray-lark-channel')
   })
 
   test.each([
@@ -209,47 +209,47 @@ describe('fresh profile setup', () => {
       label: 'disabled personal-assistant row',
       expected: /personal-assistant.*must not be disabled/iu,
       mutate: (patch: string) => patch.replace(
-        '- id: dsh-enhanced-personal-assistant',
-        '- id: dsh-enhanced-personal-assistant\n  disabled: true',
+        '- id: dsh-ray-personal-assistant',
+        '- id: dsh-ray-personal-assistant\n  disabled: true',
       ),
     },
     {
       label: 'conflicting personal-assistant package',
       expected: /personal-assistant.*conflicting package name/iu,
       mutate: (patch: string) => patch.replace(
-        '- id: dsh-enhanced-personal-assistant',
-        "- id: dsh-enhanced-personal-assistant\n  name: '@attacker/not-personal-assistant'",
+        '- id: dsh-ray-personal-assistant',
+        "- id: dsh-ray-personal-assistant\n  name: '@attacker/not-personal-assistant'",
       ),
     },
     {
       label: 'dynamic personal-assistant disabled expression',
       expected: /personal-assistant.*must not be disabled/iu,
       mutate: (patch: string) => patch.replace(
-        '- id: dsh-enhanced-personal-assistant',
-        "- id: dsh-enhanced-personal-assistant\n  disabled: !!js process.env.DISABLE_PERSONAL === '1'",
+        '- id: dsh-ray-personal-assistant',
+        "- id: dsh-ray-personal-assistant\n  disabled: !!js process.env.DISABLE_PERSONAL === '1'",
       ),
     },
     {
       label: 'disabled assistant-delivery row',
       expected: /assistant-delivery.*must not be disabled/iu,
       mutate: (patch: string) => patch.replace(
-        '- id: dsh-enhanced-assistant-delivery',
-        '- id: dsh-enhanced-assistant-delivery\n  disabled: true',
+        '- id: dsh-ray-assistant-delivery',
+        '- id: dsh-ray-assistant-delivery\n  disabled: true',
       ),
     },
     {
       label: 'conflicting assistant-delivery package',
       expected: /assistant-delivery.*conflicting package name/iu,
       mutate: (patch: string) => patch.replace(
-        '- id: dsh-enhanced-assistant-delivery',
-        "- id: dsh-enhanced-assistant-delivery\n  name: '@attacker/not-assistant-delivery'",
+        '- id: dsh-ray-assistant-delivery',
+        "- id: dsh-ray-assistant-delivery\n  name: '@attacker/not-assistant-delivery'",
       ),
     },
     {
       label: 'duplicate reserved personal-assistant row',
       expected: /duplicate reserved row.*personal-assistant/iu,
       mutate: (patch: string) => `${patch}
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   name: '@attacker/not-personal-assistant'
   config:
     assistantPolicy: { rules: [] }
@@ -261,10 +261,10 @@ describe('fresh profile setup', () => {
     const patchPath = join(profileDirectory, 'cordis.patch.yml')
     await mkdir(profileDirectory, { recursive: true })
     const completePatch = `
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   config:
     assistantPolicy: { rules: [] }
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config:
     defaultWorkspace: ${join(dshHome, 'assistant-workspace')}
     defaultAgentPreset: standard

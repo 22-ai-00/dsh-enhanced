@@ -98,7 +98,7 @@ describe.runIf(process.platform === 'linux')('shared source authority transport 
   const authorization = { schemaVersion: 1, kind: 'dsh-source-release-authorization', authorizationId: 'release-1', authority: 'release-owner', keyId: 'release-key',
     planId: request.planId, planDigest: request.planDigest, baseCommit: 'c'.repeat(40), checkedTreeDigest: 'd'.repeat(64), checkedPatchDigest: 'e'.repeat(64),
     scope: ['plugins/helper'], authorizedAt: 1, expiresAt: 2, signature: Buffer.alloc(64).toString('base64'), releasePolicy: {
-      targetBranch: 'repair', candidateId: 'helper', packageName: '@dsh-enhanced/helper', packageVersion: '1.0.1', packagePath: 'plugins/helper',
+      targetBranch: 'repair', candidateId: 'helper', packageName: '@dsh-ray/helper', packageVersion: '1.0.1', packagePath: 'plugins/helper',
       dshBaseline: '0.1.5', capabilities: ['helper'], authorities: ['filesystem'], requires: [], registryId: 'local', registryLocator: 'file:///registry',
       registryReference: 'file:///registry/packages/helper/1.0.1/package.tgz', catalogId: 'catalog', catalogPath: '/private/catalog.json', minimumReproducibleBuilds: 2 } }
 

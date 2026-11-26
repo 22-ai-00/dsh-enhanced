@@ -1,4 +1,4 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 
 /**
  * L1 dreaming notification: one bounded, owner-facing text summary of a

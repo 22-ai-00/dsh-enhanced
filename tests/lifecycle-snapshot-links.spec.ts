@@ -14,12 +14,12 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'lifecycle-snapshot-links-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const original = join(root, 'home')
-  const transaction = join(root, 'home.dsh-enhanced-transaction')
+  const transaction = join(root, 'home.dsh-ray-transaction')
   await mkdir(original, { mode: 0o700 })
   await mkdir(join(transaction, 'staged-home'), { recursive: true, mode: 0o700 })
   const descriptor = await open(root, constants.O_RDONLY | constants.O_DIRECTORY)
   cleanups.push(() => descriptor.close())
-  const stage = join(`/proc/self/fd/${descriptor.fd}`, 'home.dsh-enhanced-transaction', 'staged-home')
+  const stage = join(`/proc/self/fd/${descriptor.fd}`, 'home.dsh-ray-transaction', 'staged-home')
   return { root, original, stage }
 }
 
@@ -50,14 +50,14 @@ describe.skipIf(process.platform !== 'linux')('lifecycle snapshot links through 
   test('resolves a staged .bin link through an unchanged relative package link outside logical Home', async () => {
     const { root, original, stage } = await fixture()
     const nested = 'profiles/web/node_modules'
-    const packageName = '@dsh-enhanced/plugin-control-plane'
-    const packageTarget = '../../../../../work/github/dsh-enhanced/plugins/plugin-control-plane'
-    const binary = '../@dsh-enhanced/plugin-control-plane/bin/tool.js'
-    const external = join(root, 'work/github/dsh-enhanced/plugins/plugin-control-plane/bin/tool.js')
-    await mkdir(join(root, 'work/github/dsh-enhanced/plugins/plugin-control-plane/bin'), { recursive: true, mode: 0o700 })
+    const packageName = '@dsh-ray/plugin-control-plane'
+    const packageTarget = '../../../../../work/github/dsh-ray/plugins/plugin-control-plane'
+    const binary = '../@dsh-ray/plugin-control-plane/bin/tool.js'
+    const external = join(root, 'work/github/dsh-ray/plugins/plugin-control-plane/bin/tool.js')
+    await mkdir(join(root, 'work/github/dsh-ray/plugins/plugin-control-plane/bin'), { recursive: true, mode: 0o700 })
     await writeFile(external, 'export {}', { mode: 0o600 })
     for (const home of [original, stage]) {
-      await mkdir(join(home, nested, '@dsh-enhanced'), { recursive: true, mode: 0o700 })
+      await mkdir(join(home, nested, '@dsh-ray'), { recursive: true, mode: 0o700 })
       await mkdir(join(home, nested, '.bin'), { mode: 0o700 })
       await symlink(packageTarget, join(home, nested, packageName))
       await symlink(binary, join(home, nested, '.bin/tool'))
@@ -71,13 +71,13 @@ describe.skipIf(process.platform !== 'linux')('lifecycle snapshot links through 
       .rejects.toThrow('新增或已改变的 node_modules 外链/悬空链接')
     await rm(join(stage, nested, '.bin/new'))
     await rm(join(stage, nested, packageName))
-    await symlink('../../../../../work/github/dsh-enhanced/plugins/./plugin-control-plane', join(stage, nested, packageName))
+    await symlink('../../../../../work/github/dsh-ray/plugins/./plugin-control-plane', join(stage, nested, packageName))
     await expect(lifecycleProfileTest.assertSnapshotTreeSafe(stage, original, false, allowed))
       .rejects.toThrow('新增或已改变的 node_modules 外链/悬空链接')
     await rm(join(stage, nested, packageName))
-    await mkdir(join(root, 'work/github/dsh-enhanced/plugins/other-plugin/bin'), { recursive: true, mode: 0o700 })
-    await writeFile(join(root, 'work/github/dsh-enhanced/plugins/other-plugin/bin/tool.js'), 'export {}', { mode: 0o600 })
-    await symlink('../../../../../work/github/dsh-enhanced/plugins/other-plugin', join(stage, nested, packageName))
+    await mkdir(join(root, 'work/github/dsh-ray/plugins/other-plugin/bin'), { recursive: true, mode: 0o700 })
+    await writeFile(join(root, 'work/github/dsh-ray/plugins/other-plugin/bin/tool.js'), 'export {}', { mode: 0o600 })
+    await symlink('../../../../../work/github/dsh-ray/plugins/other-plugin', join(stage, nested, packageName))
     await expect(lifecycleProfileTest.assertSnapshotTreeSafe(stage, original, false, allowed))
       .rejects.toThrow('新增或已改变的 node_modules 外链/悬空链接')
   })
@@ -85,11 +85,11 @@ describe.skipIf(process.platform !== 'linux')('lifecycle snapshot links through 
   test('rejects a missing staged binary through an unchanged internal package link', async () => {
     const { original, stage } = await fixture()
     for (const home of [original, stage]) {
-      await mkdir(join(home, 'node_modules/@dsh-enhanced'), { recursive: true, mode: 0o700 })
+      await mkdir(join(home, 'node_modules/@dsh-ray'), { recursive: true, mode: 0o700 })
       await mkdir(join(home, 'node_modules/.bin'), { mode: 0o700 })
       await mkdir(join(home, 'packages/tool/bin'), { recursive: true, mode: 0o700 })
-      await symlink('../../packages/tool', join(home, 'node_modules/@dsh-enhanced/tool'))
-      await symlink('../@dsh-enhanced/tool/bin/tool.js', join(home, 'node_modules/.bin/tool'))
+      await symlink('../../packages/tool', join(home, 'node_modules/@dsh-ray/tool'))
+      await symlink('../@dsh-ray/tool/bin/tool.js', join(home, 'node_modules/.bin/tool'))
     }
     await writeFile(join(original, 'packages/tool/bin/tool.js'), 'old', { mode: 0o600 })
     const allowed = await lifecycleProfileTest.assertSnapshotTreeSafe(original)

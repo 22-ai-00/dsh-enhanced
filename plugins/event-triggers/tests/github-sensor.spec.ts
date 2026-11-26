@@ -10,7 +10,7 @@ function fixture(overrides: Partial<Record<'checks' | 'pulls' | 'reviews', unkno
   const fetcher = vi.fn(async (url: string, init: RequestInit) => {
     expect(init.method).toBe('GET'); expect(init.redirect).toBe('manual')
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer fixture-token')
-    expect(new Headers(init.headers).get('user-agent')).toBe('dsh-enhanced-event-triggers')
+    expect(new Headers(init.headers).get('user-agent')).toBe('dsh-ray-event-triggers')
     const path = new URL(url).pathname
     const body = path.includes('/check-runs') ? (overrides.checks ?? checks) : path.endsWith('/pulls') ? (overrides.pulls ?? [pull]) : (overrides.reviews ?? review)
     return new Response(JSON.stringify(body), { status: 200 })

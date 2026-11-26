@@ -30,7 +30,7 @@ async function fixture(memory = false) {
     const directory = join(f.sourceRepository, 'plugins', slug)
     await mkdir(join(directory, 'lib'), { recursive: true })
     const manifest = JSON.parse(await readFile(join(f.sourceRepository, 'plugins/assistant-policy/package.json'), 'utf8'))
-    manifest.name = `@dsh-enhanced/${slug}`
+    manifest.name = `@dsh-ray/${slug}`
     await writeFile(join(directory, 'package.json'), JSON.stringify(manifest, null, 2) + '\n')
     await writeFile(join(directory, 'lib/index.js'), `export const identity = '${slug}'\n`)
     await writeFile(join(directory, 'README.md'), `# ${slug}\n`)
@@ -80,8 +80,8 @@ linuxTest('prepares and reuses exact candidate tarballs outside Home while prese
   expect(result.source.upstreamCommit).toBe(upstream)
   expect(result.cohort.sourceCommit).toBe(result.source.sourceCommit)
   expect(result.originalCohortDigest).toBe(f.original.receiptDigest)
-  expect(result.cohort.packages.find(item => item.name === '@dsh-enhanced/target')?.sha256)
-    .not.toBe(f.original.packages.find(item => item.name === '@dsh-enhanced/target')?.sha256)
+  expect(result.cohort.packages.find(item => item.name === '@dsh-ray/target')?.sha256)
+    .not.toBe(f.original.packages.find(item => item.name === '@dsh-ray/target')?.sha256)
   expect(await prepareRsiLocalUpdate(f.args, ports)).toEqual(result)
   expect(builds).toBe(1)
   expect(await readFile(bootstrapPath)).toEqual(bootstrap)
@@ -102,7 +102,7 @@ linuxTest('refuses publishing a preparation when upstream advances during the bu
     await writeFile(join(f.sourceRepository, 'later.txt'), 'later upstream\n')
     git(f.sourceRepository, 'add', '.'); git(f.sourceRepository, 'commit', '-m', 'later')
   } })).rejects.toThrow()
-  const parent = (await readdir(dirname(f.home))).find(name => name.startsWith('.dsh-rsi-local-updates-'))!
+  const parent = (await readdir(dirname(f.home))).find(name => name.startsWith('.dsh-ray-local-updates-'))!
   const prepared = join(dirname(f.home), parent)
   for (const entry of await readdir(prepared)) await expect(readFile(join(prepared, entry, 'receipt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
@@ -224,7 +224,7 @@ linuxTest('explicit pre-owner extension freezes exactly one disabled bundle with
     originalCohortDigest: f.original.receiptDigest })
   expect(extended.root).not.toBe(ordinary.root)
   expect(extended.cohort.bundles).toEqual([...f.original.bundles, 'assistant-memory-learning'].sort())
-  expect(extended.cohort.packages.find(item => item.name === '@dsh-enhanced/assistant-memory-learning')).toBeDefined()
+  expect(extended.cohort.packages.find(item => item.name === '@dsh-ray/assistant-memory-learning')).toBeDefined()
   const builds = f.builds
   expect(await prepareRsiLocalUpdate(args, f.ports)).toEqual(extended)
   expect(f.builds).toBe(builds)
@@ -248,7 +248,7 @@ linuxTest('owner authority appearing during an extension build prevents a comple
     await f.ports.build(...input)
     await writeFile(join(f.home, 'rsi-authorities', f.profile, 'state/owner.json'), '{}', { mode: 0o600 })
   } })).rejects.toThrow('pre-owner state is not empty')
-  const parent = (await readdir(dirname(f.home))).find(name => name.startsWith('.dsh-rsi-local-updates-'))!
+  const parent = (await readdir(dirname(f.home))).find(name => name.startsWith('.dsh-ray-local-updates-'))!
   for (const name of await readdir(join(dirname(f.home), parent))) {
     await expect(readFile(join(dirname(f.home), parent, name, 'receipt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   }

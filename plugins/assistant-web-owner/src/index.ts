@@ -13,7 +13,7 @@ import { TYPERT } from './typert.js'
 import { DeliveryNoticesService } from './notices.js'
 import { createOwnerSessionTree, resolveHostWebModules, startOwnerSessionTree } from './native-client.js'
 
-export const name = 'dsh-enhanced-assistant-web-owner'
+export const name = 'dsh-ray-assistant-web-owner'
 export { version }
 export const inject = [...BundledSessionController.inject, 'assistantDelivery', 'typert', 'loader']
 

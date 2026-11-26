@@ -38,7 +38,7 @@ async function fixture() {
         await mkdir(join(cohortRoot, 'artifacts'), { recursive: true, mode: 0o700 })
         await writeFile(join(cohortRoot, 'artifacts', 'acp.tgz'), bundleBytes, { mode: 0o600 })
         cohort = { schemaVersion: 1, root: cohortRoot, sourceCommit, version, sourceRepository: candidateSource,
-          bundles: input.bundles, packages: [{ name: '@dsh-enhanced/acp', path: 'plugins/acp', bundle: true,
+          bundles: input.bundles, packages: [{ name: '@dsh-ray/acp', path: 'plugins/acp', bundle: true,
             tarball: join(cohortRoot, 'artifacts', 'acp.tgz'), sha256: hash(bundleBytes),
             runtimeDependencies: [], files: [{ path: 'package.json', sha256: hash('manifest'), mode: 0o644 }] }],
           receiptDigest: 'b'.repeat(64) }
@@ -65,7 +65,7 @@ async function fixture() {
 test('builds an auxiliary receipt from the exact prepared source and materializes only artifact cohorts', async () => {
   const fixtureData = await fixture()
   const proof = await prepareHostLocalArtifacts(fixtureData.input, fixtureData.ports)
-  expect(proof).toMatchObject({ protocol: 'dsh-enhanced/host-local-artifacts/v1',
+  expect(proof).toMatchObject({ protocol: 'dsh-ray/host-local-artifacts/v1',
     sourceCommit: fixtureData.preparation.source.sourceCommit, version: fixtureData.preparation.source.version,
     bundles: ['acp'], preparationDigest: fixtureData.preparation.receiptDigest })
   expect(proof.auxiliaryProfile).toMatch(/^host-migration-[a-f0-9]{20}$/u)
@@ -75,11 +75,11 @@ test('builds an auxiliary receipt from the exact prepared source and materialize
     physicalHome: fixtureData.disposable }, fixtureData.ports)
   const second = await materializeHostLocalArtifacts({ proof, homePath: fixtureData.homePath,
     physicalHome: fixtureData.stage }, fixtureData.ports)
-  const artifact = first.artifacts['@dsh-enhanced/acp']
+  const artifact = first.artifacts['@dsh-ray/acp']
   expect(artifact).toMatchObject({ version: '0.1.48', sha256: hash(fixtureData.bundleBytes),
     tarball: join(fixtureData.homePath, 'rsi-local-cohorts', proof.auxiliaryProfile, 'artifacts', 'acp.tgz'),
     sourcePath: join(fixtureData.disposable, 'rsi-local-cohorts', proof.auxiliaryProfile, 'artifacts', 'acp.tgz') })
-  expect(second.artifacts['@dsh-enhanced/acp'].tarball).toBe(artifact.tarball)
+  expect(second.artifacts['@dsh-ray/acp'].tarball).toBe(artifact.tarball)
   const originalPreparation = fixtureData.preparation
   fixtureData.preparation = { ...fixtureData.preparation, receiptDigest: 'f'.repeat(64) }
   await expect(verifyHostLocalArtifactsInHome({ proof, homePath: fixtureData.homePath,
@@ -178,7 +178,7 @@ test('builds and verifies an actual auxiliary archive from the prepared Git comm
   await mkdir(stage, { mode: 0o700 })
   const materialized = await materializeHostLocalArtifacts({ proof, homePath: sourceFixture.home,
     physicalHome: stage }, ports)
-  expect(materialized.artifacts['@dsh-enhanced/dev-only']).toMatchObject({ version: sourceFixture.version,
+  expect(materialized.artifacts['@dsh-ray/dev-only']).toMatchObject({ version: sourceFixture.version,
     tarball: join(sourceFixture.home, 'rsi-local-cohorts', proof.auxiliaryProfile, 'artifacts', 'dev-only.tgz') })
   await expect(verifyHostLocalArtifactsInHome({ proof, homePath: sourceFixture.home,
     physicalHome: stage, skipOriginal: true }, ports)).resolves.toMatchObject({ cohort: materialized.cohort })

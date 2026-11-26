@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test } from 'vitest'
-import { canonicalGrowthJson, growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
 import { LearningStore } from '../src/store.ts'
 import type { LearningCursor, LearningIntent, LearningSnapshot } from '../src/types.ts'
 

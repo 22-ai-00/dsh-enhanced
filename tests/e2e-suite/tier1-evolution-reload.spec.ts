@@ -175,7 +175,7 @@ describe('Tier 1 — F12–F14: inProcessReload, Broader Plugin Evolution & R3 D
 
       try {
         await writeBundlePackage(siblingDir, {
-          name: '@dsh-enhanced/sibling-stable',
+          name: '@dsh-ray/sibling-stable',
           version: '0.1.0',
           body: `
 export const name = 'sibling-stable'
@@ -186,7 +186,7 @@ export function apply(ctx) {
 `,
         })
         await writeBundlePackage(v1Dir, {
-          name: '@dsh-enhanced/sample-plugin',
+          name: '@dsh-ray/sample-plugin',
           version: '0.1.0',
           body: `
 export const name = 'sample-plugin'
@@ -196,7 +196,7 @@ export function apply(ctx) {
 `,
         })
         await writeBundlePackage(v2Dir, {
-          name: '@dsh-enhanced/sample-plugin',
+          name: '@dsh-ray/sample-plugin',
           version: '0.2.0',
           body: `
 export const name = 'sample-plugin'
@@ -239,7 +239,7 @@ export function apply(ctx, config) {
         const runtime = delivery.createInProcessReloadRuntime(ctx, {
           profilePath: profileDir,
           entryId: 'candidate',
-          package: '@dsh-enhanced/sample-plugin',
+          package: '@dsh-ray/sample-plugin',
           stagingDir: join(ws.stateDir, 'staging'),
           hostGeneration: () => 1,
         })
@@ -252,7 +252,7 @@ export function apply(ctx, config) {
           previousInProcessGeneration: 1,
           mode: 'artifact-replace',
           target: {
-            package: '@dsh-enhanced/sample-plugin',
+            package: '@dsh-ray/sample-plugin',
             version: '0.2.0',
             artifactDigest: v2Digest,
             patchDigest: v2PatchDigest,
@@ -286,7 +286,7 @@ export function apply(ctx, config) {
       await mkdir(profileDir, { recursive: true, mode: 0o700 })
 
       await writeBundlePackage(v1Dir, {
-        name: '@dsh-enhanced/cand-1',
+        name: '@dsh-ray/cand-1',
         version: '0.1.0',
         body: `
 export const name = 'cand-1'
@@ -296,7 +296,7 @@ export function apply(ctx) {
 `,
       })
       await writeBundlePackage(v2CrashDir, {
-        name: '@dsh-enhanced/cand-1',
+        name: '@dsh-ray/cand-1',
         version: '0.1.84',
         body: `
 export const name = 'cand-1'
@@ -327,7 +327,7 @@ export function apply() {
       const runtime = delivery.createInProcessReloadRuntime(ctx, {
         profilePath: profileDir,
         entryId: 'cand-1',
-        package: '@dsh-enhanced/cand-1',
+        package: '@dsh-ray/cand-1',
         stagingDir: join(ws.stateDir, 'staging'),
         hostGeneration: () => 1,
       })
@@ -340,7 +340,7 @@ export function apply() {
         previousInProcessGeneration: 1,
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/cand-1',
+          package: '@dsh-ray/cand-1',
           version: '0.1.84',
           artifactDigest: badDigest,
           patchDigest: badPatchDigest,
@@ -358,9 +358,9 @@ export function apply() {
 
     test('T1-F12-05: IN_PROCESS_RELOAD_DENYLIST retains core host safety while permitting evolved plugins', async () => {
       const delivery = await loadAssistantDelivery()
-      expect(delivery.IN_PROCESS_RELOAD_DENYLIST).toContain('@dsh-enhanced/plugin-control-plane')
-      expect(delivery.IN_PROCESS_RELOAD_DENYLIST).toContain('@dsh-enhanced/assistant-delivery')
-      expect(delivery.IN_PROCESS_RELOAD_DENYLIST).not.toContain('@dsh-enhanced/evolved-custom-service')
+      expect(delivery.IN_PROCESS_RELOAD_DENYLIST).toContain('@dsh-ray/plugin-control-plane')
+      expect(delivery.IN_PROCESS_RELOAD_DENYLIST).toContain('@dsh-ray/assistant-delivery')
+      expect(delivery.IN_PROCESS_RELOAD_DENYLIST).not.toContain('@dsh-ray/evolved-custom-service')
     })
   })
 
@@ -381,7 +381,7 @@ export function apply() {
         {
           path: 'package.json',
           content: JSON.stringify({
-            name: '@dsh-enhanced/svc-1',
+            name: '@dsh-ray/svc-1',
             version: '0.1.0',
             main: './lib/index.js',
             dsh: { pluginKind: 'service', bundle: { patch: './cordis.patch.yml' } },
@@ -389,7 +389,7 @@ export function apply() {
         },
         {
           path: 'cordis.patch.yml',
-          content: '- insert:\n  - id: dsh-enhanced-svc-1\n    name: "@dsh-enhanced/svc-1"\n    config: {}\n',
+          content: '- insert:\n  - id: dsh-ray-svc-1\n    name: "@dsh-ray/svc-1"\n    config: {}\n',
         },
         { path: 'README.md', content: '# svc-1' },
       ]
@@ -419,7 +419,7 @@ export function apply() {
         {
           path: 'package.json',
           content: JSON.stringify({
-            name: '@dsh-enhanced/ch-1',
+            name: '@dsh-ray/ch-1',
             version: '0.1.0',
             main: './lib/index.js',
             dsh: { pluginKind: 'channel', bundle: { patch: './cordis.patch.yml' } },
@@ -427,7 +427,7 @@ export function apply() {
         },
         {
           path: 'cordis.patch.yml',
-          content: '- insert:\n  - id: dsh-enhanced-ch-1\n    name: "@dsh-enhanced/ch-1"\n    config: {}\n',
+          content: '- insert:\n  - id: dsh-ray-ch-1\n    name: "@dsh-ray/ch-1"\n    config: {}\n',
         },
       ]
       const uiFiles = [
@@ -435,7 +435,7 @@ export function apply() {
         {
           path: 'package.json',
           content: JSON.stringify({
-            name: '@dsh-enhanced/ui-1',
+            name: '@dsh-ray/ui-1',
             version: '0.1.0',
             main: './lib/index.js',
             dsh: { pluginKind: 'ui', bundle: { patch: './cordis.patch.yml' } },
@@ -443,7 +443,7 @@ export function apply() {
         },
         {
           path: 'cordis.patch.yml',
-          content: '- insert:\n  - id: dsh-enhanced-ui-1\n    name: "@dsh-enhanced/ui-1"\n    config: {}\n',
+          content: '- insert:\n  - id: dsh-ray-ui-1\n    name: "@dsh-ray/ui-1"\n    config: {}\n',
         },
       ]
 

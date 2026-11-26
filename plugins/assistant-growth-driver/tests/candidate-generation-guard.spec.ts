@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { parseBenchmarkPlan } from '@dsh-enhanced/assistant-evaluation/benchmark'
-import type { BenchmarkPlan } from '@dsh-enhanced/assistant-evaluation/benchmark'
+import { parseBenchmarkPlan } from '@dsh-ray/assistant-evaluation/benchmark'
+import type { BenchmarkPlan } from '@dsh-ray/assistant-evaluation/benchmark'
 import { assertCandidateGenerationOrigin, runGrowthAgent } from '../src/growth-agent.ts'
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex')

@@ -1,4 +1,4 @@
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 
 export interface StrategyPolicyRecipe {
   protocol: 'dsh-native-goal-strategy-policy-v1'

@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDeepStrictEqual as same } from 'node:util'
 import { assertLocalSourceInstaller, bindLocalSourceInstaller } from './local-source-maintenance.mjs'
 
-const protocol = 'dsh-enhanced/owner-program-readiness-recovery/v1'
+const protocol = 'dsh-ray/owner-program-readiness-recovery/v1'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const digest = value => createHash('sha256').update(value).digest('hex')
 const canonical = value => value === null || typeof value !== 'object' ? JSON.stringify(value)
@@ -22,7 +22,7 @@ const fail = message => { throw new Error(`Owner program readiness recovery: ${m
 const identity = entry => ({ dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode })
 
 export function recoveryReceiptPath(homePath, transactionId) {
-  return `${homePath}.dsh-enhanced-readiness-recovery-${transactionId}.json`
+  return `${homePath}.dsh-ray-readiness-recovery-${transactionId}.json`
 }
 
 async function privateBytes(path, maximum = 2_097_152) {
@@ -56,8 +56,8 @@ function scope(manifest, homePath, profile, initial) {
   if (manifest?.version !== 4 || manifest.operation !== 'host-update'
     || !['swapped', 'failed', 'committed', 'cleanup-started'].includes(manifest.state)
     || manifest.homePath !== homePath || manifest.canonicalHome !== homePath || manifest.profile !== profile
-    || manifest.transactionPath !== `${homePath}.dsh-enhanced-transaction`
-    || migration?.candidateEverStarted !== true || proof?.protocol !== 'dsh-enhanced/host-owner-program-update/v1'
+    || manifest.transactionPath !== `${homePath}.dsh-ray-transaction`
+    || migration?.candidateEverStarted !== true || proof?.protocol !== 'dsh-ray/host-owner-program-update/v1'
     || migration.nativeSettingsImport !== undefined || !owner?.original?.resources
     || owner.homePath !== homePath || owner.profile !== profile || owner.coordinatorProfile !== expectedPair
     || !same(owner.hostPlan, migration.plan) || owner.hostPlanDigest !== digest(JSON.stringify(migration.plan))

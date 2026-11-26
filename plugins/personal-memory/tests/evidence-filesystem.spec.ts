@@ -8,7 +8,7 @@ import { describe, expect, test } from 'vitest'
 import { revalidateFileEvidence } from '../src/evidence-filesystem.ts'
 import type { EvidenceAnchor } from '../src/evidence-ledger.ts'
 import type { OriginalToolEvidence } from '../src/evidence-runtime.ts'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 
 const PATH = '/file'
 const TARGET_KEY = 'target-key:/file'

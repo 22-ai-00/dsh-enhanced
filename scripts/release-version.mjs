@@ -16,12 +16,12 @@ const verifiedHostRangePattern = new RegExp(
 )
 const pinnedHostVersionPattern = new RegExp(`^${hostVersionPatternSource}$`, 'u')
 const installerAssetPins = [
-  ['common.sh', 'DSH_ENHANCED_PINNED_COMMON_SHA256'],
-  ['lifecycle-config.mjs', 'DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256'],
-  ['lifecycle-profile.mjs', 'DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256'],
-  ['host-lifecycle.mjs', 'DSH_ENHANCED_PINNED_HOST_LIFECYCLE_SHA256'],
-  ['host-profile-update.mjs', 'DSH_ENHANCED_PINNED_HOST_PROFILE_UPDATE_SHA256'],
-  ['host-rsi-update.mjs', 'DSH_ENHANCED_PINNED_HOST_RSI_UPDATE_SHA256'],
+  ['common.sh', 'DSH_RAY_PINNED_COMMON_SHA256'],
+  ['lifecycle-config.mjs', 'DSH_RAY_PINNED_LIFECYCLE_CONFIG_SHA256'],
+  ['lifecycle-profile.mjs', 'DSH_RAY_PINNED_LIFECYCLE_PROFILE_SHA256'],
+  ['host-lifecycle.mjs', 'DSH_RAY_PINNED_HOST_LIFECYCLE_SHA256'],
+  ['host-profile-update.mjs', 'DSH_RAY_PINNED_HOST_PROFILE_UPDATE_SHA256'],
+  ['host-rsi-update.mjs', 'DSH_RAY_PINNED_HOST_RSI_UPDATE_SHA256'],
 ]
 
 function parseArguments(argv) {
@@ -253,7 +253,7 @@ async function readRemoteInstallerAssets(root) {
 function pinSourceCommonHostVersion(source, pinnedHostVersion) {
   return replacePinnedAssignment(
     source,
-    'DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION',
+    'DSH_RAY_SOURCE_PINNED_HOST_VERSION',
     pinnedHostVersion,
     pinnedHostVersionPattern,
   )
@@ -264,7 +264,7 @@ function pinRemoteInstaller(installerAssets, version, verifiedHostRange, pinnedH
   assertPinnedHostVersion(pinnedHostVersion, 'Pinned installer host version')
   let pinned = replacePinnedAssignment(
     installerAssets.installer,
-    'DSH_ENHANCED_PINNED_RELEASE_REF',
+    'DSH_RAY_PINNED_RELEASE_REF',
     `v${version}`,
     /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/,
   )
@@ -274,13 +274,13 @@ function pinRemoteInstaller(installerAssets, version, verifiedHostRange, pinnedH
   }
   pinned = replacePinnedAssignment(
     pinned,
-    'DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE',
+    'DSH_RAY_PINNED_VERIFIED_HOST_RANGE',
     verifiedHostRange,
     verifiedHostRangePattern,
   )
   pinned = replacePinnedAssignment(
     pinned,
-    'DSH_ENHANCED_PINNED_HOST_VERSION',
+    'DSH_RAY_PINNED_HOST_VERSION',
     pinnedHostVersion,
     pinnedHostVersionPattern,
   )

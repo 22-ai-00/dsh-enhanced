@@ -53,7 +53,7 @@ interface RegistryState {
   readonly models: Map<string, RegistryEntry>
 }
 
-const registrySymbol = Symbol.for('@dsh-enhanced/llm-route-capabilities/runtime-registry/v1')
+const registrySymbol = Symbol.for('@dsh-ray/llm-route-capabilities/runtime-registry/v1')
 const providerPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u
 const modes = new Set<ToolCallMode>(['none', 'native', 'bridge'])
 const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u

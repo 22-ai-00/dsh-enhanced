@@ -1,11 +1,11 @@
-# @dsh-enhanced/preference-learning
+# @dsh-ray/preference-learning
 
 面向个人助理的有界偏好学习。插件把可信 Host 产生的离散信号汇总为可审计假设，并且只允许证据充分的低风险 T1 偏好进入临时、可回滚的 Agent overlay。它不会从聊天正文自由推断规则，也不会把 tentative 偏好冒充用户确认事实。
 
 ## 安装
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/preference-learning
+dsh plugin --profile web add @dsh-ray/preference-learning
 dsh --profile web --dump-config
 ```
 
@@ -20,7 +20,7 @@ dsh --profile web --dump-config
 Host 分别调用 `canonicalPreferenceHostScope({ workspace, preset })` 与
 `hostReview` / `hostActivationCandidate` / `hostActivateOne` / `hostRollbackOne` / `hostMaintainOne`；这些入口都要求显式 authenticated owner
 `principal + operationId`，并以固定 background Policy subject
-`dsh-enhanced-assistant-recovery` 对 exact workspace/action/resource 重新授权。scope token 为冻结的
+`dsh-ray-assistant-recovery` 对 exact workspace/action/resource 重新授权。scope token 为冻结的
 runtime brand，复制、展开或序列化后会失效。所有 Host 操作还绑定 Delivery principal row id/version；
 `hostOwnerFence` 提供同样授权保护的只读 plan-time fence，返回冻结的
 `{ ownerGeneration, principalLineage }`，供后台工作在执行前后做 exact-owner CAS；

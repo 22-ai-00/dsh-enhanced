@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { createHash, createPublicKey, sign, verify } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import { isAlias, isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
-import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
+import { runtimeConfigDigest } from '@dsh-ray/plugin-control-plane'
 import type { RsiSetupManifest } from './rsi-profile.js'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import { rawLoaderConfig } from './rsi-bootstrap-manifest.js'
@@ -502,7 +502,7 @@ export function replaceRsiHostPatchConfig(source: string, id: string, expected: 
 }
 function targetDigest(manifest: RsiSetupManifest, id: string, patch: ReturnType<typeof parseDocument>): string {
   const source = config(row(patch, id))
-  return runtimeConfigDigest(id === 'dsh-enhanced-assistant-verifier'
+  return runtimeConfigDigest(id === 'dsh-ray-assistant-verifier'
     ? { ...source, sourceReviews: manifest.sourceReviews } : source)
 }
 
@@ -518,28 +518,28 @@ export function rebaseRsiHostProfiles(input: {
   const changed = rebaseRsiHostValue(input.manifest, input.rebase)
   const target = document(input.targetPatch, 'target patch')
   const replacements = new Map<string, unknown>([
-    ['dsh-enhanced-plugin-control-plane', changed.controlPlane],
-    ['dsh-enhanced-assistant-growth-driver', changed.growthDriver],
+    ['dsh-ray-plugin-control-plane', changed.controlPlane],
+    ['dsh-ray-assistant-growth-driver', changed.growthDriver],
   ])
   for (const [id, value] of replacements) {
     const current = config(row(oldTarget, id))
-    const original = id === 'dsh-enhanced-plugin-control-plane' ? input.manifest.controlPlane : input.manifest.growthDriver
+    const original = id === 'dsh-ray-plugin-control-plane' ? input.manifest.controlPlane : input.manifest.growthDriver
     if (!isDeepStrictEqual(current, original)) fail(`${id} patch differs from the owner manifest`)
     setConfig(target, id, value)
   }
-  const verifier = row(target, 'dsh-enhanced-assistant-verifier')
+  const verifier = row(target, 'dsh-ray-assistant-verifier')
   const verifierConfig = config(verifier)
   if (!isDeepStrictEqual(verifierConfig.sourceReviews, input.manifest.sourceReviews)) fail('verifier patch differs from the owner manifest')
-  setConfig(target, 'dsh-enhanced-assistant-verifier', { ...verifierConfig, sourceReviews: changed.sourceReviews })
+  setConfig(target, 'dsh-ray-assistant-verifier', { ...verifierConfig, sourceReviews: changed.sourceReviews })
   const targets = changed.controlPlane.runtimeObserver?.targets
   if (!targets) fail('runtime observer targets are missing')
   for (const targetEntry of targets) {
-    if (!replacements.has(targetEntry.entryId) && targetEntry.entryId !== 'dsh-enhanced-assistant-verifier') continue
+    if (!replacements.has(targetEntry.entryId) && targetEntry.entryId !== 'dsh-ray-assistant-verifier') continue
     const oldDigest = targetDigest(input.manifest, targetEntry.entryId, oldTarget)
     if (targetEntry.configDigest !== oldDigest) fail(`observer digest differs: ${targetEntry.entryId}`)
     targetEntry.configDigest = targetDigest(changed, targetEntry.entryId, target)
   }
-  setConfig(target, 'dsh-enhanced-plugin-control-plane', changed.controlPlane)
+  setConfig(target, 'dsh-ray-plugin-control-plane', changed.controlPlane)
   // A coordinator patch may contain only its declared standalone scope. It
   // must not carry any old Host path that this rebase cannot account for.
   if (input.coordinatorPatch.includes(input.rebase.oldHostRoot)) fail('coordinator patch has an unmapped Host path')
@@ -551,8 +551,8 @@ export function rebaseRsiHostProfiles(input: {
 export function rebaseRsiHostActivePatch(input: { patch: string; rebase: RsiHostRebase }): string {
   const documentBefore = document(input.patch, 'active patch')
   const documentAfter = document(input.patch, 'active patch')
-  const ids = ['dsh-enhanced-plugin-control-plane', 'dsh-enhanced-assistant-growth-driver',
-    'dsh-enhanced-assistant-verifier']
+  const ids = ['dsh-ray-plugin-control-plane', 'dsh-ray-assistant-growth-driver',
+    'dsh-ray-assistant-verifier']
   for (const id of ids) {
     const current = config(row(documentBefore, id))
     setConfig(documentAfter, id, rebaseRsiHostValue(current, input.rebase))
@@ -583,16 +583,16 @@ export function rebaseRsiHostManifest(manifest: RsiSetupManifest, rebase: RsiHos
   const oldTargets = manifest.controlPlane.runtimeObserver?.targets
   const newTargets = changed.controlPlane.runtimeObserver?.targets
   if (!oldTargets || !newTargets || oldTargets.length !== newTargets.length) fail('owner observer targets differ')
-  const configFor = (source: RsiSetupManifest, id: string): unknown => id === 'dsh-enhanced-plugin-control-plane'
-    ? source.controlPlane : id === 'dsh-enhanced-assistant-growth-driver' ? source.growthDriver
-      : id === 'dsh-enhanced-assistant-verifier' ? { sourceReviews: source.sourceReviews } : undefined
+  const configFor = (source: RsiSetupManifest, id: string): unknown => id === 'dsh-ray-plugin-control-plane'
+    ? source.controlPlane : id === 'dsh-ray-assistant-growth-driver' ? source.growthDriver
+      : id === 'dsh-ray-assistant-verifier' ? { sourceReviews: source.sourceReviews } : undefined
   for (let index = 0; index < oldTargets.length; index++) {
     const oldTarget = oldTargets[index]!, nextTarget = newTargets[index]!
     if (oldTarget.entryId !== nextTarget.entryId) fail('owner observer entry changed')
     const before = configFor(manifest, oldTarget.entryId)
     const after = configFor(changed, nextTarget.entryId)
     if (before === undefined || after === undefined) continue
-    if (oldTarget.entryId === 'dsh-enhanced-assistant-verifier') continue // Its full patch config is not stored in the manifest.
+    if (oldTarget.entryId === 'dsh-ray-assistant-verifier') continue // Its full patch config is not stored in the manifest.
     if (oldTarget.configDigest !== runtimeConfigDigest(before)) fail('owner observer digest differs')
     nextTarget.configDigest = runtimeConfigDigest(after)
   }

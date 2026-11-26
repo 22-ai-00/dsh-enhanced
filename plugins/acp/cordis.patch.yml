@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-acp
-      name: '@dsh-enhanced/acp'
+    - id: dsh-ray-acp
+      name: '@dsh-ray/acp'
       config:
         includeRawEvents: false
     - id: cordis-host-runner

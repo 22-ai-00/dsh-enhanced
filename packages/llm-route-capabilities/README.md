@@ -1,4 +1,4 @@
-# @dsh-enhanced/llm-route-capabilities
+# @dsh-ray/llm-route-capabilities
 
 普通、非激活型 TypeScript 库，用于把 provider/model 的工具调用**协议投影方式**附着到一个精确的 DSH `LlmRuntime` 实例。它不声明 `dsh.bundle`，也不会向 profile 注入任何 Cordis patch。
 

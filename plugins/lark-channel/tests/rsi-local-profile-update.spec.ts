@@ -8,7 +8,7 @@ import { assertRsiLocalProfileRoots, rebaseRsiLocalProfileWorkspace } from '../s
 import { rsiLocalUpdateBundles, rsiMemoryLearningInitialRow } from '../src/rsi-local-roots-extension.js'
 
 const root = '/private/owner home/rsi-local-cohorts/owner'
-const internal = (slug: string): string => `@dsh-enhanced/${slug}`
+const internal = (slug: string): string => `@dsh-ray/${slug}`
 function cohort(version = '0.1.48', dependencies = ['policy', 'removed-lib']): RsiLocalCohort {
   const names = ['target', 'policy', ...dependencies].filter((name, index, values) => values.indexOf(name) === index).sort()
   const content = { schemaVersion: 1 as const, root, sourceRepository: '/private/source', sourceCommit: 'a'.repeat(40), version,
@@ -48,8 +48,8 @@ test('advances version, adds/removes runtime edges, and preserves unrelated owne
     allowBuilds: { esbuild: true, protobufjs: false, 'owner-tool': true, newlyBlocked: false } })
   expect(Object.keys(value.overrides).sort()).toEqual(['another-package', ...Object.keys(rsiLocalDependencyOverrides(candidate))].sort())
   for (const comment of ['# owner settings', '# unrelated pin comment', '# unrelated inline', '# owner approval',
-    'original edge @dsh-enhanced/target@0.1.48>@dsh-enhanced/policy',
-    'original edge @dsh-enhanced/target@0.1.48>@dsh-enhanced/removed-lib', 'frozen tarball comment']) expect(result).toContain(comment)
+    'original edge @dsh-ray/target@0.1.48>@dsh-ray/policy',
+    'original edge @dsh-ray/target@0.1.48>@dsh-ray/removed-lib', 'frozen tarball comment']) expect(result).toContain(comment)
   expect(JSON.stringify({ original, candidate })).toBe(before)
   expect(rebaseRsiLocalProfileWorkspace({ source: result, original: candidate, candidate })).toBe(result)
 })

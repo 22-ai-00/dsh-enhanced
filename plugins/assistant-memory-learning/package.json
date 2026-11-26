@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-memory-learning",
+  "name": "@dsh-ray/assistant-memory-learning",
   "version": "0.1.88",
   "description": "Durable ordinary-task memory learning through native Automations, independent review and bounded adoption.",
   "license": "MIT",
@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-memory-learning"
   },
   "keywords": [
@@ -55,12 +55,12 @@
     "@deepseek-ai/dsh-session": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-enhanced/assistant-automations": ">=0.1.48 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">=0.1.48 <0.2.0",
-    "@dsh-enhanced/assistant-evaluation": ">=0.1.48 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.48 <0.2.0",
-    "@dsh-enhanced/assistant-verifier": ">=0.1.48 <0.2.0",
-    "@dsh-enhanced/personal-memory": ">=0.1.48 <0.2.0"
+    "@dsh-ray/assistant-automations": ">=0.1.48 <0.2.0",
+    "@dsh-ray/assistant-delivery": ">=0.1.48 <0.2.0",
+    "@dsh-ray/assistant-evaluation": ">=0.1.48 <0.2.0",
+    "@dsh-ray/assistant-policy": ">=0.1.48 <0.2.0",
+    "@dsh-ray/assistant-verifier": ">=0.1.48 <0.2.0",
+    "@dsh-ray/personal-memory": ">=0.1.48 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -81,22 +81,22 @@
     "@deepseek-ai/dsh-system-prompt": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-automations": {
+    "@dsh-ray/assistant-automations": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-delivery": {
+    "@dsh-ray/assistant-delivery": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-evaluation": {
+    "@dsh-ray/assistant-evaluation": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-policy": {
+    "@dsh-ray/assistant-policy": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-verifier": {
+    "@dsh-ray/assistant-verifier": {
       "optional": true
     },
-    "@dsh-enhanced/personal-memory": {
+    "@dsh-ray/personal-memory": {
       "optional": true
     }
   },
@@ -110,12 +110,12 @@
     "@deepseek-ai/dsh-session": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
     "@deepseek-ai/dsh-system-prompt": "catalog:",
-    "@dsh-enhanced/assistant-automations": "workspace:*",
-    "@dsh-enhanced/assistant-delivery": "workspace:*",
-    "@dsh-enhanced/assistant-evaluation": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
-    "@dsh-enhanced/assistant-verifier": "workspace:*",
-    "@dsh-enhanced/personal-memory": "workspace:*",
+    "@dsh-ray/assistant-automations": "workspace:*",
+    "@dsh-ray/assistant-delivery": "workspace:*",
+    "@dsh-ray/assistant-evaluation": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
+    "@dsh-ray/assistant-verifier": "workspace:*",
+    "@dsh-ray/personal-memory": "workspace:*",
     "@deepseek-ai/dsh-agent-default-model": "catalog:",
     "@deepseek-ai/dsh-agent-loop": "catalog:",
     "@deepseek-ai/dsh-agent-loop-testkit": "catalog:",
@@ -124,6 +124,6 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/assistant-growth-contract": "workspace:*"
+    "@dsh-ray/assistant-growth-contract": "workspace:*"
   }
 }

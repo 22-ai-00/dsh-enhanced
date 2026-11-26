@@ -1,12 +1,12 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { AssistantDeliveryService, OwnerForegroundTaskSourceContent, OwnerWorkItemLearningTask, OwnerWorkItemLearningTaskFenceInput } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { AssistantDeliveryService, OwnerForegroundTaskSourceContent, OwnerWorkItemLearningTask, OwnerWorkItemLearningTaskFenceInput } from '@dsh-ray/assistant-delivery'
+import type { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import {
   memoryLearningRequestDigest, validateMemoryLearningOwner, validateMemoryLearningReviewRequest, hasWorkItemLearningFeedbackText,
   type MemoryLearningOwner, type MemoryLearningReviewRequest, type ForegroundMemoryLearningReviewRequest, type WorkItemMemoryLearningReviewRequest,
-} from '@dsh-enhanced/assistant-growth-contract'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/assistant-growth-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { SourceReviewStore } from './source-review-store.js'
 import type { SourceReviewModelSelection } from './source-review.js'
 import type { MemoryReviewSourceText, ForegroundMemoryReviewSourceText, MemoryReviewTarget } from './memory-review-native.js'

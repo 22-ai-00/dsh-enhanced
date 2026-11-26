@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import {
   ApprovalSettlementConflict,
   validateApprovalSettlement,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import type {
   ApprovalDecisionInput,
   ApprovalDispatchRoute,
@@ -13,7 +13,7 @@ import type {
   ApprovalProposalRecoveryResult,
   ApprovalProposalResult,
   ApprovalProposalSnapshot,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import { AutomationDatabaseError, openAutomationDatabase } from './sqlite.js'
 import {
   AutomationStoreError,

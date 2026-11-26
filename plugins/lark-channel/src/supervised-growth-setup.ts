@@ -6,16 +6,16 @@ import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import type { OwnerRouteAuthority } from '@dsh-enhanced/assistant-delivery'
+import type { OwnerRouteAuthority } from '@dsh-ray/assistant-delivery'
 import type {
   AutomationOperatorRecord,
   AutomationsOperatorSnapshot,
-} from '@dsh-enhanced/assistant-automations'
+} from '@dsh-ray/assistant-automations'
 import type {
   RecoveryBootstrapAttestation,
   RecoveryHealth,
   RecoveryOperatorSnapshot,
-} from '@dsh-enhanced/assistant-recovery'
+} from '@dsh-ray/assistant-recovery'
 import { isMap, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 import { installDshResidentService, residentServiceKind, type InstalledResidentService } from './resident.js'
 import { isMainEntry, withDshHomeLifecycleLock } from './setup.js'
@@ -82,7 +82,7 @@ export function assertSupervisedGrowthAutomationGuard(
     && !(record.id === 'heartbeat:supervised-growth' && record.owner === 'assistant-heartbeat')
     && !(record.id === 'heartbeat:supervised-growth-analyst' && record.owner === 'assistant-heartbeat')
     && !(record.id === 'recovery:supervised-growth'
-      && record.owner === 'dsh-enhanced-assistant-recovery'))
+      && record.owner === 'dsh-ray-assistant-recovery'))
   if (existing.length > 0 && !acknowledged) {
     throw new Error('supervised-growth setup: active automations already exist; rerun with --ack-existing-automations to leave them untouched')
   }
@@ -333,9 +333,9 @@ interface AutomationSnapshot extends AutomationGuardRecord {
 }
 
 export const SUPERVISED_GROWTH_LIFECYCLE_ATTESTATION_PROTOCOL
-  = 'dsh-enhanced/supervised-growth-lifecycle-attestation/v1' as const
+  = 'dsh-ray/supervised-growth-lifecycle-attestation/v1' as const
 export const SUPERVISED_GROWTH_MANAGED_AUTOMATION_PROJECTION_PROTOCOL
-  = 'dsh-enhanced/supervised-growth-managed-automations/v1' as const
+  = 'dsh-ray/supervised-growth-managed-automations/v1' as const
 
 export interface SupervisedGrowthManagedAutomationProjectionRecord {
   readonly id: string
@@ -448,8 +448,8 @@ function assertLifecycleProviderContract(input: SupervisedGrowthLifecycleAttesta
     || !isDeepStrictEqual(input.externalProviderExemptions, expected)) {
     throw new Error(`supervised-growth lifecycle: ${input.stage} external provider exemptions are invalid`)
   }
-  const lark = effectivePluginConfig(input.effectiveConfig, 'dsh-enhanced-lark-channel')
-  const health = effectivePluginConfig(input.effectiveConfig, 'dsh-enhanced-assistant-health')
+  const lark = effectivePluginConfig(input.effectiveConfig, 'dsh-ray-lark-channel')
+  const health = effectivePluginConfig(input.effectiveConfig, 'dsh-ray-assistant-health')
   const providers = health.get('requiredProviders', true) as Node | undefined
   const requiredProviders = isSeq(providers) ? providers.toJSON() as unknown[] : undefined
   if (input.stage === 'preview') {
@@ -556,8 +556,8 @@ async function lifecycleDependencies(
   dependencies: SupervisedGrowthLifecycleAttestationDependencies,
 ): Promise<Required<SupervisedGrowthLifecycleAttestationDependencies>> {
   const [automations, recovery] = await Promise.all([
-    import('@dsh-enhanced/assistant-automations'),
-    import('@dsh-enhanced/assistant-recovery'),
+    import('@dsh-ray/assistant-automations'),
+    import('@dsh-ray/assistant-recovery'),
   ])
   return {
     inspectRecovery: dependencies.inspectRecovery ?? recovery.inspectRecoveryOperatorSnapshot,
@@ -580,7 +580,7 @@ async function expectedManagedAutomationRecords(input: {
   runbookId?: string
   runbookVersion?: number
 }>>> {
-  const recovery = await import('@dsh-enhanced/assistant-recovery')
+  const recovery = await import('@dsh-ray/assistant-recovery')
   const normalized = recovery.normalizeRecoveryConfig({
     ...supervisedGrowthRecoveryRuntimeConfig(input.effectiveConfig),
     databasePath: input.recoveryDatabasePath,
@@ -598,7 +598,7 @@ async function expectedManagedAutomationRecords(input: {
     runbookVersion?: number
   }>
   const records: Array<readonly [string, ExpectedRecord]> = normalized.jobs.map(job => [`recovery:${job.id}`, Object.freeze({
-      owner: 'dsh-enhanced-assistant-recovery',
+      owner: 'dsh-ray-assistant-recovery',
       status: job.activationState === 'active' ? 'active' as const : 'paused' as const,
       definitionHash: dependencies.definitionDigest(recovery.recoveryAutomationDefinition(
         job, normalized.maxStepDurationMs, job.activationState === 'preview' ? 'preview' : 'production',
@@ -662,7 +662,7 @@ function assertManagedAutomationInventory(input: {
     throw new Error('supervised-growth lifecycle: legacy supervised-growth automation is active')
   }
   for (const record of input.snapshot.records) {
-    if (record.status !== 'active' || record.owner !== 'dsh-enhanced-assistant-recovery') continue
+    if (record.status !== 'active' || record.owner !== 'dsh-ray-assistant-recovery') continue
     if (!input.expected.has(record.id)) {
       throw new Error(`supervised-growth lifecycle: unexpected active managed automation ${record.id}`)
     }
@@ -857,7 +857,7 @@ export interface SupervisedGrowthRecoveryStageDependencies {
 }
 
 async function inspectRecoveryBootstrap(databasePath: string): Promise<RecoveryHealth> {
-  const { RecoveryStore } = await import('@dsh-enhanced/assistant-recovery')
+  const { RecoveryStore } = await import('@dsh-ray/assistant-recovery')
   const store = new RecoveryStore({ path: databasePath })
   try {
     return store.health()
@@ -882,7 +882,7 @@ async function recoveryBootstrapGenerationBeforeRestart(databasePath: string): P
 }
 
 async function automationSnapshots(databasePath: string): Promise<readonly AutomationSnapshot[]> {
-  const { listAutomationsLocally } = await import('@dsh-enhanced/assistant-automations')
+  const { listAutomationsLocally } = await import('@dsh-ray/assistant-automations')
   return listAutomationsLocally(databasePath)
 }
 
@@ -895,7 +895,7 @@ function effectiveOwnerRoutes(effectiveConfig: string): readonly Record<string, 
     throw new Error('supervised-growth setup: effective profile must be a YAML sequence')
   }
   const rows = document.contents.items.filter(item => isMap(item)
-    && (item.get('id') as unknown) === 'dsh-enhanced-assistant-delivery') as YAMLMap[]
+    && (item.get('id') as unknown) === 'dsh-ray-assistant-delivery') as YAMLMap[]
   if (rows.length !== 1 || rows[0]!.get('disabled') === true) {
     throw new Error('supervised-growth setup: effective assistant-delivery row must be uniquely enabled')
   }
@@ -930,8 +930,8 @@ export async function expectedSupervisedGrowthRecoveryBootstrap(
   recoveryDatabasePath: string,
 ): Promise<SupervisedGrowthRecoveryBootstrapExpectation> {
   const [delivery, recovery] = await Promise.all([
-    import('@dsh-enhanced/assistant-delivery'),
-    import('@dsh-enhanced/assistant-recovery'),
+    import('@dsh-ray/assistant-delivery'),
+    import('@dsh-ray/assistant-recovery'),
   ])
   const normalized = recovery.normalizeRecoveryConfig({
     ...supervisedGrowthRecoveryRuntimeConfig(effectiveConfig),
@@ -980,7 +980,7 @@ async function expectedRecoveryProductionDefinition(
   effectiveConfig: string,
   recoveryDatabasePath: string,
 ): Promise<unknown> {
-  const recovery = await import('@dsh-enhanced/assistant-recovery')
+  const recovery = await import('@dsh-ray/assistant-recovery')
   const runtimeConfig = supervisedGrowthRecoveryRuntimeConfig(effectiveConfig)
   const normalized = recovery.normalizeRecoveryConfig(
     { ...runtimeConfig, databasePath: recoveryDatabasePath } as never,
@@ -999,7 +999,7 @@ async function expectedRecoveryProductionDefinition(
  */
 async function expectedSupervisedGrowthAnalystDefinition(effectiveConfig: string): Promise<unknown> {
   const heartbeatRuntime = supervisedGrowthAnalystRuntimeConfig(effectiveConfig)
-  const heartbeat = await import('@dsh-enhanced/assistant-heartbeat')
+  const heartbeat = await import('@dsh-ray/assistant-heartbeat')
   const normalized = heartbeat.normalizeHeartbeatConfig({
     heartbeats: [heartbeatRuntime.heartbeat as never],
     maxScratchBytes: heartbeatRuntime.maxScratchBytes,
@@ -1134,7 +1134,7 @@ export async function verifySupervisedGrowthRecoveryStage(input: {
             }
             if (legacyActive === undefined && input.stage === 'active' && recoveries.length === 1) {
               const record = recoveries[0]!
-              if (record.owner === 'dsh-enhanced-assistant-recovery'
+              if (record.owner === 'dsh-ray-assistant-recovery'
                 && isDeepStrictEqual(record.definition, expectedDefinition)) return generation
               throw new Error('supervised-growth setup: active Recovery automation definition does not match the compiled plan')
             }
@@ -1181,7 +1181,7 @@ async function awaitOwnerBinding(input: {
   query: ReturnType<typeof supervisedGrowthBindingQuery>
   timeoutMs: number
 }): Promise<SupervisedGrowthBinding> {
-  const { findActiveOwnerDmBindingsLocally } = await import('@dsh-enhanced/assistant-delivery')
+  const { findActiveOwnerDmBindingsLocally } = await import('@dsh-ray/assistant-delivery')
   const deadline = Date.now() + input.timeoutMs
   let prompted = false
   for (;;) {
@@ -1204,7 +1204,7 @@ async function assertSelectedOwnerBindingCurrent(input: {
   query: ReturnType<typeof supervisedGrowthBindingQuery>
   selected: SupervisedGrowthBinding
 }): Promise<void> {
-  const { findActiveOwnerDmBindingsLocally } = await import('@dsh-enhanced/assistant-delivery')
+  const { findActiveOwnerDmBindingsLocally } = await import('@dsh-ray/assistant-delivery')
   const current = selectUniqueOwnerBinding(findActiveOwnerDmBindingsLocally({
     databasePath: input.databasePath,
     ...input.query,
@@ -1234,12 +1234,12 @@ export async function runSupervisedGrowthSetup(argv: readonly string[] = process
   const binding = await awaitOwnerBinding({
     databasePath: databases.deliveryDatabasePath, query, timeoutMs: args.timeoutMs,
   })
-  const { listActiveAutomationsLocally } = await import('@dsh-enhanced/assistant-automations')
+  const { listActiveAutomationsLocally } = await import('@dsh-ray/assistant-automations')
   assertSupervisedGrowthAutomationGuard(
     listActiveAutomationsLocally(databases.automationsDatabasePath),
     args.ackExistingAutomations,
   )
-  const { RECOVERY_CATALOG_DIGEST } = await import('@dsh-enhanced/assistant-recovery')
+  const { RECOVERY_CATALOG_DIGEST } = await import('@dsh-ray/assistant-recovery')
   const activationNonce = randomUUID()
   const previewPatch = configureSupervisedGrowthProfilePatch({
     profilePatch: originalPatch,

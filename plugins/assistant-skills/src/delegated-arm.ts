@@ -1,5 +1,5 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { GoalScope } from '@dsh-enhanced/assistant-goals'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import type { GoalScope } from '@dsh-ray/assistant-goals'
 import type { SkillDefinition } from './definition.js'
 import type { SkillDelegatedArmBinding, StoredSkillDefinition } from './store.js'
 

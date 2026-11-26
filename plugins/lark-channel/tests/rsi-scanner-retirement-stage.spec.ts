@@ -6,9 +6,9 @@ import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService, type Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
-import { AssistantAutomationsService, inspectAutomationRetirementSnapshot, type AutomationRecord, type HostAutomationDefinition } from '@dsh-enhanced/assistant-automations'
-import { externalPrincipalId, ownerRouteAuthorityHash, type DeliveryPrincipal } from '@dsh-enhanced/assistant-delivery'
+import { AssistantPolicyService, type Config as PolicyConfig } from '@dsh-ray/assistant-policy'
+import { AssistantAutomationsService, inspectAutomationRetirementSnapshot, type AutomationRecord, type HostAutomationDefinition } from '@dsh-ray/assistant-automations'
+import { externalPrincipalId, ownerRouteAuthorityHash, type DeliveryPrincipal } from '@dsh-ray/assistant-delivery'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { stringify } from 'yaml'
 import { createRsiMemoryLearningSetup } from '../src/rsi-memory-learning.ts'
@@ -28,10 +28,10 @@ interface DeliveryWriter {
   revokePrincipal(id: string, version: number): DeliveryPrincipal
   close(): void
 }
-const { AutomationStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-enhanced/assistant-automations/package.json')), 'lib/store.js')).href) as {
+const { AutomationStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-ray/assistant-automations/package.json')), 'lib/store.js')).href) as {
   AutomationStore: { new (options: { path: string }): AutomationWriter; prototype: AutomationWriter }
 }
-const { DeliveryStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-enhanced/assistant-delivery/package.json')), 'lib/store.js')).href) as {
+const { DeliveryStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-ray/assistant-delivery/package.json')), 'lib/store.js')).href) as {
   DeliveryStore: { new (options: { path: string; codeGenerator?: () => string }): DeliveryWriter }
 }
 const roots: string[] = []
@@ -87,7 +87,7 @@ async function fixture(options: { version?: 15 | 16 | 17 | 18; memoryOnly?: bool
       subject: { kind: 'background', id: '*', workspace: owner.workspace, principal: owner.principalId }, actions: ['reconcile'],
       resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] }, budget: { id: 'old-retirement', amount: 1 } }] }
   const automations = { databasePath: automationsPath, runsPath: join(home, 'runs'), schedulerEnabled: true, reconcileIntervalMs: 4567 }
-  const row = (name: string, config: unknown) => ({ id: `dsh-enhanced-${name}`, name: `@dsh-enhanced/${name}`, config })
+  const row = (name: string, config: unknown) => ({ id: `dsh-ray-${name}`, name: `@dsh-ray/${name}`, config })
   const authorityClient = { executable: { path: '/unavailable/client', sha256: 'b'.repeat(64) }, configPath: '/unavailable/authority.json', timeoutMs: 1000 }
   const rows = [row('personal-assistant', { assistantPolicy: policy, assistantAutomations: automations,
     personalMemory: { databasePath: join(home, 'memory.sqlite'), automaticLearning: memory.adoption } }),

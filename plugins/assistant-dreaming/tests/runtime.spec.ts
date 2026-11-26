@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import type { HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput,
-  HostAutomationExecutorResult, SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+  HostAutomationExecutorResult, SystemAutomationReconcileInput } from '@dsh-ray/assistant-automations'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
@@ -178,7 +178,7 @@ function executorInputFromDefinition(definition: HostAutomationDefinition, occur
   executionMode: 'preview' | 'production' = 'production'): HostAutomationExecutorInput {
   return {
     occurrenceId,
-    automationId: `dsh-enhanced-assistant-dreaming:${'lane'.padEnd(40, '0')}`,
+    automationId: `dsh-ray-assistant-dreaming:${'lane'.padEnd(40, '0')}`,
     definitionHash: 'a'.repeat(64),
     executionMode,
     targetScope: definition.execution.targetScope,
@@ -325,12 +325,12 @@ describe('enabled dreaming plugin', () => {
     const reconcile = fakes.automations.reconciles[0]!
     expect(reconcile).toMatchObject({
       owner: 'assistant-dreaming',
-      automationId: expect.stringMatching(/^dsh-enhanced-assistant-dreaming:[a-f0-9]{40}$/u),
+      automationId: expect.stringMatching(/^dsh-ray-assistant-dreaming:[a-f0-9]{40}$/u),
       desiredStatus: 'active',
     })
     // Active reconcile keys are load-scoped: replaying an old receipt would
     // suppress reactivation after a pause/reload (see the retire regression).
-    expect(reconcile.idempotencyKey).toMatch(/^dsh-enhanced-assistant-dreaming:[a-f0-9]{40}:[a-f0-9]{40}:active:[0-9a-f-]{36}$/u)
+    expect(reconcile.idempotencyKey).toMatch(/^dsh-ray-assistant-dreaming:[a-f0-9]{40}:[a-f0-9]{40}:active:[0-9a-f-]{36}$/u)
     expect(reconcile.definition).toMatchObject({
       name: 'Bounded dreaming review',
       schedule: { kind: 'every', anchorAt: '1970-01-01T00:00:00.000Z', intervalMs: 3_600_000 },

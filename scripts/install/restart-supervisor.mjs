@@ -88,7 +88,7 @@ async function privateFile(path, maxSize = 512_000, allowEmpty = false) {
 }
 
 async function hostIdentity(home, userHome) {
-  const bindingSource = await privateFile(join(home, '.dsh-rsi-host.json'), 16_384)
+  const bindingSource = await privateFile(join(home, '.dsh-ray-host.json'), 16_384)
   const binding = JSON.parse(bindingSource.toString('utf8'))
   if (binding.schemaVersion !== 1 || !safePath(binding.cacheRoot)
     || !/^0\.2\.[0-9]+-rc\.[0-9]+$/u.test(binding.version)
@@ -130,7 +130,7 @@ async function hostIdentity(home, userHome) {
 async function withLifecycleLock(home, task) {
   const tmp = await lstat('/tmp')
   if (!tmp.isDirectory() || tmp.uid !== 0 || (tmp.mode & 0o7777) !== 0o1777) fail('unsafe /tmp')
-  const lockPath = `/tmp/.dsh-enhanced-lifecycle-${process.getuid()}-${digest(home)}.lock`
+  const lockPath = `/tmp/.dsh-ray-lifecycle-${process.getuid()}-${digest(home)}.lock`
   const lock = await open(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600)
   try {
     const opened = await lock.stat(), linked = await lstat(lockPath)
@@ -157,7 +157,7 @@ export async function planRestartSupervisorInstall(input, dependencies = {}) {
   if (home !== input.dshHome) fail('Home must be canonical')
   const userHome = await realpath(dependencies.userHome ?? homedir())
   if (inside(home, userHome) || home === userHome) fail('external config must be outside DSH Home')
-  if (await lstat(`${home}.dsh-enhanced-transaction`).then(() => true, error => {
+  if (await lstat(`${home}.dsh-ray-transaction`).then(() => true, error => {
     if (error.code === 'ENOENT') return false
     throw error
   })) fail('Home upgrade transaction exists')
@@ -171,7 +171,7 @@ export async function planRestartSupervisorInstall(input, dependencies = {}) {
   const trustedFiles = []
   if (receipt.packages.length < 2 || receipt.packages.length > 128) fail('unexpected cohort package count')
   for (const proof of receipt.packages) {
-    if (!/^@dsh-enhanced\/[a-z0-9-]+$/u.test(proof.name)
+    if (!/^@dsh-ray\/[a-z0-9-]+$/u.test(proof.name)
       || !Array.isArray(proof.files) || proof.files.length < 2
       || packageRoots.has(proof.name)) fail('invalid cohort package inventory')
     const rootPath = await installedPackageRoot(home, input.profile, proof.name)
@@ -192,8 +192,8 @@ export async function planRestartSupervisorInstall(input, dependencies = {}) {
       trustedFiles.push({ path: actual, digest: file.sha256 })
     }
   }
-  const deliveryRoot = packageRoots.get('@dsh-enhanced/assistant-delivery')
-  const policyRoot = packageRoots.get('@dsh-enhanced/assistant-policy')
+  const deliveryRoot = packageRoots.get('@dsh-ray/assistant-delivery')
+  const policyRoot = packageRoots.get('@dsh-ray/assistant-policy')
   if (!deliveryRoot || !policyRoot) fail('cohort lacks Delivery or Policy')
   const helper = join(deliveryRoot, 'bin/dsh-restart-supervisor.js')
   const policyEvaluatorPath = join(policyRoot, 'lib/evaluator.js')
@@ -207,7 +207,7 @@ export async function planRestartSupervisorInstall(input, dependencies = {}) {
   if (parsed.errors.length !== 0) fail('invalid frozen profile patch')
   const entries = parsed.toJS()
   const policyEntries = Array.isArray(entries)
-    ? entries.filter(entry => entry?.id === 'dsh-enhanced-personal-assistant')
+    ? entries.filter(entry => entry?.id === 'dsh-ray-personal-assistant')
     : []
   if (policyEntries.length !== 1 || !policyEntries[0]?.config?.assistantPolicy) {
     fail('profile patch lacks one explicit Policy configuration')
@@ -222,7 +222,7 @@ export async function planRestartSupervisorInstall(input, dependencies = {}) {
   }
   const policyRules = policyConfig.rules
   const deliveryEntries = Array.isArray(entries)
-    ? entries.filter(entry => entry?.id === 'dsh-enhanced-assistant-delivery') : []
+    ? entries.filter(entry => entry?.id === 'dsh-ray-assistant-delivery') : []
   if (deliveryEntries.length !== 1 || !deliveryEntries[0]?.config) {
     fail('profile patch lacks one explicit Delivery configuration')
   }
@@ -260,7 +260,7 @@ export async function planRestartSupervisorInstall(input, dependencies = {}) {
     fail('target unit does not run this cohort profile')
   }
   const unitDigest = digest(unitSource)
-  const stateDir = join(userHome, '.local', 'state', 'dsh-enhanced', 'restart-supervisor', input.profile)
+  const stateDir = join(userHome, '.local', 'state', 'dsh-ray', 'restart-supervisor', input.profile)
   const unitDir = join(userHome, '.config', 'systemd', 'user')
   const configPath = join(stateDir, 'config.json')
   if ([stateDir, unitDir, configPath, helper, node].some(value => !safePath(value))

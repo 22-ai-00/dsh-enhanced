@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, rea
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { canonicalGrowthJson } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson } from '@dsh-ray/assistant-growth-contract'
 import { creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import type { CreationCapabilityConfig } from './creation-capability-types.js'
 

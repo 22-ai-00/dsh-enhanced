@@ -292,7 +292,7 @@ export async function createProspectiveCanaryAuthority({ root, home, workspace, 
   const privateRoot = join(root, 'private-holdout'); await mkdir(privateRoot, { recursive: true, mode: 0o700 }); await chmod(privateRoot, 0o700)
   const keys = generateKeyPairSync('ed25519'), key = join(privateRoot, 'key.pem'), config = join(privateRoot, 'authority.json'), state = join(privateRoot, 'state.sqlite')
   await writeFile(key, keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
-  const cli = resolve(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-skills/lib/holdout-cli.js')
+  const cli = resolve(home, 'profiles/web/node_modules/@dsh-ray/assistant-skills/lib/holdout-cli.js')
   const localConfig = join(privateRoot, 'inspect.json')
   await writeFile(localConfig, JSON.stringify({ prospective: { generator: task.generator }, privateKeyPath: key, statePath: state, limits: { maxToolCalls: 8, maxOutputBytes: 16384 } }), { mode: 0o600 })
   const inspected = JSON.parse((await exec(process.execPath, [cli, '--inspect-config', localConfig], { encoding: 'utf8' })).stdout)
@@ -330,7 +330,7 @@ export async function createProspectiveCanaryAuthority({ root, home, workspace, 
 
 export function canaryPolicy(workspace) {
   const agent = { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }
-  const background = { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace, principal: 'web/web/local/operator' }
+  const background = { kind: 'background', id: 'dsh-ray-assistant-skills', workspace, principal: 'web/web/local/operator' }
   const resource = { kind: 'evolution', id: 'verified-workflows' }
   return [
     { id: 'canary-owner', effect: 'allow', subject: agent, actions: ['inspect', 'run', 'compare', 'canary', 'watch'], resource, context: { initiators: ['external'] } },
@@ -341,7 +341,7 @@ export function canaryPolicy(workspace) {
 /** Policy needed by an owner-armed repair continuation and its background worker. */
 export function repairPolicy(workspace) {
   const agent = { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }
-  const background = { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace, principal: 'web/web/local/operator' }
+  const background = { kind: 'background', id: 'dsh-ray-assistant-skills', workspace, principal: 'web/web/local/operator' }
   const resource = { kind: 'evolution', id: 'verified-workflows' }
   return [...canaryPolicy(workspace),
     { id: 'repair-owner', effect: 'allow', subject: agent, actions: ['draft', 'compare', 'canary', 'watch'], resource, context: { initiators: ['external'] } },

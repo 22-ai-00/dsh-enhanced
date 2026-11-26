@@ -1,6 +1,6 @@
 import { symbols } from '@deepseek-ai/cordis'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { TrustedWorkItemOwnerFeedbackProof } from '@dsh-enhanced/assistant-evaluation'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import type { TrustedWorkItemOwnerFeedbackProof } from '@dsh-ray/assistant-evaluation'
 import type { NormalizedConfig } from './config.js'
 import { CONTINUATION_OWNER, continuationItemBasis, parseContinuationActivation } from './continuation-contract.js'
 import { continuationDigest } from './continuation-record.js'

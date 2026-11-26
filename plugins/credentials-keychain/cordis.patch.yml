@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-credentials-keychain
-      name: '@dsh-enhanced/credentials-keychain'
+    - id: dsh-ray-credentials-keychain
+      name: '@dsh-ray/credentials-keychain'
       inject:
         - assistantPolicy
       config:

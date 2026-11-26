@@ -15,7 +15,7 @@ export const AUTONOMY_DAILY_PERIOD_MS = 86_400_000
 export const MAX_AUTONOMY_DAILY_BUDGET = 10_000_000
 
 /** Deterministic rule id prefix shared by Web-owner RSI autonomy grants. */
-export const WEB_OWNER_POLICY_ID_PREFIX = 'dsh-enhanced-web-'
+export const WEB_OWNER_POLICY_ID_PREFIX = 'dsh-ray-web-'
 
 /** Supported preset budget tiers for Web-owner RSI autonomy setup. */
 export type AutonomyBudgetTier = 'conservative' | 'balanced'
@@ -297,7 +297,7 @@ export function buildWebOwnerDreamingPolicyGrants(input: WebOwnerDreamingPolicyG
   const dreamingBudgetId = assertIdentifier('dreamingBudgetId', input.dreamingBudgetId)
   const dailyDreamBudget = assertPositiveInt('dailyDreamBudget', input.dailyDreamBudget)
   const ruleIds = webOwnerDreamingRuleIds(scope.profile)
-  const automationId = `dsh-enhanced-assistant-dreaming:${scope.principalId}:${scope.ownerRouteId}`
+  const automationId = `dsh-ray-assistant-dreaming:${scope.principalId}:${scope.ownerRouteId}`
   const bgContext = { initiators: ['background' as const] }
   const fgContext = { initiators: ['foreground' as const] }
   const ownerSubject = { kind: 'external' as const, id: scope.principalId, workspace: scope.workspace, principal: scope.principalId }

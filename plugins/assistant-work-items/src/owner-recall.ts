@@ -1,5 +1,5 @@
 import { WorkItemOwnerAccess, ownerArgumentsOf as argumentsOf, type OwnerWorkItemExecution, type WorkItemOwnerAccessDependencies } from './owner-access.js'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { truncateUtf8 } from './config.js'
 import { WorkItemError, type WorkItemRecord, type WorkItemResumeReport } from './types.js'
 

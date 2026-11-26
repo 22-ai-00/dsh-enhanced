@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { JsonSchemaNode, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { anySourceGrowthRunDigest, canonicalGrowthJson, SourceGrowthRunUnavailableError, validateAnySourceGrowthRunBinding,
   type AnySourceGrowthRunBinding, type PluginCreationVerificationCertificate,
-  type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginRevisionVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { extractPluginKindFromTarGz } from './creation-capability-journal.js'
 import { creationCapabilityExecutionMatches, revisionCapabilityExecutionMatches,
   verifyCreationCapabilityExecution, verifyRevisionCapabilityExecution } from './creation-capability-execution.js'
@@ -129,7 +129,7 @@ export class CreationCapabilityRuntime {
     ports: CreationCapabilityPorts; createRunner?: () => Promise<CreationCapabilityRunner> }) {
     this.ctx = input.ctx; this.config = input.config; this.journal = input.journal; this.ports = input.ports
     this.createRunner = input.createRunner ?? (async () => {
-      const { PluginBehaviorRunner } = await import('@dsh-enhanced/assistant-verifier/plugin-behavior-runner')
+      const { PluginBehaviorRunner } = await import('@dsh-ray/assistant-verifier/plugin-behavior-runner')
       if (!('backend' in this.config.runner)) throw new Error('creation capability runner requires a native backend')
       return new PluginBehaviorRunner({ ...this.config.runner, authorityDigest: this.journal.authorityDigest })
     })

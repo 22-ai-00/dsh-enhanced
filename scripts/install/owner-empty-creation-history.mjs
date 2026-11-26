@@ -180,11 +180,11 @@ function configRows(api, ownerUpdate) {
     if (found.length !== 1 || found[0].get('disabled') === true || !api.yaml.isMap(found[0].get('config', true))) fail('effective-config-row-invalid')
     return found[0].get('config', true)
   }
-  const verifier = row('dsh-enhanced-assistant-verifier'); row('dsh-enhanced-plugin-control-plane')
+  const verifier = row('dsh-ray-assistant-verifier'); row('dsh-ray-plugin-control-plane')
   const decoded = document.toJS({ maxAliasCount: 64 })
-  for (const id of ['dsh-enhanced-assistant-verifier', 'dsh-enhanced-plugin-control-plane']) if (decoded.filter(item => item?.id === id).length !== 1) fail('effective-config-row-invalid')
-  const verifierConfig = decoded.find(item => item.id === 'dsh-enhanced-assistant-verifier').config
-  const controlConfig = decoded.find(item => item.id === 'dsh-enhanced-plugin-control-plane').config
+  for (const id of ['dsh-ray-assistant-verifier', 'dsh-ray-plugin-control-plane']) if (decoded.filter(item => item?.id === id).length !== 1) fail('effective-config-row-invalid')
+  const verifierConfig = decoded.find(item => item.id === 'dsh-ray-assistant-verifier').config
+  const controlConfig = decoded.find(item => item.id === 'dsh-ray-plugin-control-plane').config
   const config = key => verifierConfig[key]
   const lanes = [['creation-reviews', 'creationReviews', manifest.pluginCreation?.reviews],
     ['revision-reviews', 'revisionReviews', manifest.pluginRevision?.reviews], ['revision-regressions', 'revisionRegressions', manifest.pluginRevision?.regressions]]

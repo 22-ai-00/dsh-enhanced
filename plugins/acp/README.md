@@ -1,4 +1,4 @@
-# @dsh-enhanced/acp
+# @dsh-ray/acp
 
 让支持 [Agent Client Protocol（ACP）](https://agentclientprotocol.com) 的编辑器和客户端直接使用 DeepSeek Harness（DSH）。插件通过 stdio 提供 ACP 服务，并沿用 DSH 的 Agent、模型、工具、权限和会话能力。
 
@@ -7,7 +7,7 @@
 需要先安装兼容的 DSH（当前验证基线与 peer 范围见[兼容性基线](../../docs/compatibility.md)）。然后创建一个独立的 `acp` profile 并安装插件：
 
 ```sh
-dsh plugin --profile acp add @dsh-enhanced/acp
+dsh plugin --profile acp add @dsh-ray/acp
 dsh --profile acp --dump-config
 ```
 
@@ -30,7 +30,7 @@ DSH/Cordis 服务以及 patch 中使用的 `agent-presets`、`cordis-host-runner
 
 在 Windows 上，如果 ACP 客户端不能自动解析 npm 生成的命令 shim，请按该客户端的配置方式把命令改为 `dsh.cmd`。不要使用会向 stdout 输出额外文字的启动脚本。
 
-Windows 支持目前为实验性，尚未在真实 Windows 用户环境和主流 ACP 客户端上完成充分测试。如果遇到问题，欢迎在 [GitHub 仓库](https://github.com/22-ai-00/dsh-enhanced)提交 issue 或 pull request。
+Windows 支持目前为实验性，尚未在真实 Windows 用户环境和主流 ACP 客户端上完成充分测试。如果遇到问题，欢迎在 [GitHub 仓库](https://github.com/22-ai-00/dsh-ray)提交 issue 或 pull request。
 
 ## 功能
 
@@ -47,7 +47,7 @@ Agent 模式只能在会话第一条消息发送前选择，首轮开始后不�
 插件默认使用 DSH profile 的模型设置。需要覆盖初始配置时，编辑 `~/.dsh/profiles/acp/cordis.patch.yml`：
 
 ```yaml
-- id: dsh-enhanced-acp
+- id: dsh-ray-acp
   config:
     includeRawEvents: false
 ```
@@ -81,7 +81,7 @@ stdio 消息可能包含提示词、推理、工具参数与结果、会话标�
 在本仓库中测试未发布代码时，可以改为安装插件目录：
 
 ```sh
-pnpm --filter @dsh-enhanced/acp build
+pnpm --filter @dsh-ray/acp build
 dsh plugin --profile acp add ./plugins/acp
 ```
 

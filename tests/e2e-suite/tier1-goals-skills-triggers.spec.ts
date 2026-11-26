@@ -631,7 +631,7 @@ describe('Tier 1 — F15–F18: GoalStrategyRuntime, Compensation, EventTriggers
           {
             id: 'cred-use',
             effect: 'allow',
-            subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' },
+            subject: { kind: 'background', id: 'dsh-ray-event-triggers' },
             actions: ['credential.use'],
             resource: { kind: 'credential', id: '*' },
             context: { initiators: ['background'] },
@@ -672,7 +672,7 @@ describe('Tier 1 — F15–F18: GoalStrategyRuntime, Compensation, EventTriggers
                 id: 'cred-wh',
                 provider: 'environment',
                 environmentName: 'DSH_E2E_WEBHOOK_SECRET',
-                consumers: ['dsh-enhanced-event-triggers'],
+                consumers: ['dsh-ray-event-triggers'],
                 purposes: ['verify-webhook'],
                 maxLeaseMs: 30_000,
               }],
@@ -686,7 +686,7 @@ describe('Tier 1 — F15–F18: GoalStrategyRuntime, Compensation, EventTriggers
       const observer = makeTriggerObserver(ws.workspace, 'webhook-obs')
       let svc!: InstanceType<typeof mod.EventTriggersService>
       await ctx.plugin({
-        name: 'dsh-enhanced-event-triggers',
+        name: 'dsh-ray-event-triggers',
         apply(runtime: unknown) {
           svc = new mod.EventTriggersService(runtime as never, {
             databasePath: ws.sqlitePath('events'),

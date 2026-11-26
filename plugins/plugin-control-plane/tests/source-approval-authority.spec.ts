@@ -71,7 +71,7 @@ async function fixture(beforePlan?: { path: string; content: string }, managedVe
   const repository = join(root, 'repository'); await mkdir(join(repository, 'plugins', 'health-helper', 'src'), { recursive: true, mode: 0o700 })
   await git(repository, 'init', '-q'); await git(repository, 'config', 'user.email', 'tests@example.invalid'); await git(repository, 'config', 'user.name', 'Tests')
   await writeFile(join(repository, 'plugins', 'health-helper', 'src', 'tool.ts'), 'export const value = 1\n', { encoding: 'utf8', mode: 0o600 })
-  await writeFile(join(repository, 'plugins', 'health-helper', 'package.json'), `${JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '0.1.0',
+  await writeFile(join(repository, 'plugins', 'health-helper', 'package.json'), `${JSON.stringify({ name: '@dsh-ray/health-helper', version: '0.1.0',
     dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { build: 'tsc' } }, null, 2)}\n`, { mode: 0o600 })
   await writeFile(join(repository, 'plugins', 'health-helper', 'src', 'version.ts'), "export const version = '0.1.0'\n", { mode: 0o600 })
   await git(repository, 'add', '.'); await git(repository, 'commit', '-qm', 'base')
@@ -160,10 +160,10 @@ describe.runIf(process.platform === 'linux')('finite source approval authority',
   })
 
   it.each(['scripts', 'name', 'dependencies', 'runtime'] as const)('rejects a checked but unauthorized %s change beside the version bump', async field => {
-    const manifest = { name: '@dsh-enhanced/health-helper', version: '0.1.1', dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { build: 'tsc' } }
+    const manifest = { name: '@dsh-ray/health-helper', version: '0.1.1', dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { build: 'tsc' } }
     const value = await fixture(field === 'runtime' ? { path: 'plugins/health-helper/src/version.ts', content: "export const version = '0.1.1'\nconsole.log('candidate code')\n" }
       : { path: 'plugins/health-helper/package.json', content: `${JSON.stringify({ ...manifest,
-        ...(field === 'scripts' ? { scripts: { build: 'candidate-command' } } : field === 'name' ? { name: '@dsh-enhanced/other' } : { dependencies: { other: '1.0.0' } }) })}\n` }, true)
+        ...(field === 'scripts' ? { scripts: { build: 'candidate-command' } } : field === 'name' ? { name: '@dsh-ray/other' } : { dependencies: { other: '1.0.0' } }) })}\n` }, true)
     await expect(authorizePreparedSource(value.config(), value.request)).rejects.toThrow('refused')
   })
 

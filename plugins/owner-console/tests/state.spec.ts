@@ -6,11 +6,11 @@ type Bundle = OwnerConsoleStatus['bundles'][number]
 type Plugin = OwnerConsoleStatus['plugins'][number]
 
 const bundle = (overrides: Partial<Bundle> = {}): Bundle => ({
-  name: '@dsh-enhanced/lark-channel', enabled: true, installed: true, removable: true,
-  rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }], ...overrides,
+  name: '@dsh-ray/lark-channel', enabled: true, installed: true, removable: true,
+  rows: [{ rowId: 'dsh-ray-lark-channel', moduleName: '@dsh-ray/lark-channel' }], ...overrides,
 } as Bundle)
 const plugin = (overrides: Partial<Plugin> = {}): Plugin => ({
-  entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active', ...overrides,
+  entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'active', ...overrides,
 } as Plugin)
 const status = (overrides: Partial<OwnerConsoleStatus> = {}): OwnerConsoleStatus => ({
   feishu: { mode: 'env', installed: false, enabled: false, appIdConfigured: false, connected: false, connection: 'absent' },
@@ -25,7 +25,7 @@ const status = (overrides: Partial<OwnerConsoleStatus> = {}): OwnerConsoleStatus
   bundles: [], plugins: [], ...overrides,
 } as OwnerConsoleStatus)
 
-const LARK = '@dsh-enhanced/lark-channel'
+const LARK = '@dsh-ray/lark-channel'
 
 describe('panel component state', () => {
   it('does not mistake an unreadable or absent Host for an uninstalled plugin', () => {
@@ -75,21 +75,21 @@ describe('panel component state', () => {
 
   it('names the exact bundles that provide missing companion services', () => {
     const state = componentState(status({ bundles: [bundle()], plugins: [plugin({ fiberPhase: 'pending' })] }), LARK)
-    expect(state.missing).toEqual([{ service: 'assistantDelivery', bundle: '@dsh-enhanced/assistant-delivery' }])
-    expect(missingRemedy(state)).toContain('assistantDelivery（安装 @dsh-enhanced/assistant-delivery）')
-    expect(componentState(status(), LARK).missing).toEqual([{ service: 'assistantDelivery', bundle: '@dsh-enhanced/assistant-delivery' }])
+    expect(state.missing).toEqual([{ service: 'assistantDelivery', bundle: '@dsh-ray/assistant-delivery' }])
+    expect(missingRemedy(state)).toContain('assistantDelivery（安装 @dsh-ray/assistant-delivery）')
+    expect(componentState(status(), LARK).missing).toEqual([{ service: 'assistantDelivery', bundle: '@dsh-ray/assistant-delivery' }])
   })
 
   it('offers a minimal, copyable patch repair without inventing config', () => {
     const state = componentState(status({ bundles: [bundle()], plugins: [plugin({ fiberPhase: 'failed' })] }), LARK)
     const patch = repairPatch(state, LARK)
-    expect(patch).toContain('- id: dsh-enhanced-lark-channel')
+    expect(patch).toContain('- id: dsh-ray-lark-channel')
     expect(patch).toContain('  disabled: true')
-    expect(patch).toContain('缺少服务 assistantDelivery：安装 @dsh-enhanced/assistant-delivery')
+    expect(patch).toContain('缺少服务 assistantDelivery：安装 @dsh-ray/assistant-delivery')
     expect(patch).not.toContain('config:')
     // Without declared rows, fall back to the panel's naming convention.
     const guessed = repairPatch(componentState(status({ bundles: [bundle({ rows: [] })] }), LARK), LARK)
-    expect(guessed).toContain('- id: dsh-enhanced-lark-channel')
+    expect(guessed).toContain('- id: dsh-ray-lark-channel')
   })
 
   it('distinguishes installed-disabled personal-assistant and enabled-stalled assistant-delivery instead of suggesting reinstall', () => {
@@ -100,44 +100,44 @@ describe('panel component state', () => {
         { name: 'assistantSkills', available: false },
       ],
       bundles: [
-        bundle({ name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] }),
-        bundle({ name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] }),
+        bundle({ name: '@dsh-ray/personal-assistant', installed: true, enabled: false, rows: [{ rowId: 'dsh-ray-personal-assistant', moduleName: '@dsh-ray/personal-assistant' }] }),
+        bundle({ name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] }),
         bundle({ name: LARK, installed: true, enabled: true }),
       ],
       plugins: [plugin({ fiberPhase: 'pending' })],
     }), LARK)
     // lark-channel ignores unrelated assistantSkills unavailability
     expect(state.missing).toEqual([
-      { service: 'assistantPolicy', bundle: '@dsh-enhanced/personal-assistant', state: 'disabled' },
-      { service: 'assistantDelivery', bundle: '@dsh-enhanced/assistant-delivery', state: 'stalled' },
+      { service: 'assistantPolicy', bundle: '@dsh-ray/personal-assistant', state: 'disabled' },
+      { service: 'assistantDelivery', bundle: '@dsh-ray/assistant-delivery', state: 'stalled' },
     ])
     const remedy = missingRemedy(state)
-    expect(remedy).toContain('@dsh-enhanced/personal-assistant 已安装但未启用')
-    expect(remedy).toContain('@dsh-enhanced/assistant-delivery 已启用，等待前置服务')
-    expect(remedy).not.toContain('安装 @dsh-enhanced/assistant-policy')
-    expect(remedy).not.toContain('安装 @dsh-enhanced/assistant-delivery')
+    expect(remedy).toContain('@dsh-ray/personal-assistant 已安装但未启用')
+    expect(remedy).toContain('@dsh-ray/assistant-delivery 已启用，等待前置服务')
+    expect(remedy).not.toContain('安装 @dsh-ray/assistant-policy')
+    expect(remedy).not.toContain('安装 @dsh-ray/assistant-delivery')
     const patch = repairPatch(state, LARK)
-    expect(patch).toContain('@dsh-enhanced/personal-assistant 已安装但未启用')
-    expect(patch).toContain('@dsh-enhanced/assistant-delivery 已启用但尚未就绪')
+    expect(patch).toContain('@dsh-ray/personal-assistant 已安装但未启用')
+    expect(patch).toContain('@dsh-ray/assistant-delivery 已启用但尚未就绪')
   })
 
   it('marks embedded personal-assistant sub-bundles as bundled when personal-assistant is active', () => {
     const s = status({
       bundles: [
-        bundle({ name: '@dsh-enhanced/personal-assistant', enabled: true }),
-        bundle({ name: '@dsh-enhanced/assistant-policy', enabled: false }),
-        bundle({ name: '@dsh-enhanced/personal-memory', enabled: false }),
-        bundle({ name: '@dsh-enhanced/personal-wiki', enabled: false }),
-        bundle({ name: '@dsh-enhanced/assistant-automations', enabled: false }),
-        bundle({ name: '@dsh-enhanced/assistant-work-items', enabled: false }),
+        bundle({ name: '@dsh-ray/personal-assistant', enabled: true }),
+        bundle({ name: '@dsh-ray/assistant-policy', enabled: false }),
+        bundle({ name: '@dsh-ray/personal-memory', enabled: false }),
+        bundle({ name: '@dsh-ray/personal-wiki', enabled: false }),
+        bundle({ name: '@dsh-ray/assistant-automations', enabled: false }),
+        bundle({ name: '@dsh-ray/assistant-work-items', enabled: false }),
       ],
-      plugins: [plugin({ moduleName: '@dsh-enhanced/personal-assistant', fiberPhase: 'active' })],
+      plugins: [plugin({ moduleName: '@dsh-ray/personal-assistant', fiberPhase: 'active' })],
     })
     for (const pkg of [
-      '@dsh-enhanced/assistant-policy',
-      '@dsh-enhanced/personal-memory',
-      '@dsh-enhanced/personal-wiki',
-      '@dsh-enhanced/assistant-automations',
+      '@dsh-ray/assistant-policy',
+      '@dsh-ray/personal-memory',
+      '@dsh-ray/personal-wiki',
+      '@dsh-ray/assistant-automations',
     ]) {
       expect(componentState(s, pkg)).toMatchObject({
         kind: 'bundled',
@@ -148,7 +148,7 @@ describe('panel component state', () => {
         stalled: false,
       })
     }
-    expect(componentState(s, '@dsh-enhanced/assistant-work-items')).toMatchObject({
+    expect(componentState(s, '@dsh-ray/assistant-work-items')).toMatchObject({
       kind: 'disabled',
       label: '已安装但未启用',
       canEnable: true,

@@ -1,5 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { GoalStoreError } from './types.js'
 import type { GoalExecutionIntent, GoalExecutionRun, GoalScope } from './types.js'
 import { prepareGoalStoreDatabaseFile } from './store.js'

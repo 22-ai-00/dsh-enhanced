@@ -1,4 +1,4 @@
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import { assertHoldoutIsolation } from './holdout-isolation.js'
 import {
   benchmarkAssert, benchmarkHash, benchmarkObject, benchmarkSchedule, benchmarkSnapshot,

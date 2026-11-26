@@ -181,7 +181,7 @@ describe('CompensationLedger', () => {
         principalRecordId: 'rec-1',
         principalVersion: 1,
       },
-      sourcePlugin: 'dsh-enhanced-assistant-skills',
+      sourcePlugin: 'dsh-ray-assistant-skills',
       runId: 'run-tamper-1',
       stepId: 'step-tamper-1',
       metadata: { note: 'clean' },

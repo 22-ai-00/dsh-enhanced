@@ -23,9 +23,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantGoalsService, type Config as GoalsConfig } from '../src/service.ts'
 import { GoalEventWaitStore } from '../src/event-wait-store.ts'
 import { GoalExecutionStore } from '../src/execution-store.ts'
-import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
-import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
-import type { AcceptanceProfile } from '@dsh-enhanced/assistant-verifier'
+import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-ray/assistant-verifier'
+import type { AcceptanceProfile } from '@dsh-ray/assistant-verifier'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })

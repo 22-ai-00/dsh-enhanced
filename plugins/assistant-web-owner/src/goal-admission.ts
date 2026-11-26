@@ -2,12 +2,12 @@ import { createHash } from 'node:crypto'
 import { isAbsolute, join, normalize } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
-import { Config as GoalsConfig, validateGoalStrategyConfig, type GoalCallsBudgetConfig, type GoalTokenBudgetConfig, type GoalStrategyConfig } from '@dsh-enhanced/assistant-goals'
-import { compileAcceptanceProfiles, createVerifierAuthorities, type AcceptanceProfile, type VerifierAuthorityInput, type RepositoryReadbackAuthorityInput, type RepositoryCommitReadbackAuthorityInput } from '@dsh-enhanced/assistant-verifier'
-import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
-import type { ActiveWebOwnerBindingSnapshot } from '@dsh-enhanced/assistant-delivery'
+import { Config as GoalsConfig, validateGoalStrategyConfig, type GoalCallsBudgetConfig, type GoalTokenBudgetConfig, type GoalStrategyConfig } from '@dsh-ray/assistant-goals'
+import { compileAcceptanceProfiles, createVerifierAuthorities, type AcceptanceProfile, type VerifierAuthorityInput, type RepositoryReadbackAuthorityInput, type RepositoryCommitReadbackAuthorityInput } from '@dsh-ray/assistant-verifier'
+import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER } from '@dsh-ray/assistant-deepseek-budget'
+import type { ActiveWebOwnerBindingSnapshot } from '@dsh-ray/assistant-delivery'
 import { inspectAutonomyProfile, type AutonomyDoctorProfile } from './doctor.js'
-import * as Actions from '@dsh-enhanced/assistant-actions'
+import * as Actions from '@dsh-ray/assistant-actions'
 import { literalPath } from './setup.js'
 import { parseSettingsDefaultModelRoute, type ConfiguredDefaultModelRoute } from './settings-route.js'
 
@@ -214,13 +214,13 @@ function merge(base: YAMLMap, overlay: YAMLMap): YAMLMap {
 }
 /** Compose a complete candidate, preserving custom siblings and rejecting modified managed settings. */
 export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, effectiveSource: string,
-  taskSource: string, snapshot: ActiveWebOwnerBindingSnapshot, now = Date.now(), settingsSource?: string, eventSupport?: typeof import('@dsh-enhanced/event-triggers')): { patch: string; admissionId: string; profile: AutonomyDoctorProfile; repositoryDelivery?: { repository: string; branch: string; paths: string[]; acceptance: 'goal-outcome' | 'goal-step' } } {
+  taskSource: string, snapshot: ActiveWebOwnerBindingSnapshot, now = Date.now(), settingsSource?: string, eventSupport?: typeof import('@dsh-ray/event-triggers')): { patch: string; admissionId: string; profile: AutonomyDoctorProfile; repositoryDelivery?: { repository: string; branch: string; paths: string[]; acceptance: 'goal-outcome' | 'goal-step' } } {
   const task = parseGoalAdmissionTask(taskSource)
   for (const value of [input.dshHome, input.workspace]) if (!isAbsolute(value) || normalize(value) !== value) fail('home and workspace must be canonical paths')
   if (!Number.isFinite(now) || task.version === 1 && now >= Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.expiresAt)) fail('model contract expired')
   const target = parse(source); const effective = parse(effectiveSource)
   const row = (rows: YAMLSeq, slug: string, required: boolean): YAMLMap | undefined => {
-    const id = `dsh-enhanced-${slug}`; const name = `@dsh-enhanced/${slug}`
+    const id = `dsh-ray-${slug}`; const name = `@dsh-ray/${slug}`
     const found = rows.items.filter(value => isMap(value) && (value.get('id') === id || value.get('name') === name)) as YAMLMap[]
     if (found.length > 1) fail(`duplicate ${slug}`)
     const item = found[0]
@@ -233,7 +233,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     const base = inherited.has('config') ? map(inherited.get('config', true)) : target.document.createNode({}) as YAMLMap
     const value = existing?.has('config') ? merge(base, map(existing.get('config', true))) : map(base.clone())
     if (materialize) {
-      const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${slug}`, name: `@dsh-enhanced/${slug}` }) as YAMLMap
+      const destination = existing ?? target.document.createNode({ id: `dsh-ray-${slug}`, name: `@dsh-ray/${slug}` }) as YAMLMap
       destination.set('config', value); if (!existing) target.rows.add(destination)
     }
     return value
@@ -400,21 +400,21 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
         if (!isSeq(consumers) || !isSeq(purposes)
           || literalString(matching[0]!.get('provider', true)) === undefined
           || (literalInteger(matching[0]!.get('maxLeaseMs', true)) ?? 0) < 30_000
-          || !consumers.items.some(item => literalString(item) === 'dsh-enhanced-assistant-actions')
+          || !consumers.items.some(item => literalString(item) === 'dsh-ray-assistant-actions')
           || !purposes.items.some(item => literalString(item) === 'github.commit')) fail('credential handle is unavailable')
         const grant = { id: `${admissionId}-repository`, revision: 1, principalDigest: createHash('sha256').update(principalId).digest('hex'), principalRecordId: owner.id, principalVersion: owner.version, workspace: input.workspace, agentPreset: input.preset, repository: repository.repository, branch: repository.branch, paths: repository.paths, credentialHandle: repository.credentialHandle!, expiresAt: repository.expiresAt, maxActions: repository.maxActions, maxTotalBytes: repository.maxTotalBytes, repoWorkflow: { baseBranch: repository.baseBranch, allowBranchCreate: false, allowPullRequest: repository.openPullRequest }, verifiedDelivery: { ownerRouteId: admissionId, budgetId, ...(repository.acceptance ? { acceptance: repository.acceptance } : {}) } }
         append(actions!, 'grants', [grant])
-        if (typeof Actions.validateActionConfig !== 'function') fail('install matching @dsh-enhanced/assistant-actions first')
+        if (typeof Actions.validateActionConfig !== 'function') fail('install matching @dsh-ray/assistant-actions first')
         Actions.validateActionConfig(actions!.toJSON())
         grantId = grant.id
       }
       const repositoryRules = [
         { id: `${admissionId}-repository-agent`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: `action:github:${grantId}` }, context: { initiators: ['external', 'background'] } },
         ...['action_github_grants', 'action_github_inspect', 'action_github_deliver', 'action_github_delivery_status'].map(tool => ({ id: `${admissionId}-repository-${tool}`, effect: 'allow' as const, subject: { kind: 'agent' as const, id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool' as const, id: tool }, context: { initiators: ['external', 'background'] } })),
-        { id: `${admissionId}-repository-background`, effect: 'allow' as const, subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-actions', workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool' as const, id: `action:github:${grantId}` }, context: { initiators: ['background'] } },
+        { id: `${admissionId}-repository-background`, effect: 'allow' as const, subject: { kind: 'background' as const, id: 'dsh-ray-assistant-actions', workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool' as const, id: `action:github:${grantId}` }, context: { initiators: ['background'] } },
         { id: `${admissionId}-repository-automation`, effect: 'allow' as const, subject: { kind: 'background' as const, id: '*', workspace: input.workspace, principal: principalId }, actions: ['reconcile', 'execute'], resource: { kind: 'automation' as const, id: 'verified-delivery-*' }, context: { initiators: ['background'] } },
         { id: `${admissionId}-repository-notice`, effect: 'allow' as const, subject: { kind: 'background' as const, id: 'assistant-actions-verified-delivery/v1', workspace: input.workspace, principal: principalId }, actions: ['send'], resource: { kind: 'message' as const, id: binding.id }, context: { initiators: ['background'] } },
-        ...(externalGrant ? [] : [{ id: `${admissionId}-repository-credential`, effect: 'allow' as const, subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential' as const, id: repository.credentialHandle! }, context: { initiators: ['background'] } }]),
+        ...(externalGrant ? [] : [{ id: `${admissionId}-repository-credential`, effect: 'allow' as const, subject: { kind: 'background' as const, id: 'dsh-ray-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential' as const, id: repository.credentialHandle! }, context: { initiators: ['background'] } }]),
       ]
       append(policy, 'rules', repositoryRules)
       if (repository.events) {
@@ -429,7 +429,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
           if (eventHandle.length !== 1) fail('repository observation credential handle is unavailable')
           const eventConsumers = eventHandle[0]!.get('consumers', true), eventPurposes = eventHandle[0]!.get('purposes', true)
           if (!isSeq(eventConsumers) || !isSeq(eventPurposes) || (literalInteger(eventHandle[0]!.get('maxLeaseMs', true)) ?? 0) < events.requestTimeoutMs
-            || !eventConsumers.items.some(item => literalString(item) === 'dsh-enhanced-event-triggers') || !eventPurposes.items.some(item => literalString(item) === 'github.observe')) fail('repository observation handle must authorize event-triggers and github.observe')
+            || !eventConsumers.items.some(item => literalString(item) === 'dsh-ray-event-triggers') || !eventPurposes.items.some(item => literalString(item) === 'github.observe')) fail('repository observation handle must authorize event-triggers and github.observe')
         }
         const observer = { workspace: input.workspace, preset: input.preset, principalId, principalRecordId: owner.id, principalVersion: owner.version, ownerRouteId: admissionId, expiresAt: repository.expiresAt, budgetId: eventBudgetId }
         append(eventTriggers!, 'triggers', [{ id: triggerId, automationId, kind: 'github-repository', observerLifetime: 'goal', repository: repository.repository, branch: repository.branch, baseBranch: repository.baseBranch,
@@ -442,7 +442,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
           { id: eventBudgetId, metric: 'automation-runs', limit: events.maxFires, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }])
         append(policy, 'rules', [
           { id: `${triggerId}-observe`, effect: 'allow', subject: { kind: 'background', id: `event-triggers:${triggerId}`, workspace: input.workspace, principal: principalId }, actions: ['observe'], resource: { kind: 'network', id: `https://api.github.com/repos/${repository.repository}` }, context: { initiators: ['background'] }, budget: { id: pollBudgetId, amount: 1 } },
-          ...(externalGrant ? [] : [{ id: `${triggerId}-credential`, effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: events.credentialHandle! }, context: { initiators: ['background'] } }]),
+          ...(externalGrant ? [] : [{ id: `${triggerId}-credential`, effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: events.credentialHandle! }, context: { initiators: ['background'] } }]),
           { id: `${triggerId}-ingest`, effect: 'allow', subject: { kind: 'external', id: `event-triggers:${triggerId}`, workspace: input.workspace }, actions: ['ingest'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['external'] } },
           { id: `${triggerId}-host`, effect: 'allow', subject: { kind: 'background', id: EVENT_OBSERVER_EXECUTOR, workspace: input.workspace, principal: principalId }, actions: ['observe', 'reconcile', 'execute', 'pause'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['background'] } },
           { id: `${triggerId}-execute`, effect: 'allow', subject: { kind: 'background', id: automationId, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['background'] } },

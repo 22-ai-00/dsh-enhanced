@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { installRestartSupervisorPlan, planRestartSupervisorInstall } from '../scripts/install/restart-supervisor.mjs'
-import { KNOWN_ENHANCED_PACKAGES, runUpgrade } from '../packages/dsh-rsi-cli/src/upgrade.ts'
+import { KNOWN_ENHANCED_PACKAGES, runUpgrade } from '../packages/dsh-ray/src/upgrade.ts'
 import { inspectRestartPolicyAndCode, validateRestartSupervisorConfig, type RestartSupervisorConfig } from '../plugins/assistant-delivery/src/restart-supervisor.ts'
 
 const sha = (source: string | Uint8Array) => createHash('sha256').update(source).digest('hex')
@@ -23,7 +23,7 @@ async function fixture() {
   const packageRoot = join(home, 'packages', 'assistant-delivery')
   const policyRoot = join(home, 'packages', 'assistant-policy')
   const wikiRoot = join(home, 'packages', 'personal-wiki')
-  const packageLinkDir = join(home, 'profiles', 'assistant', 'node_modules', '@dsh-enhanced')
+  const packageLinkDir = join(home, 'profiles', 'assistant', 'node_modules', '@dsh-ray')
   await Promise.all([mkdir(cohort, { recursive: true }), mkdir(join(packageRoot, 'bin'), { recursive: true }),
     mkdir(join(packageRoot, 'lib'), { recursive: true }), mkdir(join(policyRoot, 'lib'), { recursive: true }),
     mkdir(join(wikiRoot, 'lib'), { recursive: true }),
@@ -40,11 +40,11 @@ async function fixture() {
   ] as const
   for (const [name, source] of policyFiles) await writeFile(join(policyRoot, name), source)
   const wikiSource = 'export const wiki = 1\n'
-  const wikiManifest = JSON.stringify({ name: '@dsh-enhanced/personal-wiki', version: '0.1.62' })
+  const wikiManifest = JSON.stringify({ name: '@dsh-ray/personal-wiki', version: '0.1.62' })
   await writeFile(join(wikiRoot, 'lib', 'index.js'), wikiSource)
   await writeFile(join(wikiRoot, 'package.json'), wikiManifest)
-  const deliveryManifest = JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: '0.1.62' })
-  const policyManifest = JSON.stringify({ name: '@dsh-enhanced/assistant-policy', version: '0.1.62', type: 'module' })
+  const deliveryManifest = JSON.stringify({ name: '@dsh-ray/assistant-delivery', version: '0.1.62' })
+  const policyManifest = JSON.stringify({ name: '@dsh-ray/assistant-policy', version: '0.1.62', type: 'module' })
   await writeFile(join(packageRoot, 'package.json'), deliveryManifest)
   await writeFile(join(policyRoot, 'package.json'), policyManifest)
   await symlink(packageRoot, join(packageLinkDir, 'assistant-delivery'))
@@ -52,18 +52,18 @@ async function fixture() {
   await symlink(wikiRoot, join(packageLinkDir, 'personal-wiki'))
   const sourceCommit = 'a'.repeat(40)
   await writeFile(join(cohort, 'receipt.json'), JSON.stringify({ root: cohort, sourceCommit,
-    version: '0.1.62', packages: [{ name: '@dsh-enhanced/assistant-delivery', path: 'plugins/assistant-delivery',
+    version: '0.1.62', packages: [{ name: '@dsh-ray/assistant-delivery', path: 'plugins/assistant-delivery',
       files: [...files.map(([path, source]) => ({ path, sha256: sha(source) })),
         { path: 'package.json', sha256: sha(deliveryManifest) }] },
-    { name: '@dsh-enhanced/assistant-policy', path: 'plugins/assistant-policy',
+    { name: '@dsh-ray/assistant-policy', path: 'plugins/assistant-policy',
       files: [...policyFiles.map(([path, source]) => ({ path, sha256: sha(source) })),
         { path: 'package.json', sha256: sha(policyManifest) }] },
-    { name: '@dsh-enhanced/personal-wiki', path: 'plugins/personal-wiki', files: [
+    { name: '@dsh-ray/personal-wiki', path: 'plugins/personal-wiki', files: [
       { path: 'lib/index.js', sha256: sha(wikiSource) },
       { path: 'package.json', sha256: sha(wikiManifest) },
     ] }] }), { mode: 0o600 })
   await writeFile(join(home, 'profiles', 'assistant', 'cordis.patch.yml'),
-    `- id: dsh-enhanced-personal-assistant\n  config:\n    assistantAutomations:\n      databasePath: !!js dshHomePath('assistant-automations/state.sqlite')\n    assistantPolicy:\n      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')\n      rules:\n        - id: exact-restart\n          effect: allow\n          actions: [maintenance.restart]\n- id: dsh-enhanced-assistant-delivery\n  config:\n    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')\n    ownerRoutes:\n      - id: owner-route-1\n    restart:\n      databasePath: ${join(home, 'assistant-delivery', 'restart.sqlite')}\n      ownerRouteId: owner-route-1\n`)
+    `- id: dsh-ray-personal-assistant\n  config:\n    assistantAutomations:\n      databasePath: !!js dshHomePath('assistant-automations/state.sqlite')\n    assistantPolicy:\n      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')\n      rules:\n        - id: exact-restart\n          effect: allow\n          actions: [maintenance.restart]\n- id: dsh-ray-assistant-delivery\n  config:\n    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')\n    ownerRoutes:\n      - id: owner-route-1\n    restart:\n      databasePath: ${join(home, 'assistant-delivery', 'restart.sqlite')}\n      ownerRouteId: owner-route-1\n`)
   const hostRoot = join(userHome, 'hosts', '0.2.1-rc.2')
   const hostBin = join(hostRoot, 'node_modules', '.bin')
   const hostPackage = join(hostRoot, 'node_modules', '@deepseek-ai', 'dsh')
@@ -81,7 +81,7 @@ async function fixture() {
   await writeFile(join(hostRoot, 'receipt.json'), hostReceipt)
   const hostBinding = JSON.stringify({ schemaVersion: 1, cacheRoot: join(userHome, 'hosts'),
     version: '0.2.1-rc.2', receiptDigest: sha(hostReceipt) })
-  await writeFile(join(home, '.dsh-rsi-host.json'), hostBinding, { mode: 0o600 })
+  await writeFile(join(home, '.dsh-ray-host.json'), hostBinding, { mode: 0o600 })
   const fragment = join(root, 'dsh-profile-assistant.service')
   await writeFile(fragment, `[Unit]\nStartLimitIntervalSec=600\nStartLimitBurst=3\n\n[Service]\nWorkingDirectory=${join(home, 'profiles', 'assistant')}\n`
     + `Environment="DSH_HOME=${home}"\nExecStart=/usr/bin/node "${join(hostBin, 'dsh')}" --profile assistant --no-open\n`)
@@ -177,7 +177,7 @@ describe('external restart supervisor installer', () => {
       .rejects.toThrow('cohort receipt does not match expected source')
     await writeFile(join(sample.packageRoot, 'lib', 'restart-supervisor.js'), 'drift')
     await expect(planRestartSupervisorInstall(sample.input, deps)).rejects.toThrow('installed helper is not frozen')
-    await writeFile(`${sample.home}.dsh-enhanced-transaction`, 'active')
+    await writeFile(`${sample.home}.dsh-ray-transaction`, 'active')
     await expect(planRestartSupervisorInstall(sample.input, deps)).rejects.toThrow('Home upgrade transaction exists')
   })
 
@@ -196,7 +196,7 @@ describe('external restart supervisor installer', () => {
     await writeFile(join(wiki.home, 'packages', 'personal-wiki', 'lib', 'index.js'), 'export const wiki = 2\n')
     await expect(planRestartSupervisorInstall(wiki.input,
       { userHome: wiki.userHome, showUnit: wiki.showUnit }))
-      .rejects.toThrow('installed helper is not frozen by cohort: @dsh-enhanced/personal-wiki/lib/index.js')
+      .rejects.toThrow('installed helper is not frozen by cohort: @dsh-ray/personal-wiki/lib/index.js')
     const host = await fixture()
     await writeFile(join(host.hostRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
       'export const changed = true\n')
@@ -205,15 +205,35 @@ describe('external restart supervisor installer', () => {
       .rejects.toThrow('Host code differs from installed receipt')
   })
 
-  it('F28: KNOWN_ENHANCED_PACKAGES matches release-manifest.json and runUpgrade produces config verified by validateRestartSupervisorConfig & inspectRestartPolicyAndCode', async () => {
+  it('F28: KNOWN_ENHANCED_PACKAGES matches workspace non-CLI packages & release-manifest.json and runUpgrade produces config verified by validateRestartSupervisorConfig & inspectRestartPolicyAndCode', async () => {
     const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+    const workspaceNonCli: string[] = []
+    for (const parent of ['plugins', 'packages']) {
+      for (const entry of await readdir(join(repoRoot, parent), { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+        const manifestText = await readFile(join(repoRoot, parent, entry.name, 'package.json'), 'utf8')
+        const pkg = JSON.parse(manifestText) as { name?: string }
+        if (pkg.name && pkg.name !== 'dsh-ray') workspaceNonCli.push(pkg.name)
+      }
+    }
+    expect([...KNOWN_ENHANCED_PACKAGES].sort()).toEqual(workspaceNonCli.sort())
+
     const manifest = JSON.parse(await readFile(join(repoRoot, 'release-manifest.json'), 'utf8')) as {
       current: { packages: Record<string, string> }
     }
-    const expectedNonCli = Object.keys(manifest.current.packages)
-      .filter(name => name !== '@dsh-enhanced/dsh-rsi-cli')
-      .sort()
-    expect([...KNOWN_ENHANCED_PACKAGES].sort()).toEqual(expectedNonCli)
+    if ('dsh-ray' in manifest.current.packages) {
+      const expectedNonCli = Object.keys(manifest.current.packages)
+        .filter(name => name !== 'dsh-ray')
+        .sort()
+      expect([...KNOWN_ENHANCED_PACKAGES].sort()).toEqual(expectedNonCli)
+    } else {
+      // Pre-first-dsh-ray-release historical 0.1.88 ledger: verify package-slug parity without touching release-manifest.json.
+      const manifestSlugs = Object.keys(manifest.current.packages)
+        .map(name => (name === 'dsh-ray' || name.endsWith('-cli') ? 'dsh-ray' : name.slice(name.indexOf('/') + 1)))
+        .sort()
+      const knownSlugs = ['dsh-ray', ...KNOWN_ENHANCED_PACKAGES.map(name => name.slice(name.indexOf('/') + 1))].sort()
+      expect(knownSlugs).toEqual(manifestSlugs)
+    }
 
     const sample = await fixture()
     // Seed profile package.json + coordinator marker + .pnpm layout with 0.1.82 and upgrade to 0.1.85
@@ -231,14 +251,14 @@ describe('external restart supervisor installer', () => {
     await writeFile(join(coordDir, 'package.json'), JSON.stringify({
       name: `dsh-profile-${coordProfile}`,
       private: true,
-      dependencies: { '@dsh-enhanced/assistant-automations': '0.1.82', '@dsh-enhanced/plugin-control-plane': '0.1.82' },
+      dependencies: { '@dsh-ray/assistant-automations': '0.1.82', '@dsh-ray/plugin-control-plane': '0.1.82' },
     }), { mode: 0o644 })
 
     const profileDir = join(sample.home, 'profiles', 'assistant')
     await writeFile(join(profileDir, 'package.json'), JSON.stringify({
       name: 'dsh-profile-assistant',
       private: true,
-      dependencies: { '@dsh-enhanced/assistant-delivery': '0.1.82', '@dsh-enhanced/personal-wiki': '0.1.82' },
+      dependencies: { '@dsh-ray/assistant-delivery': '0.1.82', '@dsh-ray/personal-wiki': '0.1.82' },
     }), { mode: 0o600 })
     await writeFile(join(profileDir, 'pnpm-workspace.yaml'), 'nodeLinker: isolated\n', { mode: 0o600 })
     await writeFile(join(profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n', { mode: 0o600 })
@@ -258,10 +278,10 @@ describe('external restart supervisor installer', () => {
 
     // 2. Simulate migrated npm profile at 0.1.82 (.pnpm virtual store, transitive assistant-policy)
     const mkStorePkg = async (ver: string, slug: string, files: Record<string, string>) => {
-      const storePkg = join(profileDir, 'node_modules', '.pnpm', `@dsh-enhanced+${slug}@${ver}_cordis`, 'node_modules', '@dsh-enhanced', slug)
+      const storePkg = join(profileDir, 'node_modules', '.pnpm', `@dsh-ray+${slug}@${ver}_cordis`, 'node_modules', '@dsh-ray', slug)
       await mkdir(join(storePkg, 'lib'), { recursive: true })
       await mkdir(join(storePkg, 'bin'), { recursive: true })
-      await writeFile(join(storePkg, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${slug}`, version: ver }), { mode: 0o644 })
+      await writeFile(join(storePkg, 'package.json'), JSON.stringify({ name: `@dsh-ray/${slug}`, version: ver }), { mode: 0o644 })
       for (const [rel, content] of Object.entries(files)) {
         await writeFile(join(storePkg, rel), content, { mode: 0o644 })
       }
@@ -280,10 +300,10 @@ describe('external restart supervisor installer', () => {
     const wiki082 = await mkStorePkg('0.1.82', 'personal-wiki', {
       'lib/index.js': 'export const wiki = 1\n',
     })
-    await rm(join(profileDir, 'node_modules', '@dsh-enhanced'), { recursive: true, force: true })
-    await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced'), { recursive: true })
-    await symlink(delivery082, join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'))
-    await symlink(wiki082, join(profileDir, 'node_modules', '@dsh-enhanced', 'personal-wiki'))
+    await rm(join(profileDir, 'node_modules', '@dsh-ray'), { recursive: true, force: true })
+    await mkdir(join(profileDir, 'node_modules', '@dsh-ray'), { recursive: true })
+    await symlink(delivery082, join(profileDir, 'node_modules', '@dsh-ray', 'assistant-delivery'))
+    await symlink(wiki082, join(profileDir, 'node_modules', '@dsh-ray', 'personal-wiki'))
 
     const res = await runUpgrade({
       dshHome: sample.home,
@@ -295,7 +315,7 @@ describe('external restart supervisor installer', () => {
       osHome: sample.userHome,
     }, {
       fetch: (async () => new Response(JSON.stringify({ 'dist-tags': { latest: '0.1.85' } }), { status: 200 })) as typeof globalThis.fetch,
-      inspectBoundHost: async () => ({ status: 'ready', bindingPath: join(sample.home, '.dsh-rsi-host.json'), version: '0.2.1-rc.2', dshPath: '/bin/dsh', issues: [] }),
+      inspectBoundHost: async () => ({ status: 'ready', bindingPath: join(sample.home, '.dsh-ray-host.json'), version: '0.2.1-rc.2', dshPath: '/bin/dsh', issues: [] }),
       runner: () => ({ status: 0, stdout: 'inactive\n', stderr: '' }),
       upgradeProfilePackages: async () => {
         const delivery085 = await mkStorePkg('0.1.85', 'assistant-delivery', {
@@ -310,10 +330,10 @@ describe('external restart supervisor installer', () => {
         const wiki085 = await mkStorePkg('0.1.85', 'personal-wiki', {
           'lib/index.js': 'export const wiki = 2\n',
         })
-        await rm(join(profileDir, 'node_modules', '@dsh-enhanced'), { recursive: true, force: true })
-        await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced'), { recursive: true })
-        await symlink(delivery085, join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'))
-        await symlink(wiki085, join(profileDir, 'node_modules', '@dsh-enhanced', 'personal-wiki'))
+        await rm(join(profileDir, 'node_modules', '@dsh-ray'), { recursive: true, force: true })
+        await mkdir(join(profileDir, 'node_modules', '@dsh-ray'), { recursive: true })
+        await symlink(delivery085, join(profileDir, 'node_modules', '@dsh-ray', 'assistant-delivery'))
+        await symlink(wiki085, join(profileDir, 'node_modules', '@dsh-ray', 'personal-wiki'))
       },
       verifyHealth: async () => ({ ok: true }),
     })
@@ -321,7 +341,7 @@ describe('external restart supervisor installer', () => {
 
     const refreshedRaw = JSON.parse(await readFile(plan.configPath, 'utf8')) as RestartSupervisorConfig
     const validated = validateRestartSupervisorConfig(refreshedRaw)
-    expect(validated.policyEvaluatorPath).toContain('@dsh-enhanced+assistant-policy@0.1.85_cordis')
+    expect(validated.policyEvaluatorPath).toContain('@dsh-ray+assistant-policy@0.1.85_cordis')
     await mkdir(dirname(sample.input.policyDatabasePath), { recursive: true, mode: 0o700 })
     const policyDb = new DatabaseSync(sample.input.policyDatabasePath)
     try {

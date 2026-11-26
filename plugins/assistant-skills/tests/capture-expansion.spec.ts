@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { captureFailureCandidateProvenance, captureRunExpansions } from '../src/capture-expansion.ts'
 import { createDefinition, failureSummaryEvidenceDigest, validateFailureCaptureProvenance, validateHostFailureEvidenceSummary,
   type HostFailureEvidenceSummary, type VerifiedWorkflowSource } from '../src/definition.ts'

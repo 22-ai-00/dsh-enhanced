@@ -2,10 +2,10 @@
   <img src="plugins/owner-console/assets/icon-128.webp" width="88" height="88" alt="文鳐 Ray icon">
 </p>
 
-<h1 align="center">dsh-enhanced · 文鳐 Ray</h1>
+<h1 align="center">dsh-ray · 文鳐 Ray</h1>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@dsh-enhanced/dsh-rsi-cli"><img alt="npm" src="https://img.shields.io/npm/v/@dsh-enhanced/dsh-rsi-cli?color=2f6f6f"></a>
+  <a href="https://www.npmjs.com/package/dsh-ray"><img alt="npm" src="https://img.shields.io/npm/v/dsh-ray?color=2f6f6f"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D24.9.0-339933">
   <img alt="status" src="https://img.shields.io/badge/status-experimental-orange">
@@ -25,13 +25,13 @@
 **标准安装（推荐：飞书 + 本地 Web + 自成长全能力，交互式向导）**：
 
 ```sh
-npm i -g @dsh-enhanced/dsh-rsi-cli && dsh-rsi install
+npm i -g dsh-ray && dsh-ray install
 ```
 
 **纯本地 Web 速览体验（暂不配飞书，一键安装并打开控制台）**：
 
 ```sh
-npm i -g @dsh-enhanced/dsh-rsi-cli && dsh-rsi install --scenario web --model skip --yes && dsh-rsi open --profile web
+npm i -g dsh-ray && dsh-ray install --scenario web --model skip --yes && dsh-ray open --profile web
 ```
 
 ### 首次连接（3 步完成）
@@ -40,7 +40,7 @@ npm i -g @dsh-enhanced/dsh-rsi-cli && dsh-rsi install --scenario web --model ski
 2. 给机器人私聊发送终端显示的最新 `DSH-CONNECT-…` 验证码，以终端提示绑定成功为准。
 3. 服务启动后，私聊发送 `/model` 选择模型并确认即可开始对话（更多细节与排障见[安装指南](scripts/install/README.md)与[飞书接入](plugins/lark-channel/docs/setup.md)；暂不接飞书见[只用本机 Web](scripts/install/README.md#只用本机-web)）。
 
-> 安装向导默认自动探测本机已登录的 `traex` / `agy` 或引导配置 DeepSeek API Key（`0600` 存于本机）；新安装默认 `Full access`，如需收紧为写入需人工批准可改用 `dsh-rsi install --permission workspace-write`。`dsh-rsi open` 输出的 Web 地址含登录令牌，请勿公开分享。
+> 安装向导默认自动探测本机已登录的 `traex` / `agy` 或引导配置 DeepSeek API Key（`0600` 存于本机）；新安装默认 `Full access`，如需收紧为写入需人工批准可改用 `dsh-ray install --permission workspace-write`。`dsh-ray open` 输出的 Web 地址含登录令牌，请勿公开分享。
 
 ## 架构一览
 
@@ -59,17 +59,17 @@ npm i -g @dsh-enhanced/dsh-rsi-cli && dsh-rsi install --scenario web --model ski
 
 | 想做什么 | 命令 |
 | --- | --- |
-| 打开 Web 与「文鳐」控制台 | `dsh-rsi open --profile web` |
-| 检查、预演或一键自助升级并恢复 | `dsh-rsi upgrade --check` / `--dry-run` / `--yes` |
-| 查看助手/Host/插件版本与自迭代统计 | `dsh-rsi version [--json]` / `dsh-rsi --version` / 聊天 `/version` |
-| 一键开启或关闭自迭代能力 | `dsh-rsi enable` / `dsh-rsi disable`（或对话 `/autonomy enable\|disable`） |
-| 只读环境与服务体检（含 `traex`/`agy`） | `dsh-rsi doctor [--profile web] [--json]` |
-| 查看 Home、绑定 Host 与服务状态 | `dsh-rsi status [--json]` |
-| 升级全局 `dsh-rsi` CLI（加 `--all` 同步升级插件） | `dsh-rsi update` / `dsh-rsi update --all --yes` |
-| 查看只读成长计分卡 | `dsh-rsi growth-report --since 7d` |
-| 查看最近日志或重启服务 | `dsh-rsi logs --profile web --lines 100` / `dsh-rsi restart --profile web` |
+| 打开 Web 与「文鳐」控制台 | `dsh-ray open --profile web` |
+| 检查、预演或一键自助升级并恢复 | `dsh-ray upgrade --check` / `--dry-run` / `--yes` |
+| 查看助手/Host/插件版本与自迭代统计 | `dsh-ray version [--json]` / `dsh-ray --version` / 聊天 `/version` |
+| 一键开启或关闭自迭代能力 | `dsh-ray enable` / `dsh-ray disable`（或对话 `/autonomy enable\|disable`） |
+| 只读环境与服务体检（含 `traex`/`agy`） | `dsh-ray doctor [--profile web] [--json]` |
+| 查看 Home、绑定 Host 与服务状态 | `dsh-ray status [--json]` |
+| 升级全局 `dsh-ray` CLI（加 `--all` 同步升级插件） | `dsh-ray update` / `dsh-ray update --all --yes` |
+| 查看只读成长计分卡 | `dsh-ray growth-report --since 7d` |
+| 查看最近日志或重启服务 | `dsh-ray logs --profile web --lines 100` / `dsh-ray restart --profile web` |
 
-> 浏览器关闭后，默认安装的常驻服务仍会在后台运行。注意：`dsh-rsi reinstall` 会删除旧数据后重装，日常升级请使用 `dsh-rsi upgrade --yes` 或 `dsh-rsi update`（详见[命令参考](packages/dsh-rsi-cli/README.md)与[维护说明](scripts/install/maintenance.md)）。
+> 浏览器关闭后，默认安装的常驻服务仍会在后台运行。注意：`dsh-ray reinstall` 会删除旧数据后重装，日常升级请使用 `dsh-ray upgrade --yes` 或 `dsh-ray update`（详见[命令参考](packages/dsh-ray/README.md)与[维护说明](scripts/install/maintenance.md)）。
 
 ## 按需阅读
 
@@ -78,7 +78,7 @@ npm i -g @dsh-enhanced/dsh-rsi-cli && dsh-rsi install --scenario web --model ski
 | 首次安装、场景选择、安装排障 | [安装指南](scripts/install/README.md) |
 | 添加或切换模型（含 `traex` / `agy`） | [模型配置](docs/models.md) |
 | 飞书绑定、权限与消息排查 | [飞书接入](plugins/lark-channel/docs/setup.md) |
-| `dsh-rsi` 完整命令、升级与卸载 | [命令参考](packages/dsh-rsi-cli/README.md) |
+| `dsh-ray` 完整命令、升级与卸载 | [命令参考](packages/dsh-ray/README.md) |
 | 已支持能力与当前限制 | [当前状态](docs/rsi-status.md) · [验收合同](docs/rsi-acceptance.md) |
 | 全部插件与共享库清单 | [插件目录](plugins/README.md) · [共享包目录](packages/README.md) |
 

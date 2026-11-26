@@ -4,12 +4,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type SkillRegistry from '@deepseek-ai/dsh-skill'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import Schema from '@deepseek-ai/schemastery'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
+import type { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
 import type {
   ApprovalDispatchRouteV2,
   AssistantPolicyService,
   PolicyDecision,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import { WikiProposalManager, WikiProposalStore } from './proposals.js'
 import { registerWikiTools } from './tools.js'
 import type {
@@ -85,7 +85,7 @@ Use Personal Wiki for durable, human-readable research, project, person, concept
 
 Keep curated Markdown as truth. A derived page must cite direct curated evidence and must not summarize another derived page.`
 
-export const PERSONAL_WIKI_APPROVAL_SOURCE = 'dsh-enhanced-personal-wiki'
+export const PERSONAL_WIKI_APPROVAL_SOURCE = 'dsh-ray-personal-wiki'
 
 const configSchema = Schema.object({
   vaultRoot: Schema.string().required(),

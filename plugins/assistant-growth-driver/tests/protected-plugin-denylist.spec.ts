@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { PROTECTED_PLUGIN_DENYLIST } from '@dsh-enhanced/plugin-control-plane'
+import { PROTECTED_PLUGIN_DENYLIST } from '@dsh-ray/plugin-control-plane'
 import { GROWTH_PROTECTED_PLUGIN_DENYLIST } from '../src/source-port.ts'
 
 describe('protected plugin denylists', () => {

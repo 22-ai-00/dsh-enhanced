@@ -1,18 +1,18 @@
-# @dsh-enhanced/assistant-health
+# @dsh-ray/assistant-health
 
 聚合个人助理各 provider 的公开 `health()` seam，输出低基数、无正文/路径/secret 的 liveness、readiness 和 Policy-gated 详细报告。它不读取其他插件的 SQLite/Vault，不执行修复，也不是第五个业务真源。
 
 ## 安装与使用
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-health
+dsh plugin --profile web add @dsh-ray/assistant-health
 dsh --profile web --dump-config
 ```
 
 默认把 Policy、Memory、Wiki、Automations 设为 required；Evaluation、Preference Learning、Evolution、Growth Experiments、Delivery、Credentials、Event、Recovery、Heartbeat、Lark 与 Verifier 未安装不会让 core readiness 失败。`supervised` 安装器会自动安装本插件，并把 Delivery、Evaluation、Preference Learning、Evolution、Growth Experiments、Recovery、Heartbeat、Lark Channel 连同四个核心 provider 写入 `requiredProviders`。v2 Recovery 已取代旧的 model maintenance Heartbeat；当前 Heartbeat 只承载独立、受限且有每日预算的 adoption analyst，因此仍属于 supervised readiness。配置和报告中的稳定公开 id 是 `preferenceLearning`，Health 会把它解析到 provider 实际注册的 Cordis service `assistantPreferenceLearning`。`ctx.assistantHealth.liveness()` 只表示进程内 service 活着；`readiness()` 只调用本地 content-free health seam，不调用模型、工具或外网。详细 `assistant_health` tool 还需目标 Agent 对 `tool:assistant-health` 的 `inspect` Policy 规则。
 
 固定 Host runbook 只能调用明确无 scope 的 `hostGlobalSnapshot({ principal, operationId })`。该入口通过
-固定 background subject `dsh-enhanced-assistant-recovery` 对全局资源
+固定 background subject `dsh-ray-assistant-recovery` 对全局资源
 `tool:assistant-health:global/inspect` 做 Policy 授权，返回与详细报告相同的 content-free 白名单快照；
 它没有任何 repair/execute 方法。此结果只可用于 run admission、全局 verification 与告警，不能作为
 某个 workspace/preset 的 Preference/Evolution mutation 证据；scoped plan 必须分别读取对应插件的

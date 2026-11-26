@@ -9,8 +9,8 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { registerLlmRouteCapability, type ToolCallMode } from '@dsh-enhanced/llm-route-capabilities'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { registerLlmRouteCapability, type ToolCallMode } from '@dsh-ray/llm-route-capabilities'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -173,7 +173,7 @@ async function harness(options: {
     async execute(_args, exec) {
       allowedCalls += 1
       if (options.backgroundProposal) {
-        prepareAgentApproval(exec.agent, { sourceId: 'dsh-enhanced-assistant-evolution' })
+        prepareAgentApproval(exec.agent, { sourceId: 'dsh-ray-assistant-evolution' })
       }
       return {}
     },
@@ -332,7 +332,7 @@ describe('fresh rc.1 automation Agent runner', () => {
     expect(result.outcome).toBe('succeeded')
     expect(fixture.bindAgentApprovalRoute).toHaveBeenCalledWith(expect.anything(), { bindingId: 'binding-owner' })
     expect(fixture.derivedApprovalRoutes).toEqual([{
-      routeVersion: 2, sourceId: 'dsh-enhanced-assistant-evolution', bindingId: 'binding-owner',
+      routeVersion: 2, sourceId: 'dsh-ray-assistant-evolution', bindingId: 'binding-owner',
       bindingVersion: 3, bindingGeneration: 2, workspace: process.cwd(),
       principal: 'lark/main/tenant/owner', principalRecordId: 'principal-owner', principalVersion: 4,
     }])

@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
-import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { CreationCapabilityJournal } from '../src/creation-capability-journal.js'
 import { inspectCreationCapabilityTaskAssociations, type CreationCapabilityFeedbackInput } from '../src/creation-capability-feedback.js'
 import type { CreationCapabilityConfig } from '../src/creation-capability-types.js'

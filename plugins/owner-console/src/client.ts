@@ -422,7 +422,7 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         runtime.slots.inject('settings.models.footer', () => runtime.slots.register(
           { name: 'settings.models.footer', id: 'wenyao-coding-agents', order: 20 }, modelsFooter)),
         runtime.slots.inject('settings.models.provider-card', () => runtime.slots.register(
-          { name: 'settings.models.provider-card', key: 'dsh-enhanced-traex-acp-provider' },
+          { name: 'settings.models.provider-card', key: 'dsh-ray-traex-acp-provider' },
           (props: Readonly<{
             provider?: Readonly<{ id?: string; provider?: string; name?: string; displayName?: string; settingsNs?: string }>
             configured?: boolean

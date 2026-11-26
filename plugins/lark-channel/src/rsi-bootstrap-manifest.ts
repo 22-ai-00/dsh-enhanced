@@ -1,8 +1,8 @@
 import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
-import { linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
-import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST, controlPlaneDigest, runtimeConfigDigest, validateHostDeploymentInputs, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
+import { type ActiveLarkOwnerBinding } from '@dsh-ray/assistant-delivery'
+import { linuxRuntimeDigest } from '@dsh-ray/assistant-isolation'
+import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST, controlPlaneDigest, runtimeConfigDigest, validateHostDeploymentInputs, type RuntimeObserverTarget } from '@dsh-ray/plugin-control-plane'
 import { isAlias, isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
@@ -23,8 +23,8 @@ const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const pluginPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 const digestPattern = /^[a-f0-9]{64}$/u
 const phases = ['pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-verify', 'catalog-admission'] as const
-const mutableRows = new Set(['dsh-enhanced-personal-assistant', 'dsh-enhanced-assistant-verifier',
-  'dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning', 'dsh-enhanced-plugin-control-plane'])
+const mutableRows = new Set(['dsh-ray-personal-assistant', 'dsh-ray-assistant-verifier',
+  'dsh-ray-assistant-growth-driver', 'dsh-ray-assistant-memory-learning', 'dsh-ray-plugin-control-plane'])
 const day = 86_400_000
 
 export type RsiBootstrapSourceBuild = RsiLinuxSourceBuildPreparation
@@ -184,13 +184,13 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     if (!hostInputs.includes(required)) fail(`Host deployment input is missing ${required}`)
   }
   for (const name of input.plugins) {
-    const prefix = `node_modules/@dsh-enhanced/${name}/`
+    const prefix = `node_modules/@dsh-ray/${name}/`
     if (!hostInputs.includes(`${prefix}package.json`) || !hostInputs.includes(`${prefix}cordis.patch.yml`)
       || !hostInputs.some(path => path.startsWith(`${prefix}lib/`) && path.endsWith('.js'))) {
       fail(`Host deployment input does not cover installed package ${name}`)
     }
   }
-  const memoryManifestPaths = hostInputs.filter(path => path.endsWith('/@dsh-enhanced/personal-memory/package.json'))
+  const memoryManifestPaths = hostInputs.filter(path => path.endsWith('/@dsh-ray/personal-memory/package.json'))
   if (memoryManifestPaths.length !== 1) fail('Host deployment inputs require one embedded Personal Memory package')
   const memoryPrefix = memoryManifestPaths[0]!.slice(0, -'package.json'.length)
   if (!hostInputs.includes(`${memoryPrefix}cordis.patch.yml`)
@@ -209,22 +209,22 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   }
   const upgrading = input.upgradeExistingOwner === true
   const installedRepairable = [...rows.entries()].flatMap(([id, entry]) => {
-    const allowDisabled = id === 'dsh-enhanced-assistant-memory-learning'
+    const allowDisabled = id === 'dsh-ray-assistant-memory-learning'
       || (upgrading && SELF_ITERATION_MANAGED_ROW_IDS.has(id))
     if (entry.get('disabled') === true && !allowDisabled) return []
     const name = entry.get('name')
-    if (typeof name !== 'string' || !name.startsWith('@dsh-enhanced/')) {
-      if (id.startsWith('dsh-enhanced-')) fail(`installed plugin row ${id} has no package name`)
+    if (typeof name !== 'string' || !name.startsWith('@dsh-ray/')) {
+      if (id.startsWith('dsh-ray-')) fail(`installed plugin row ${id} has no package name`)
       return []
     }
-    const plugin = name.slice('@dsh-enhanced/'.length)
-    if (!pluginPattern.test(plugin) || id !== `dsh-enhanced-${plugin}`) fail(`installed plugin row ${id} has inconsistent package identity`)
+    const plugin = name.slice('@dsh-ray/'.length)
+    if (!pluginPattern.test(plugin) || id !== `dsh-ray-${plugin}`) fail(`installed plugin row ${id} has inconsistent package identity`)
     return OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(plugin) ? [] : [plugin]
   })
   if (installedRepairable.length !== input.plugins.length
     || new Set(installedRepairable).size !== installedRepairable.length
     || installedRepairable.some(name => !input.plugins.includes(name))) fail('plugin scope differs from all installed repairable bundles')
-  const delivery = rows.get('dsh-enhanced-assistant-delivery')
+  const delivery = rows.get('dsh-ray-assistant-delivery')
   if (!delivery || delivery.get('disabled') === true) fail('effective Delivery is unavailable')
   const deliveryConfig = plain(rowConfig(delivery, 'Delivery'), 'Delivery config')
   const resolvedOwner = resolveRsiOwnerRoute(deliveryConfig, input.owner, input.dshHome)
@@ -235,12 +235,12 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     workspace: input.owner.workspace, agentPreset: input.owner.agentPreset }
   let ordinaryUseLearning: RsiOrdinaryUseLearningSetup | undefined
   if (input.enableOrdinaryUseLearning === true) {
-    const proactive = rows.get('dsh-enhanced-assistant-proactive')
-    if (!proactive || (!upgrading && proactive.get('disabled') === true) || proactive.get('name') !== '@dsh-enhanced/assistant-proactive') {
+    const proactive = rows.get('dsh-ray-assistant-proactive')
+    if (!proactive || (!upgrading && proactive.get('disabled') === true) || proactive.get('name') !== '@dsh-ray/assistant-proactive') {
       fail('ordinary-use learning requires an enabled installed assistant-proactive bundle')
     }
-    const workItems = rows.get('dsh-enhanced-assistant-work-items')
-    if (!workItems || (!upgrading && workItems.get('disabled') === true) || workItems.get('name') !== '@dsh-enhanced/assistant-work-items') {
+    const workItems = rows.get('dsh-ray-assistant-work-items')
+    if (!workItems || (!upgrading && workItems.get('disabled') === true) || workItems.get('name') !== '@dsh-ray/assistant-work-items') {
       fail('ordinary-use learning requires an enabled installed assistant-work-items bundle')
     }
     ordinaryUseLearning = createRsiOrdinaryUseLearningSetup({ deliveryConfig,
@@ -289,13 +289,13 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     resources: input.resources, source: input.source, owner: reviewOwner, now: input.now, expiresAt: input.expiresAt,
     stateSeal: runnerStates.sourceBuild })
 
-  const personal = rows.get('dsh-enhanced-personal-assistant')
-  if (!personal || personal.get('disabled') === true || personal.get('name') !== '@dsh-enhanced/personal-assistant') fail('effective personal assistant is missing')
+  const personal = rows.get('dsh-ray-personal-assistant')
+  if (!personal || personal.get('disabled') === true || personal.get('name') !== '@dsh-ray/personal-assistant') fail('effective personal assistant is missing')
   const personalConfig = rowConfig(personal, 'personal assistant')
   const memoryConfig = personalConfig.get('personalMemory', true) as Node | undefined
   if (!isMap(memoryConfig)) fail('effective embedded Personal Memory is missing')
-  const learner = rows.get('dsh-enhanced-assistant-memory-learning')
-  if (input.skipMemoryLearning !== true && (!learner || learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
+  const learner = rows.get('dsh-ray-assistant-memory-learning')
+  if (input.skipMemoryLearning !== true && (!learner || learner.get('name') !== '@dsh-ray/assistant-memory-learning'
     || input.upgradeExistingOwner !== true && learner.get('disabled') === true && learner.has('config'))) fail('effective memory learner must be the installed unconfigured bundle')
   const policy = plain(mapping(rowConfig(personal, 'personal assistant').get('assistantPolicy', true) as Node | undefined, 'assistantPolicy'), 'assistantPolicy')
   let reviewLimit = 7
@@ -310,7 +310,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     if (limits.size !== 1 || !Number.isSafeInteger(globalReview[0]!.limit) || (globalReview[0]!.limit as number) < 1) fail('existing global automation budget conflicts')
     reviewLimit = globalReview[0]!.limit as number
   }
-  const growthRow = rows.get('dsh-enhanced-assistant-growth-driver')
+  const growthRow = rows.get('dsh-ray-assistant-growth-driver')
   if (!growthRow) fail('effective growth driver is missing')
   const effectiveGrowth = growthRow.has('config') ? plain(rowConfig(growthRow, 'growth driver'), 'growth driver') : {}
   const selection = {} as { provider?: string; model?: string; reasoningEffort?: string }
@@ -443,20 +443,20 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   // Delivery, Growth and Verifier final options are determined by compileRsiProfiles.
   // Observe their final raw Loader options, not the pre-install dump. Neither
   // embeds runtimeObserver, so there is no configuration-digest cycle.
-  const verifier = rows.get('dsh-enhanced-assistant-verifier')
+  const verifier = rows.get('dsh-ray-assistant-verifier')
   if (!verifier || verifier.get('disabled') === true) fail('effective verifier is missing')
   const verifierRaw = rawLoaderConfig(rowConfig(verifier, 'verifier'), 'verifier')
   if (!verifierRaw || typeof verifierRaw !== 'object' || Array.isArray(verifierRaw)) fail('invalid verifier config')
   manifest.controlPlane.runtimeObserver!.targets.push(
-    { entryId: 'dsh-enhanced-assistant-growth-driver', module: '@dsh-enhanced/assistant-growth-driver',
+    { entryId: 'dsh-ray-assistant-growth-driver', module: '@dsh-ray/assistant-growth-driver',
       configDigest: runtimeConfigDigest(manifest.growthDriver), services: ['assistantGrowthDriver'] },
-    { entryId: 'dsh-enhanced-assistant-verifier', module: '@dsh-enhanced/assistant-verifier',
+    { entryId: 'dsh-ray-assistant-verifier', module: '@dsh-ray/assistant-verifier',
       configDigest: runtimeConfigDigest({ ...verifierRaw, sourceReviews: manifest.sourceReviews,
         ...(memoryLearning === undefined ? {} : { memoryReviews: memoryLearning.reviews }),
         ...(manifest.pluginCreation ? { creationReviews: manifest.pluginCreation.reviews } : {}),
         ...(manifest.pluginRevision ? { revisionReviews: manifest.pluginRevision.reviews,
           revisionRegressions: manifest.pluginRevision.regressions } : {}) }), services: ['assistantVerifier'] },
-    { entryId: 'dsh-enhanced-personal-assistant', module: '@dsh-enhanced/personal-assistant',
+    { entryId: 'dsh-ray-personal-assistant', module: '@dsh-ray/personal-assistant',
       configDigest: runtimeConfigDigest(compileRsiPersonalAssistantOptions({
         effectiveConfig: rawLoaderConfig(personalConfig, 'personal assistant') as Record<string, unknown>,
         manifest, scope: { workspace: scope.workspace, preset: scope.preset, principal: scope.principalId },
@@ -464,21 +464,21 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
           source: manifest.controlPlane.sourceJobs!.budgetId, observations: manifest.controlPlane.taskObservations!.budgetId },
         ...(input.upgradeExistingOwner ? { upgradeExistingOwner: true } : {}),
       })), services: ['personalMemory', 'assistantPolicy', 'assistantAutomations'] },
-    ...(memoryLearning === undefined ? [] : [{ entryId: 'dsh-enhanced-assistant-memory-learning', module: '@dsh-enhanced/assistant-memory-learning',
+    ...(memoryLearning === undefined ? [] : [{ entryId: 'dsh-ray-assistant-memory-learning', module: '@dsh-ray/assistant-memory-learning',
       configDigest: runtimeConfigDigest(memoryLearning.learning), services: ['assistantMemoryLearning'] }]),
   )
   if (ordinaryUseLearning !== undefined) {
     // These rows are modified by the profile compiler, so observe the final raw
     // options rather than the pre-install dump. Recompute on every retry from
     // the same effective inputs; the compiler preserves unrelated keys.
-    const proactiveRow = rows.get('dsh-enhanced-assistant-proactive')!
+    const proactiveRow = rows.get('dsh-ray-assistant-proactive')!
     const proactiveRaw = proactiveRow.has('config')
       ? rawLoaderConfig(proactiveRow.get('config', true) as Node, 'assistant-proactive') : null
     const proactiveBase = record(proactiveRaw) ? proactiveRaw : {}
     const proactiveFinal = { ...proactiveBase,
       ...(upgrading && proactiveBase.enabled === false ? { enabled: true } : {}),
       intakeEvaluation: ordinaryUseLearning.intakeEvaluation }
-    const workItemsRow = rows.get('dsh-enhanced-assistant-work-items')!
+    const workItemsRow = rows.get('dsh-ray-assistant-work-items')!
     const workItemsRaw = workItemsRow.has('config')
       ? rawLoaderConfig(workItemsRow.get('config', true) as Node, 'assistant-work-items') : null
     const workItemsBase = record(workItemsRaw) ? workItemsRaw : {}
@@ -488,13 +488,13 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
       ...(upgrading && workItemsBase.enabled === false ? { enabled: true } : {}),
       intakeLedger: { ...ledger, evaluation: { ...evaluation, enabled: true } } }
     manifest.controlPlane.runtimeObserver!.targets.push(
-      { entryId: 'dsh-enhanced-assistant-proactive', module: '@dsh-enhanced/assistant-proactive',
+      { entryId: 'dsh-ray-assistant-proactive', module: '@dsh-ray/assistant-proactive',
         configDigest: runtimeConfigDigest(proactiveFinal), services: ['assistantProactive'] },
-      { entryId: 'dsh-enhanced-assistant-work-items', module: '@dsh-enhanced/assistant-work-items',
+      { entryId: 'dsh-ray-assistant-work-items', module: '@dsh-ray/assistant-work-items',
         configDigest: runtimeConfigDigest(workItemsFinal), services: ['assistantWorkItems'] },
     )
   }
-  const deliveryTarget = manifest.controlPlane.runtimeObserver!.targets.find(target => target.entryId === 'dsh-enhanced-assistant-delivery')
+  const deliveryTarget = manifest.controlPlane.runtimeObserver!.targets.find(target => target.entryId === 'dsh-ray-assistant-delivery')
   if (deliveryTarget) {
     // The input observer digest was validated above against the original dump.
     // Only the journaled compiler output receives the new owner route.

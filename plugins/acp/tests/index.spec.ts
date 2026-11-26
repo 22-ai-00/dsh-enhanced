@@ -24,9 +24,9 @@ const DSH_HOST_PACKAGES = [
   '@deepseek-ai/dsh-user-approval',
 ] as const
 
-describe('@dsh-enhanced/acp package contract', () => {
+describe('@dsh-ray/acp package contract', () => {
   it('uses the stable Cordis identity and native service injections', () => {
-    expect(name).toBe('dsh-enhanced-acp')
+    expect(name).toBe('dsh-ray-acp')
     expect(inject).toEqual(['agentDefaultModel', 'agentPresets', 'agents', 'llm'])
   })
 

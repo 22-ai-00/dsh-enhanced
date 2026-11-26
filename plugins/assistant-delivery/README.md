@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-delivery
+# @dsh-ray/assistant-delivery
 
 本地安装初始化可使用 `ensurePrincipalLocally({ databasePath, principal })`：只在空库创建 owner，已有相同 active owner 时原样返回；不同身份、linked 或 revoked 均拒绝。它不具有 `pairPrincipalLocally()` 的 owner 交接副作用，适合可重复安装流程；显式交接继续使用原 API。
 
@@ -17,13 +17,13 @@
 - `@deepseek-ai/dsh-goal`：可选原生目标服务；启用 `agentGoalContinuationTimeoutMs` 时还须由 Host 挂载同版本 `dsh-goal-round-driver`，仅安装服务不产生自动续跑
 - `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
 - Cordis：`^4.1.0`
-- `@dsh-enhanced/assistant-policy`：同批发布版本，硬依赖
+- `@dsh-ray/assistant-policy`：同批发布版本，硬依赖
 - Preference Learning 是反向订阅 `subscribePreferenceFeedback()` 的可选下游；Delivery 不声明对它的 peer/runtime 依赖，避免消息核心与学习插件形成双向包依赖
 - 真实多轮恢复还要求 profile 已配置官方 `ctx.sessionPersistence` provider；缺失时新建空 session 可以成功，但冷 resume 会进入有界失败/死信路径。
 
 ```sh
-dsh plugin --profile headless add @dsh-enhanced/assistant-policy
-dsh plugin --profile headless add @dsh-enhanced/assistant-delivery
+dsh plugin --profile headless add @dsh-ray/assistant-policy
+dsh plugin --profile headless add @dsh-ray/assistant-delivery
 dsh --profile headless --dump-config
 ```
 
@@ -270,7 +270,7 @@ Session 续约间隔取有效 lease 的约三分之一，有效期限使用 `min
 - `/feedback`：提交固定枚举的响应偏好，或对 exact Automation 结果提交任务目标状态；在 Delivery 本地处理，不恢复 Agent、不交给模型。
 - `/learning`：查看状态或 content-free T1 摘要、导出版本化稳定 JSON、暂停、恢复、按 exact T1 key 回滚或清除当前 workspace + preset 的偏好学习；只允许 exact active owner，在 Delivery 本地处理，不恢复 Agent、不交给模型。
 - `/autonomy`（含 `/autonomy enable`、`/autonomy disable`、`/autonomy upgrade` 与自然语言启停/升级指令）：由 active owner 触发整体助手自迭代启停与升级恢复；不恢复 Agent、不交给模型。
-- `/version`（别名 `/autonomy version` 及简洁自然语言如“查看版本”“自己迭代了多少次？”）：已授权成员只读查看当前 `dsh-enhanced`、Host、插件概览与自迭代演进统计（`dsh-rsi/version/v1`）；优先委托 `ownerConsole.versionInfo()`，未挂载时使用只读兜底采集器，不恢复 Agent、不交给模型。
+- `/version`（别名 `/autonomy version` 及简洁自然语言如“查看版本”“自己迭代了多少次？”）：已授权成员只读查看当前 `dsh-ray`、Host、插件概览与自迭代演进统计（`dsh-ray/version/v1`）；优先委托 `ownerConsole.versionInfo()`，未挂载时使用只读兜底采集器，不恢复 Agent、不交给模型。
 
 渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。
 
@@ -492,9 +492,9 @@ Cordis 按上下文读取 service 时可能产生不同 proxy 对象，Host 不�
 ## 验证
 
 ```sh
-pnpm --filter @dsh-enhanced/assistant-delivery test
-pnpm --filter @dsh-enhanced/assistant-delivery typecheck
-pnpm --filter @dsh-enhanced/assistant-delivery build
+pnpm --filter @dsh-ray/assistant-delivery test
+pnpm --filter @dsh-ray/assistant-delivery typecheck
+pnpm --filter @dsh-ray/assistant-delivery build
 pnpm --dir plugins/assistant-delivery pack --dry-run
 ```
 
@@ -509,7 +509,7 @@ Host 可用 `inspectOwnerForegroundLearningTask()` 将 Evaluation 增量结果�
 
 ## 原生 Web owner 接入
 
-可选的 `@dsh-enhanced/assistant-web-owner` 消费受信 Host API `bindNativeWebOwner(ctx, config)`。每个 Delivery 服务只允许一个活动 Web Controller capability；身份必须是已配对、当前 active owner 的 `web` principal，workspace/preset 和 owner record/version 在颁发时固定。此 API 不暴露内部 lease manager，也不对任意同进程 Host 代码宣称沙箱隔离。
+可选的 `@dsh-ray/assistant-web-owner` 消费受信 Host API `bindNativeWebOwner(ctx, config)`。每个 Delivery 服务只允许一个活动 Web Controller capability；身份必须是已配对、当前 active owner 的 `web` principal，workspace/preset 和 owner record/version 在颁发时固定。此 API 不暴露内部 lease manager，也不对任意同进程 Host 代码宣称沙箱隔离。
 
 新 Web Session 先在同一 construction lease 下创建并 flush，再在 SQLite 事务中创建 binding 并提升该 lease 的 target；中间不会失去占用或出现第二执行者。文本 Inbox 直接原子 claimed，native-admission/native-dispatch-started 标记保证崩溃后不被普通入站 worker 重放。原生 inserted/claimed 的确切消息证明连接到既有当前 owner 回合与前台验收协议。空闲、超时、撤权或 scope 卸载调用实际 memoized disposer；未完成清理不记 quiescent。
 
@@ -519,7 +519,7 @@ Host 可用 `inspectOwnerForegroundLearningTask()` 将 Evaluation 增量结果�
 
 可选 Host 接口 `registerForegroundTaskObserver()` 只接受当前 Control Plane 拥有的注册，在认证 Inbox 的执行绑定后同步通知开始，资源释放并保存真实执行回执后通知结束。它不改变 schema 23 或学习来源摘要，不注册模型工具；注销、owner/服务换代及重启后不补发历史事件，观察错误不影响正常聊天。部署版本与 readiness 核对由 [Control Plane](../plugin-control-plane) 持有；这些事件本身不证明任务质量或具体工具调用。
 
-Host 编排可从 `@dsh-enhanced/assistant-delivery/types` 读取无服务初始化的公开类型；该入口不激活 Delivery，也不授予消息发送权限。根构建先生成此类型入口，避免 Evaluation benchmark 与 Delivery 服务声明形成构建环。
+Host 编排可从 `@dsh-ray/assistant-delivery/types` 读取无服务初始化的公开类型；该入口不激活 Delivery，也不授予消息发送权限。根构建先生成此类型入口，避免 Evaluation benchmark 与 Delivery 服务声明形成构建环。
 
 ## Host 回放的回复阻断
 

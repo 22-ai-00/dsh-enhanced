@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { PluginCreationVerificationCertificate, SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import type { PluginCreationVerificationCertificate, SourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { captureCreationCapabilitySource, creationCapabilitySourceDigest,
   type CreationCapabilitySourceSnapshot } from '../src/creation-capability-source.js'
@@ -250,17 +250,17 @@ describe('revision of archived created plugin through the real Git generator', (
       },
       peerDependencies: {
         ...(parsedManifest.peerDependencies as Record<string, string> | undefined),
-        '@dsh-enhanced/assistant-delivery': '>=0.1.0',
+        '@dsh-ray/assistant-delivery': '>=0.1.0',
       },
       peerDependenciesMeta: {
         ...(parsedManifest.peerDependenciesMeta as Record<string, { optional: boolean }> | undefined),
-        '@dsh-enhanced/assistant-delivery': { optional: true },
+        '@dsh-ray/assistant-delivery': { optional: true },
       },
     }
     const revisedPatch = [
       '- insert:',
-      `    - id: dsh-enhanced-${name}`,
-      `      name: '@dsh-enhanced/${name}'`,
+      `    - id: dsh-ray-${name}`,
+      `      name: '@dsh-ray/${name}'`,
       '      inject:',
       '        - assistantDelivery',
       '      config:',
@@ -304,8 +304,8 @@ describe('revision of archived created plugin through the real Git generator', (
     }
     const uiRevisedPatch = [
       '- insert:',
-      `    - id: dsh-enhanced-${name}`,
-      `      name: '@dsh-enhanced/${name}'`,
+      `    - id: dsh-ray-${name}`,
+      `      name: '@dsh-ray/${name}'`,
       '      inject:',
       '        - typert',
       '      ui:',

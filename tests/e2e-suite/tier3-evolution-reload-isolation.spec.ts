@@ -149,7 +149,7 @@ describe('Tier 3 Pairwise — F08–F14, F02 & F16: Evolution, Reload, Isolation
       {
         path: 'package.json',
         content: JSON.stringify({
-          name: '@dsh-enhanced/demo-svc',
+          name: '@dsh-ray/demo-svc',
           version: '0.2.0',
           main: './lib/index.js',
           dsh: { pluginKind: 'service', bundle: { patch: './cordis.patch.yml' } },
@@ -157,7 +157,7 @@ describe('Tier 3 Pairwise — F08–F14, F02 & F16: Evolution, Reload, Isolation
       },
       {
         path: 'cordis.patch.yml',
-        content: '- insert:\n  - id: dsh-enhanced-demo-svc\n    name: "@dsh-enhanced/demo-svc"\n    config: {}\n',
+        content: '- insert:\n  - id: dsh-ray-demo-svc\n    name: "@dsh-ray/demo-svc"\n    config: {}\n',
       },
     ]
     expect(() => validateFiles(v2SourceFiles)).not.toThrow()
@@ -165,8 +165,8 @@ describe('Tier 3 Pairwise — F08–F14, F02 & F16: Evolution, Reload, Isolation
     expect(runnerMod.isPluginKind('service')).toBe(true)
 
     const svcTgz = packPluginEntries({
-      'package/package.json': JSON.stringify({ name: '@dsh-enhanced/demo-svc', version: '0.2.0', type: 'module', main: './lib/index.js' }),
-      'package/cordis.patch.yml': '- insert:\n  - id: demo-svc\n    name: "@dsh-enhanced/demo-svc"\n',
+      'package/package.json': JSON.stringify({ name: '@dsh-ray/demo-svc', version: '0.2.0', type: 'module', main: './lib/index.js' }),
+      'package/cordis.patch.yml': '- insert:\n  - id: demo-svc\n    name: "@dsh-ray/demo-svc"\n',
       'package/lib/index.js': `
         import { Service } from '@deepseek-ai/cordis'
         class DemoService extends Service {
@@ -212,7 +212,7 @@ describe('Tier 3 Pairwise — F08–F14, F02 & F16: Evolution, Reload, Isolation
 
     try {
       await writeBundlePackage(siblingDir, {
-        name: '@dsh-enhanced/sibling-stable',
+        name: '@dsh-ray/sibling-stable',
         version: '0.1.0',
         body: `
 export const name = 'sibling-stable'
@@ -223,7 +223,7 @@ export function apply(ctx) {
 `,
       })
       await writeBundlePackage(v1Dir, {
-        name: '@dsh-enhanced/demo-svc',
+        name: '@dsh-ray/demo-svc',
         version: '0.1.0',
         body: `
 export const name = 'demo-svc'
@@ -233,7 +233,7 @@ export function apply(ctx) {
 `,
       })
       await writeBundlePackage(v2Dir, {
-        name: '@dsh-enhanced/demo-svc',
+        name: '@dsh-ray/demo-svc',
         version: '0.2.0',
         body: `
 export const name = 'demo-svc'
@@ -288,7 +288,7 @@ export function apply(ctx) {
       const runtime = delivery.createInProcessReloadRuntime(ctx, {
         profilePath: profileDir,
         entryId: 'candidate',
-        package: '@dsh-enhanced/demo-svc',
+        package: '@dsh-ray/demo-svc',
         stagingDir: join(ws.stateDir, 'staging'),
         hostGeneration: () => 1,
       })
@@ -301,7 +301,7 @@ export function apply(ctx) {
         previousInProcessGeneration: 1,
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/demo-svc',
+          package: '@dsh-ray/demo-svc',
           version: '0.2.0',
           artifactDigest: v2Digest,
           patchDigest: v2PatchDigest,
@@ -343,7 +343,7 @@ export function apply(ctx) {
     await mkdir(profileDir, { recursive: true, mode: 0o700 })
 
     await writeBundlePackage(v1Dir, {
-      name: '@dsh-enhanced/cand-svc',
+      name: '@dsh-ray/cand-svc',
       version: '0.1.0',
       body: `
 export const name = 'cand-svc'
@@ -353,7 +353,7 @@ export function apply(ctx) {
 `,
     })
     await writeBundlePackage(v2CrashDir, {
-      name: '@dsh-enhanced/cand-svc',
+      name: '@dsh-ray/cand-svc',
       version: '0.1.84',
       body: `
 export const name = 'cand-svc'
@@ -445,7 +445,7 @@ export function apply() {
         running: { artifactDigest: await delivery.computeInProcessArtifactDigest({ sourceDir: v1Dir }), patchDigest: badPatchDigest },
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/cand-svc',
+          package: '@dsh-ray/cand-svc',
           version: '0.1.84',
           artifactDigest: badDigest,
           patchDigest: badPatchDigest,
@@ -559,7 +559,7 @@ export function apply() {
                 running: { artifactDigest: await delivery.computeInProcessArtifactDigest({ sourceDir: v1Dir }), patchDigest: badPatchDigest },
                 mode: 'artifact-replace',
                 target: {
-                  package: '@dsh-enhanced/cand-svc',
+                  package: '@dsh-ray/cand-svc',
                   version: '0.1.84',
                   artifactDigest: badDigest,
                   patchDigest: badPatchDigest,
@@ -622,7 +622,7 @@ export function apply() {
         inProcessGeneration: 1,
         running: { artifactDigest: badDigest, patchDigest: badPatchDigest },
         target: {
-          package: '@dsh-enhanced/cand-svc',
+          package: '@dsh-ray/cand-svc',
           version: '0.1.84',
           artifactDigest: badDigest,
           patchDigest: badPatchDigest,
@@ -664,7 +664,7 @@ export function apply() {
       {
         path: 'package.json',
         content: JSON.stringify({
-          name: '@dsh-enhanced/ch-er03',
+          name: '@dsh-ray/ch-er03',
           version: '0.1.0',
           main: './lib/index.js',
           dsh: { pluginKind: 'channel', bundle: { patch: './cordis.patch.yml' } },
@@ -672,7 +672,7 @@ export function apply() {
       },
       {
         path: 'cordis.patch.yml',
-        content: '- insert:\n  - id: dsh-enhanced-ch-er03\n    name: "@dsh-enhanced/ch-er03"\n    config: {}\n',
+        content: '- insert:\n  - id: dsh-ray-ch-er03\n    name: "@dsh-ray/ch-er03"\n    config: {}\n',
       },
     ]
     const uiFiles = [
@@ -680,7 +680,7 @@ export function apply() {
       {
         path: 'package.json',
         content: JSON.stringify({
-          name: '@dsh-enhanced/ui-er03',
+          name: '@dsh-ray/ui-er03',
           version: '0.1.0',
           main: './lib/index.js',
           dsh: { pluginKind: 'ui', bundle: { patch: './cordis.patch.yml' } },
@@ -688,7 +688,7 @@ export function apply() {
       },
       {
         path: 'cordis.patch.yml',
-        content: '- insert:\n  - id: dsh-enhanced-ui-er03\n    name: "@dsh-enhanced/ui-er03"\n    config: {}\n',
+        content: '- insert:\n  - id: dsh-ray-ui-er03\n    name: "@dsh-ray/ui-er03"\n    config: {}\n',
       },
     ]
     expect(() => validateFiles(channelFiles)).not.toThrow()
@@ -700,7 +700,7 @@ export function apply() {
     // Protected plugin target is rejected by source-revision binding check
     const validateBinding = getExportFn<(input: Record<string, unknown>) => unknown>(sr, 'validateSourceRevisionBinding')
     expect(() => validateBinding({
-      pluginName: '@dsh-enhanced/assistant-policy',
+      pluginName: '@dsh-ray/assistant-policy',
       baseCommit: 'a'.repeat(40),
       parentSourceDigest: sha256Hex('p'),
     })).toThrow()
@@ -1439,7 +1439,7 @@ export function apply() {
 
     const patchPath = join(ws.dshHome, 'profiles', 'web', 'cordis.patch.yml')
     await mkdir(dirname(patchPath), { recursive: true, mode: 0o700 })
-    await writeFile(patchPath, `- id: dsh-enhanced-assistant-isolation\n  name: "@dsh-enhanced/assistant-isolation"\n  config:\n    grants:\n      - id: repo\n        expiresAt: ${Date.now() + 600_000}\n`, { mode: 0o600 })
+    await writeFile(patchPath, `- id: dsh-ray-assistant-isolation\n  name: "@dsh-ray/assistant-isolation"\n  config:\n    grants:\n      - id: repo\n        expiresAt: ${Date.now() + 600_000}\n`, { mode: 0o600 })
 
     const prevEventSource = process.env.DSH_REPO_EVENT_SOURCE
     const prevLog = process.env.DSH_REPO_DELIVERY_FIXTURE_LOG
@@ -1667,12 +1667,12 @@ export function apply() {
     const r3V2Dir = join(ws.root, 'bundles', 'r3-v2')
     await mkdir(profileDir, { recursive: true, mode: 0o700 })
     await writeBundlePackage(r3V1Dir, {
-      name: '@dsh-enhanced/r3-demo-svc',
+      name: '@dsh-ray/r3-demo-svc',
       version: '0.1.0',
       body: "export const name = 'r3-svc'\nexport function apply(ctx) { ctx.provide('demoR3Svc', () => 'r3-v1') }\n",
     })
     await writeBundlePackage(r3V2Dir, {
-      name: '@dsh-enhanced/r3-demo-svc',
+      name: '@dsh-ray/r3-demo-svc',
       version: '0.2.0',
       body: "export const name = 'r3-svc'\nexport function apply(ctx) { ctx.provide('demoR3Svc', () => 'r3-v2') }\n",
     })
@@ -1799,7 +1799,7 @@ export function apply() {
         running: { artifactDigest: v1Digest, patchDigest: v2PatchDigest },
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/r3-demo-svc',
+          package: '@dsh-ray/r3-demo-svc',
           version: '0.2.0',
           artifactDigest: v2Digest,
           patchDigest: v2PatchDigest,

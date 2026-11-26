@@ -1,6 +1,6 @@
 import { appendFileSync } from 'node:fs'
 
-export const name = 'dsh-enhanced-autonomy-deepseek-test-transport'
+export const name = 'dsh-ray-autonomy-deepseek-test-transport'
 export const inject = ['llm', 'assistantGoals']
 const endpoint = 'https://api.deepseek.com/chat/completions'
 const objective = 'Create a shell program that reads two integers and prints their sum'

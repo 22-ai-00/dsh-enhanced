@@ -1,4 +1,4 @@
-import type { ExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
+import type { ExternalEventEnvelope } from '@dsh-ray/assistant-automations/external-event'
 
 /** A stable production cursor for a single configured event trigger. */
 export interface EventSourceSnapshot {

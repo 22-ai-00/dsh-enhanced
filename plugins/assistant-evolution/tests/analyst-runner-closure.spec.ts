@@ -17,15 +17,15 @@ import { Session, SessionId, SESSION_FORMAT_VERSION, type UserMessage } from '@d
 import {
   acceptanceDigest,
   goalDefinitionSituation,
-} from '@dsh-enhanced/task-acceptance-contract'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
+} from '@dsh-ray/task-acceptance-contract'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-ray/assistant-verifier'
 import type {
   AcceptedExecution,
   AcceptanceTask,
   TaskAcceptanceProducer,
   TaskAcceptanceRegistration,
-} from '@dsh-enhanced/assistant-verifier'
+} from '@dsh-ray/assistant-verifier'
 import { afterEach, describe, expect, test } from 'vitest'
 // The REAL automation runner under test. The package entry does not export it,
 // so — exactly as this suite already reaches for the built sibling goals ledger
@@ -355,7 +355,7 @@ async function fixture(dryRunAdapter = false): Promise<Target & {
   ctx.provide('assistantDelivery', {
     prepareAgentApproval: () => Object.freeze({
       routeVersion: 2,
-      sourceId: 'dsh-enhanced-assistant-evolution',
+      sourceId: 'dsh-ray-assistant-evolution',
       bindingId: 'analyst-owner-route',
       bindingVersion: 3,
       bindingGeneration: 2,

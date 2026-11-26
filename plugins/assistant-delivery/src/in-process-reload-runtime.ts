@@ -43,8 +43,8 @@ const MAX_TIMEOUT_MS = 120_000
 
 /** Packages that must never be hot-reloaded in-process. */
 export const IN_PROCESS_RELOAD_DENYLIST: readonly string[] = Object.freeze([
-  '@dsh-enhanced/plugin-control-plane',
-  '@dsh-enhanced/assistant-delivery',
+  '@dsh-ray/plugin-control-plane',
+  '@dsh-ray/assistant-delivery',
 ])
 
 const DENIED_PACKAGES = new Set(IN_PROCESS_RELOAD_DENYLIST)
@@ -478,7 +478,7 @@ function findPackageRootForEntry(entryFilePath: string): { packageRoot: string; 
     const stat = lstatSync(pkgPath, { throwIfNoEntry: false })
     if (stat && !stat.isSymbolicLink() && stat.isFile()) {
       const parsed = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown; private?: unknown }
-      if (typeof parsed.name === 'string' && parsed.name !== 'dsh-enhanced-monorepo') {
+      if (typeof parsed.name === 'string' && parsed.name !== 'dsh-ray-monorepo') {
         return { packageRoot: current, packageName: parsed.name }
       }
       return undefined

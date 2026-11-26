@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdtemp, readdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { ControlPlaneCliError } from './errors.js'
 import { runLocalBuffer, runLocalCommand } from './source-workspace.js'
 

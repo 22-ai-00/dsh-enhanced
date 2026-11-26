@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import { WorkItemError } from './types.js'
 
 export const MAX_CONTINUATION_INPUT_BYTES = 262144

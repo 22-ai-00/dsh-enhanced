@@ -26,10 +26,10 @@ test('a packed Verifier resolves its Isolation runner in a cold profile without 
     const sharedLibraries = await snapshotPackageLibraries(repository, packedPackages)
     const workspace = join(root, 'workspace')
     await copyPackWorkspace(repository, workspace, packedPackages)
-    expect(await realpath(join(workspace, 'plugins', 'assistant-verifier', 'node_modules', '@dsh-enhanced', 'assistant-isolation')))
+    expect(await realpath(join(workspace, 'plugins', 'assistant-verifier', 'node_modules', '@dsh-ray', 'assistant-isolation')))
       .toBe(await realpath(join(workspace, 'plugins', 'assistant-isolation')))
     const profile = join(root, 'profile')
-    const scope = join(profile, 'node_modules', '@dsh-enhanced')
+    const scope = join(profile, 'node_modules', '@dsh-ray')
     await mkdir(scope, { recursive: true })
     for (const [kind, slug] of packedPackages) {
       const artifacts = join(root, `pack-${slug}`)
@@ -50,7 +50,7 @@ test('a packed Verifier resolves its Isolation runner in a cold profile without 
       exports: Record<string, { default: string }>
     }
     const isolationManifest = JSON.parse(await readFile(join(scope, 'assistant-isolation', 'package.json'), 'utf8')) as { version: string }
-    expect(manifest.dependencies['@dsh-enhanced/assistant-isolation']).toBe(isolationManifest.version)
+    expect(manifest.dependencies['@dsh-ray/assistant-isolation']).toBe(isolationManifest.version)
     expect(manifest.dsh.bundle.patch).toBe('./cordis.patch.yml')
     expect(manifest.exports['./linux-behavior-runtime']?.default).toBe('./lib/linux-behavior-runtime.js')
     expect(manifest.exports['./plugin-behavior-config']?.default).toBe('./lib/plugin-behavior-config.js')
@@ -69,7 +69,7 @@ test('a packed Verifier resolves its Isolation runner in a cold profile without 
     const missing = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(runner)})`],
       { cwd: profile, encoding: 'utf8', timeout: 10_000 })
     expect(missing.status).not.toBe(0)
-    expect(missing.stderr).toContain("Cannot find package '@dsh-enhanced/assistant-isolation'")
+    expect(missing.stderr).toContain("Cannot find package '@dsh-ray/assistant-isolation'")
     await rename(disabled, isolation)
     const home = join(root, 'home')
     await mkdir(home)
@@ -78,8 +78,8 @@ test('a packed Verifier resolves its Isolation runner in a cold profile without 
     const loaded = spawnSync(process.execPath, ['--input-type=module', '-e',
       `import {createRequire} from 'node:module';
 const require=createRequire(${JSON.stringify(join(profile, 'entry.mjs'))});
-const config=require('@dsh-enhanced/assistant-verifier/plugin-behavior-config');
-const linux=require('@dsh-enhanced/assistant-verifier/linux-behavior-runtime');
+const config=require('@dsh-ray/assistant-verifier/plugin-behavior-config');
+const linux=require('@dsh-ray/assistant-verifier/linux-behavior-runtime');
 if(typeof config.validateCreationBehaviorDeploymentConfig!=='function'
  ||typeof linux.verifyLinuxPluginBehaviorAdoptionRuntime!=='function') throw Error('packed adoption exports missing');
 const {PluginBehaviorRunner}=await import(${JSON.stringify(runner)});

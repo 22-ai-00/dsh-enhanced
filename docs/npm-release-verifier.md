@@ -75,7 +75,7 @@ Local tests exercise real TLS, both signed receipt protocols, altered authority/
 
 Current delivery status and verification limits are maintained in [RSI status](rsi-status.md). Engineering checks and live registry observations remain separate evidence.
 
-The historical real npm readback checked both signed receipt protocols for `@dsh-enhanced/plugin-control-plane@0.1.32`. Its 195,256 downloaded bytes matched the SHA-512 in the committed release fixture. The adapter independently fetched the real registry artifact for each verification; authorization, owner signature, auxiliary build files and ambiguous-publish history were explicit disposable fixtures. Raw public keys and receipts belong in local evidence or CI artifacts; they are not shipped in this repository. The probe removes its temporary private keys and state.
+The historical real npm readback checked both signed receipt protocols for `@dsh-ray/plugin-control-plane@0.1.32`. Its 195,256 downloaded bytes matched the SHA-512 in the committed release fixture. The adapter independently fetched the real registry artifact for each verification; authorization, owner signature, auxiliary build files and ambiguous-publish history were explicit disposable fixtures. Raw public keys and receipts belong in local evidence or CI artifacts; they are not shipped in this repository. The probe removes its temporary private keys and state.
 
 Reproduce after building Control Plane:
 

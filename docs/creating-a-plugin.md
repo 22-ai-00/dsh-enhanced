@@ -16,7 +16,7 @@ pnpm create:plugin my-plugin
 
 在 `package.json` 中检查：
 
-- `name` 是最终发布名；默认是 `@dsh-enhanced/<name>`。
+- `name` 是最终发布名；默认是 `@dsh-ray/<name>`。
 - `dsh.bundle.patch` 固定指向 `./cordis.patch.yml`。
 - `files` 包含 `lib`、patch、README 和许可证。
 - DSH 宿主提供的 Cordis/service 包同时出现在 peer 与开发依赖中。

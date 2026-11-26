@@ -9,13 +9,13 @@ import type {
   MemoryProposalResult,
   MemoryRecord,
   PersonalMemoryService,
-} from '@dsh-enhanced/personal-memory'
+} from '@dsh-ray/personal-memory'
 import type {
   PersonalWikiService,
   WikiPageStatus,
   WikiPageType,
   WikiProposalResult,
-} from '@dsh-enhanced/personal-wiki'
+} from '@dsh-ray/personal-wiki'
 import { registerMemoryWikiBridgeTools } from './tools.js'
 
 export interface Config {

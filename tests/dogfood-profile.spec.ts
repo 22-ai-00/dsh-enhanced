@@ -13,7 +13,7 @@ import { applyDogfoodPluginPreset } from '../plugins/assistant-policy/lib/plugin
 import { applyWebOwnerAutonomySetup } from '../plugins/assistant-web-owner/lib/index.js'
 import { prepareWebOwnerProfile } from '../plugins/assistant-web-owner/src/setup.ts'
 import { AssistantWorkItemsService, ConfigSchema as WorkItemsConfigSchema } from '../plugins/assistant-work-items/lib/index.js'
-import { collectGrowthReport } from '../packages/dsh-rsi-cli/lib/index.js'
+import { collectGrowthReport } from '../packages/dsh-ray/lib/index.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const installer = join(root, 'scripts', 'install', 'install-local.sh')
@@ -99,13 +99,13 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
     expect(example.applyCommands).toHaveLength(5)
     expect(example.applyCommands[0]).toContain('--scenario web')
     expect(example.applyCommands[0]).toContain('--plugin-preset dogfood')
-    expect(example.applyCommands[1]).toContain('dsh-rsi open --profile web')
+    expect(example.applyCommands[1]).toContain('dsh-ray open --profile web')
     expect(example.applyCommands[2]).toContain('/profiles/web/node_modules/.bin/dsh-web-owner-setup')
     expect(example.applyCommands[2]).toContain('--autonomy-setup')
     expect(example.applyCommands[2]).toContain('--enable-memory-learning')
     expect(example.applyCommands[3]).toContain('/profiles/web/node_modules/.bin/dsh-plugin-setup')
-    expect(example.applyCommands[4]).toContain('dsh-rsi open --profile web')
-    expect(example.inspectionCommand).toBe('dsh-rsi growth-report --profile web --since 14d')
+    expect(example.applyCommands[4]).toContain('dsh-ray open --profile web')
+    expect(example.inspectionCommand).toBe('dsh-ray growth-report --profile web --since 14d')
 
     const result = spawnSync(
       '/bin/bash',
@@ -113,7 +113,7 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
       {
         cwd: root,
         encoding: 'utf8',
-        env: { ...process.env, DSH_HOME: dshHome, DSH_ENHANCED_PLATFORM_OVERRIDE: 'Darwin' },
+        env: { ...process.env, DSH_HOME: dshHome, DSH_RAY_PLATFORM_OVERRIDE: 'Darwin' },
       },
     )
     expect(result.status, result.stderr).toBe(0)
@@ -137,21 +137,21 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
 
     // Materialize profile package.json + node_modules markers so profile-scoped growth-report recognizes installed families
     for (const slug of cohort) {
-      await mkdir(join(dshHome, 'profiles', 'web', 'node_modules', '@dsh-enhanced', slug), { recursive: true })
+      await mkdir(join(dshHome, 'profiles', 'web', 'node_modules', '@dsh-ray', slug), { recursive: true })
       await writeFile(
-        join(dshHome, 'profiles', 'web', 'node_modules', '@dsh-enhanced', slug, 'package.json'),
-        JSON.stringify({ name: `@dsh-enhanced/${slug}`, version: '0.1.76' }),
+        join(dshHome, 'profiles', 'web', 'node_modules', '@dsh-ray', slug, 'package.json'),
+        JSON.stringify({ name: `@dsh-ray/${slug}`, version: '0.1.76' }),
       )
     }
     await writeFile(
       join(dshHome, 'profiles', 'web', 'package.json'),
       JSON.stringify({
         private: true,
-        dependencies: Object.fromEntries(cohort.map(slug => [`@dsh-enhanced/${slug}`, '0.1.76'])),
+        dependencies: Object.fromEntries(cohort.map(slug => [`@dsh-ray/${slug}`, '0.1.76'])),
       }),
     )
 
-    // Step 1a: Initial Web-owner setup (during `dsh-rsi install --scenario web --plugin-preset dogfood`)
+    // Step 1a: Initial Web-owner setup (during `dsh-ray install --scenario web --plugin-preset dogfood`)
     const initialEffective = await buildMergedEffectiveDump(cohort, patchPath)
     const initialPlan = prepareWebOwnerProfile(
       { dshHome, profile: 'web', workspace, preset: 'standard' },
@@ -167,7 +167,7 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
     )
     expect(firstPass.changed).toBe(true)
 
-    // Step 2: `dsh-rsi open --profile web` creates the real idle Web owner Session binding + model settings
+    // Step 2: `dsh-ray open --profile web` creates the real idle Web owner Session binding + model settings
     await mkdir(dirname(initialPlan.databasePath), { recursive: true })
     const delivery = new DeliveryStore({ path: initialPlan.databasePath })
     try {
@@ -214,10 +214,10 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
       { dshHome, profile: 'web' },
       { readDump: async () => (await buildMergedEffectiveDump(cohort, patchPath)).seq },
     )
-    expect(secondPass.skipped.filter(s => s.id === 'dsh-enhanced-assistant-memory-learning')).toEqual([])
+    expect(secondPass.skipped.filter(s => s.id === 'dsh-ray-assistant-memory-learning')).toEqual([])
     expect(secondPass.skipped.filter(s => s.reason === 'not installed')).toEqual([])
     expect(secondPass.skipped).toContainEqual({
-      id: 'dsh-enhanced-assistant-work-items',
+      id: 'dsh-ray-assistant-work-items',
       reason: expect.stringMatching(/originBindingId/u),
     })
 
@@ -227,18 +227,18 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
       config?: Record<string, unknown>
     }>
     const byId = new Map(finalDump.map(r => [r.id, r]))
-    expect(byId.get('dsh-enhanced-preference-learning')?.config).toMatchObject({
+    expect(byId.get('dsh-ray-preference-learning')?.config).toMatchObject({
       enabled: true,
       autonomousT1Enabled: true,
     })
-    expect(byId.get('dsh-enhanced-assistant-evaluation')?.config).toMatchObject({
+    expect(byId.get('dsh-ray-assistant-evaluation')?.config).toMatchObject({
       notificationOutcomesEnabled: true,
       intakeAttentionAgreementEnabled: true,
       intakeEvaluationAgreementEnabled: true,
       attentionTuningAutoAdopt: true,
       attentionLooseningEnabled: true,
     })
-    const wiCfg = byId.get('dsh-enhanced-assistant-work-items')?.config
+    const wiCfg = byId.get('dsh-ray-assistant-work-items')?.config
     expect(wiCfg).toMatchObject({
       enabled: true,
       mode: 'observe',
@@ -251,11 +251,11 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
       workRoot: join(dshHome, 'assistant-work-items', 'work'),
     }))
     expect(wiService.intakeAdmissionMode()).toBe('disabled')
-    expect(byId.get('dsh-enhanced-assistant-memory-learning')?.disabled).toBe(false)
-    expect(byId.get('dsh-enhanced-assistant-memory-learning')?.config).toMatchObject({
+    expect(byId.get('dsh-ray-assistant-memory-learning')?.disabled).toBe(false)
+    expect(byId.get('dsh-ray-assistant-memory-learning')?.config).toMatchObject({
       workItemExperiences: true,
     })
-    expect(byId.get('dsh-enhanced-assistant-association')?.config).toMatchObject({
+    expect(byId.get('dsh-ray-assistant-association')?.config).toMatchObject({
       enabled: true,
       dreaming: { enabled: true },
       intakeSignal: { enabled: true },
@@ -299,7 +299,7 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
     const cohort = example.installedCohort
     const patchPath = join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
     await writeFile(patchPath, [
-      '- id: dsh-enhanced-assistant-work-items',
+      '- id: dsh-ray-assistant-work-items',
       '  config:',
       '    enabled: false',
       '    mode: observe',
@@ -318,30 +318,30 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
       { readDump: async () => (await buildMergedEffectiveDump(cohort, patchPath)).seq },
     )
     expect(presetResult.changes).toContainEqual({
-      id: 'dsh-enhanced-assistant-work-items',
+      id: 'dsh-ray-assistant-work-items',
       key: 'enabled',
       from: false,
       to: true,
     })
     expect(presetResult.changes).toContainEqual({
-      id: 'dsh-enhanced-assistant-work-items',
+      id: 'dsh-ray-assistant-work-items',
       key: 'intakeLedger.enabled',
       from: false,
       to: true,
     })
     expect(presetResult.changes).toContainEqual({
-      id: 'dsh-enhanced-assistant-work-items',
+      id: 'dsh-ray-assistant-work-items',
       key: 'intakeLedger.evaluation.admit.enabled',
       from: undefined,
       to: true,
     })
-    expect(presetResult.skipped.some(s => s.id === 'dsh-enhanced-assistant-work-items' && s.reason.includes('originBindingId'))).toBe(false)
+    expect(presetResult.skipped.some(s => s.id === 'dsh-ray-assistant-work-items' && s.reason.includes('originBindingId'))).toBe(false)
 
     const finalDump = (await buildMergedEffectiveDump(cohort, patchPath)).seq.toJSON() as Array<{
       id: string
       config?: Record<string, unknown>
     }>
-    const wiCfg = finalDump.find(r => r.id === 'dsh-enhanced-assistant-work-items')?.config
+    const wiCfg = finalDump.find(r => r.id === 'dsh-ray-assistant-work-items')?.config
     expect(wiCfg).toMatchObject({
       enabled: true,
       mode: 'observe',

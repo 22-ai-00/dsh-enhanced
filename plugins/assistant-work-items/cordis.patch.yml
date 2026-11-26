@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-work-items
-      name: '@dsh-enhanced/assistant-work-items'
+    - id: dsh-ray-assistant-work-items
+      name: '@dsh-ray/assistant-work-items'
       inject:
         - assistantPolicy
       config:

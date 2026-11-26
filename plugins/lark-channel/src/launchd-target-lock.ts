@@ -17,7 +17,7 @@ export async function withLaunchAgentTargetLock<T>(
     || (temporary.mode & 0o7777) !== 0o1777) {
     throw new Error('lark-channel setup: unsafe launchd target lock directory')
   }
-  const lockPath = `/tmp/.dsh-enhanced-launchd-${uid}-${input.profile}.lock`
+  const lockPath = `/tmp/.dsh-ray-launchd-${uid}-${input.profile}.lock`
   let descriptor: Awaited<ReturnType<typeof open>> | undefined
   try {
     descriptor = await open(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600)

@@ -4,7 +4,7 @@ import { validateCreationBehaviorDeploymentConfig, validatePluginBehaviorDeploym
 
 // This deployment validator must stay usable in copied programs without loading
 // Isolation's runtime or acquiring any state/kernel resources.
-vi.mock('@dsh-enhanced/assistant-isolation', () => { throw new Error('unexpected Isolation runtime import') })
+vi.mock('@dsh-ray/assistant-isolation', () => { throw new Error('unexpected Isolation runtime import') })
 
 function linux(): LinuxPluginBehaviorRunnerConfig {
   const path = '/approved/behavior-runtime'

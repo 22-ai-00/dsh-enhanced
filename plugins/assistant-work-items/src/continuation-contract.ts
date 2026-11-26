@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { HostAutomationDefinition, HostAgentExecutionContract } from '@dsh-enhanced/assistant-automations'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import type { HostAutomationDefinition, HostAgentExecutionContract } from '@dsh-ray/assistant-automations'
 import type { NormalizedConfig } from './config.js'
 import type { PeerOwnerRouteReceipt } from './peers.js'
 import type { WorkItemRecord } from './types.js'

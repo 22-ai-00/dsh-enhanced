@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { inspectLinuxRunnerState, prepareLinuxRunnerState, type LinuxRunnerStateSeal } from '@dsh-enhanced/assistant-isolation'
+import { inspectLinuxRunnerState, prepareLinuxRunnerState, type LinuxRunnerStateSeal } from '@dsh-ray/assistant-isolation'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { RsiSetupManifest } from './rsi-profile.js'
 import { rsiBuildResources as io } from './rsi-build.js'

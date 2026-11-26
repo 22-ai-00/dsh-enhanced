@@ -8,7 +8,7 @@ import { normalizeHandles } from '../plugins/credentials-keychain/src/config.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
-const valid = (expiresAt = Date.now() + 600_000) => ({ version: 2, repository: 'example/e2e-target', baseBranch: 'main', temporaryBranch: 'e2e/source-retirement', paths: ['summarize.mjs'], credentialHandle: 'github-live-e2e', credential: { id: 'github-live-e2e', provider: 'environment', consumers: ['dsh-enhanced-assistant-actions', 'dsh-enhanced-event-triggers'], purposes: ['github.commit', 'github.observe'], maxLeaseMs: 30_000, reference: { environmentName: 'DSH_E2E_GITHUB_TOKEN' } }, expiresAt, maxActions: 75, maxTotalBytes: 1_048_576, requiredChecks: [{ name: 'CI', appId: 7 }], reviewerIds: [42], minApprovals: 1, event: { maxPolls: 30, maxFires: 4, pollIntervalMs: 2_000, requestTimeoutMs: 10_000 } })
+const valid = (expiresAt = Date.now() + 600_000) => ({ version: 2, repository: 'example/e2e-target', baseBranch: 'main', temporaryBranch: 'e2e/source-retirement', paths: ['summarize.mjs'], credentialHandle: 'github-live-e2e', credential: { id: 'github-live-e2e', provider: 'environment', consumers: ['dsh-ray-assistant-actions', 'dsh-ray-event-triggers'], purposes: ['github.commit', 'github.observe'], maxLeaseMs: 30_000, reference: { environmentName: 'DSH_E2E_GITHUB_TOKEN' } }, expiresAt, maxActions: 75, maxTotalBytes: 1_048_576, requiredChecks: [{ name: 'CI', appId: 7 }], reviewerIds: [42], minApprovals: 1, event: { maxPolls: 30, maxFires: 4, pollIntervalMs: 2_000, requestTimeoutMs: 10_000 } })
 async function input(value: unknown, mode = 0o600) { const root = await mkdtemp(join(tmpdir(), 'repo-live-input-')); roots.push(root); const path = join(root, 'live.json'); await writeFile(path, JSON.stringify(value), { mode }); await chmod(path, mode); return path }
 const direct = () => {
   const value: Record<string, unknown> = { ...valid(), version: 3, deliveryMode: 'commit', maxActions: 38 }
@@ -36,7 +36,7 @@ describe('live repository E2E input', () => {
     await expect(loadLiveRepositoryInput(await input({ ...valid(), paths: ['other.mjs'] }))).rejects.toThrow(/schema/)
     await expect(loadLiveRepositoryInput(await input({ ...valid(), event: { ...valid().event, maxPolls: 4 } }))).rejects.toThrow(/schema/)
     await expect(loadLiveRepositoryInput(await input({ ...valid(), event: { ...valid().event, requestTimeoutMs: 30001 } }))).rejects.toThrow(/schema/)
-    await expect(loadLiveRepositoryInput(await input({ ...valid(), credential: { ...valid().credential, consumers: ['dsh-enhanced-assistant-actions'] } }))).rejects.toThrow(/not authorized/)
+    await expect(loadLiveRepositoryInput(await input({ ...valid(), credential: { ...valid().credential, consumers: ['dsh-ray-assistant-actions'] } }))).rejects.toThrow(/not authorized/)
   })
   it('accepts explicit direct delivery and rejects missing or mixed modes before setup', async () => {
     const value = await loadLiveRepositoryInput(await input(direct()))

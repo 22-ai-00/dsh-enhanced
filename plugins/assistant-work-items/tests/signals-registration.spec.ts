@@ -94,7 +94,7 @@ function candidate(overrides: Partial<WorkItemSignalCandidate> = {}): WorkItemSi
       sourceVersion: SIGNAL_VERSION,
       signalDigest: 'sha256:digest-watch-1',
       observedAt: T0,
-      evidence: { pullRequest: 42, repository: '22-ai-00/dsh-enhanced' },
+      evidence: { pullRequest: 42, repository: '22-ai-00/dsh-ray' },
     },
     ...overrides,
   }

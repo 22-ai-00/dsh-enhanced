@@ -1,14 +1,14 @@
-# @dsh-enhanced/assistant-association
+# @dsh-ray/assistant-association
 
-面向 DeepSeek Harness 的亚 5ms 进程内存双缓冲关联图与联想召回层（Slice S1–S4）：将 `personal-memory`、`assistant-goals`、`assistant-work-items`、`assistant-automations`、`personal-wiki`、`assistant-skills`、`event-triggers`、`assistant-dreaming`、受限隔离 Web 学习产物与确定性任务片段（Delivery + Evaluation 混合账本）统一建图并持久保存在本地 SQLite（Schema v4）中，在每步模型调用前完成同步 Aho-Corasick 实体匹配、CJK bigram BM25 回退与 ≤2 跳邻接表扩散，注入单段滞回 `<association>` 上下文块并提供 `assoc_read(id)` 按需读取工具（对 `'web'` 节点附带 `sourceUrl` 与 `fetchedAt`  provenance）；同时支持基于隐式使用信号的有界 Hebbian 边权更新、WP22 版本化参数档案自调参与精确回退、默认开启并受独立 Policy 授权的空闲做梦建边（`low` 信任与双端失效级联）、`observe` 态 `work-items` 信号发射、通过 WP04 守卫的非留出片段聚类、隐式低可信信号与生产评估池馈送，以及默认开启并受 `allowedDomains` 白名单、Policy `web.learn` 门控与 `@dsh-enhanced/assistant-isolation` OS 级沙箱约束的只读兴趣驱动 Web 学习（S4）。
+面向 DeepSeek Harness 的亚 5ms 进程内存双缓冲关联图与联想召回层（Slice S1–S4）：将 `personal-memory`、`assistant-goals`、`assistant-work-items`、`assistant-automations`、`personal-wiki`、`assistant-skills`、`event-triggers`、`assistant-dreaming`、受限隔离 Web 学习产物与确定性任务片段（Delivery + Evaluation 混合账本）统一建图并持久保存在本地 SQLite（Schema v4）中，在每步模型调用前完成同步 Aho-Corasick 实体匹配、CJK bigram BM25 回退与 ≤2 跳邻接表扩散，注入单段滞回 `<association>` 上下文块并提供 `assoc_read(id)` 按需读取工具（对 `'web'` 节点附带 `sourceUrl` 与 `fetchedAt`  provenance）；同时支持基于隐式使用信号的有界 Hebbian 边权更新、WP22 版本化参数档案自调参与精确回退、默认开启并受独立 Policy 授权的空闲做梦建边（`low` 信任与双端失效级联）、`observe` 态 `work-items` 信号发射、通过 WP04 守卫的非留出片段聚类、隐式低可信信号与生产评估池馈送，以及默认开启并受 `allowedDomains` 白名单、Policy `web.learn` 门控与 `@dsh-ray/assistant-isolation` OS 级沙箱约束的只读兴趣驱动 Web 学习（S4）。
 
 ## 安装
 
-本插件依赖 `@dsh-enhanced/assistant-policy`（通过 `inject: ['assistantPolicy']` 门控）。其余可选 Host peers（`personalMemory`、`assistantGoals`、`assistantWorkItems`、`assistantAutomations`、`assistantDelivery`、`assistantEvaluation`、`personalWiki`、`assistantSkills`、`eventTriggers`、`assistantDreaming`、`assistantVerifier`、`systemPrompt`、`tools`）均通过 `peerDependenciesMeta.*.optional = true` 延迟绑定，缺失时按可用来源优雅降级：
+本插件依赖 `@dsh-ray/assistant-policy`（通过 `inject: ['assistantPolicy']` 门控）。其余可选 Host peers（`personalMemory`、`assistantGoals`、`assistantWorkItems`、`assistantAutomations`、`assistantDelivery`、`assistantEvaluation`、`personalWiki`、`assistantSkills`、`eventTriggers`、`assistantDreaming`、`assistantVerifier`、`systemPrompt`、`tools`）均通过 `peerDependenciesMeta.*.optional = true` 延迟绑定，缺失时按可用来源优雅降级：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-policy
-dsh plugin --profile web add @dsh-enhanced/assistant-association
+dsh plugin --profile web add @dsh-ray/assistant-policy
+dsh plugin --profile web add @dsh-ray/assistant-association
 dsh --profile web --dump-config
 ```
 
@@ -71,7 +71,7 @@ dsh --profile web --dump-config
 | `webLearning.allowedDomains` | `string[]` | `[]` | 允许抓取的 HTTPS 域名白名单（拒绝 IP、通配符、`localhost`、`.local`/`.internal`/`.arpa`；空名单失败关闭）。 |
 | `webLearning.seedUrls` | `string[]` | `[]` | 允许的 `https:` 检索/种子 URL 模板（支持 `{query}` URL 编码替换，主机须命中 `allowedDomains`）。 |
 | `webLearning.allowSubdomains` / `allowIpv6` | `boolean` / `boolean` | `false` / `false` | 是否允许白名单子域名匹配及 IPv6 公网地址。 |
-| `webLearning.isolationMode` | `'subprocess' \| 'in-process'` | `'subprocess'` | 抓取隔离模式（默认通过 `@dsh-enhanced/assistant-isolation` 在 Linux `bwrap` / macOS `sandbox-exec` / Windows Job Object OS 级沙箱、空 `0o700` 目录与剥离凭据环境的子进程中失败关闭执行）。 |
+| `webLearning.isolationMode` | `'subprocess' \| 'in-process'` | `'subprocess'` | 抓取隔离模式（默认通过 `@dsh-ray/assistant-isolation` 在 Linux `bwrap` / macOS `sandbox-exec` / Windows Job Object OS 级沙箱、空 `0o700` 目录与剥离凭据环境的子进程中失败关闭执行）。 |
 | `webLearning.intervalMs` / `idleMinMs` / `cooldownMs` | `integer` | `3600000` (1h) / `900000` (15m) / `86400000` (24h) | 运行最小间隔、最近活动空闲门槛与同 URL 重复抓取冷却期（ms）。 |
 | `webLearning.maxInterestsPerRun` / `maxRequestsPerRun` / `maxPagesPerRun` | `integer` | `3` / `5` / `3` | 单轮最多提取的兴趣主题数、HTTP 请求次数与成功页面上限。 |
 | `webLearning.maxBytesPerRequest` / `maxTotalBytesPerRun` | `integer` | `524288` (512 KiB) / `1048576` (1 MiB) | 单次请求与单轮总响应字节上限。 |
@@ -91,11 +91,11 @@ dsh --profile web --dump-config
    - **弱使用（`+α/3`）**：未触发 `assoc_read` 时，若暴露节点的**唯一实体**（排除当轮 prompt 已出现的实体以及多个暴露节点共享的实体）在模型输出文本中复现，记为弱使用（`+α * weakRatio`）；同一任务随后若再触发 `assoc_read`，仅补足差额至 `+α`。
    - **指数衰减与纠正降权（`-β`）**：超过 `nonUseGraceMs` 宽限期未被使用的边按 `hebbian.decayHalfLifeMs` 分片幂等指数衰减；当 Evaluation 记录 `withdraw` / `retract` / 非 `achieved` 纠正或 `user-feedback:not-achieved` 时，对 lookback 窗口内最近暴露或会话关联边施加 `-β` 惩罚。所有边权严格夹逼在 `[weightMin, weightMax]` 并追加审计记录到 `assoc_hebbian_events`。
 6. **WP22 版本化参数档案与自调参（Slice S2）**：
-   - 将 `{decayHalfLifeMs, maxHops, maxItems, hysteresisDeltaMilli, sourceWeightsPct}` 持久保存在不可变版本链 `assoc_param_profile_versions` / `assoc_param_profile_heads` / `assoc_param_profile_events` 中（基于 `@dsh-enhanced/assistant-growth-contract` 规范 JSON 与 SHA-256 digest 验真；若活跃行校验失败则逐级回退到经核验的父版本）。
+   - 将 `{decayHalfLifeMs, maxHops, maxItems, hysteresisDeltaMilli, sourceWeightsPct}` 持久保存在不可变版本链 `assoc_param_profile_versions` / `assoc_param_profile_heads` / `assoc_param_profile_events` 中（基于 `@dsh-ray/assistant-growth-contract` 规范 JSON 与 SHA-256 digest 验真；若活跃行校验失败则逐级回退到经核验的父版本）。
    - **自动收紧**：当窗口样本达到 `minSample` 且超时率、纠正率、低使用率或单来源噪声率超标时，按有界离散阶梯单步收紧（如降 `maxHops`/`maxItems`、缩 `decayHalfLifeMs`、升 `hysteresisDeltaMilli` 或下调高噪声来源权重）并自动进入 `observing` 观察期。
    - **放宽重放门控**：任何参数放宽（含混合收紧与放宽）均禁止直接自动采用，必须绑定不可变 `holdoutSeal`（`assoc_param_relax_proposals`）并通过 `assoc_replay_episodes` 同步热路径重放与留出健康核验（`timeouts <= parent`、`p99Ms <= hotPathBudgetMs`、`usedHits >= parent` 且 `usedHitsGain > noiseExposedGain`），决策记入 `assoc_param_relax_decisions`。
    - **精确版本回退与防震荡黑名单**：观察期内若超时率、纠正率或使用率出现显著退化，立即回退至精确 `parent_version` 并将退化配置 `params_digest` 写入 `assoc_param_rolled_back_digests`，防止后续周期重复震荡采用。
-7. **S2–S4 遥测与成长反馈账本（Schema v4）**：在既有 `assoc_step_metrics`、`assoc_exposures` 与 `assoc_holdout_assignments` 基础上提供 `assoc_read_events`、`assoc_task_telemetry` 与 `assoc_replay_episodes`（S2），Schema v3 新增 `assoc_dream_runs`、`assoc_intake_signals`、`assoc_skill_candidates`、`assoc_implicit_signals` 与 `assoc_eval_pool`，Schema v4 新增 `assoc_web_learning_runs`、`assoc_web_learning_budget_usage` 与 `assoc_web_learning_fetches`（支持 `v0/v1/v2/v3 -> v4` 幂等迁移）；供 `dsh-rsi growth-report` 第 6 节输出在线指标、跨窗口留出对照及 S3/S4 计数。
+7. **S2–S4 遥测与成长反馈账本（Schema v4）**：在既有 `assoc_step_metrics`、`assoc_exposures` 与 `assoc_holdout_assignments` 基础上提供 `assoc_read_events`、`assoc_task_telemetry` 与 `assoc_replay_episodes`（S2），Schema v3 新增 `assoc_dream_runs`、`assoc_intake_signals`、`assoc_skill_candidates`、`assoc_implicit_signals` 与 `assoc_eval_pool`，Schema v4 新增 `assoc_web_learning_runs`、`assoc_web_learning_budget_usage` 与 `assoc_web_learning_fetches`（支持 `v0/v1/v2/v3 -> v4` 幂等迁移）；供 `dsh-ray growth-report` 第 6 节输出在线指标、跨窗口留出对照及 S3/S4 计数。
 8. **空闲做梦建边与双端失效级联（Slice S3）**：`dreaming.enabled: true`（默认开启，可显式设为 `false` 关闭），在空闲门（`idleMinMs`、`intervalMs`、无运行中 Agent）、Policy `evolution`（`dream.build`）与可选预算及 Delivery active route 全部通过后，确定性生成 `trust: 'low'` 的长程 `'dream'` 边、桥接 `'abstraction'` 节点/边与绑定 `ownerScopeKey` / `trust` 的 AC 同义词（`assoc_synonyms`），并可投影可选 `assistant-dreaming` idea。所有派生节点、边与同义词均在 `assoc_derived_from` 登记全部支撑端点，任一端点被撤回（`withdrawSource`）、冲突抑制（`suppressNodeConflict`）、版本更新或 TTL 过期清理（`sweepExpiredNodesNow`）时立即级联硬删除。
 9. **扩展来源接入（Slice S3）**：
    - `personal-wiki`：通过 `inspectHostPages` 与 `onPageChange` 投影页面（`draft` 为 `low` 信任，其余为 `trusted`），归档或删除即撤回；`assoc_read` 实时校验 `wiki` 读取策略与有效状态。
@@ -110,7 +110,7 @@ dsh --profile web --dump-config
 12. **受限兴趣驱动 Web 学习（Slice S4）**：
     - 默认开启（`webLearning.enabled: true`，可显式设为 `false` 关闭），但 `allowedDomains` 默认为空且失败关闭；启用后必须依次通过非空 `allowedDomains` 白名单、紧急停止、间隔/空闲门、持久化 UTC 日预算（`assoc_web_learning_budget_usage`）、Delivery active route、可选 Policy 预算与 `Policy.authorize({ action: 'web.learn', resource: { kind: 'network', id: 'assistant-association:web-learning' } })`，任何门控拒绝均产生 0 次抓取与 0 节点。
     - 兴趣提取（`extractWebLearningInterests`）仅消费同 owner 非留出、非敏感（`sensitivity !== 'private'`）目标/工作项/做梦节点/低覆盖片段；`extractWebLearningInterests` / `scrubInterestText` 的脱敏（剥离路径、邮箱、IP、UUID、工作区/身份片段与常见凭据模式，并截断为 ≤3 词 / ≤64 字符查询）仅作为启发式纵深防御（defense-in-depth），与显式授权/门控（`webLearning.enabled` + Policy `web.learn`）、非私有敏感度过滤（排除 `sensitivity = 'private'`）、非空域名白名单（`allowedDomains`）及 OS 级隔离沙箱子进程共同生效。
-    - 默认以 `isolationMode: 'subprocess'` 通过 `@dsh-enhanced/assistant-isolation`（Linux `bwrap` namespace/只读绑定、macOS `sandbox-exec` Seatbelt、Windows Job Object）在规范 `realpath` 解析的空 `0o700` 临时沙箱工作目录和无凭据环境（`HOME`/`TMPDIR` 隔离至沙箱目录，`LC_ALL=C`，剥离 `NODE_OPTIONS`/`LD_*`/`DYLD_*` 及全部宿主密钥）中失败关闭执行只读 HTTPS `GET`（不可用时直接报错，绝不回退至非沙箱 `spawn` 或进程内执行；强制域名白名单、公网 IP DNS 钉扎、禁止私网/本地/元数据 SSRF、禁用写工具与凭据头、流式字节上限与单轮/每日预算耗尽即停并保留已成功页面）。
+    - 默认以 `isolationMode: 'subprocess'` 通过 `@dsh-ray/assistant-isolation`（Linux `bwrap` namespace/只读绑定、macOS `sandbox-exec` Seatbelt、Windows Job Object）在规范 `realpath` 解析的空 `0o700` 临时沙箱工作目录和无凭据环境（`HOME`/`TMPDIR` 隔离至沙箱目录，`LC_ALL=C`，剥离 `NODE_OPTIONS`/`LD_*`/`DYLD_*` 及全部宿主密钥）中失败关闭执行只读 HTTPS `GET`（不可用时直接报错，绝不回退至非沙箱 `spawn` 或进程内执行；强制域名白名单、公网 IP DNS 钉扎、禁止私网/本地/元数据 SSRF、禁用写工具与凭据头、流式字节上限与单轮/每日预算耗尽即停并保留已成功页面）。
     - 生成的节点统一标注 `kind: 'web'`、`trust: 'low'`、`sourcePlugin: 'assistant-association:web'`、`metadata.sourceUrl`、`metadata.fetchedAt` 与 `expiresAt`（TTL 过期或 `withdrawWebSource` 均沿 `assoc_derived_from` 级联删除节点与共现 `'entity'` 边）；`assoc_read(id)` 返回 `sourceUrl`、`fetchedAt` 与 `<association_item trust="low" ...>` 不可信边界，且 `allowLowTrust: false` 时对热路径与 `assoc_read` 完全隐藏。
 
 ## 服务接口概览
@@ -122,9 +122,9 @@ dsh --profile web --dump-config
 
 ## 权限与数据
 
-- **文件系统**：仅读写 `databasePath`（及其 `-wal` / `-shm` 伴随文件，Schema v4 本地 SQLite 账本）与同目录 `holdout.seed`；父目录权限强制 `0o700`，数据库与种子文件权限强制 `0o600`（拒绝符号链接与非当前 UID 文件）。当启用 `webLearning.enabled` 且处于默认 `isolationMode: 'subprocess'` 时，每轮创建并立即清理独立的规范 `0o700` 临时沙箱工作目录，并通过 `@dsh-enhanced/assistant-isolation` 仅向子进程开放只读宿主运行目录与唯一可写 `0o700` 沙箱目录。
+- **文件系统**：仅读写 `databasePath`（及其 `-wal` / `-shm` 伴随文件，Schema v4 本地 SQLite 账本）与同目录 `holdout.seed`；父目录权限强制 `0o700`，数据库与种子文件权限强制 `0o600`（拒绝符号链接与非当前 UID 文件）。当启用 `webLearning.enabled` 且处于默认 `isolationMode: 'subprocess'` 时，每轮创建并立即清理独立的规范 `0o700` 临时沙箱工作目录，并通过 `@dsh-ray/assistant-isolation` 仅向子进程开放只读宿主运行目录与唯一可写 `0o700` 沙箱目录。
 - **网络**：S1–S3 无网络请求。S4 仅在启用 `webLearning.enabled: true`、配置非空 `allowedDomains` 且通过 Policy `web.learn` 授权时发起只读 HTTPS `GET` 请求（OS 沙箱仅允许 `outbound-https` 出站且无监听，固定 443 端口、公网 IP DNS 钉扎、SSRF 防护、手动重定向校验、禁止写入与凭据请求头、到达请求/字节/时长预算即停）。
-- **子进程**：S1–S3 无子进程。S4 默认 `isolationMode: 'subprocess'` 通过 `@dsh-enhanced/assistant-isolation`（Linux `bwrap`、macOS `sandbox-exec`、Windows Job Object）在独立 `0o700` 沙箱目录派生只读 `web-learning-worker` 子进程，剥离全部宿主凭据环境变量并限制资源与输出上限，超时执行 `SIGTERM` → `SIGKILL`；沙箱原语不可用时严格失败关闭，绝不降级为非沙箱子进程。
+- **子进程**：S1–S3 无子进程。S4 默认 `isolationMode: 'subprocess'` 通过 `@dsh-ray/assistant-isolation`（Linux `bwrap`、macOS `sandbox-exec`、Windows Job Object）在独立 `0o700` 沙箱目录派生只读 `web-learning-worker` 子进程，剥离全部宿主凭据环境变量并限制资源与输出上限，超时执行 `SIGTERM` → `SIGKILL`；沙箱原语不可用时严格失败关闭，绝不降级为非沙箱子进程。
 - **凭据**：不读取、传递或存储用户账号、Cookie、API 密钥或 OAuth token（`holdout.seed` 仅为本地匿名分区 HMAC 密钥；S3 做梦/信号受 Policy `evolution`/`automation` 门控，`wiki` 读取校验 `wiki` 规则，S4 Web 学习剥离全部凭据环境变量并在提取兴趣前脱敏私有上下文）。
 - **浏览器**：无。
 - **安装脚本**：无。

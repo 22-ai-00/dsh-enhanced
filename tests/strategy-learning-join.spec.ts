@@ -7,7 +7,7 @@ import {
   acceptanceCanonicalJson,
   acceptanceDigest,
   goalDefinitionSituation,
-} from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/task-acceptance-contract'
 import { GoalStrategyStore } from '../plugins/assistant-goals/lib/strategy-store.js'
 import { EvolutionStore } from '../plugins/assistant-evolution/lib/store.js'
 import { canonicalEvolutionScope } from '../plugins/assistant-evolution/lib/service.js'

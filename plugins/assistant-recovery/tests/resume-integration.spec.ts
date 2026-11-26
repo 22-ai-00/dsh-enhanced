@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { HostAutomationExecutorInput } from '@dsh-enhanced/assistant-automations'
+import type { HostAutomationExecutorInput } from '@dsh-ray/assistant-automations'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RecoveryAutomationExecutor } from '../src/automation-executor.ts'
 import { RECOVERY_CATALOG_DIGEST } from '../src/catalog.ts'

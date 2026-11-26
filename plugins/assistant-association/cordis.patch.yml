@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-association
-      name: '@dsh-enhanced/assistant-association'
+    - id: dsh-ray-assistant-association
+      name: '@dsh-ray/assistant-association'
       inject:
         - assistantPolicy
       config:

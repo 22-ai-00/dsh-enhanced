@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'

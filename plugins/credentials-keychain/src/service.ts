@@ -1,6 +1,6 @@
 import { isAbsolute } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { Config } from './config.js'
 import { CredentialLedger } from './ledger.js'
 import { CredentialProviderError, readCredential, runCredentialCommand } from './providers.js'

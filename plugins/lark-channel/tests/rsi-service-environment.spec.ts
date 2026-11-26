@@ -9,7 +9,7 @@ import {
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 async function fixture() {
-  const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-rsi-service-env-')); roots.push(root)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-ray-service-env-')); roots.push(root)
   const home = join(root, '.dsh')
   await mkdir(home, { mode: 0o755 })
   await mkdir(join(home, 'rsi-service-environments'), { mode: 0o700 })

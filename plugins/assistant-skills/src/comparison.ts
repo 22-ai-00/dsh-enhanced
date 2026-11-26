@@ -1,10 +1,10 @@
 import { mkdirSync, lstatSync, realpathSync, readFileSync } from 'node:fs'
 import { isAbsolute, join, relative } from 'node:path'
 import { createRequire } from 'node:module'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { GoalScope } from '@dsh-enhanced/assistant-goals'
-import type { IsolatedVerifierRunner, LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
-import type { BenchmarkObservation, BenchmarkPlan } from '@dsh-enhanced/assistant-evaluation/benchmark'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import type { GoalScope } from '@dsh-ray/assistant-goals'
+import type { IsolatedVerifierRunner, LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
+import type { BenchmarkObservation, BenchmarkPlan } from '@dsh-ray/assistant-evaluation/benchmark'
 import type { SkillDefinition } from './definition.js'
 import { instantiate } from './definition.js'
 import { replaySkill, validateReplayTrace } from './replay.js'
@@ -94,7 +94,7 @@ function privateRoot(path: string): void {
 const require = createRequire(import.meta.url)
 const codeDigest = acceptanceDigest([readFileSync(new URL(import.meta.url), 'utf8'), readFileSync(new URL(import.meta.url.endsWith('.ts') ? './replay.ts' : './replay.js', import.meta.url), 'utf8')])
 function runtimeDigest(): string {
-  const packages = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-fs-local', '@deepseek-ai/dsh-tool-fs', '@dsh-enhanced/assistant-isolation', '@dsh-enhanced/assistant-evaluation']
+  const packages = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-fs-local', '@deepseek-ai/dsh-tool-fs', '@dsh-ray/assistant-isolation', '@dsh-ray/assistant-evaluation']
   return acceptanceDigest({ protocol: 'assistant-skills/comparison/v1', codeDigest, packages: Object.fromEntries(packages.map(name => [name, (require(`${name}/package.json`) as { version: string }).version])) })
 }
 /** Host coordinator: fixed native file-tool replay, separate isolated artifact execution, Host-side judge. */
@@ -110,7 +110,7 @@ export class SkillComparator {
     privateRoot(this.#profile.stateRoot)
     this.#runtime = runtimeDigest()
     const p = this.#profile, count = p.maxComparisons * p.cases.length * p.repeats * 2
-    this.#runner = import('@dsh-enhanced/assistant-isolation').then(({ IsolatedVerifierRunner }) => new IsolatedVerifierRunner({ backend: 'linux-native', stateRoot: join(p.stateRoot, 'verification'),
+    this.#runner = import('@dsh-ray/assistant-isolation').then(({ IsolatedVerifierRunner }) => new IsolatedVerifierRunner({ backend: 'linux-native', stateRoot: join(p.stateRoot, 'verification'),
       runtime: p.runtime, cgroupRoots: p.cgroupRoots,
       authorityDigest: acceptanceDigest(p), command: p.command, expiresAt: p.expiresAt, maxRuns: count,
       maxTotalDurationMs: count * p.verificationDurationMs, maxDurationMs: p.verificationDurationMs, maxOutputBytes: p.maxOutputBytes }))
@@ -119,7 +119,7 @@ export class SkillComparator {
   async compare(id: string, baseline: SkillDefinition, candidate: SkillDefinition, signal: AbortSignal, authorize: () => void) {
     const p = this.#profile
     const { BenchmarkStore, assertCandidateGenerationInput, assertHoldoutIsolation, benchmarkReport,
-      parseBenchmarkPlan, runBenchmark } = await import('@dsh-enhanced/assistant-evaluation/benchmark')
+      parseBenchmarkPlan, runBenchmark } = await import('@dsh-ray/assistant-evaluation/benchmark')
     if (p.dataset === undefined) throw new Error('assistant-skills: comparison requires a proven benchmark split')
     const runner = await this.#runner
     // Clone definitions and materialize every parameter set before any execution.

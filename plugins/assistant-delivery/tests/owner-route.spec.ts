@@ -1,7 +1,7 @@
 import { removeEmptyWorkItemReplySchema } from './helpers/work-item-reply-schema.js'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'

@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { isDeepStrictEqual, promisify } from 'node:util'
 import { hashLinuxRuntimeTree, prepareLinuxSystemSnapshot, readLinuxUserNamespaceMapping, verifyLinuxRuntime,
   verifyLinuxSystemSnapshotRuntimeDependencies, verifyLinuxUserNamespaceMapping, type LinuxRuntime, type LinuxSystemSnapshot,
-  type LinuxUserNamespaceMapping } from '@dsh-enhanced/assistant-isolation'
+  type LinuxUserNamespaceMapping } from '@dsh-ray/assistant-isolation'
 import { NODE_ARCHIVES, NODE_VERSION, officialArchive, prepareLinuxRsiRuntime, readLinuxRsiRuntime,
   type LinuxRsiBootstrapInput } from './rsi-linux-runtime-bootstrap.js'
 

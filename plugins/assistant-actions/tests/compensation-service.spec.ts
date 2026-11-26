@@ -8,10 +8,10 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { AssistantIsolationService } from '@dsh-enhanced/assistant-isolation'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { AssistantIsolationService } from '@dsh-ray/assistant-isolation'
 import { nativeIsolationConfig, cleanupNativeIsolation } from './helpers/native-isolation.ts'
-import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
+import { CredentialsKeychainService } from '@dsh-ray/credentials-keychain'
 import { createHash } from 'node:crypto'
 import { createServer, request as httpRequest, type Server } from 'node:http'
 import type { request as httpsRequest } from 'node:https'
@@ -177,9 +177,9 @@ async function makeHarness(options: HarnessOptions = {}) {
   ], rules: [
     { id: 'action', effect: 'allow', subject: { kind: 'agent', id: 'primary' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:fix' }, budget: { id: 'commits', amount: 1 } },
     { id: 'compensate', effect: 'allow', subject: { kind: 'agent', id: 'primary' }, actions: ['compensate'], resource: { kind: 'tool', id: 'action:github-rollback:fix' }, budget: { id: 'rollbacks', amount: 1 } },
-    { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
+    { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
   ] })
-  await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(secretRoot, 'token'), consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit', 'github.compensate'], maxLeaseMs: 30_000 }] })
+  await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(secretRoot, 'token'), consumers: ['dsh-ray-assistant-actions'], purposes: ['github.commit', 'github.compensate'], maxLeaseMs: 30_000 }] })
   ctx.provide('agents' as never, { get: (id: string) => id === owner.id ? owner : id === other.id ? other : undefined } as never)
   // Tests may switch the resolved delivery principal while a compensation is in
   // flight to prove the 100 ms authorization poll aborts it after owner change.
@@ -191,7 +191,7 @@ async function makeHarness(options: HarnessOptions = {}) {
   await ctx.plugin(AssistantIsolationService, await nativeIsolationConfig(join(root, 'isolation'), [{ id: 'offline', revision: 1, principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: root, agentPreset: 'primary', expiresAt: grant.expiresAt, maxRuns: 1, maxTotalDurationMs: 60_000 }]))
   let asks = 0
   ctx.on('approval/request', async () => { asks++; return 'allowed-once' })
-  const load = async () => await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) {
+  const load = async () => await ctx.plugin({ name: 'dsh-ray-assistant-actions', apply(runtime: Context) {
     new AssistantActionsService(runtime, { stateRoot, grants: [grant] },
       input => commitOnGitHub(input, graphqlTransport),
       undefined,

@@ -66,7 +66,7 @@ describe('one-click installers', () => {
     })
     expect(await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')).toBe('durable-session')
     expect(result.stdout).toContain('profile 生命周期事务完成：upgrade')
-    await expect(readFile(`${f.dshHome}.dsh-enhanced-transaction/state`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(`${f.dshHome}.dsh-ray-transaction/state`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     const sandboxInvocations = await readJsonLines(f.bwrapLog)
     expect(sandboxInvocations).toHaveLength(8)
     for (const invocation of sandboxInvocations) {
@@ -76,7 +76,7 @@ describe('one-click installers', () => {
       expect(invocation).toContain('--new-session')
       expect(invocation).toEqual(expect.arrayContaining(['--ro-bind', '/', '/', '--tmpfs', '/tmp']))
       expect(invocation).toEqual(expect.arrayContaining([
-        '--perms', '0400', '--ro-bind-data', '4', '/run/dsh-enhanced-lifecycle-config.mjs',
+        '--perms', '0400', '--ro-bind-data', '4', '/run/dsh-ray-lifecycle-config.mjs',
       ]))
       const bind = invocation.indexOf('--bind-fd')
       expect(invocation.slice(bind, bind + 3)).toEqual(['--bind-fd', '3', f.dshHome])
@@ -98,7 +98,7 @@ describe('one-click installers', () => {
     expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
     const preserved = await preservedLifecycleTransactions(f.dshHome)
     expect(preserved).toHaveLength(1)
-    expect(preserved[0]).toBe(`${f.dshHome}.dsh-enhanced-transaction`)
+    expect(preserved[0]).toBe(`${f.dshHome}.dsh-ray-transaction`)
     const preservedManifest = JSON.parse(await readFile(join(preserved[0]!, 'manifest.json'), 'utf8'))
     expect(preservedManifest).toMatchObject({ operation: 'upgrade', profile: 'web', state: 'failed' })
     expect(preservedManifest.failure).toContain('隔离 Host 激活失败')
@@ -127,8 +127,8 @@ describe('one-click installers', () => {
   })
 
   test.each([
-    '@dsh-enhanced/personal-assistant@1.4.0-rc.2',
-    '@dsh-enhanced/personal-assistant@1.4.0+build.7',
+    '@dsh-ray/personal-assistant@1.4.0-rc.2',
+    '@dsh-ray/personal-assistant@1.4.0+build.7',
   ])('lifecycle executor accepts exact prerelease or build npm spec %s', async target => {
     const f = await lifecycleFixture()
 
@@ -142,10 +142,10 @@ describe('one-click installers', () => {
   })
 
   test.each([
-    '@dsh-enhanced/personal-assistant@^1.4.0',
-    '@dsh-enhanced/personal-assistant@1.4.x',
-    '@dsh-enhanced/personal-assistant@latest',
-    '@dsh-enhanced/personal-assistant@next',
+    '@dsh-ray/personal-assistant@^1.4.0',
+    '@dsh-ray/personal-assistant@1.4.x',
+    '@dsh-ray/personal-assistant@latest',
+    '@dsh-ray/personal-assistant@next',
   ])('lifecycle executor rejects range or tag npm spec %s before creating a transaction', async target => {
     const f = await lifecycleFixture()
 
@@ -154,7 +154,7 @@ describe('one-click installers', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('升级目标必须是本地绝对路径或精确版本')
     expect(await readFile(f.operationLog, 'utf8')).toBe('')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('offline uninstall archives the complete old profile and preserves all external durable state', async () => {
@@ -168,14 +168,14 @@ describe('one-click installers', () => {
     const archives = await readdir(join(f.dshHome, 'uninstalled-profiles'))
     expect(archives).toHaveLength(1)
     const archived = JSON.parse(await readFile(join(f.dshHome, 'uninstalled-profiles', archives[0]!, 'package.json'), 'utf8'))
-    expect(archived.dependencies).toMatchObject({ '@dsh-enhanced/personal-assistant': '0.1.0' })
+    expect(archived.dependencies).toMatchObject({ '@dsh-ray/personal-assistant': '0.1.0' })
     expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 2, values: ['durable-goal-state', 'migrated-during-activation'] })
     expect(await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')).toBe('durable-session')
     const repeated = runLifecycle(
       ['uninstall', 'web', f.dshHome, '0'], f.dshHome, f.fakeBin, { expectedScenario: 'unsupported' },
     )
     expect(repeated.status, repeated.stderr).toBe(0)
-    expect(repeated.stdout).toContain('没有 @dsh-enhanced/* 顶层依赖')
+    expect(repeated.stdout).toContain('没有 @dsh-ray/* 顶层依赖')
     expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toEqual(archives)
   })
 
@@ -196,14 +196,14 @@ describe('one-click installers', () => {
     await expect(stat(join(f.dshHome, 'uninstalled-profiles'))).rejects.toMatchObject({ code: 'ENOENT' })
 
     const preserved = await preservedLifecycleTransactions(f.dshHome)
-    expect(preserved).toEqual([`${f.dshHome}.dsh-enhanced-transaction`])
+    expect(preserved).toEqual([`${f.dshHome}.dsh-ray-transaction`])
     const stagedHome = join(preserved[0]!, 'staged-home')
     const stagedArchives = await readdir(join(stagedHome, 'uninstalled-profiles'))
     expect(stagedArchives).toHaveLength(1)
     const archived = JSON.parse(await readFile(
       join(stagedHome, 'uninstalled-profiles', stagedArchives[0]!, 'package.json'), 'utf8',
     ))
-    expect(archived.dependencies).toMatchObject({ '@dsh-enhanced/personal-assistant': '0.1.0' })
+    expect(archived.dependencies).toMatchObject({ '@dsh-ray/personal-assistant': '0.1.0' })
     expect(readLifecycleDatabase(join(stagedHome, 'assistant-goals', 'web.sqlite'))).toEqual({
       userVersion: 2, values: ['durable-goal-state', 'migrated-during-activation'],
     })
@@ -250,7 +250,7 @@ describe('one-click installers', () => {
 
   test('refuses unbound legacy transaction residue without renaming or deleting unknown homes', async () => {
     const f = await lifecycleFixture()
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     await mkdir(transaction, { mode: 0o700 })
     await writeFile(join(transaction, 'state'), 'swapped\n')
     await rename(f.dshHome, join(transaction, 'original-home'))
@@ -269,7 +269,7 @@ describe('one-click installers', () => {
 
   test('bound recovery refuses a manifest carrying an unknown top-level field even with a valid digest (F10)', async () => {
     const f = await lifecycleFixture({ thirdParty: false })
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const originalManifest = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
     const manifest = await writeBoundLifecycleManifest({
       dshHome: f.dshHome, originalHome: f.dshHome, state: 'preparing',
@@ -287,7 +287,7 @@ describe('one-click installers', () => {
 
   test.each(['preparing', 'failed'] as const)('bound %s recovery preserves evidence while leaving the original home intact', async state => {
     const f = await lifecycleFixture({ thirdParty: false })
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const originalIdentity = await lifecycleIdentity(f.dshHome)
     const originalManifest = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
     const stagedHome = join(transaction, 'staged-home')
@@ -311,7 +311,7 @@ describe('one-click installers', () => {
 
   test('bound original-renamed recovery restores an absent home from the original backup', async () => {
     const f = await lifecycleFixture({ thirdParty: false })
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const backupHome = join(transaction, 'original-home')
     const originalIdentity = await lifecycleIdentity(f.dshHome)
     const originalManifest = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
@@ -336,7 +336,7 @@ describe('one-click installers', () => {
 
   test('bound swapped recovery restores the original and keeps the failed staged home as evidence', async () => {
     const f = await lifecycleFixture({ thirdParty: false })
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const backupHome = join(transaction, 'original-home')
     const stagedHome = join(transaction, 'staged-home')
     const originalIdentity = await lifecycleIdentity(f.dshHome)
@@ -346,7 +346,7 @@ describe('one-click installers', () => {
     await mkdir(stagedHome)
     await mkdir(join(stagedHome, 'profiles', 'web'), { recursive: true })
     await writeFile(join(stagedHome, '.lifecycle-dump-config'), stringify([
-      { id: 'dsh-enhanced-assistant-web-owner', name: '@dsh-enhanced/assistant-web-owner' },
+      { id: 'dsh-ray-assistant-web-owner', name: '@dsh-ray/assistant-web-owner' },
     ]))
     await writeFile(join(stagedHome, 'staged-marker'), 'failed staged home')
     const stagedIdentity = await lifecycleIdentity(stagedHome)
@@ -368,7 +368,7 @@ describe('one-click installers', () => {
 
   test('bound v1 committed recovery without transactionIdentity removes its backup and transaction', async () => {
     const f = await lifecycleFixture({ thirdParty: false })
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const backupHome = join(transaction, 'original-home')
     const stagedHome = join(transaction, 'staged-home')
     const originalIdentity = await lifecycleIdentity(f.dshHome)
@@ -388,7 +388,7 @@ describe('one-click installers', () => {
     expect(committedManifest).not.toHaveProperty('transactionIdentity')
     await rename(stagedHome, f.dshHome)
     expect(await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')).toContain(
-      'dsh-enhanced-assistant-web-owner',
+      'dsh-ray-assistant-web-owner',
     )
 
     const result = runRecovery('web', f.dshHome, f.fakeBin)
@@ -402,7 +402,7 @@ describe('one-click installers', () => {
 
   test('bound v1 cleanup tombstone survives partial deletion and retries without a complete backup tree', async () => {
     const f = await lifecycleFixture({ thirdParty: false })
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const backupHome = join(transaction, 'original-home')
     const stagedHome = join(transaction, 'staged-home')
     const originalIdentity = await lifecycleIdentity(f.dshHome)
@@ -424,7 +424,7 @@ describe('one-click installers', () => {
     const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(manifest).toMatchObject({
       version: 1, state: 'cleanup-started',
-      cleanup: { protocol: 'dsh-enhanced/service-cleanup/v1', phase: 'deleting' },
+      cleanup: { protocol: 'dsh-ray/service-cleanup/v1', phase: 'deleting' },
     })
     await expect(stat(join(transaction, manifest.cleanup.tombstoneName, 'profiles')))
       .rejects.toMatchObject({ code: 'ENOENT' })
@@ -440,7 +440,7 @@ describe('one-click installers', () => {
     ['digest', { inode: false, digest: true }],
   ] as const)('bound recovery fails closed on an original %s mismatch', async (_kind, mismatch) => {
     const f = await lifecycleFixture({ thirdParty: false })
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const markerPath = join(transaction, 'staged-home', 'evidence')
     await mkdir(dirname(markerPath), { recursive: true })
     await writeFile(markerPath, 'untouched evidence')
@@ -468,7 +468,7 @@ describe('one-click installers', () => {
     const f = await lifecycleFixture({ thirdParty: false })
     const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
     const first = startLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { packageBlock: true })
-    const stagedHome = join(`${f.dshHome}.dsh-enhanced-transaction`, 'staged-home')
+    const stagedHome = join(`${f.dshHome}.dsh-ray-transaction`, 'staged-home')
     await waitForFile(join(stagedHome, '.package-preparation-started'))
 
     const second = startLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
@@ -490,11 +490,11 @@ describe('one-click installers', () => {
 
   test('an externally held lifecycle lock is nonblocking and covers recovery before any residue is moved', async () => {
     const f = await lifecycleFixture({ thirdParty: false })
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const residueMarker = join(transaction, 'legacy-residue')
     await mkdir(transaction, { mode: 0o700 })
     await writeFile(residueMarker, 'must-not-move')
-    const lock = await holdExternalLifecycleLock(`${f.dshHome}.dsh-enhanced-lifecycle.lock`)
+    const lock = await holdExternalLifecycleLock(`${f.dshHome}.dsh-ray-lifecycle.lock`)
 
     try {
       const recovery = startRecovery('web', f.dshHome, f.fakeBin)
@@ -518,7 +518,7 @@ describe('one-click installers', () => {
     const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
 
     const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, {
-      configAfterUpgrade: "- id: dsh-enhanced-assistant-web-owner\n  name: '@dsh-enhanced/assistant-web-owner'\n- id: newly-installed-state\n  name: '@dsh-enhanced/personal-assistant'\n  config:\n    statePath: /srv/newly-installed/state.json",
+      configAfterUpgrade: "- id: dsh-ray-assistant-web-owner\n  name: '@dsh-ray/assistant-web-owner'\n- id: newly-installed-state\n  name: '@dsh-ray/personal-assistant'\n  config:\n    statePath: /srv/newly-installed/state.json",
     })
 
     expect(result.status).toBe(1)
@@ -575,7 +575,7 @@ describe('one-click installers', () => {
       await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
       expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
       const preserved = await preservedLifecycleTransactions(f.dshHome)
-      expect(preserved).toEqual([`${f.dshHome}.dsh-enhanced-transaction`])
+      expect(preserved).toEqual([`${f.dshHome}.dsh-ray-transaction`])
       expect(await realpath(join(preserved[0]!, 'staged-home', packageSymlinkRelative))).toBe(secondExternal)
       if (existing) expect(await realpath(join(f.dshHome, packageSymlinkRelative))).toBe(firstExternal)
       else await expect(stat(join(f.dshHome, packageSymlinkRelative))).rejects.toMatchObject({ code: 'ENOENT' })
@@ -720,10 +720,10 @@ describe('one-click installers', () => {
     expect(result.status, result.stderr).toBe(0)
     expect(result.stderr).not.toContain('只由完整本地仓库安装器提供')
     expect(result.stdout).toContain('npm cohort（dry-run）：将核验所有 bundle 都已发布为 1.4.0')
-    expect(result.stdout).toContain('@dsh-enhanced/personal-assistant@1.4.0')
-    expect(result.stdout).toContain('@dsh-enhanced/assistant-goals@1.4.0')
+    expect(result.stdout).toContain('@dsh-ray/personal-assistant@1.4.0')
+    expect(result.stdout).toContain('@dsh-ray/assistant-goals@1.4.0')
     for (const absent of ['plugin-control-plane', 'assistant-delivery', 'assistant-web-owner']) {
-      expect(result.stdout).not.toContain('@dsh-enhanced/' + absent + '@1.4.0')
+      expect(result.stdout).not.toContain('@dsh-ray/' + absent + '@1.4.0')
     }
     expect(result.stdout).not.toContain('owner-library@1.4.0')
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
@@ -732,7 +732,7 @@ describe('one-click installers', () => {
   test('npm upgrade prepares, verifies, fetches, and installs its exact metadata cohort transactionally', async () => {
     const f = await lifecycleFixture()
     const version = '1.4.0-rc.2+build.7'
-    const target = `@dsh-enhanced/personal-assistant@${version}`
+    const target = `@dsh-ray/personal-assistant@${version}`
     const packageBefore = JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))
     const workspaceBefore = await readFile(join(f.profileDirectory, 'pnpm-workspace.yaml'), 'utf8')
 
@@ -756,7 +756,7 @@ describe('one-click installers', () => {
     expect(operations.find(line => line.startsWith('pnpm-offline-install\tpresent\t'))).toContain('install --offline --frozen-lockfile')
     expect(operations.some(line => line.startsWith('pnpm-store-add') || line.startsWith('dsh-add'))).toBe(false)
     const packageAfter = JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))
-    expect(packageAfter.dependencies['@dsh-enhanced/personal-assistant']).toBe(version)
+    expect(packageAfter.dependencies['@dsh-ray/personal-assistant']).toBe(version)
     expect(packageAfter.dsh).toEqual(packageBefore.dsh)
     expect(await readFile(join(f.profileDirectory, 'pnpm-workspace.yaml'), 'utf8')).toBe(workspaceBefore)
     expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toContain(`"${target}"`)
@@ -779,7 +779,7 @@ describe('one-click installers', () => {
     expect(await readFile(f.operationLog, 'utf8')).not.toMatch(/npm-view|pnpm-prepare|dsh-add/u)
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
     expect(await readFile(join(cohortRoot, 'receipt.json'), 'utf8')).toBe('{"frozen":true}\n')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test('npm upgrade uses an isolated metadata preparation directory and a fd-bound frozen offline store', async () => {
@@ -810,7 +810,7 @@ describe('one-click installers', () => {
     ]
     const first = startInstaller(npmInstaller, args, f.dshHome, f.fakeBin, { npmBlock: true })
     await waitForFile(join(f.root, 'npm-block-started'))
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
 
     const second = startInstaller(npmInstaller, args, f.dshHome, f.fakeBin)
     const observedSecond = await Promise.race([
@@ -821,7 +821,7 @@ describe('one-click installers', () => {
     expect(observedSecond, 'the contender must fail immediately while npm view holds the lifecycle lock').toBeDefined()
     expect(observedSecond!.status).not.toBe(0)
     expect(observedSecond!.stderr).toMatch(/busy|lock|正在|并发|占用/iu)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await readFile(f.operationLog, 'utf8')).match(/^npm-view/mgu)).toHaveLength(1)
 
     await writeFile(join(f.root, 'npm-block-release'), '')
@@ -850,7 +850,7 @@ describe('one-click installers', () => {
     expect(result.status).not.toBe(0)
     expect(result.stderr).toMatch(/writable|permission|权限|写入|不可写|不安全/iu)
     expect(await readFile(f.operationLog, 'utf8')).toBe('')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test.each([
@@ -873,7 +873,7 @@ describe('one-click installers', () => {
     const operations = await readFile(f.operationLog, 'utf8')
     expect(operations).toContain(`${phaseLog}\tabsent\t`)
     expect(operations).not.toContain('pnpm-offline-install\tpresent\t')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
     expect(await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')).toBe(patchBefore)
     expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
@@ -905,7 +905,7 @@ describe('one-click installers', () => {
     expect(operations).toContain('pnpm-verify\tabsent\t')
     expect(operations).toContain('pnpm-fetch\tabsent\t')
     expect(operations).not.toContain('pnpm-offline-install\tpresent\t')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
     expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(lockfileBefore)
     await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
@@ -926,7 +926,7 @@ describe('one-click installers', () => {
     const operations = await readFile(f.operationLog, 'utf8')
     expect(operations).toContain('pnpm-prepare\tabsent\t')
     expect(operations).not.toContain('pnpm-offline-install\tpresent\t')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))).toMatchObject({ externalMutation: 'preserve' })
     expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(lockfileBefore)
     expect(await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')).toBe(patchBefore)
@@ -959,10 +959,10 @@ describe('one-click installers', () => {
   test('npm upgrade detaches and restores an external Host peer fallback before offline pnpm materialization', async () => {
     const f = await lifecycleFixture()
     const externalPeer = join(f.root, 'host-peer-fallback')
-    const peerLink = join(f.profileDirectory, 'node_modules', '@dsh-enhanced', 'lark-channel')
+    const peerLink = join(f.profileDirectory, 'node_modules', '@dsh-ray', 'lark-channel')
     const unexpectedBin = join(f.root, 'outside-bin', 'lark-channel')
     await mkdir(externalPeer, { recursive: true })
-    await writeFile(join(externalPeer, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/lark-channel', version: '0.1.0' }))
+    await writeFile(join(externalPeer, 'package.json'), JSON.stringify({ name: '@dsh-ray/lark-channel', version: '0.1.0' }))
     await mkdir(dirname(peerLink), { recursive: true })
     await symlink(externalPeer, peerLink)
 
@@ -993,13 +993,13 @@ describe('one-click installers', () => {
     const operations = await readFile(f.operationLog, 'utf8')
     expect(operations).not.toContain('pnpm-prepare\tabsent\t')
     expect(operations).not.toContain('pnpm-store-add\tabsent\t')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('npm upgrade recovers an old transaction and returns before registry or store access', async () => {
     const f = await lifecycleFixture()
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const stagedHome = join(transaction, 'staged-home')
     await mkdir(stagedHome, { recursive: true })
     await writeFile(join(stagedHome, 'recovered-evidence'), 'preserve')
@@ -1024,7 +1024,7 @@ describe('one-click installers', () => {
     const f = await lifecycleFixture()
     const homeAlias = join(f.root, 'home-alias')
     await symlink(f.dshHome, homeAlias)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const stagedHome = join(transaction, 'staged-home')
     await mkdir(stagedHome, { recursive: true })
     await writeFile(join(stagedHome, 'canonical-recovery-evidence'), 'preserve')
@@ -1085,7 +1085,7 @@ describe('one-click installers', () => {
     ], f.dshHome, undefined, environment)
 
     expect(result.status, result.stderr).toBe(0)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test('upgrade and uninstall require explicit supported lifecycle scenarios and stopped-home confirmation', async () => {
@@ -1158,7 +1158,7 @@ describe('one-click installers', () => {
     expect(result.status).toBe(code)
     expect(result.stderr).toContain(message)
     expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command[1] === 'stop')).toBe(false)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
     expect(await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')).toBe(sessionBefore)
     await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
@@ -1188,7 +1188,7 @@ describe('one-click installers', () => {
           expect(result.status, `${source} ${dryRun ? 'dry' : 'live'} ${rejected.scenario} ${rejected.operation}: ${result.stderr}`).toBe(2)
           expect(await readFile(f.operationLog, 'utf8')).toBe('')
           expect(await readFile(f.systemdLog, 'utf8')).toBe('')
-          await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+          await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
         }
       }
     },
@@ -1213,7 +1213,7 @@ describe('one-click installers', () => {
       expect(result.stdout).toContain('Supervised service-aware uninstall (Linux systemd --user)')
       expect(await readFile(f.operationLog, 'utf8')).toBe('')
       expect(await readFile(f.systemdLog, 'utf8')).toBe('')
-      await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     },
     15_000,
   )
@@ -1236,14 +1236,14 @@ describe('one-click installers', () => {
       expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toHaveLength(1)
       expect(await readFile(f.operationLog, 'utf8')).toBe('')
       expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command[1] === 'stop')).toBe(true)
-      await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     },
     15_000,
   )
 
   test('npm supervised upgrade rejects a source without read-only lifecycle capabilities before registry, store, systemd, or transaction work', async () => {
     const f = await lifecycleFixture({ systemd: {}, effectiveScenario: 'supervised' })
-    const shadow = join(f.profileDirectory, 'node_modules', '@dsh-enhanced', 'lark-channel')
+    const shadow = join(f.profileDirectory, 'node_modules', '@dsh-ray', 'lark-channel')
     await mkdir(shadow, { recursive: true })
     await writeFile(join(shadow, 'package.json'), JSON.stringify({ type: 'module', exports: './index.js' }))
     await writeFile(join(shadow, 'index.js'), 'export const unsupported = true\n')
@@ -1255,7 +1255,7 @@ describe('one-click installers', () => {
     expect(result.stderr).toMatch(/read-only operator|只读 operator|cohort/iu)
     expect(await readFile(f.operationLog, 'utf8')).toBe('')
     expect(await readFile(f.systemdLog, 'utf8')).toBe('')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('supervised service upgrade requires its target unit active before mask, stop, or transaction creation', async () => {
@@ -1271,7 +1271,7 @@ describe('one-click installers', () => {
     expect(result.stderr).toMatch(/supervised.*active/iu)
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('RSI pair upgrades target and coordinator in one Home transaction', async () => {
@@ -1280,12 +1280,12 @@ describe('one-click installers', () => {
     expect(result.status, result.stderr).toBe(0)
     expect(JSON.parse(await readFile(f.receiptPath, 'utf8')).version).toBe('0.1.1')
     for (const profile of ['web', f.coordinator]) {
-      const cp = JSON.parse(await readFile(join(f.dshHome, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'package.json'), 'utf8'))
+      const cp = JSON.parse(await readFile(join(f.dshHome, 'profiles', profile, 'node_modules', '@dsh-ray', 'plugin-control-plane', 'package.json'), 'utf8'))
       expect(cp.version).toBe('0.1.1')
       expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('active')
     }
     expect(await readFile(f.operationLog, 'utf8')).toContain(`pair-add ${f.coordinator}`)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 30_000)
 
   // Parent lifecycle flow is real; systemd, DSH and retirement API/owner
@@ -1301,7 +1301,7 @@ describe('one-click installers', () => {
     expect(operations.indexOf('scanner-host retirement=completed retired=true')).toBeGreaterThan(operations.indexOf('scanner-api apply'))
     expect(JSON.parse(await readFile(join(f.dshHome, 'old-ledger.json'), 'utf8'))).toEqual(ledger)
     expect(await readFile(join(f.dshHome, '.scanner-retired'), 'utf8')).toBe('fixture permanent marker')
-    const completed = (await readdir(f.root)).filter(name => name.startsWith('home.dsh-enhanced-transaction.completed-'))
+    const completed = (await readdir(f.root)).filter(name => name.startsWith('home.dsh-ray-transaction.completed-'))
     expect(completed).toHaveLength(1)
     const archived = join(f.root, completed[0]!), manifest = JSON.parse(await readFile(join(archived, 'manifest.json'), 'utf8'))
     const journal = manifest.supervisedLifecycle.scannerRetirement
@@ -1316,7 +1316,7 @@ describe('one-click installers', () => {
       expect((await lstat(path)).mode & 0o777).toBe(0o600)
       expect(createHash('sha256').update(await readFile(path)).digest('hex')).toBe(reference.digest)
     }
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 30_000)
 
   test('RSI scanner partial maintenance failure preserves original Home and prepared tuple evidence without first Host', async () => {
@@ -1328,10 +1328,10 @@ describe('one-click installers', () => {
     expect(await readFile(f.receiptPath, 'utf8')).toBe(receipt)
     expect((await readFile(f.operationLog, 'utf8'))).not.toContain('scanner-host')
     for (const profile of ['web', f.coordinator]) {
-      expect(JSON.parse(await readFile(join(f.dshHome, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'package.json'), 'utf8')).version).toBe('0.1.0')
+      expect(JSON.parse(await readFile(join(f.dshHome, 'profiles', profile, 'node_modules', '@dsh-ray', 'plugin-control-plane', 'package.json'), 'utf8')).version).toBe('0.1.0')
       expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('active')
     }
-    const failed = (await readdir(f.root)).filter(name => name.startsWith('home.dsh-enhanced-transaction.failed-'))
+    const failed = (await readdir(f.root)).filter(name => name.startsWith('home.dsh-ray-transaction.failed-'))
     expect(failed).toHaveLength(1)
     const archived = join(f.root, failed[0]!), manifest = JSON.parse(await readFile(join(archived, 'manifest.json'), 'utf8'))
     expect(manifest.supervisedLifecycle.scannerRetirement.phase).toBe('prepared')
@@ -1346,7 +1346,7 @@ describe('one-click installers', () => {
     const failed = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin,
       { expectedScenario: 'supervised', systemdStartFailsProfile: f.coordinator })
     expect(failed.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`, backup = join(transaction, 'original-home')
+    const transaction = `${f.dshHome}.dsh-ray-transaction`, backup = join(transaction, 'original-home')
     const before = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(before.supervisedLifecycle.scannerRetirement.phase).toBe('completed')
     expect(before.supervisedLifecycle.phase).toBe('post-swap-pending')
@@ -1368,7 +1368,7 @@ describe('one-click installers', () => {
     const crashed = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin,
       { expectedScenario: 'supervised', crashAfterCleanupMetadata: true })
     expect(crashed.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`, manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    const transaction = `${f.dshHome}.dsh-ray-transaction`, manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     const evidence = await lifecycleProfileTest.readScannerRetirementEvidence(transaction, manifest)
     expect(evidence.completion.planDigest).toBe(evidence.captured.capture.plan.planDigest)
     const before = await readFile(f.operationLog, 'utf8')
@@ -1377,7 +1377,7 @@ describe('one-click installers', () => {
     const after = await readFile(f.operationLog, 'utf8')
     expect(after.match(/^pair-add/gmu)?.length).toBe(before.match(/^pair-add/gmu)?.length)
     expect(after.match(/^scanner-api apply/gmu)?.length).toBe(1)
-    const completed = (await readdir(f.root)).filter(name => name.startsWith('home.dsh-enhanced-transaction.completed-'))
+    const completed = (await readdir(f.root)).filter(name => name.startsWith('home.dsh-ray-transaction.completed-'))
     expect(completed).toHaveLength(1)
     const archived = join(f.root, completed[0]!), archivedManifest = JSON.parse(await readFile(join(archived, 'manifest.json'), 'utf8'))
     await expect(lifecycleProfileTest.readScannerRetirementEvidence(archived, archivedManifest)).resolves.toEqual(evidence)
@@ -1393,7 +1393,7 @@ describe('one-click installers', () => {
     expect(result.stderr).toContain('42')
     expect(await readFile(f.receiptPath, 'utf8')).toBe(receipt)
     for (const profile of ['web', f.coordinator]) {
-      const cp = JSON.parse(await readFile(join(f.dshHome, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'package.json'), 'utf8'))
+      const cp = JSON.parse(await readFile(join(f.dshHome, 'profiles', profile, 'node_modules', '@dsh-ray', 'plugin-control-plane', 'package.json'), 'utf8'))
       expect(cp.version).toBe('0.1.0')
       expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('active')
     }
@@ -1416,20 +1416,20 @@ describe('one-click installers', () => {
 
   test('RSI pair rejects a coordinator already running a different cohort before stopping services', async () => {
     const f = await rsiPairLifecycleFixture()
-    const path = join(f.coordinatorPath, 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'package.json')
+    const path = join(f.coordinatorPath, 'node_modules', '@dsh-ray', 'plugin-control-plane', 'package.json')
     const manifest = JSON.parse(await readFile(path, 'utf8')); manifest.version = '0.1.2'
     await writeFile(path, JSON.stringify(manifest))
     const result = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain('安装版本与登记不一致')
     expect(await readFile(f.operationLog, 'utf8')).not.toContain('pair-add')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test.each(['installed', 'candidate'])('RSI pair refuses mixed %s target versions before stopping either service', async kind => {
     const f = await rsiPairLifecycleFixture()
     const path = kind === 'installed'
-      ? join(f.dshHome, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'personal-assistant', 'package.json')
+      ? join(f.dshHome, 'profiles', 'web', 'node_modules', '@dsh-ray', 'personal-assistant', 'package.json')
       : join(f.targets[0]!, 'package.json')
     const manifest = JSON.parse(await readFile(path, 'utf8')); manifest.version = '0.1.2'
     await writeFile(path, JSON.stringify(manifest))
@@ -1439,7 +1439,7 @@ describe('one-click installers', () => {
     expect(await readFile(f.operationLog, 'utf8')).not.toContain('pair-add')
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test('RSI pair keeps an old no-Web coordinator running when rollback readiness cannot be proved', async () => {
@@ -1490,7 +1490,7 @@ describe('one-click installers', () => {
     expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
     expect(await readFile(join(cohortRoot, 'receipt.json'), 'utf8')).toBe('{"frozen":true}\n')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test.each(['receipt', 'cohort-directory'])('RSI pair npm upgrade rejects frozen local %s before registry access or stopping services', async kind => {
@@ -1512,12 +1512,12 @@ describe('one-click installers', () => {
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
     expect(JSON.parse(await readFile(f.receiptPath, 'utf8')).version).toBe('0.1.0')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test('RSI pair retains both snapshots after stale activation and reconciles without reinstalling', async () => {
     const f = await rsiPairLifecycleFixture()
-    const modulePath = join(f.coordinatorPath, 'node_modules', '@dsh-enhanced', 'assistant-automations', 'index.js')
+    const modulePath = join(f.coordinatorPath, 'node_modules', '@dsh-ray', 'assistant-automations', 'index.js')
     const source = await readFile(modulePath, 'utf8')
     const readyPath = join(f.root, 'coordinator-ready')
     await writeFile(modulePath, "import { readFileSync, existsSync } from 'node:fs'\n" + source.replace('updatedAt: Date.now()',
@@ -1527,9 +1527,9 @@ describe('one-click installers', () => {
     expect(result.stderr).toContain('fresh InvocationID Host ready marker')
     expect(await readFile(f.operationLog, 'utf8')).toContain(`pair-add ${f.coordinator}`)
     expect(JSON.parse(await readFile(f.receiptPath, 'utf8')).version).toBe('0.1.1')
-    const backup = join(`${f.dshHome}.dsh-enhanced-transaction`, 'original-home')
+    const backup = join(`${f.dshHome}.dsh-ray-transaction`, 'original-home')
     for (const profile of ['web', f.coordinator]) {
-      const cp = JSON.parse(await readFile(join(backup, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'package.json'), 'utf8'))
+      const cp = JSON.parse(await readFile(join(backup, 'profiles', profile, 'node_modules', '@dsh-ray', 'plugin-control-plane', 'package.json'), 'utf8'))
       expect(cp.version).toBe('0.1.0')
       expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('inactive')
     }
@@ -1555,7 +1555,7 @@ describe('one-click installers', () => {
     for (const profile of ['web', f.coordinator]) {
       expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('active')
     }
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 30_000)
 
   test('RSI pair recovery refuses effective coordinator drift and retains the old Home', async () => {
@@ -1563,11 +1563,11 @@ describe('one-click installers', () => {
     const failed = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin,
       { expectedScenario: 'supervised', systemdStartFailsProfile: f.coordinator })
     expect(failed.status).not.toBe(0)
-    const backup = join(`${f.dshHome}.dsh-enhanced-transaction`, 'original-home')
+    const backup = join(`${f.dshHome}.dsh-ray-transaction`, 'original-home')
     expect(existsSync(backup), failed.stderr).toBe(true)
     const configPath = join(f.coordinatorPath, '.lifecycle-dump-config')
     const rows = parse(await readFile(configPath, 'utf8'))
-    rows.find((row: { id: string }) => row.id === 'dsh-enhanced-plugin-control-plane').config.adoptionCoordinator.timeoutMs += 1
+    rows.find((row: { id: string }) => row.id === 'dsh-ray-plugin-control-plane').config.adoptionCoordinator.timeoutMs += 1
     await writeFile(configPath, stringify(rows))
     const recovered = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
     expect(recovered.status).not.toBe(0)
@@ -1584,7 +1584,7 @@ describe('one-click installers', () => {
     const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { expectedScenario })
     expect(result.status, result.stderr).toBe(0)
     expect(await readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).toBe('upgraded\n')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].activeState).toBe('active')
   }, 15_000)
 
@@ -1618,7 +1618,7 @@ describe('one-click installers', () => {
     )
     expect(result.status, result.stderr).toBe(0)
     expect(await readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).toBe('upgraded\n')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     const state = await readLifecycleSystemdState(f.systemdState)
     expect(state.units['dsh-profile-web.service'].activeState).toBe('active')
   })
@@ -1643,7 +1643,7 @@ describe('one-click installers', () => {
     const archive = join(f.dshHome, 'uninstalled-profiles', archives[0]!)
     expect(JSON.parse(await readFile(join(archive, 'package.json'), 'utf8'))).toEqual(originalManifest)
     expect(Object.keys(originalManifest.dependencies).sort()).toEqual(
-      supervisedManagedDependencies.map(name => `@dsh-enhanced/${name}`).sort(),
+      supervisedManagedDependencies.map(name => `@dsh-ray/${name}`).sort(),
     )
     expect(await readFile(join(archive, 'cordis.patch.yml'), 'utf8')).toBe(originalPatch)
     expect(await readdir(archive)).toEqual(expect.arrayContaining([
@@ -1669,7 +1669,7 @@ describe('one-click installers', () => {
     expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 1 })
     expect(state.units['dsh-profile-worker.service']!.invocationId).toMatch(/^fresh-worker-/u)
     expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', starts: 0 })
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test('supervised uninstall accepts an unchanged node_modules hardlink without weakening profile data files', async () => {
@@ -1734,7 +1734,7 @@ describe('one-click installers', () => {
     )
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain('injected supervised post-swap failure')
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     expect(await stat(join(transaction, 'original-home'))).toBeDefined()
     const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(manifest).toMatchObject({ version: 3, state: 'service-failed', servicePhase: 'service-failed' })
@@ -1752,7 +1752,7 @@ describe('one-click installers', () => {
     )
     expect(result.status).not.toBe(0)
     expect(result.stderr).toMatch(/Lark|connected|ready/iu)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     expect(await stat(join(transaction, 'original-home'))).toBeDefined()
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].activeState).toBe('inactive')
   })
@@ -1770,7 +1770,7 @@ describe('one-click installers', () => {
     )
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain('稳定性窗口内报告了非接受状态')
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     expect(await stat(join(transaction, 'original-home'))).toBeDefined()
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].activeState).toBe('inactive')
   })
@@ -1810,7 +1810,7 @@ describe('one-click installers', () => {
     )
     expect(result.status).not.toBe(0)
     expect(result.stderr).toMatch(/proof.*drift|proof.*漂移|owner/iu)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     expect(await stat(join(transaction, 'original-home'))).toBeDefined()
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].activeState).toBe('inactive')
   })
@@ -1835,7 +1835,7 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', systemdCrashBeforeStartProfile: 'web' },
     )
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const crashManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(crashManifest).toMatchObject({ version: 3, state: 'swapped', servicePhase: 'starting',
       supervisedLifecycle: { phase: 'post-swap-pending', startAttempt: { kind: 'accept-active' } } })
@@ -1860,7 +1860,7 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', killLifecycleAfterOriginalRename: true },
     )
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     expect((await readFile(f.operationLog, 'utf8')).match(/^dsh-add/gmu)).toHaveLength(1)
     const recovered = runServiceLifecycle(
       ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' },
@@ -1884,13 +1884,13 @@ describe('one-click installers', () => {
     )
 
     expect(crashed.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     expect(existsSync(f.dshHome), crashed.stderr).toBe(false)
     const crashManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(crashManifest).toMatchObject({
       version: 3, operation: 'uninstall', expectedScenario: 'supervised', stagedScenario: 'unsupported',
       state: 'original-renamed', servicePhase: 'stopped',
-      supervisedLifecycle: { protocol: 'dsh-enhanced/supervised-uninstall/v1', phase: 'clean-target-validated' },
+      supervisedLifecycle: { protocol: 'dsh-ray/supervised-uninstall/v1', phase: 'clean-target-validated' },
     })
     expect((lifecycleProfileTest as typeof lifecycleProfileTest & { validV3OperationShape(value: unknown): boolean })
       .validV3OperationShape(crashManifest)).toBe(true)
@@ -1921,11 +1921,11 @@ describe('one-click installers', () => {
     )
 
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(manifest).toMatchObject({
       version: 3, operation: 'uninstall', state: 'service-failed', servicePhase: 'service-failed',
-      supervisedLifecycle: { protocol: 'dsh-enhanced/supervised-uninstall/v1', phase: 'clean-target-pending' },
+      supervisedLifecycle: { protocol: 'dsh-ray/supervised-uninstall/v1', phase: 'clean-target-pending' },
     })
     const archives = await readdir(join(f.dshHome, 'uninstalled-profiles'))
     expect(archives).toHaveLength(1)
@@ -1963,7 +1963,7 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', systemdJournal: 'stale', systemdLarkProfiles: ['worker'] }, 'service-uninstall',
     )
     expect(first.status).not.toBe(0)
-    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const transaction = f.dshHome + '.dsh-ray-transaction'
     const archives = await readdir(join(f.dshHome, 'uninstalled-profiles'))
     expect(archives).toHaveLength(1)
     await writeFile(join(f.dshHome, 'uninstalled-profiles', archives[0]!, 'cordis.patch.yml'), 'tampered\n')
@@ -1995,12 +1995,12 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', canonicalCleanupFails: true }, 'service-uninstall',
     )
     expect(first.status).not.toBe(0)
-    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const transaction = f.dshHome + '.dsh-ray-transaction'
     const manifestPath = join(transaction, 'manifest.json')
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
     expect(manifest).toMatchObject({
       version: 3, operation: 'uninstall', state: 'cleanup-started', servicePhase: 'service-accepted',
-      supervisedLifecycle: { protocol: 'dsh-enhanced/supervised-uninstall/v1', phase: 'clean-target-accepted' },
+      supervisedLifecycle: { protocol: 'dsh-ray/supervised-uninstall/v1', phase: 'clean-target-accepted' },
     })
     const malformed = { ...manifest, serviceAcceptance: [manifest.serviceAcceptance[0], manifest.serviceAcceptance[0]] }
     malformed.updatedAt = '2026-09-11T20:00:00.000Z'
@@ -2035,14 +2035,14 @@ describe('one-click installers', () => {
     )
 
     expect(crashed.status).not.toBe(0)
-    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const transaction = f.dshHome + '.dsh-ray-transaction'
     const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(manifest).toMatchObject({
       version: 3, operation: 'uninstall', state: 'cleanup-started', servicePhase: 'service-accepted',
       cleanup: {
-        protocol: 'dsh-enhanced/service-cleanup/v1', phase: 'deleting', tombstoneName: 'cleanup-original-home',
+        protocol: 'dsh-ray/service-cleanup/v1', phase: 'deleting', tombstoneName: 'cleanup-original-home',
       },
-      supervisedLifecycle: { protocol: 'dsh-enhanced/supervised-uninstall/v1', phase: 'clean-target-accepted' },
+      supervisedLifecycle: { protocol: 'dsh-ray/supervised-uninstall/v1', phase: 'clean-target-accepted' },
     })
     const tombstone = join(transaction, manifest.cleanup.tombstoneName)
     await expect(stat(tombstone)).resolves.toBeDefined()
@@ -2074,7 +2074,7 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', crashDuringCleanup: true }, 'service-uninstall',
     )
     expect(crashed.status).not.toBe(0)
-    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const transaction = f.dshHome + '.dsh-ray-transaction'
     const state = await readLifecycleSystemdState(f.systemdState)
     const web = state.units['dsh-profile-web.service']!
     const startsBeforeRecovery = web.starts
@@ -2122,7 +2122,7 @@ describe('one-click installers', () => {
         { expectedScenario: 'supervised', ...firstCrash }, 'service-uninstall',
       )
       expect(crashed.status).not.toBe(0)
-      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const transaction = `${f.dshHome}.dsh-ray-transaction`
       const initialManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
       expect(initialManifest).toMatchObject({
         state: 'cleanup-started', servicePhase: 'service-accepted', cleanup: { phase: cleanupPhase },
@@ -2171,7 +2171,7 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', crashDuringCleanup: true }, 'service-uninstall',
     )
     expect(crashed.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     if (residue.crashAfterCleanupReacceptPending) {
       const state = await readLifecycleSystemdState(f.systemdState)
       const web = state.units['dsh-profile-web.service']!
@@ -2211,7 +2211,7 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', crashDuringCleanup: true }, 'service-uninstall',
     )
     expect(crashed.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const systemdBefore = (await readLifecycleSystemdLog(f.systemdLog)).length
 
     const recovered = runServiceLifecycle(
@@ -2236,7 +2236,7 @@ describe('one-click installers', () => {
         { expectedScenario: 'supervised', crashDuringCleanup: true }, 'service-uninstall',
       )
       expect(crashed.status).not.toBe(0)
-      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const transaction = `${f.dshHome}.dsh-ray-transaction`
       const state = await readLifecycleSystemdState(f.systemdState)
       const web = state.units['dsh-profile-web.service']!
       web.mainPid += 100
@@ -2283,7 +2283,7 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', systemdDynamicProfile: 'late' }, 'service-uninstall',
     )
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     const containment = manifest.containmentMasks.find((mask: { unit: string }) => (
       mask.unit === 'dsh-profile-late.service'
@@ -2327,11 +2327,11 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', crashAfterCleanupPrepared: true }, 'service-uninstall',
     )
     expect(crashed.status).not.toBe(0)
-    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const transaction = f.dshHome + '.dsh-ray-transaction'
     const prepared = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(prepared).toMatchObject({
       state: 'cleanup-started', servicePhase: 'service-accepted',
-      cleanup: { protocol: 'dsh-enhanced/service-cleanup/v1', phase: 'prepared' },
+      cleanup: { protocol: 'dsh-ray/service-cleanup/v1', phase: 'prepared' },
     })
 
     const interrupted = runServiceLifecycle(
@@ -2341,7 +2341,7 @@ describe('one-click installers', () => {
     expect(interrupted.status).not.toBe(0)
     const retried = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(retried).toMatchObject({
-      state: 'cleanup-started', cleanup: { protocol: 'dsh-enhanced/service-cleanup/v1' },
+      state: 'cleanup-started', cleanup: { protocol: 'dsh-ray/service-cleanup/v1' },
     })
 
     const recovered = runServiceLifecycle(
@@ -2358,7 +2358,7 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', killLifecycleAfterStopped: true },
     )
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const residue = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(residue).toMatchObject({ version: 3, state: 'preparing', servicePhase: 'stopped',
       supervisedLifecycle: { phase: 'source-pending' } })
@@ -2380,7 +2380,7 @@ describe('one-click installers', () => {
       { expectedScenario: 'supervised', canonicalCleanupFails: true },
     )
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     await rm(join(transaction, 'original-home'), { recursive: true })
     const operations = await readFile(f.operationLog, 'utf8')
     expect(operations.match(/^dsh-add/gmu)).toHaveLength(1)
@@ -2426,7 +2426,7 @@ describe('one-click installers', () => {
       expect(crashed.status).not.toBe(0)
       await expect(stat(homeAlias)).rejects.toMatchObject({ code: 'ENOENT' })
       expect((await lstat(homeAlias)).isSymbolicLink()).toBe(true)
-      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const transaction = `${f.dshHome}.dsh-ray-transaction`
       const crashManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
       expect(crashManifest).toMatchObject({ version: 2, state: 'original-renamed', expectedScenario: 'lark' })
       const operationsBeforeRecovery = await readFile(f.operationLog, 'utf8')
@@ -2487,7 +2487,7 @@ describe('one-click installers', () => {
       expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
       expect(await readFile(f.operationLog, 'utf8')).toBe('')
       expect(await readFile(f.systemdLog, 'utf8')).toBe('')
-      await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
       await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
       await expect(stat(f.activationMarker)).rejects.toMatchObject({ code: 'ENOENT' })
     },
@@ -2501,10 +2501,10 @@ describe('one-click installers', () => {
 - id: pwsh-sandbox
   name: '@deepseek-ai/dsh-sandbox-pwsh'
   disabled: !!js process.platform !== 'win32'
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
-- id: dsh-enhanced-assistant-isolation
-  name: '@dsh-enhanced/assistant-isolation'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
+- id: dsh-ray-assistant-isolation
+  name: '@dsh-ray/assistant-isolation'
 `)
 
     expect(scenario).toBe('autonomy')
@@ -2512,10 +2512,10 @@ describe('one-click installers', () => {
 
   test('scenario classifier treats a config-disabled Lark row beside web as web', async () => {
     const scenario = await classifyLifecycleScenario(`
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
-- id: dsh-enhanced-lark-channel
-  name: '@dsh-enhanced/lark-channel'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
+- id: dsh-ray-lark-channel
+  name: '@dsh-ray/lark-channel'
   config:
     enabled: false
 `)
@@ -2525,43 +2525,43 @@ describe('one-click installers', () => {
 
   test.each([
     ['duplicate enabled Lark rows', `
-- id: dsh-enhanced-lark-channel
-  name: '@dsh-enhanced/lark-channel'
+- id: dsh-ray-lark-channel
+  name: '@dsh-ray/lark-channel'
   config: { enabled: true }
 - id: lark-owner-alias
-  name: '@dsh-enhanced/lark-channel'
+  name: '@dsh-ray/lark-channel'
   config: { enabled: true }
 `],
     ['duplicate config-disabled and enabled Lark rows', `
-- id: dsh-enhanced-lark-channel
-  name: '@dsh-enhanced/lark-channel'
+- id: dsh-ray-lark-channel
+  name: '@dsh-ray/lark-channel'
   config: { enabled: false }
 - id: lark-owner-alias
-  name: '@dsh-enhanced/lark-channel'
+  name: '@dsh-ray/lark-channel'
   config: { enabled: true }
 `],
     ['malformed top-level disabled boolean', `
-- id: dsh-enhanced-lark-channel
-  name: '@dsh-enhanced/lark-channel'
+- id: dsh-ray-lark-channel
+  name: '@dsh-ray/lark-channel'
   disabled: 'false'
   config: { enabled: true }
 `],
     ['dynamic lifecycle marker disabled expression', `
-- id: dsh-enhanced-lark-channel
-  name: '@dsh-enhanced/lark-channel'
+- id: dsh-ray-lark-channel
+  name: '@dsh-ray/lark-channel'
   disabled: !!js process.platform === 'win32'
   config: { enabled: true }
 `],
     ['malformed Lark enabled boolean', `
-- id: dsh-enhanced-lark-channel
-  name: '@dsh-enhanced/lark-channel'
+- id: dsh-ray-lark-channel
+  name: '@dsh-ray/lark-channel'
   config: { enabled: 'false' }
 `],
     ['mixed enabled Lark and web rows', `
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
-- id: dsh-enhanced-lark-channel
-  name: '@dsh-enhanced/lark-channel'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
+- id: dsh-ray-lark-channel
+  name: '@dsh-ray/lark-channel'
   config: { enabled: true }
 `],
   ])('scenario classifier fails closed for %s', async (_label, source) => {
@@ -2668,8 +2668,8 @@ describe('one-click installers', () => {
     const archivePath = join(f.dshHome, 'uninstalled-profiles', archives[0]!)
     expect(JSON.parse(await readFile(join(archivePath, 'package.json'), 'utf8'))).toMatchObject({
       dependencies: {
-        '@dsh-enhanced/personal-assistant': '0.1.0',
-        '@dsh-enhanced/lark-channel': '0.1.0',
+        '@dsh-ray/personal-assistant': '0.1.0',
+        '@dsh-ray/lark-channel': '0.1.0',
       },
     })
     expect(await readFile(join(archivePath, 'cordis.patch.yml'), 'utf8')).toContain('owner-custom')
@@ -2776,7 +2776,7 @@ describe('one-click installers', () => {
     expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-nested.service'])
       .toMatchObject({ activeState: 'active', starts: 0 })
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test('Lark uninstall rejects a relative unit DSH_HOME before masking or stopping services', async () => {
@@ -2793,7 +2793,7 @@ describe('one-click installers', () => {
     expect(result.stderr).toMatch(/ownership|DSH_HOME|absolute|绝对|所有权/iu)
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test('Lark uninstall fail-closes when a foreign unit changes to conflicting ownership before acceptance', async () => {
@@ -2861,7 +2861,7 @@ describe('one-click installers', () => {
     )
 
     try {
-      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const transaction = `${f.dshHome}.dsh-ray-transaction`
       const deadline = Date.now() + 6_000
       let ownershipReads = 0
       let manifest: { operation?: string; state?: string } | undefined
@@ -2969,7 +2969,7 @@ describe('one-click installers', () => {
     expect(result.stderr).toMatch(/standard Lark|clean Web|installer|baseline|unsupported|标准 Lark|不受支持/iu)
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test('repeating Lark uninstall on a clean unsupported profile is a no-op without systemd access or a second archive', async () => {
@@ -2988,10 +2988,10 @@ describe('one-click installers', () => {
     )
 
     expect(repeated.status, repeated.stderr).toBe(0)
-    expect(repeated.stdout).toContain('没有 @dsh-enhanced/* 顶层依赖')
+    expect(repeated.stdout).toContain('没有 @dsh-ray/* 顶层依赖')
     expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toEqual(archives)
     expect(await readFile(f.systemdLog, 'utf8')).toBe(systemdBefore)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test('post-swap Lark uninstall failure preserves clean and original homes with every related service stopped', async () => {
@@ -3008,7 +3008,7 @@ describe('one-click installers', () => {
 
     expect(result.status).not.toBe(0)
     expect(result.stderr).toMatch(/preserve|保留.*current home.*original-home|readiness|就绪/iu)
-    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const transaction = f.dshHome + '.dsh-ray-transaction'
     const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(manifest).toMatchObject({
       version: 2, operation: 'uninstall', expectedScenario: 'lark', stagedScenario: 'unsupported',
@@ -3021,7 +3021,7 @@ describe('one-click installers', () => {
     expect(archives).toHaveLength(1)
     expect(JSON.parse(await readFile(join(
       f.dshHome, 'uninstalled-profiles', archives[0]!, 'package.json',
-    ), 'utf8'))).toMatchObject({ dependencies: { '@dsh-enhanced/personal-assistant': '0.1.0' } })
+    ), 'utf8'))).toMatchObject({ dependencies: { '@dsh-ray/personal-assistant': '0.1.0' } })
     const state = await readLifecycleSystemdState(f.systemdState)
     expect(Object.values(state.units)).toEqual(expect.arrayContaining([
       expect.objectContaining({ profile: 'web', activeState: 'inactive', mainPid: 0, controlPid: 0 }),
@@ -3040,7 +3040,7 @@ describe('one-click installers', () => {
       ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, { systemdJournal: 'stale' }, 'service-uninstall',
     )
     expect(first.status).not.toBe(0)
-    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const transaction = f.dshHome + '.dsh-ray-transaction'
     const firstManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     const archives = await readdir(join(f.dshHome, 'uninstalled-profiles'))
     const archivedManifest = await readFile(join(f.dshHome, 'uninstalled-profiles', archives[0]!, 'package.json'), 'utf8')
@@ -3071,7 +3071,7 @@ describe('one-click installers', () => {
         ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, { systemdJournal: 'stale' }, 'service-uninstall',
       )
       expect(first.status).not.toBe(0)
-      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const transaction = `${f.dshHome}.dsh-ray-transaction`
       const backup = join(transaction, 'original-home')
       const backupIdentity = await lifecycleIdentity(backup)
       const startsBefore = (await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']!.starts
@@ -3113,7 +3113,7 @@ describe('one-click installers', () => {
       { systemdJournal: 'stale', systemdUnsupportedProfile: 'baseline' }, 'service-uninstall',
     )
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const backupIdentity = await lifecycleIdentity(join(transaction, 'original-home'))
     await writeFile(join(baselineDirectory, 'cordis.patch.yml'), 'owner-tamper\n')
 
@@ -3156,7 +3156,7 @@ describe('one-click installers', () => {
       expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toEqual(archives)
       expect(await readFile(f.operationLog, 'utf8')).toBe(operationsBefore)
       expect(operationsBefore).not.toMatch(/^npm-view|^pnpm-store-add/mu)
-      await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
       expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
         .toMatchObject({ activeState: 'active', starts: 2 })
     },
@@ -3177,7 +3177,7 @@ describe('one-click installers', () => {
     )
 
     expect(crashed.status).not.toBe(0)
-    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const transaction = f.dshHome + '.dsh-ray-transaction'
     await expect(stat(f.dshHome)).rejects.toMatchObject({ code: 'ENOENT' })
     const crashManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(crashManifest).toMatchObject({
@@ -3193,7 +3193,7 @@ describe('one-click installers', () => {
     expect(recovered.stderr).toMatch(/original-renamed|原 home.*active service set/iu)
     expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
     expect(JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))).toMatchObject({
-      dependencies: { '@dsh-enhanced/personal-assistant': '0.1.0' },
+      dependencies: { '@dsh-ray/personal-assistant': '0.1.0' },
     })
     await expect(stat(join(f.dshHome, 'uninstalled-profiles'))).rejects.toMatchObject({ code: 'ENOENT' })
     const preserved = await preservedLifecycleTransactions(f.dshHome)
@@ -3354,7 +3354,7 @@ describe('one-click installers', () => {
     expect(result.stderr).toMatch(/service|systemd|unit|drop-in|fragment|DSH_HOME|受管|安全|权限/iu)
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command[1] === 'stop')).toBe(false)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('a supervised sibling makes a Lark upgrade fail before mask, stop, or transaction creation', async () => {
@@ -3371,7 +3371,7 @@ describe('one-click installers', () => {
     expect(result.stderr).toMatch(/supervised|recovery|attestation/iu)
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test.each([
@@ -3391,7 +3391,7 @@ describe('one-click installers', () => {
     expect(result.status).not.toBe(0)
     expect(result.stderr).toMatch(/stop|停止|PID|quiesc|静止|service|systemd|systemctl/iu)
     expect(await readFile(f.operationLog, 'utf8')).toBe('')
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     const state = await readLifecycleSystemdState(f.systemdState)
     expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', subState: 'running' })
     expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', subState: 'running' })
@@ -3520,7 +3520,7 @@ describe('one-click installers', () => {
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].unitFileState)
       .toBe('masked-runtime')
     expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command[1] === 'unmask')).toBe(false)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('post-swap start-intent crash recovery contains the unit before restarting it', async () => {
@@ -3531,7 +3531,7 @@ describe('one-click installers', () => {
     )
 
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     expect(JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8')))
       .toMatchObject({ version: 2, state: 'swapped', servicePhase: 'starting' })
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
@@ -3770,7 +3770,7 @@ describe('one-click installers', () => {
     expect(unmaskIndex).toBeGreaterThanOrEqual(0)
     expect(recoveryCommands.some(command => command[1] === 'start'
       && command.includes('dsh-profile-late.service'))).toBe(false)
-    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test('guardian never mutates a dynamic unit with conflicting HOME and WorkingDirectory ownership', async () => {
@@ -3833,7 +3833,7 @@ describe('one-click installers', () => {
       const first = await lifecycleResult(pendingFirst, phase, started + 12_000 - Date.now())
       durations.first = Date.now() - firstStarted
       expect(first.status).not.toBe(0)
-      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const transaction = `${f.dshHome}.dsh-ray-transaction`
       const firstManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
       const containment = firstManifest.containmentMasks.find((mask: { unit: string }) => (
         mask.unit === 'dsh-profile-late.service'
@@ -3883,9 +3883,9 @@ describe('one-click installers', () => {
   test('production lifecycle source cannot enable fake service tools through environment variables', async () => {
     const source = await readFile(join(installDirectory, 'lifecycle-profile.mjs'), 'utf8')
 
-    expect(source).not.toContain('DSH_ENHANCED_TEST_SERVICE_TOOLS')
-    expect(source).not.toContain('DSH_ENHANCED_TEST_SSHD_PROOF_PIDS')
-    expect(source).not.toContain('DSH_ENHANCED_TEST_SDPAM_PROOF_PIDS')
+    expect(source).not.toContain('DSH_RAY_TEST_SERVICE_TOOLS')
+    expect(source).not.toContain('DSH_RAY_TEST_SSHD_PROOF_PIDS')
+    expect(source).not.toContain('DSH_RAY_TEST_SDPAM_PROOF_PIDS')
     expect(source).not.toContain('LIFECYCLE_SYSTEMD_STATE')
     expect(source).toMatch(/entry\.uid !== 0/u)
     expect(source).toMatch(/\['\/usr\/bin', '\/bin'\]\.includes\(dirname\(canonical\)\)/u)
@@ -3903,7 +3903,7 @@ describe('one-click installers', () => {
 
   test('service-aware upgrade handles v1 residue before any transaction rename or deletion', async () => {
     const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const stagedHome = join(transaction, 'staged-home')
     await mkdir(stagedHome, { recursive: true })
     await writeFile(join(stagedHome, 'legacy-v1-marker'), 'preserve')
@@ -4207,7 +4207,7 @@ describe('one-click installers', () => {
     )
 
     expect(result.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(manifest).toMatchObject({ version: 2, operation: 'upgrade', profile: 'web', servicePhase: 'service-failed' })
     expect(manifest.services).toHaveLength(3)
@@ -4248,7 +4248,7 @@ describe('one-click installers', () => {
       ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdJournal: 'stale' },
     )
     expect(result.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     expect(await readFile(join(f.dshHome, 'rsi-service-environments', 'web.json'), 'utf8')).toBe(original)
     expect(await readFile(join(transaction, 'original-home', 'rsi-service-environments', 'web.json'), 'utf8'))
       .toBe(original)
@@ -4348,7 +4348,7 @@ describe('one-click installers', () => {
     )
 
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     expect(JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8')))
       .toMatchObject({ version: 2, state: 'service-failed', servicePhase: 'service-failed' })
     expect((await readFile(f.operationLog, 'utf8')).match(/^dsh-add\t/gmu)).toHaveLength(1)
@@ -4380,7 +4380,7 @@ describe('one-click installers', () => {
     )
 
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const firstManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(firstManifest).toMatchObject({ version: 2, state: 'service-failed', servicePhase: 'service-failed' })
     const stagedIdentity = await lifecycleIdentity(f.dshHome)
@@ -4423,7 +4423,7 @@ describe('one-click installers', () => {
     )
 
     expect(crashed.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     await expect(stat(f.dshHome)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await lifecycleIdentity(join(transaction, 'original-home'))).toEqual(originalIdentity)
     const crashManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
@@ -4463,7 +4463,7 @@ describe('one-click installers', () => {
         { killLifecycleAfterOriginalRename: true },
       )
       expect(crashed.status).not.toBe(0)
-      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const transaction = `${f.dshHome}.dsh-ray-transaction`
       const crashManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
       expect(crashManifest).toMatchObject({ version: 2, state: 'original-renamed', expectedScenario: 'lark' })
       const operationsBeforeRecovery = await readFile(f.operationLog, 'utf8')
@@ -4495,8 +4495,8 @@ describe('one-click installers', () => {
   )
 
   test.each([
-    ['post-package', { configAfterUpgrade: `- id: dsh-enhanced-assistant-web-owner\n  name: '@dsh-enhanced/assistant-web-owner'` }],
-    ['post-activation', { configAfterActivation: `- id: dsh-enhanced-assistant-web-owner\n  name: '@dsh-enhanced/assistant-web-owner'` }],
+    ['post-package', { configAfterUpgrade: `- id: dsh-ray-assistant-web-owner\n  name: '@dsh-ray/assistant-web-owner'` }],
+    ['post-activation', { configAfterActivation: `- id: dsh-ray-assistant-web-owner\n  name: '@dsh-ray/assistant-web-owner'` }],
   ] as const)('service-aware upgrade rejects %s scenario drift before swap and restores the original active set',
     async (phase, drift) => {
       const f = await lifecycleFixture({ systemd: { units: [
@@ -4524,7 +4524,7 @@ describe('one-click installers', () => {
       expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 1 })
       expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 1 })
       expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', mainPid: 0, starts: 0 })
-      await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(`${f.dshHome}.dsh-ray-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
       const preserved = await preservedLifecycleTransactions(f.dshHome)
       expect(preserved).toHaveLength(1)
       const stagedActivationMarker = join(preserved[0]!, 'staged-home', '.activation-ran')
@@ -4540,7 +4540,7 @@ describe('one-click installers', () => {
       ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdJournal: 'stale' },
     )
     expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const manifestPath = join(transaction, 'manifest.json')
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
     await rm(join(transaction, 'original-home'), { recursive: true })
@@ -4574,7 +4574,7 @@ describe('one-click installers', () => {
 
     expect(first.status).not.toBe(0)
     expect(first.stderr).toMatch(/canonical.*cleanup|清理失败|residue/iu)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const firstManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(firstManifest).toMatchObject({
       version: 2, state: 'cleanup-started', servicePhase: 'service-accepted',
@@ -4607,7 +4607,7 @@ describe('one-click installers', () => {
     expect(await readFile(f.operationLog, 'utf8')).toBe('')
     const state = await readLifecycleSystemdState(f.systemdState)
     expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'inactive', subState: 'dead' })
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     expect(await lifecycleIdentity(f.dshHome)).toBeDefined()
     const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(manifest).toMatchObject({ version: 2, operation: 'upgrade', profile: 'web' })

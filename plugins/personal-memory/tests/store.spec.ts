@@ -3,7 +3,7 @@ import { chmod, link, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { withPreferenceMemoryPromotionCancellationDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { withPreferenceMemoryPromotionCancellationDigest } from '@dsh-ray/assistant-growth-contract'
 import {
   hashMemoryProposalIntent,
   hashMemoryMutation,
@@ -117,7 +117,7 @@ describe('personal memory store', () => {
 
   test('canonicalizes dispatch field order in synthetic conflict fingerprints', () => {
     const canonical = {
-      sourceId: 'dsh-enhanced-personal-memory',
+      sourceId: 'dsh-ray-personal-memory',
       bindingId: 'binding-owner-dm',
       workspace: '/work/alpha',
       principal: 'owner:lark:123',

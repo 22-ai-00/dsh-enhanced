@@ -1,6 +1,6 @@
-import type { AssistantGoalsService, GoalScope, OwnerGoalRunProof } from '@dsh-enhanced/assistant-goals'
-import type { TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
-import { acceptanceDigest, goalDefinitionSituation, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import type { AssistantGoalsService, GoalScope, OwnerGoalRunProof } from '@dsh-ray/assistant-goals'
+import type { TrustedTaskLearningProjectionReceipt } from '@dsh-ray/assistant-evaluation'
+import { acceptanceDigest, goalDefinitionSituation, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
 import type { SkillRun, SkillWatchCanonicalRevision, SkillWatchObservation, SkillWatchObservationBinding, SkillWatchObservationResult, SkillWatchTaskFamily } from './store.js'
 
 function record(value: unknown): value is Record<string, unknown> {

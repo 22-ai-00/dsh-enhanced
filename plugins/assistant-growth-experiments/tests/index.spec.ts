@@ -6,9 +6,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
   version: string
 }
 
-describe('dsh-enhanced-assistant-growth-experiments', () => {
+describe('dsh-ray-assistant-growth-experiments', () => {
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-assistant-growth-experiments')
+    expect(name).toBe('dsh-ray-assistant-growth-experiments')
     expect(version).toBe(manifest.version)
   })
 })

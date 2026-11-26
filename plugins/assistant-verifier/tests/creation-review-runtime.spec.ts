@@ -7,11 +7,11 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { sourceGrowthEvidenceDigest, sourceGrowthRunDigest, verifyPluginCreationVerificationCertificate,
   anySourceGrowthRunDigest, isSourceOwnerContinuation, type SourceOwnerReceipt,
-  type WorkItemSourceGrowthRunBinding, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+  type WorkItemSourceGrowthRunBinding, type SourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import { afterEach, expect, test, vi } from 'vitest'
 import { CreationReviewRuntime, compileCreationReviewConfig, type CreationReviewConfig, type PreparedCreationSnapshot, type WorkItemPreparedCreationSource } from '../src/creation-review.ts'
 import { CreationReviewStore } from '../src/creation-review-store.ts'
@@ -20,7 +20,7 @@ import { behaviorNativeRuntimeDigest } from '../src/plugin-behavior-config.ts'
 import { compileRevisionRegressionReviewConfig } from '../src/revision-regression-review.ts'
 
 const observer = vi.hoisted(() => ({ run: vi.fn(), close: vi.fn(async () => {}) }))
-vi.mock('@dsh-enhanced/assistant-isolation', () => ({
+vi.mock('@dsh-ray/assistant-isolation', () => ({
   NativeMacVerifierRunner: class {
     run(...args: unknown[]) { return observer.run(...args) }
     close() { return observer.close() }

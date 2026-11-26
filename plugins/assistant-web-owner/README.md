@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-web-owner
+# @dsh-ray/assistant-web-owner
 
 将现有 DSH Web 聊天接到一个已配对的 Delivery owner，让原生用户文本回合能够使用 `assistant-goals` 等依赖可信人类回合的能力。沿用原生 `SessionController`、Typert、Goal UI 和 AgentLoop。
 
@@ -16,11 +16,11 @@
 
 Web principal 必须是 `channel: web`，其 account、tenant、user 由可信本地安装者固定。安装器使用 `ensurePrincipalLocally()`：只在空库初始化，或原样保留完全匹配的 active owner，不替换其他 owner、不复活已撤权身份。已有 Lark 或不同 owner 使用同一数据库时会拒绝，可为独立部署选择另一个 `DSH_HOME`。高级离线交接 API `pairPrincipalLocally()` 仍保留其原本的显式交接语义；本安装器不调用它。当前不支持跨渠道 owner 别名或多用户 Web 身份映射。
 
-本 bundle patch 先禁用上游 `session-controller` 行，再插入 `dsh-enhanced-assistant-web-owner`。在该 bundle 后追加完整配置 patch：
+本 bundle patch 先禁用上游 `session-controller` 行，再插入 `dsh-ray-assistant-web-owner`。在该 bundle 后追加完整配置 patch：
 
 ```yaml
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
   config:
     principal: { account: local, tenant: local, user: operator }
     workspace: /absolute/workspace
@@ -203,7 +203,7 @@ v2 的硬限制是模型请求数、工具请求数、总时长和每次输出�
 
 v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admission` 命令。字段为 `repository`（例如 `owner/project`）、`baseBranch`、`branch`、`paths`、`credentialHandle`、`expiresAt`（明确的 Unix 毫秒到期时间）、`maxActions`、`maxTotalBytes` 和 `openPullRequest`，另可显式设置 `acceptance: "goal-step"` 允许独立步骤验收后的中间提交。省略时为 `goal-outcome`，继续要求整体验收；CLI 会显示实际模式。当前 `paths` 只允许包含本任务的 `verification.artifactPath`，因为只有该文件具备配置的独立验收。目标分支必须已存在，PR 基准分支必须与它不同。
 
-`credentialHandle` 引用已配置在 Keychain 中的凭据；该 handle 必须使用可静态读取的无标签配置，允许 `dsh-enhanced-assistant-actions` 消费者与 `github.commit` 用途，且 `maxLeaseMs` 不小于 30,000。任务文件不接受 token，也不会创建或修改 handle。`expiresAt` 必须覆盖配置时刻后的整个目标执行预算并额外预留 60 秒交付时间，同时不超过当前隔离授权期限；重复设置不会续期。`maxActions` 同时计入仓库读取与提交、PR 操作：仅提交至少 2 次，创建 PR 至少 3 次；额外调查需要更多次数。
+`credentialHandle` 引用已配置在 Keychain 中的凭据；该 handle 必须使用可静态读取的无标签配置，允许 `dsh-ray-assistant-actions` 消费者与 `github.commit` 用途，且 `maxLeaseMs` 不小于 30,000。任务文件不接受 token，也不会创建或修改 handle。`expiresAt` 必须覆盖配置时刻后的整个目标执行预算并额外预留 60 秒交付时间，同时不超过当前隔离授权期限；重复设置不会续期。`maxActions` 同时计入仓库读取与提交、PR 操作：仅提交至少 2 次，创建 PR 至少 3 次；额外调查需要更多次数。
 
 设置命令从已有主人和空闲 Session 派生 Actions grant、owner route、有限调度预算及精确 Policy 规则，包含后台提交与原会话通知；无需用户填写内部身份、路由或规则 ID。未提供 `wake` 时自动配置至多一次后台运行；已有合法 `wake` 配置继续使用。已有同 ID 配置冲突会拒绝整次配置，而不会覆盖。正式 CLI 在取得配置锁后及写入前重读有效配置，发现下层凭据或插件配置变化时拒绝；多文件配置与数据库仍不构成一个跨进程原子事务。所需 Actions、Keychain、Goals、Automations 与 Delivery 必须来自匹配的安装集合。
 
@@ -245,7 +245,7 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 }
 ```
 
-须安装匹配版本的 EventTriggers，且上述 Keychain handle 已允许 `dsh-enhanced-event-triggers` / `github.observe`。CLI 创建绑定当前 owner、仓库及分支的正式来源、有限无模型 observer 和 Goals 等待权限；Goals 向模型公开当前授权范围内的来源 ID。设置不会验证远端连通性。`maxPolls` 必须大于 `maxFires`，`maxGoalRounds` 至少为 2；`maxActions` 须覆盖 `3 + 12 × maxGoalRounds`（每轮最多三次四读验收），显式 wake 的 `maxRuns` 至少为 `maxFires + 1`。不足时拒绝配置，不自动扩额。观察期限沿用明确的 `repositoryDelivery.expiresAt`，重复设置不续期。完整真实 GitHub 生命周期仍须实际验证。
+须安装匹配版本的 EventTriggers，且上述 Keychain handle 已允许 `dsh-ray-event-triggers` / `github.observe`。CLI 创建绑定当前 owner、仓库及分支的正式来源、有限无模型 observer 和 Goals 等待权限；Goals 向模型公开当前授权范围内的来源 ID。设置不会验证远端连通性。`maxPolls` 必须大于 `maxFires`，`maxGoalRounds` 至少为 2；`maxActions` 须覆盖 `3 + 12 × maxGoalRounds`（每轮最多三次四读验收），显式 wake 的 `maxRuns` 至少为 `maxFires + 1`。不足时拒绝配置，不自动扩额。观察期限沿用明确的 `repositoryDelivery.expiresAt`，重复设置不续期。完整真实 GitHub 生命周期仍须实际验证。
 
 每个验收 profile 的验证窗口为 `verification.maxDurationMs × verification.cases.length`，必须小于 `stepMaxDurationMs`。未配置仓库 outcome 时两个 profile 都使用该窗口；因此 `executionBudget.durationMs` 必须严格大于 `stepMaxDurationMs + 2 × 验证窗口`，以覆盖 native round、step 验收和 whole-goal 验收。setup 会拒绝不足的明确预算，不会自动扩大时长或权限。
 
@@ -257,7 +257,7 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 
 ### 只读自治就绪快照（`--readiness`）
 
-`dsh-autonomy-doctor --readiness [--profile <name>] [--dsh-home <absolute>]` 只读取组合后的有效 profile（`dsh --dump-config`），输出确定性文本和最终一行可解析 JSON（协议 `dsh-enhanced/autonomy-readiness/v1`）。它不激活 Host、不请求模型、不写状态、不读数据库，也不读取凭据内容。检查环：
+`dsh-autonomy-doctor --readiness [--profile <name>] [--dsh-home <absolute>]` 只读取组合后的有效 profile（`dsh --dump-config`），输出确定性文本和最终一行可解析 JSON（协议 `dsh-ray/autonomy-readiness/v1`）。它不激活 Host、不请求模型、不写状态、不读数据库，也不读取凭据内容。检查环：
 
 | 环节 | 就绪条件（静态） | 未就绪时的典型原因 |
 | --- | --- | --- |

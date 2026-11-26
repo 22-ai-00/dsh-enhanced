@@ -3,10 +3,10 @@ import { access, lstat, mkdir, open, readdir, readFile, realpath, rename, unlink
 import { constants } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { listActiveAutomationsForReadiness } from '@dsh-enhanced/assistant-automations'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { listActiveAutomationsForReadiness } from '@dsh-ray/assistant-automations'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
 import { isDeepStrictEqual } from 'node:util'
-import { controlPlaneDigest, queryRuntimeObserver, runtimeConfigDigest, type RuntimeObserverConfig } from '@dsh-enhanced/plugin-control-plane'
+import { controlPlaneDigest, queryRuntimeObserver, runtimeConfigDigest, type RuntimeObserverConfig } from '@dsh-ray/plugin-control-plane'
 import { withDshHomeLifecycleLock } from './setup.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
 import { rsiBuildResources as io } from './rsi-build.js'
@@ -180,10 +180,10 @@ async function ensureCoordinator(input: RsiInstallInput, coordinator: string,
     await io.writeExclusive(receiptPath,receipt); await io.syncDirectory(input.dshHome); owned = true
   }
   const matches = async (name: string): Promise<boolean> => {
-    const path = join(root,'node_modules','@dsh-enhanced',name,'package.json')
+    const path = join(root,'node_modules','@dsh-ray',name,'package.json')
     if (!await exists(path)) return false
     const manifest = JSON.parse((await io.readStable(await realpath(path),65_536)).toString('utf8')) as {name:string;version:string}
-    if (manifest.name !== `@dsh-enhanced/${name}` || manifest.version !== version) fail('coordinator must use the same installed plugin release')
+    if (manifest.name !== `@dsh-ray/${name}` || manifest.version !== version) fail('coordinator must use the same installed plugin release')
     return true
   }
   let complete = (await Promise.all(coordinatorBundles.map(matches))).every(Boolean)
@@ -199,7 +199,7 @@ async function ensureCoordinator(input: RsiInstallInput, coordinator: string,
     if (!['inactive','failed'].includes(state.ActiveState!) || state.MainPID !== '0') fail('partial coordinator must be stopped before package repair')
     if (local) await installRsiLocalProfile({dshHome:input.dshHome,profile:coordinator,cohort:local,
       bundles:coordinatorBundles,dsh:{path:executor.path,pin:{path:executor.path,sha256:executor.sha256}},signal})
-    else await io.command(executor.path, ['plugin', '--profile', coordinator, 'add', ...coordinatorBundles.map(name => `@dsh-enhanced/${name}@${version}`)],
+    else await io.command(executor.path, ['plugin', '--profile', coordinator, 'add', ...coordinatorBundles.map(name => `@dsh-ray/${name}@${version}`)],
       { ...process.env, DSH_HOME: input.dshHome, npm_config_loglevel: 'error' }, signal, 300_000, 2_097_152)
     if (!(await Promise.all(coordinatorBundles.map(matches))).every(Boolean)) fail('coordinator package installation is incomplete')
   }
@@ -269,9 +269,9 @@ async function ready(manifest: RsiSetupManifest, pin: RsiAuthorityConfigInput['s
   const memoryDatabasePath = manifest.memoryLearning === undefined ? undefined
     : rsiDatabasePaths(rsiSetupPorts.dump(manifest.targetProfile, home), home).automationsDatabasePath
   if (manifest.memoryLearning) {
-    for (const [id, service] of [['dsh-enhanced-personal-assistant', 'personalMemory'],
-      ['dsh-enhanced-assistant-verifier', 'assistantVerifier'],
-      ['dsh-enhanced-assistant-memory-learning', 'assistantMemoryLearning']] as const) {
+    for (const [id, service] of [['dsh-ray-personal-assistant', 'personalMemory'],
+      ['dsh-ray-assistant-verifier', 'assistantVerifier'],
+      ['dsh-ray-assistant-memory-learning', 'assistantMemoryLearning']] as const) {
       if (!manifest.controlPlane.runtimeObserver?.targets.some(target => target.entryId === id
         && target.services.includes(service))) fail(`target memory observer is missing ${id}`)
     }

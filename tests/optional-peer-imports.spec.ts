@@ -14,7 +14,7 @@ import { describe, expect, test } from 'vitest'
  *
  * 场景拓扑直接解析 scripts/install/common.sh 的 slug 清单（不在测试中
  * 双写，避免清单演进时守卫漂移），再沿各包 package.json 的硬 dependencies
- * 做 @dsh-enhanced/* 闭包扩展。
+ * 做 @dsh-ray/* 闭包扩展。
  */
 const workspaceRoot = new URL('..', import.meta.url).pathname
 const installerLibrary = join(workspaceRoot, 'scripts', 'install', 'common.sh')
@@ -43,12 +43,12 @@ function loadPackageManifests(): Map<string, PackageManifest> {
       packages.set(manifest.name, {
         name: manifest.name,
         directory: join(groupDirectory, entry),
-        hardDependencies: new Set(Object.keys(manifest.dependencies ?? {}).filter(n => n.startsWith('@dsh-enhanced/'))),
+        hardDependencies: new Set(Object.keys(manifest.dependencies ?? {}).filter(n => n.startsWith('@dsh-ray/'))),
         optionalPeers: new Set(
           Object.entries(manifest.peerDependenciesMeta ?? {})
             .filter(([, meta]) => meta.optional === true)
             .map(([name]) => name)
-            .filter(name => name.startsWith('@dsh-enhanced/')),
+            .filter(name => name.startsWith('@dsh-ray/')),
         ),
       })
     }
@@ -64,9 +64,9 @@ function extractArraySlugs(source: string, arrayName: string): string[] {
 function extractCaseSlugs(source: string, branch: string): string[] {
   const section = source.match(new RegExp(`^\\s*${branch}\\)\\s*(?<body>[\\s\\S]*?);;`, 'mu'))?.groups?.body ?? ''
   const slugs: string[] = []
-  // 两种写法都支持：逐字 dsh_enhanced_append_slug 'slug'
-  // 与 for slug in slug-a slug-b; do dsh_enhanced_append_slug "$slug"; done
-  for (const match of section.matchAll(/dsh_enhanced_append_slug\s+'([a-z0-9-]+)'/gu)) {
+  // 两种写法都支持：逐字 dsh_ray_append_slug 'slug'
+  // 与 for slug in slug-a slug-b; do dsh_ray_append_slug "$slug"; done
+  for (const match of section.matchAll(/dsh_ray_append_slug\s+'([a-z0-9-]+)'/gu)) {
     slugs.push(match[1]!)
   }
   for (const match of section.matchAll(/for\s+slug\s+in\s+(?<list>[a-z0-9\s-]+?)\s*;/gu)) {
@@ -78,10 +78,10 @@ function extractCaseSlugs(source: string, branch: string): string[] {
 /** 从安装器脚本推导 scenario -> 顶层 slug 列表。 */
 function loadScenarios(): Record<string, string[]> {
   const source = readFileSync(installerLibrary, 'utf8')
-  const core = extractArraySlugs(source, 'DSH_ENHANCED_CORE_PLUGIN_SLUGS')
-  const lark = extractArraySlugs(source, 'DSH_ENHANCED_LARK_PLUGIN_SLUGS')
-  const supervised = extractArraySlugs(source, 'DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS')
-  const full = extractArraySlugs(source, 'DSH_ENHANCED_LEGACY_FULL_PLUGIN_SLUGS')
+  const core = extractArraySlugs(source, 'DSH_RAY_CORE_PLUGIN_SLUGS')
+  const lark = extractArraySlugs(source, 'DSH_RAY_LARK_PLUGIN_SLUGS')
+  const supervised = extractArraySlugs(source, 'DSH_RAY_SUPERVISED_GROWTH_PLUGIN_SLUGS')
+  const full = extractArraySlugs(source, 'DSH_RAY_LEGACY_FULL_PLUGIN_SLUGS')
   return {
     core,
     web: [...core, ...extractCaseSlugs(source, 'web')],
@@ -95,7 +95,7 @@ function loadScenarios(): Record<string, string[]> {
 /** 顶层 slug 集合沿硬 dependencies 展开为「该场景实际安装的包名闭包」。 */
 function scenarioClosure(topSlugs: readonly string[], packages: Map<string, PackageManifest>): Set<string> {
   const installed = new Set<string>()
-  const queue = topSlugs.map(slug => `@dsh-enhanced/${slug}`)
+  const queue = topSlugs.map(slug => `@dsh-ray/${slug}`)
   while (queue.length > 0) {
     const name = queue.pop()!
     if (installed.has(name)) continue
@@ -167,7 +167,7 @@ function entryReach(entry: string): Set<string> | undefined {
 
 /**
  * 主入口（src/index.ts）沿静态值 import/export 可达的全部生产模块。
- * 仅独立 bin（如 lark-channel 的 dsh-rsi-setup）可达的模块不约束：
+ * 仅独立 bin（如 lark-channel 的 dsh-ray-setup）可达的模块不约束：
  * bin 是独立可执行体，有权要求其专属 peer 存在；installer setup 入口
  * 由下方的 INSTALLER_SETUP_ENTRYPOINTS 按各自运行场景独立守卫。
  */
@@ -234,17 +234,17 @@ describe('optional peer 静态导入守卫（按安装器场景闭包）', () =>
 
   test('supervised runtime providers cover Recovery required enhanced peers', () => {
     const supervised = closures.get('supervised')!
-    const recovery = packages.get('@dsh-enhanced/assistant-recovery')!
+    const recovery = packages.get('@dsh-ray/assistant-recovery')!
     // Recovery's mounted class declares these as required Cordis injections.
     // peerDependenciesMeta.optional cannot make the runtime injection optional.
     for (const provider of [
-      '@dsh-enhanced/assistant-automations',
-      '@dsh-enhanced/assistant-delivery',
-      '@dsh-enhanced/assistant-evaluation',
-      '@dsh-enhanced/assistant-evolution',
-      '@dsh-enhanced/assistant-goals',
-      '@dsh-enhanced/assistant-health',
-      '@dsh-enhanced/preference-learning',
+      '@dsh-ray/assistant-automations',
+      '@dsh-ray/assistant-delivery',
+      '@dsh-ray/assistant-evaluation',
+      '@dsh-ray/assistant-evolution',
+      '@dsh-ray/assistant-goals',
+      '@dsh-ray/assistant-health',
+      '@dsh-ray/preference-learning',
     ]) {
       expect(supervised.has(provider), `supervised 缺少 Recovery provider ${provider}`).toBe(true)
       expect(recovery.optionalPeers.has(provider), `Recovery manifest 缺少 peer ${provider}`).toBe(true)
@@ -276,7 +276,7 @@ describe('optional peer 静态导入守卫（按安装器场景闭包）', () =>
     const reach = mainEntryReach(manifest)
     for (const [peer, scenarioNames] of peerScenarios) {
       test(`${packageName} 主入口不静态值导入 ${peer}（场景 ${scenarioNames.join('/')} 不安装该 peer）`, () => {
-        if (reach === undefined) return // 无主入口的工具包（如 rsi-cli）不适用
+        if (reach === undefined) return // 无主入口的工具包（如 dsh-ray）不适用
         const violations: string[] = []
         for (const file of reach) {
           const source = readFileSync(file, 'utf8')
@@ -304,16 +304,16 @@ describe('optional peer 静态导入守卫（按安装器场景闭包）', () =>
     const entryFile = join(workspaceRoot, 'plugins', entry.packageSlug, entry.relativeEntry)
     const reach = entryReach(entryFile)
     for (const scenarioName of entry.scenarios) {
-      test(`setup 入口 plugins/${entry.packageSlug}/${entry.relativeEntry} 在 ${scenarioName} 场景不静态值导入未安装 @dsh-enhanced/* 包`, () => {
+      test(`setup 入口 plugins/${entry.packageSlug}/${entry.relativeEntry} 在 ${scenarioName} 场景不静态值导入未安装 @dsh-ray/* 包`, () => {
         expect(reach, `缺少 setup 入口 plugins/${entry.packageSlug}/${entry.relativeEntry}`).toBeDefined()
         const closure = closures.get(scenarioName)
         expect(closure, `未知安装器场景 ${scenarioName}`).toBeDefined()
-        expect(closure!.has(`@dsh-enhanced/${entry.packageSlug}`), `${scenarioName} 场景闭包缺少 @dsh-enhanced/${entry.packageSlug}`).toBe(true)
+        expect(closure!.has(`@dsh-ray/${entry.packageSlug}`), `${scenarioName} 场景闭包缺少 @dsh-ray/${entry.packageSlug}`).toBe(true)
         const violations: string[] = []
         for (const file of reach!) {
           const source = readFileSync(file, 'utf8')
           for (const { specifier, line } of extractStaticValueImports(source)) {
-            if (!specifier.startsWith('@dsh-enhanced/')) continue
+            if (!specifier.startsWith('@dsh-ray/')) continue
             const importedPackage = specifierPackageName(specifier)
             if (!closure!.has(importedPackage)) {
               violations.push(`${file.replace(workspaceRoot, '')}:${line} -> ${importedPackage}`)

@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { continuationDigest } from '../src/continuation-record.ts'
 import { afterEach, expect, test, vi } from 'vitest'
 import { engineeringFixture } from './engineering-context.fixture.ts'

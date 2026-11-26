@@ -9,13 +9,13 @@
   "registry": {
     "results": [
       {
-        "name": "@dsh-enhanced/personal-memory",
+        "name": "@dsh-ray/personal-memory",
         "version": "0.1.32",
         "integrity": "sha512-EciUd5Qo6DE+N7knPiOSLNoLNjuPpRyHyZJYa0niHyuvlJSqw94RCOlbVA2TvFIgkuvNIGtGqo627Ecl5Grwmg==",
         "ok": true
       },
       {
-        "name": "@dsh-enhanced/plugin-control-plane",
+        "name": "@dsh-ray/plugin-control-plane",
         "version": "0.1.32",
         "integrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
         "ok": true

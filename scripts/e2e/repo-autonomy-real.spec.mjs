@@ -59,11 +59,11 @@ const verificationCommand = 'PATH=/runtime/0/bin:/usr/bin:/bin /bin/cp /workspac
 
 async function checkVerificationCommand(home, temp) {
   const patchDoc = parseDocument(await readFile(join(home, 'profiles/web/cordis.patch.yml'), 'utf8'))
-  const isolationConfig = patchRow(patchDoc, 'dsh-enhanced-assistant-isolation').get('config', true)?.toJSON?.()
+  const isolationConfig = patchRow(patchDoc, 'dsh-ray-assistant-isolation').get('config', true)?.toJSON?.()
   if (isolationConfig?.backend !== 'linux-native' || !isolationConfig?.linux?.runtime || !isolationConfig?.linux?.cgroupRoots) {
     throw new Error('installed assistant-isolation row did not materialize linux-native runtime and delegated cgroupRoots')
   }
-  const { IsolatedVerifierRunner } = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-isolation/lib/index.js')).href)
+  const { IsolatedVerifierRunner } = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-ray/assistant-isolation/lib/index.js')).href)
   const runner = new IsolatedVerifierRunner({
     backend: 'linux-native',
     stateRoot: join(temp, 'fixture-control'),
@@ -107,7 +107,7 @@ function patchRow(document, id) {
 
 function installLiveCredentialReference(source, live) {
   const patch = parseDocument(source)
-  const keychain = patchRow(patch, 'dsh-enhanced-credentials-keychain')
+  const keychain = patchRow(patch, 'dsh-ray-credentials-keychain')
   const config = keychain.get('config', true)
   const handles = config.get('handles', true)
   const current = handles?.toJSON?.() ?? []
@@ -225,7 +225,7 @@ function unknownExecutionWithoutPullRequest(goalsPath, goalId, fixturePath) {
 function effectiveDeliveryContinuationTimeout(home) {
   try {
     const patch = parseDocument(readFileSync(join(home, 'profiles/web/cordis.patch.yml'), 'utf8'))
-    const row = patchRow(patch, 'dsh-enhanced-assistant-delivery')
+    const row = patchRow(patch, 'dsh-ray-assistant-delivery')
     const configured = row.get('config', true).toJSON()?.agentGoalContinuationTimeoutMs
     // This is the Delivery schema's runtime default when the effective profile
     // does not explicitly set the field.
@@ -354,7 +354,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     const server = createServer(); server.on('error', reject)
     server.listen(0, '127.0.0.1', () => { const address = server.address(); server.close(error => error ? reject(error) : resolvePort(address.port)) })
   })
-  const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_ENHANCED_WEB_PORT: String(port), DSH_REPO_AUTONOMY_OBSERVER_LOG: observerLog,
+  const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_RAY_WEB_PORT: String(port), DSH_REPO_AUTONOMY_OBSERVER_LOG: observerLog,
     DSH_REPO_AUTONOMY_NO_MODEL: setupOnly ? '1' : '0',
     DSH_REPO_AUTONOMY_MAX_CALLS: repositoryEvents ? '26' : '14', DSH_REPO_AUTONOMY_DURATION_MS: '300000' }
   let host; let restarted; let externalBroker; let sandboxLlm; let activePage = page; let failed = false; let sessionId
@@ -365,12 +365,12 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     // Keep this disposable profile independent of a developer's published
     // Skills/Proactive defaults before the formal installer reads them.
     await mkdir(join(home, 'profiles', 'web'), { recursive: true, mode: 0o700 })
-    await writeFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), `- id: dsh-enhanced-assistant-skills
-  name: '@dsh-enhanced/assistant-skills'
+    await writeFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), `- id: dsh-ray-assistant-skills
+  name: '@dsh-ray/assistant-skills'
   config:
     databasePath: ${join(home, 'assistant-skills/skills.sqlite')}
-- id: dsh-enhanced-assistant-proactive
-  name: '@dsh-enhanced/assistant-proactive'
+- id: dsh-ray-assistant-proactive
+  name: '@dsh-ray/assistant-proactive'
   config:
     databasePath: ${join(home, 'assistant-proactive/proactive.sqlite')}
 `, { mode: 0o600 })
@@ -503,10 +503,10 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     // without blocking the initial foreground turn.
     {
       const verifierPatch = parseDocument(await readFile(patchPath, 'utf8'))
-      patchRow(verifierPatch, 'dsh-enhanced-assistant-verifier')
+      patchRow(verifierPatch, 'dsh-ray-assistant-verifier')
       const setVerifierRequireAcceptance = node => {
         if (isMap(node)) {
-          if (node.get('id') === 'dsh-enhanced-assistant-verifier' && isMap(node.get('config', true))) {
+          if (node.get('id') === 'dsh-ray-assistant-verifier' && isMap(node.get('config', true))) {
             node.get('config', true).set('requireAcceptance', verifierPatch.createNode(false))
           }
           for (const item of node.items) setVerifierRequireAcceptance(item.value)
@@ -524,7 +524,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       // replaced here; EventTriggers, Keychain, Policy, observer and durable
       // source store remain the installed components.
       const patch = parseDocument(await readFile(patchPath, 'utf8'))
-      const source = patchRow(patch, 'dsh-enhanced-event-triggers')
+      const source = patchRow(patch, 'dsh-ray-event-triggers')
       source.set('disabled', true)
       const replacement = patch.createNode({ id: 'repo-event-transport-fixture', name: resolve(root, 'scripts/e2e/repo-event-transport-fixture.mjs') })
       replacement.set('config', source.get('config', true).clone())

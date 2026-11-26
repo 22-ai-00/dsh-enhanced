@@ -24,7 +24,7 @@ async function identity(path: string): Promise<Identity> {
 }
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'scanner-installer-proof-'))); roots.push(root)
-  const home = join(root, 'home'), transaction = `${home}.dsh-enhanced-transaction`, staged = join(transaction, 'staged-home')
+  const home = join(root, 'home'), transaction = `${home}.dsh-ray-transaction`, staged = join(transaction, 'staged-home')
   await mkdir(home, { mode: 0o700 }); await mkdir(transaction, { mode: 0o700 }); await mkdir(staged, { mode: 0o700 })
   const beforeRecords = [{ id: `usage-scan-${h('1')}`, owner: 'assistant-growth-usage', definitionHash: h('2'),
     status: 'active', nextRunAt: 2, createdAt: 1, updatedAt: 1, version: 1, runningTaskCount: 0 }]
@@ -40,7 +40,7 @@ async function fixture() {
   const manifest = { id: randomUUID(), version: 3, operation: 'upgrade', homePath: home, profile: 'web',
     originalIdentity: await identity(home), stagedIdentity: await identity(staged), transactionIdentity: await identity(transaction),
     supervisedLifecycle: { source, scannerRetirement: undefined as Journal | undefined } }
-  const sourceArtifact = { protocol: 'dsh-enhanced/scanner-retirement-source/v1', transactionId: manifest.id,
+  const sourceArtifact = { protocol: 'dsh-ray/scanner-retirement-source/v1', transactionId: manifest.id,
     homePath: home, profile: 'web', source, effectiveConfig, ownerSource }
   const plan = { protocol: 'lark-channel/scanner-retirement-plan/v1', planDigest: h('a'), dshHome: home, profile: 'web', owner,
     effectiveConfigDigest: source.effectiveConfigDigest, automationsDatabasePath: join(home, source.databasePaths.automations),
@@ -50,7 +50,7 @@ async function fixture() {
   const captured = { candidateConfigDigest: hash(effectiveConfig), capture: { status: 'prepared', plan } }
   const completion = { protocol: 'lark-channel/scanner-retirement-completion/v1', planDigest: plan.planDigest, after: { records: afterRecords } }
   function journal(phase = 'source-bound'): Journal {
-    return { protocol: 'dsh-enhanced/scanner-retirement-transaction/v1', phase, transactionId: manifest.id, homePath: home, profile: 'web',
+    return { protocol: 'dsh-ray/scanner-retirement-transaction/v1', phase, transactionId: manifest.id, homePath: home, profile: 'web',
       originalIdentity: clone(manifest.originalIdentity), stagedIdentity: clone(manifest.stagedIdentity), sourceDigest: api.scannerBindingDigest(source),
       sourceArtifact: { file: 'scanner-retirement-source.json', digest: h('b') },
       ...(phase === 'source-bound' ? {} : { captureArtifact: { file: 'scanner-retirement-capture.json', digest: h('c') } }),
@@ -254,9 +254,9 @@ describe.skipIf(process.platform !== 'linux')('scanner original-restore admissio
 // The tiny public-API module records delegation; it grants no stage authority.
 async function operatorFixture() {
   const f = await fixture(); const journal = await archive(f)
-  const packageRoot = join(f.home, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'lark-channel')
+  const packageRoot = join(f.home, 'profiles', 'web', 'node_modules', '@dsh-ray', 'lark-channel')
   await mkdir(packageRoot, { recursive: true })
-  await writeFile(join(packageRoot, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/lark-channel', type: 'module', exports: './index.mjs' }))
+  await writeFile(join(packageRoot, 'package.json'), JSON.stringify({ name: '@dsh-ray/lark-channel', type: 'module', exports: './index.mjs' }))
   const log = join(f.home, 'operator-api.ndjson'), config = join(f.home, 'operator-config.json'), dumpLog = join(f.home, 'operator-dump.json')
   await writeFile(config, f.sourceArtifact.effectiveConfig)
   const dsh = join(f.home, 'dsh')

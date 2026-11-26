@@ -709,7 +709,7 @@ describe('Tier 2 — F15–F18: GoalStrategy, Compensation, EventTriggers & Skil
         databasePath: ws.sqlitePath('policy'),
         rules: [
           { id: 'obs', effect: 'allow', subject: { kind: 'background', id: EVENT_OBSERVER_EXECUTOR, workspace: ws.workspace, principal: 'owner:one' }, actions: ['observe', 'reconcile', 'execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
-          { id: 'cred', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: '*' }, context: { initiators: ['background'] } },
+          { id: 'cred', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: '*' }, context: { initiators: ['background'] } },
           { id: 'ing', effect: 'allow', subject: { kind: 'external', id: '*', workspace: ws.workspace }, actions: ['ingest'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['external'] } },
           { id: 'acc', effect: 'allow', subject: { kind: 'external', id: 'webhook:wh-1' }, actions: ['accept'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['external'] } },
         ],
@@ -732,7 +732,7 @@ describe('Tier 2 — F15–F18: GoalStrategy, Compensation, EventTriggers & Skil
                 id: 'cred-wh',
                 provider: 'environment',
                 environmentName: 'DSH_E2E_WH_T2_SECRET',
-                consumers: ['dsh-enhanced-event-triggers'],
+                consumers: ['dsh-ray-event-triggers'],
                 purposes: ['verify-webhook'],
                 maxLeaseMs: 30_000,
               }],
@@ -744,7 +744,7 @@ describe('Tier 2 — F15–F18: GoalStrategy, Compensation, EventTriggers & Skil
 
       let svc!: InstanceType<typeof mod.EventTriggersService>
       await ctx.plugin({
-        name: 'dsh-enhanced-event-triggers',
+        name: 'dsh-ray-event-triggers',
         apply(runtime: unknown) {
           svc = new mod.EventTriggersService(runtime as never, {
             databasePath: ws.sqlitePath('events'),

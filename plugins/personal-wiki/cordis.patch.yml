@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-personal-wiki
-      name: '@dsh-enhanced/personal-wiki'
+    - id: dsh-ray-personal-wiki
+      name: '@dsh-ray/personal-wiki'
       inject:
         - assistantPolicy
       config:

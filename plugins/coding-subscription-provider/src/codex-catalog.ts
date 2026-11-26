@@ -266,8 +266,8 @@ export async function discoverCodexModels(
     id: 0,
     params: {
       clientInfo: {
-        name: 'dsh_enhanced',
-        title: 'DSH Enhanced',
+        name: 'dsh_ray',
+        title: 'DSH Ray',
         version,
       },
     },

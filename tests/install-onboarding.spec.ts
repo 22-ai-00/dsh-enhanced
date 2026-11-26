@@ -47,26 +47,26 @@ describe('guided onboarding helpers', () => {
   test('stored credential detection matches only a non-empty key line', async () => {
     const home = await temporaryHome()
     await mkdir(home, { recursive: true })
-    const check = () => library(`dsh_enhanced_model_credential_stored ${JSON.stringify(home)} deepseek-official`).status
+    const check = () => library(`dsh_ray_model_credential_stored ${JSON.stringify(home)} deepseek-official`).status
     expect(check()).toBe(1)
     await writeFile(join(home, '.credentials.yaml'), 'DEEPSEEK_API_KEY: \n', { mode: 0o600 })
     expect(check()).toBe(1)
     await writeFile(join(home, '.credentials.yaml'), 'DEEPSEEK_API_KEY: sk-stored\n', { mode: 0o600 })
     expect(check()).toBe(0)
-    expect(library(`dsh_enhanced_model_credential_stored ${JSON.stringify(home)} traex-agent`).status).toBe(0)
+    expect(library(`dsh_ray_model_credential_stored ${JSON.stringify(home)} traex-agent`).status).toBe(0)
   })
 
   test('model plan keeps user routes and stored keys, configures only with a key source', async () => {
     const home = await temporaryHome()
     await mkdir(home, { recursive: true })
     const plan = (provider: string, interactive: string, env: Record<string, string> = {}) =>
-      library(`dsh_enhanced_guided_model_plan ${JSON.stringify(home)} ${JSON.stringify(provider)} ${interactive}`, env).stdout
+      library(`dsh_ray_guided_model_plan ${JSON.stringify(home)} ${JSON.stringify(provider)} ${interactive}`, env).stdout
     expect(plan('openai-compatible', '1', { DEEPSEEK_API_KEY: 'sk-x' })).toBe('keep')
     expect(plan('unresolved', '1')).toBe('keep')
     expect(plan('deepseek-official', '0')).toBe('keep')
     expect(plan('deepseek-official', '1')).toBe('configure')
     expect(plan('', '0', { DEEPSEEK_API_KEY: 'sk-x' })).toBe('configure')
-    expect(plan('deepseek-official', '0', { DSH_ENHANCED_MODEL_API_KEY: 'sk-x' })).toBe('configure')
+    expect(plan('deepseek-official', '0', { DSH_RAY_MODEL_API_KEY: 'sk-x' })).toBe('configure')
     await writeFile(join(home, '.credentials.yaml'), 'DEEPSEEK_API_KEY: sk-stored\n', { mode: 0o600 })
     expect(plan('deepseek-official', '1', { DEEPSEEK_API_KEY: 'sk-x' })).toBe('keep')
   })
@@ -76,7 +76,7 @@ describe('guided onboarding helpers', () => {
     const emptyPath = join(dirname(home), 'empty-bin')
     await mkdir(emptyPath, { recursive: true })
     const resolveProvider = () => library(
-      `dsh_enhanced_guided_model_provider ${JSON.stringify(home)} web`,
+      `dsh_ray_guided_model_provider ${JSON.stringify(home)} web`,
       { PATH: `${emptyPath}:/usr/bin:/bin` },
     ).stdout
     expect(resolveProvider()).toBe('deepseek-official')
@@ -85,7 +85,7 @@ describe('guided onboarding helpers', () => {
   })
 
   test('single onboarding question defaults to guided', () => {
-    const choose = (input: string) => library('dsh_enhanced_choose_onboarding_mode', {}, input)
+    const choose = (input: string) => library('dsh_ray_choose_onboarding_mode', {}, input)
     expect(choose('\n').stdout).toBe('guided')
     expect(choose('1\n').stdout).toBe('guided')
     expect(choose('2\n').stdout).toBe('custom')
@@ -115,7 +115,7 @@ describe('guided onboarding installer dry-run', () => {
     const home = await temporaryHome()
     const waited = installer(['--dry-run', '--yes', '--scenario', 'supervised', '--lark', 'configure'], home)
     expect(waited.status, waited.stderr).toBe(0)
-    expect(waited.stdout).toMatch(/dsh-rsi-setup --wait-owner-dm --profile web --dsh-home \S+ --timeout-seconds 600/)
+    expect(waited.stdout).toMatch(/dsh-ray-setup --wait-owner-dm --profile web --dsh-home \S+ --timeout-seconds 600/)
     expect(waited.stdout).toContain('只有已绑定的 owner 可以操作和授权')
     expect(waited.stdout.indexOf('--wait-owner-dm')).toBeLessThan(waited.stdout.indexOf('install-owner'))
 
@@ -152,7 +152,7 @@ describe('guided onboarding installer dry-run', () => {
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('自治学习装配')
     const preset = result.stdout.indexOf('dsh-plugin-setup preset recommended --yes')
-    const ownerInstall = result.stdout.indexOf('dsh-rsi-setup --install-owner')
+    const ownerInstall = result.stdout.indexOf('dsh-ray-setup --install-owner')
     expect(ownerInstall).toBeGreaterThanOrEqual(0)
     expect(preset).toBeGreaterThan(ownerInstall)
     expect(result.stdout).toContain('--enable-ordinary-use-learning')
@@ -187,7 +187,7 @@ describe('guided onboarding installer dry-run', () => {
     // No real dsh on PATH: the helper's native Host branch is not under test here,
     // only which decisions it forwards to dsh-plugin-setup.
     const assembly = (args: string) => library(
-      `ASSEMBLY_LOG=${JSON.stringify(log)} dsh_enhanced_apply_supervised_learning_assembly ${args}`,
+      `ASSEMBLY_LOG=${JSON.stringify(log)} dsh_ray_apply_supervised_learning_assembly ${args}`,
       { PATH: '/usr/bin:/bin' },
     )
     const calls = async () => (await readFile(log, 'utf8')).trim()
@@ -222,11 +222,11 @@ describe('guided onboarding installer dry-run', () => {
   })
 
   test('plugin preset confirmation declines without a terminal', () => {
-    expect(library('dsh_enhanced_confirm_plugin_preset', {}, '\n').status).toBe(1)
+    expect(library('dsh_ray_confirm_plugin_preset', {}, '\n').status).toBe(1)
   })
 
   test('learning decision defaults stay explicit and deterministic', () => {
-    const resolve = (...args: string[]) => library('dsh_enhanced_resolve_learning_decision ' + args.join(' '))
+    const resolve = (...args: string[]) => library('dsh_ray_resolve_learning_decision ' + args.join(' '))
     expect(resolve('auto', 'supervised', '1', '0', '1').stdout).toBe('authorize')
     expect(resolve('auto', 'supervised', '0', '0', '1').stdout).toBe('preserve')
     expect(resolve('auto', 'lark', '1', '0', '1').stdout).toBe('skip')
@@ -235,35 +235,35 @@ describe('guided onboarding installer dry-run', () => {
     expect(resolve('authorize', 'supervised', '1', '0', '0').stdout).toBe('authorize')
     expect(resolve('bogus', 'supervised', '1', '0', '0').status).toBe(2)
     // No terminal: the guided question declines; callers fall back to the stated default.
-    expect(library('dsh_enhanced_confirm_ordinary_use_learning', {}, '\n').status).toBe(1)
+    expect(library('dsh_ray_confirm_ordinary_use_learning', {}, '\n').status).toBe(1)
   })
 
   test('install intent is private, schema-checked and reusable', async () => {
     // A missing parent Home is created 0700; mkdir -p alone would leave the
     // caller umask (typically 0755) on the Home the marker lives in.
     const home = join(await temporaryHome(), 'nested', 'home')
-    const written = library('dsh_enhanced_write_install_intent ' + JSON.stringify(home) + ' supervised skip auto-skip')
+    const written = library('dsh_ray_write_install_intent ' + JSON.stringify(home) + ' supervised skip auto-skip')
     expect(written.status, written.stderr).toBe(0)
-    const intentPath = join(home, '.dsh-enhanced', 'install-intent.json')
+    const intentPath = join(home, '.dsh-ray', 'install-intent.json')
     const intent = JSON.parse(await readFile(intentPath, 'utf8')) as Record<string, unknown>
     expect(intent).toMatchObject({ schemaVersion: 1, scenario: 'supervised', learning: 'skip', pluginPreset: 'auto-skip' })
     expect(Number.isSafeInteger(intent.at)).toBe(true)
     expect((await stat(home)).mode & 0o777).toBe(0o700)
-    expect((await stat(join(home, '.dsh-enhanced'))).mode & 0o777).toBe(0o700)
+    expect((await stat(join(home, '.dsh-ray'))).mode & 0o777).toBe(0o700)
     expect((await stat(intentPath)).mode & 0o777).toBe(0o600)
-    const read = library('dsh_enhanced_read_install_intent ' + JSON.stringify(home))
+    const read = library('dsh_ray_read_install_intent ' + JSON.stringify(home))
     expect(read.status).toBe(0)
     expect(read.stdout.trim().split(' ')).toEqual(['supervised', 'skip', 'auto-skip', String(intent.at)])
     // Invalid markers are rejected instead of being treated as the recorded decision.
     await writeFile(intentPath, 'not-json\n')
-    expect(library('dsh_enhanced_read_install_intent ' + JSON.stringify(home)).status).toBe(2)
+    expect(library('dsh_ray_read_install_intent ' + JSON.stringify(home)).status).toBe(2)
     const missing = await temporaryHome()
-    expect(library('dsh_enhanced_read_install_intent ' + JSON.stringify(missing)).status).toBe(1)
+    expect(library('dsh_ray_read_install_intent ' + JSON.stringify(missing)).status).toBe(1)
     // An existing Home keeps the permissions it already has.
     const existing = await temporaryHome()
     await mkdir(existing, { recursive: true })
     await chmod(existing, 0o755)
-    expect(library('dsh_enhanced_write_install_intent ' + JSON.stringify(existing) + ' supervised authorize recommended').status).toBe(0)
+    expect(library('dsh_ray_write_install_intent ' + JSON.stringify(existing) + ' supervised authorize recommended').status).toBe(0)
     expect((await stat(existing)).mode & 0o777).toBe(0o755)
   })
 
@@ -282,7 +282,7 @@ describe('guided onboarding installer dry-run', () => {
     // The declined owner setup is never invoked with the learning authorization.
     expect(skipped.stdout).not.toContain('--enable-ordinary-use-learning')
     // Dry-run plans the decision but must not persist the marker.
-    expect(existsSync(join(skippedHome, '.dsh-enhanced'))).toBe(false)
+    expect(existsSync(join(skippedHome, '.dsh-ray'))).toBe(false)
 
     const invalid = installer(['--dry-run', '--yes', '--lark', 'skip', '--learning', 'bogus'], await temporaryHome())
     expect(invalid.status).toBe(2)
@@ -303,8 +303,8 @@ describe('guided onboarding installer dry-run', () => {
         await writeFile(join(home, 'profiles', 'web', 'package.json'), profileManifest)
       }
       if (learning !== null) {
-        await mkdir(join(home, '.dsh-enhanced'), { recursive: true, mode: 0o700 })
-        await writeFile(join(home, '.dsh-enhanced', 'install-intent.json'),
+        await mkdir(join(home, '.dsh-ray'), { recursive: true, mode: 0o700 })
+        await writeFile(join(home, '.dsh-ray', 'install-intent.json'),
           '{"schemaVersion":1,"scenario":"supervised","learning":"' + learning + '","pluginPreset":"' + preset + '","at":1794400000}\n', { mode: 0o600 })
       }
       return home
@@ -351,8 +351,8 @@ describe('guided onboarding installer dry-run', () => {
       const rejected = run(home, ['--learning', decision])
       expect(rejected.status, decision).toBe(2)
       expect(rejected.stderr).toContain('既有安装不接受新的学习决策')
-      expect(rejected.stdout).not.toContain('dsh-rsi-setup --install-owner')
-      expect(existsSync(join(home, '.dsh-enhanced'))).toBe(false)
+      expect(rejected.stdout).not.toContain('dsh-ray-setup --install-owner')
+      expect(existsSync(join(home, '.dsh-ray'))).toBe(false)
     }
 
     // The resolved guided/explicit preset decision is persisted, so a retry may
@@ -371,8 +371,8 @@ describe('guided onboarding installer dry-run', () => {
     // could silently authorize learning).
     for (const withProfile of [false, true]) {
       const corrupt = await seed(null, withProfile)
-      await mkdir(join(corrupt, '.dsh-enhanced'), { recursive: true, mode: 0o700 })
-      await writeFile(join(corrupt, '.dsh-enhanced', 'install-intent.json'), '{}\n', { mode: 0o600 })
+      await mkdir(join(corrupt, '.dsh-ray'), { recursive: true, mode: 0o700 })
+      await writeFile(join(corrupt, '.dsh-ray', 'install-intent.json'), '{}\n', { mode: 0o600 })
       const rejectedMarker = run(corrupt)
       expect(rejectedMarker.status, String(withProfile)).toBe(2)
       expect(rejectedMarker.stderr).toContain('无法通过校验')
@@ -404,7 +404,7 @@ describe('guided onboarding installer dry-run', () => {
     expect(withDreaming.stdout).toContain(join(repoRoot, 'plugins', 'assistant-dreaming'))
     expect(withDreaming.stdout).toContain(join(repoRoot, 'plugins', 'assistant-evaluation'))
     expect(withDreaming.stdout).toContain(join(repoRoot, 'plugins', 'assistant-skills'))
-    expect(withDreaming.stdout).toContain('Dreaming：将安装 @dsh-enhanced/assistant-dreaming（默认安全休眠 enabled=false）')
+    expect(withDreaming.stdout).toContain('Dreaming：将安装 @dsh-ray/assistant-dreaming（默认安全休眠 enabled=false）')
     expect(withDreaming.stdout).not.toContain('enabled: true')
 
     const withAddons = installer([
@@ -425,9 +425,9 @@ describe('guided onboarding installer dry-run', () => {
 
   test('install intent persists optional proactive/dreaming/growth switches backwards-compatibly', async () => {
     const home = await temporaryHome()
-    const writeExt = library('dsh_enhanced_write_install_intent ' + JSON.stringify(home) + ' web skip auto-skip on off on')
+    const writeExt = library('dsh_ray_write_install_intent ' + JSON.stringify(home) + ' web skip auto-skip on off on')
     expect(writeExt.status, writeExt.stderr).toBe(0)
-    const intent = JSON.parse(await readFile(join(home, '.dsh-enhanced', 'install-intent.json'), 'utf8')) as Record<string, unknown>
+    const intent = JSON.parse(await readFile(join(home, '.dsh-ray', 'install-intent.json'), 'utf8')) as Record<string, unknown>
     expect(intent).toMatchObject({
       schemaVersion: 1,
       scenario: 'web',
@@ -437,12 +437,12 @@ describe('guided onboarding installer dry-run', () => {
       dreaming: 'off',
       growth: 'on',
     })
-    const readExt = library('dsh_enhanced_read_install_intent ' + JSON.stringify(home))
+    const readExt = library('dsh_ray_read_install_intent ' + JSON.stringify(home))
     expect(readExt.status, readExt.stderr).toBe(0)
     expect(readExt.stdout.trim().split(' ')).toEqual(['web', 'skip', 'auto-skip', String(intent.at), 'on', 'off', 'on'])
 
     // Unknown extra keys in install-intent.json fail closed.
-    await writeFile(join(home, '.dsh-enhanced', 'install-intent.json'), JSON.stringify({ ...intent, extraKey: 'bad' }) + '\n')
-    expect(library('dsh_enhanced_read_install_intent ' + JSON.stringify(home)).status).toBe(2)
+    await writeFile(join(home, '.dsh-ray', 'install-intent.json'), JSON.stringify({ ...intent, extraKey: 'bad' }) + '\n')
+    expect(library('dsh_ray_read_install_intent ' + JSON.stringify(home)).status).toBe(2)
   })
 })

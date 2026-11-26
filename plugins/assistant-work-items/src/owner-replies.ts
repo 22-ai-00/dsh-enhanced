@@ -1,5 +1,5 @@
 import { symbols } from '@deepseek-ai/cordis'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import type { NormalizedConfig } from './config.js'
 import { truncateUtf8 } from './config.js'
 import type { WorkItemContinuation } from './continuation.js'

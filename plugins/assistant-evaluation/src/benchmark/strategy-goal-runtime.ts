@@ -1,7 +1,7 @@
 /** Native Goal + isolated artifact assembly. This does not attest a complete comparison. */
 import { Context } from '@deepseek-ai/cordis'
-import { acceptanceDigest, type TaskAcceptanceContract, type TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
-import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { acceptanceDigest, type TaskAcceptanceContract, type TaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import type { NativeAdapterFactory, NativeAdapterBinding, NativeModelConfig } from './native.js'
 import type { BenchmarkExecutionRequest } from './runner.js'
 import { benchmarkAssert, benchmarkInteger, benchmarkObject, benchmarkSnapshot } from './schema.js'

@@ -31,7 +31,7 @@ export function parseHostUpdatePlan(value, homePath) {
     'originalBindingDigest', 'originalRuntime', 'candidateRuntime', 'candidateBindingSource'])
     || ![1, 2].includes(value.schemaVersion) || !['current', 'update'].includes(value.status)
     || !absolute(value.canonicalHome) || value.canonicalHome !== homePath
-    || value.bindingPath !== `${homePath}/.dsh-rsi-host.json`
+    || value.bindingPath !== `${homePath}/.dsh-ray-host.json`
     || typeof value.candidateBindingSource !== 'string'
     || value.schemaVersion === 1 && (typeof value.originalBindingSource !== 'string'
       || !hex(value.originalBindingDigest) || digest(value.originalBindingSource) !== value.originalBindingDigest)

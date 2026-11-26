@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/task-acceptance-contract",
+  "name": "@dsh-ray/task-acceptance-contract",
   "version": "0.1.88",
   "description": "Strict immutable acceptance and verification wire contracts for DSH assistant plugins.",
   "license": "MIT",
@@ -41,7 +41,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "packages/task-acceptance-contract"
   },
   "keywords": [

@@ -4,7 +4,7 @@ import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import type { RsiAuthorityResources } from '../src/rsi-authority-resources.js'
 import type { RsiSetupManifest } from '../src/rsi-profile.js'
 import { rawLoaderConfig } from '../src/rsi-bootstrap-manifest.js'
-import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
+import { runtimeConfigDigest } from '@dsh-ray/plugin-control-plane'
 import { readRsiHostPatchConfig, readRsiHostUpdateOverlayChain, rebaseRsiHostActivePatch, rebaseRsiHostProfiles,
   rebaseRsiHostValue, replaceRsiHostPatchConfig,
   rsiHostUpdateOverlayDigest, signRsiHostUpdateOverlay, signRsiOwnerRepairOverlay, signRsiOwnerProgramUpdateOverlay } from '../src/rsi-host-update.js'
@@ -24,17 +24,17 @@ describe('bounded RSI Host update projections', () => {
 
   test('preserves an adopted patch’s unrelated rows while migrating its pinned rows', () => {
     const patch = `[
-      { id: dsh-enhanced-plugin-control-plane, config: { runtimeObserver: { targets: [] }, executor: { path: /old-host/bin/dsh, sha256: '${oldSha}', version: 0.1.5-rc.3 } } },
-      { id: dsh-enhanced-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3, ownerModel: 0.1.5-rc.3 } },
-      { id: dsh-enhanced-assistant-verifier, config: { sourceReviews: [] } },
+      { id: dsh-ray-plugin-control-plane, config: { runtimeObserver: { targets: [] }, executor: { path: /old-host/bin/dsh, sha256: '${oldSha}', version: 0.1.5-rc.3 } } },
+      { id: dsh-ray-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3, ownerModel: 0.1.5-rc.3 } },
+      { id: dsh-ray-assistant-verifier, config: { sourceReviews: [] } },
       { id: owner-extra, config: { version: 0.1.5-rc.3 } }
     ]`
     const changed = rebaseRsiHostActivePatch({ patch, rebase })
     const rows = parseDocument(changed).toJSON() as Array<{ id: string; config: unknown }>
-    expect(rows.find(row => row.id === 'dsh-enhanced-plugin-control-plane')?.config).toMatchObject({
+    expect(rows.find(row => row.id === 'dsh-ray-plugin-control-plane')?.config).toMatchObject({
       executor: { path: '/new-host/bin/dsh', sha256: newSha, version: '0.1.5' },
     })
-    expect(rows.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')?.config).toEqual({
+    expect(rows.find(row => row.id === 'dsh-ray-assistant-growth-driver')?.config).toEqual({
       dshBaseline: '0.1.5', ownerModel: '0.1.5-rc.3',
     })
     expect(rows.find(row => row.id === 'owner-extra')?.config).toEqual({ version: '0.1.5-rc.3' })
@@ -47,29 +47,29 @@ describe('bounded RSI Host update projections', () => {
     const verifier = { databasePath: { __jsExpr: "dshHomePath('verifier/state.sqlite')" }, sourceReviews: [] }
     const digest = runtimeConfigDigest(verifier)
     const patch = `[
-      { id: dsh-enhanced-plugin-control-plane, config: { runtimeObserver: { targets: [{ entryId: dsh-enhanced-assistant-verifier, configDigest: ${digest} }] }, executor: { path: /old-host/bin/dsh, sha256: '${oldSha}', version: 0.1.5-rc.3 } } },
-      { id: dsh-enhanced-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3 } },
-      { id: dsh-enhanced-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", sourceReviews: [] } },
+      { id: dsh-ray-plugin-control-plane, config: { runtimeObserver: { targets: [{ entryId: dsh-ray-assistant-verifier, configDigest: ${digest} }] }, executor: { path: /old-host/bin/dsh, sha256: '${oldSha}', version: 0.1.5-rc.3 } } },
+      { id: dsh-ray-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3 } },
+      { id: dsh-ray-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", sourceReviews: [] } },
       { id: personal-assistant, config: { nested: [{ databasePath: !!js 'dshHomePath("personal/state.sqlite")' }] } }
     ]`
     const coordinator = `[{ id: coordinator, config: { path: !!js "dshHomePath('coordinator/state.sqlite')" } }]`
-    const manifest = { controlPlane: readRsiHostPatchConfig(patch, 'dsh-enhanced-plugin-control-plane'),
-      growthDriver: readRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-growth-driver'), sourceReviews: [] } as unknown as RsiSetupManifest
+    const manifest = { controlPlane: readRsiHostPatchConfig(patch, 'dsh-ray-plugin-control-plane'),
+      growthDriver: readRsiHostPatchConfig(patch, 'dsh-ray-assistant-growth-driver'), sourceReviews: [] } as unknown as RsiSetupManifest
     const changed = rebaseRsiHostProfiles({ manifest, targetPatch: patch, coordinatorPatch: coordinator, rebase })
     expect(changed.manifest.controlPlane.runtimeObserver!.targets[0]!.configDigest).toBe(digest)
-    expect(readRsiHostPatchConfig(changed.targetPatch, 'dsh-enhanced-assistant-verifier')).toEqual(verifier)
+    expect(readRsiHostPatchConfig(changed.targetPatch, 'dsh-ray-assistant-verifier')).toEqual(verifier)
     expect(changed.targetPatch).toContain('!!js')
     expect(changed.coordinatorPatch).toContain('!!js')
     const adopted = rebaseRsiHostActivePatch({ patch, rebase })
-    expect(readRsiHostPatchConfig(adopted, 'dsh-enhanced-assistant-verifier')).toEqual(verifier)
+    expect(readRsiHostPatchConfig(adopted, 'dsh-ray-assistant-verifier')).toEqual(verifier)
     const document = parseDocument(adopted, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (s: string) => s }] })
     const verifierRow = document.contents
     expect(rawLoaderConfig(verifierRow, 'patch')).toMatchObject(expect.arrayContaining([
-      { id: 'dsh-enhanced-assistant-verifier', config: verifier },
+      { id: 'dsh-ray-assistant-verifier', config: verifier },
     ]))
     const rows = document.contents
     if (!isSeq(rows)) throw new Error('invalid test patch')
-    const verifierNode = rows.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-assistant-verifier')
+    const verifierNode = rows.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-ray-assistant-verifier')
     if (!isMap(verifierNode)) throw new Error('missing verifier')
     const configNode = verifierNode.get('config', true)
     if (!isMap(configNode)) throw new Error('missing config')
@@ -78,48 +78,48 @@ describe('bounded RSI Host update projections', () => {
   })
 
   test('rejects unknown tags, duplicates, string impersonation and tagged expression changes', () => {
-    const patch = `[{ id: dsh-enhanced-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", sourceReviews: [] } }]`
-    const old = readRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-verifier')
+    const patch = `[{ id: dsh-ray-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", sourceReviews: [] } }]`
+    const old = readRsiHostPatchConfig(patch, 'dsh-ray-assistant-verifier')
     expect(old.databasePath).toEqual({ __jsExpr: "dshHomePath('verifier/state.sqlite')" })
-    expect(() => replaceRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-verifier',
+    expect(() => replaceRsiHostPatchConfig(patch, 'dsh-ray-assistant-verifier',
       { ...old, databasePath: "dshHomePath('verifier/state.sqlite')" }, old)).toThrow('row changed')
-    expect(() => replaceRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-verifier', old,
+    expect(() => replaceRsiHostPatchConfig(patch, 'dsh-ray-assistant-verifier', old,
       { ...old, databasePath: { __jsExpr: "dshHomePath('other.sqlite')" } })).toThrow('tagged Loader expression')
-    expect(() => replaceRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-verifier', old,
+    expect(() => replaceRsiHostPatchConfig(patch, 'dsh-ray-assistant-verifier', old,
       { ...old, databasePath: '/tmp/plain.sqlite' })).toThrow('tagged Loader expression')
-    const once = replaceRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-verifier', old,
+    const once = replaceRsiHostPatchConfig(patch, 'dsh-ray-assistant-verifier', old,
       { ...old, sourceReviews: [{ id: 'one' }] })
-    const twice = replaceRsiHostPatchConfig(once, 'dsh-enhanced-assistant-verifier',
+    const twice = replaceRsiHostPatchConfig(once, 'dsh-ray-assistant-verifier',
       { ...old, sourceReviews: [{ id: 'one' }] }, { ...old, sourceReviews: [{ id: 'two' }] })
     expect(twice).toContain('!!js')
-    expect(readRsiHostPatchConfig(twice, 'dsh-enhanced-assistant-verifier').sourceReviews).toEqual([{ id: 'two' }])
-    expect(() => readRsiHostPatchConfig(patch.replace('!!js', '!!python'), 'dsh-enhanced-assistant-verifier'))
+    expect(readRsiHostPatchConfig(twice, 'dsh-ray-assistant-verifier').sourceReviews).toEqual([{ id: 'two' }])
+    expect(() => readRsiHostPatchConfig(patch.replace('!!js', '!!python'), 'dsh-ray-assistant-verifier'))
       .toThrow('bounded patch')
     expect(() => readRsiHostPatchConfig(patch.replace('sourceReviews: []', 'sourceReviews: [], sourceReviews: []'),
-      'dsh-enhanced-assistant-verifier')).toThrow('bounded patch')
+      'dsh-ray-assistant-verifier')).toThrow('bounded patch')
     expect(() => readRsiHostPatchConfig(patch.replace('!!js "dshHomePath(\'verifier/state.sqlite\')"',
-      "{ __jsExpr: \"dshHomePath('verifier/state.sqlite')\" }"), 'dsh-enhanced-assistant-verifier'))
+      "{ __jsExpr: \"dshHomePath('verifier/state.sqlite')\" }"), 'dsh-ray-assistant-verifier'))
       .toThrow('untagged Loader expression marker')
   })
 
   test('expands a bounded native YAML alias without losing tagged expressions', () => {
     const patch = `[
-      { id: dsh-enhanced-plugin-control-plane, config: {
+      { id: dsh-ray-plugin-control-plane, config: {
         runtimeObserver: { targets: [] },
         taskObservations: { scope: &a1 { account: owner, tenant: stable } },
         liveQualification: { scope: *a1 },
         executor: { path: /old-host/bin/dsh, sha256: '${oldSha}', version: 0.1.5-rc.3 }
       } },
-      { id: dsh-enhanced-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3 } },
-      { id: dsh-enhanced-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", sourceReviews: [] } }
+      { id: dsh-ray-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3 } },
+      { id: dsh-ray-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", sourceReviews: [] } }
     ]`
-    const cp = readRsiHostPatchConfig(patch, 'dsh-enhanced-plugin-control-plane')
+    const cp = readRsiHostPatchConfig(patch, 'dsh-ray-plugin-control-plane')
     expect(cp.liveQualification).toEqual({ scope: { account: 'owner', tenant: 'stable' } })
     const changed = rebaseRsiHostActivePatch({ patch, rebase })
     expect(changed).toContain('!!js')
     expect(changed).not.toContain('*a1')
     expect(changed).not.toContain('&a1')
-    expect(readRsiHostPatchConfig(changed, 'dsh-enhanced-plugin-control-plane')).toMatchObject({
+    expect(readRsiHostPatchConfig(changed, 'dsh-ray-plugin-control-plane')).toMatchObject({
       taskObservations: { scope: { account: 'owner', tenant: 'stable' } },
       liveQualification: { scope: { account: 'owner', tenant: 'stable' } },
       executor: { path: '/new-host/bin/dsh' },
@@ -135,24 +135,24 @@ describe('bounded RSI Host update projections', () => {
     const verifier = { databasePath: { __jsExpr: "dshHomePath('verifier/state.sqlite')" }, sourceReviews: reviews }
     const digest = runtimeConfigDigest(verifier)
     const patch = `[
-      { id: dsh-enhanced-plugin-control-plane, config: { runtimeObserver: { targets: [{ entryId: dsh-enhanced-assistant-verifier, configDigest: ${digest} }] } } },
-      { id: dsh-enhanced-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3 } },
-      { id: dsh-enhanced-assistant-verifier, config: {
+      { id: dsh-ray-plugin-control-plane, config: { runtimeObserver: { targets: [{ entryId: dsh-ray-assistant-verifier, configDigest: ${digest} }] } } },
+      { id: dsh-ray-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3 } },
+      { id: dsh-ray-assistant-verifier, config: {
         databasePath: !!js "dshHomePath('verifier/state.sqlite')",
         sourceReviews: { runner: { path: /old-host/bin/dsh, sha256: '${oldSha}' } }
       } }
     ]`
-    const manifest = { controlPlane: readRsiHostPatchConfig(patch, 'dsh-enhanced-plugin-control-plane'),
-      growthDriver: readRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-growth-driver'),
+    const manifest = { controlPlane: readRsiHostPatchConfig(patch, 'dsh-ray-plugin-control-plane'),
+      growthDriver: readRsiHostPatchConfig(patch, 'dsh-ray-assistant-growth-driver'),
       sourceReviews: reviews } as unknown as RsiSetupManifest
     const changed = rebaseRsiHostProfiles({ manifest, targetPatch: patch, coordinatorPatch: '[]', rebase })
-    const newControl = readRsiHostPatchConfig(changed.targetPatch, 'dsh-enhanced-plugin-control-plane')
+    const newControl = readRsiHostPatchConfig(changed.targetPatch, 'dsh-ray-plugin-control-plane')
     expect(newControl).toEqual(changed.manifest.controlPlane)
-    expect(newControl.runtimeObserver).toEqual({ targets: [{ entryId: 'dsh-enhanced-assistant-verifier',
-      configDigest: runtimeConfigDigest(readRsiHostPatchConfig(changed.targetPatch, 'dsh-enhanced-assistant-verifier')) }] })
+    expect(newControl.runtimeObserver).toEqual({ targets: [{ entryId: 'dsh-ray-assistant-verifier',
+      configDigest: runtimeConfigDigest(readRsiHostPatchConfig(changed.targetPatch, 'dsh-ray-assistant-verifier')) }] })
     expect(newControl.runtimeObserver).not.toEqual(manifest.controlPlane.runtimeObserver)
     expect(changed.targetPatch).toContain('!!js')
-    expect(() => replaceRsiHostPatchConfig(changed.targetPatch, 'dsh-enhanced-plugin-control-plane',
+    expect(() => replaceRsiHostPatchConfig(changed.targetPatch, 'dsh-ray-plugin-control-plane',
       newControl, { ...newControl })).not.toThrow()
   })
 

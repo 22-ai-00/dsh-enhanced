@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-dreaming",
+  "name": "@dsh-ray/assistant-dreaming",
   "version": "0.1.88",
   "description": "A DeepSeek Harness plugin for Assistant Dreaming.",
   "license": "MIT",
@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-dreaming"
   },
   "keywords": [
@@ -54,13 +54,13 @@
     "@deepseek-ai/dsh-llm": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-session": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-enhanced/assistant-automations": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-evaluation": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-goals": ">=0.1.25 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-skills": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/personal-memory": ">=0.1.33 <0.2.0"
+    "@dsh-ray/assistant-automations": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-delivery": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-evaluation": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-goals": ">=0.1.25 <0.2.0",
+    "@dsh-ray/assistant-policy": ">=0.1.0 <0.2.0",
+    "@dsh-ray/assistant-skills": ">=0.1.33 <0.2.0",
+    "@dsh-ray/personal-memory": ">=0.1.33 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -78,25 +78,25 @@
     "@deepseek-ai/dsh-tools": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-automations": {
+    "@dsh-ray/assistant-automations": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-delivery": {
+    "@dsh-ray/assistant-delivery": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-evaluation": {
+    "@dsh-ray/assistant-evaluation": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-goals": {
+    "@dsh-ray/assistant-goals": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-policy": {
+    "@dsh-ray/assistant-policy": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-skills": {
+    "@dsh-ray/assistant-skills": {
       "optional": true
     },
-    "@dsh-enhanced/personal-memory": {
+    "@dsh-ray/personal-memory": {
       "optional": true
     }
   },
@@ -113,17 +113,17 @@
     "@deepseek-ai/dsh-llm": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
     "@deepseek-ai/dsh-agent-loop-testkit": "catalog:",
-    "@dsh-enhanced/assistant-automations": "workspace:*",
-    "@dsh-enhanced/assistant-delivery": "workspace:*",
-    "@dsh-enhanced/assistant-evaluation": "workspace:*",
-    "@dsh-enhanced/assistant-goals": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
-    "@dsh-enhanced/assistant-skills": "workspace:*",
-    "@dsh-enhanced/personal-memory": "workspace:*",
+    "@dsh-ray/assistant-automations": "workspace:*",
+    "@dsh-ray/assistant-delivery": "workspace:*",
+    "@dsh-ray/assistant-evaluation": "workspace:*",
+    "@dsh-ray/assistant-goals": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
+    "@dsh-ray/assistant-skills": "workspace:*",
+    "@dsh-ray/personal-memory": "workspace:*",
     "@deepseek-ai/dsh-tool-executor-native": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
+    "@dsh-ray/task-acceptance-contract": "workspace:*"
   }
 }

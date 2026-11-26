@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-dreaming
+# @dsh-ray/assistant-dreaming
 
 条件式默认启用的"做梦/突发奇想"插件：在缺少 `scope`/`databasePath`/`provider`/`model`/`budgetId`/`budgetAmount` 等必填前提时保持安全休眠（`enabled: false`，零写入）；一旦配置齐备且未显式禁用或退役（`enabled: false` / `retired: true`），默认解析为 `enabled: true` 自动激活。启用后它以低频率、确定性随机、
 空闲感知的方式回顾**已认证的历史投影**（可信任务投影、owner 目标、活动技能，以及可选
@@ -34,7 +34,7 @@ Agent，并把
   `assistantGoals`、`assistantSkills`、`agents`、`sessions`、`tools`），所有
   sibling DSH bundle（含可选 `assistantPolicy`、`personalMemory`）在 `package.json`
   中均声明为**可选** `peerDependencies`（不放入 `dependencies`），只有
-  `@deepseek-ai/schemastery` 与 `@dsh-enhanced/task-acceptance-contract` 等非激活
+  `@deepseek-ai/schemastery` 与 `@dsh-ray/task-acceptance-contract` 等非激活
   共享库留在 `dependencies`。模型调用本身经 `agents`/Agent Loop 与 Host 的 `llm`
   route 发生；启用阶段会做前置门禁（`validateOwnerRoute`、可选 `assistantPolicy`
   emergency-stop/budget/execute 规则、可选 `llm.listProviders()` 与执行前
@@ -96,21 +96,21 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
 1. 安装 bundle（npm 发布后）或把本地打包 tarball 装进目标 profile：
 
    ```sh
-   dsh plugin --profile <profile> add @dsh-enhanced/assistant-dreaming
+   dsh plugin --profile <profile> add @dsh-ray/assistant-dreaming
    # 或本地验证：pnpm --dir plugins/assistant-dreaming pack --pack-destination /tmp
-   # dsh plugin --profile <profile> add /tmp/dsh-enhanced-assistant-dreaming-<version>.tgz
+   # dsh plugin --profile <profile> add /tmp/dsh-ray-assistant-dreaming-<version>.tgz
    dsh --profile <profile> --dump-config | grep -A2 assistant-dreaming
    ```
 
    `dsh plugin add` 会把包注册进 profile 的 `dsh.profile.bundles`，bundle patch 插入
-   一行 `dsh-enhanced-assistant-dreaming`（无 config，即关闭状态）。
+   一行 `dsh-ray-assistant-dreaming`（无 config，即关闭状态）。
 
 2. 在 profile 的 `cordis.patch.yml` 里按 id 覆盖该行，写入启用配置（值按实际 owner
    替换；行内 config 是整段替换，不是深合并）：
 
    ```yaml
-   - id: dsh-enhanced-assistant-dreaming
-     name: '@dsh-enhanced/assistant-dreaming'
+   - id: dsh-ray-assistant-dreaming
+     name: '@dsh-ray/assistant-dreaming'
      config:
        enabled: true
        scope:
@@ -175,7 +175,7 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
          effect: allow
          subject: { kind: background, id: '*', workspace: /Users/<owner>/.dsh/assistant-workspace, principal: <principal> }
          actions: [reconcile, execute]
-         resource: { kind: automation, id: 'dsh-enhanced-assistant-dreaming:*' }
+         resource: { kind: automation, id: 'dsh-ray-assistant-dreaming:*' }
          context: { initiators: [background] }
        - id: assistant-dreaming-submit
          effect: allow
@@ -229,7 +229,7 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
      若已误把 `enabled` 改成 false：Automations 在 materialize 阶段就找不到执行器，
      会为每个到期 slot 记录 availability incident（**不产生 run**，也没有模型调用），
      需要用 Automations 的 owner/system ownership 入口暂停或删除该
-     `dsh-enhanced-assistant-dreaming:*` 行，然后重载 profile。
+     `dsh-ray-assistant-dreaming:*` 行，然后重载 profile。
 
 ## 账本
 
@@ -272,7 +272,7 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
 
 ## 测试
 
-`pnpm --filter @dsh-enhanced/assistant-dreaming test`（62 个用例，6 个文件）：
+`pnpm --filter @dsh-ray/assistant-dreaming test`（62 个用例，6 个文件）：
 config fail-closed、包依赖边界（sibling DSH bundle 仅在可选 `peerDependencies`）、
 确定性抽签/active-hours/idle（含 `coldStartAnchorAt`）/日上限门、确定性票号/环形窗口
 匹配、SQLite 账本/状态机/保留期（含带生命周期事件的过期 idea）/schema 1→2→3 迁移/

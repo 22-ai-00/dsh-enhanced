@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import type { GoalScope } from '@dsh-enhanced/assistant-goals'
+import type { GoalScope } from '@dsh-ray/assistant-goals'
 import type { GrowthAuthority } from './deposit.js'
 
 const CORDIS_ORIGINAL = Symbol.for('cordis.original')

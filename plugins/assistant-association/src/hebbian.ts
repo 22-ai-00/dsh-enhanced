@@ -1,4 +1,4 @@
-import type { TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
+import type { TrustedTaskLearningProjectionReceipt } from '@dsh-ray/assistant-evaluation'
 import { isBoundaryMatch, stepAcState, type EntityAutomaton } from './aho-corasick.js'
 import { extractEntities } from './entities.js'
 import { normalizeEntityKey, normalizeForAc } from './tokenize.js'

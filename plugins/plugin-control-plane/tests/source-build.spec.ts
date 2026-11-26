@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, expect, it, vi } from 'vitest'
-import { validateNativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import { validateNativeMacRuntime } from '@dsh-ray/assistant-isolation'
 import { validateSourceBuildConfig, verifySourcePreparation, type SourceBuildConfig } from '../src/source-build.ts'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace, type SourceCreationGrant } from '../src/source-creation.ts'
 import { createIsolatedWorktree } from '../src/source-workspace.ts'
@@ -17,8 +17,8 @@ import { createSourceCreationFixture } from './helpers/source-creation-fixture.t
 import { runLinuxPreparedChecks } from '../src/linux-source-build.js'
 import { linuxSourceConfig, linuxMockRunner } from './helpers/linux-source-build-fixture.js'
 
-vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
-  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+vi.mock('@dsh-ray/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-ray/assistant-isolation')>()
   return { ...actual, verifyLinuxRuntime: vi.fn(async value => value) }
 })
 

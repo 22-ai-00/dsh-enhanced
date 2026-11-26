@@ -1,3 +1,3 @@
 - insert:
-    - id: dsh-enhanced-assistant-proactive
-      name: '@dsh-enhanced/assistant-proactive'
+    - id: dsh-ray-assistant-proactive
+      name: '@dsh-ray/assistant-proactive'

@@ -6,8 +6,8 @@ import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService, type Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
-import { AssistantAutomationsService, inspectAutomationRetirementSnapshot, type AutomationRecord, type HostAutomationDefinition } from '@dsh-enhanced/assistant-automations'
+import { AssistantPolicyService, type Config as PolicyConfig } from '@dsh-ray/assistant-policy'
+import { AssistantAutomationsService, inspectAutomationRetirementSnapshot, type AutomationRecord, type HostAutomationDefinition } from '@dsh-ray/assistant-automations'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { applyScannerRetirementMaintenance, type ScannerRetirementOperation, type ScannerRetirementResult } from '../src/rsi-scanner-retirement-runtime.ts'
 
@@ -21,7 +21,7 @@ interface Writer {
   retireSystemOwned(input: ScannerRetirementOperation): ScannerRetirementResult
   close(): void
 }
-const { AutomationStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-enhanced/assistant-automations/package.json')), 'lib/store.js')).href) as {
+const { AutomationStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-ray/assistant-automations/package.json')), 'lib/store.js')).href) as {
   AutomationStore: { new (options: { path: string }): Writer; prototype: Writer }
 }
 

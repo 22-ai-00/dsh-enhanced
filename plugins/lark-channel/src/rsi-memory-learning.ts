@@ -1,10 +1,10 @@
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { isDeepStrictEqual } from 'node:util'
-import { growthObjectDigest, validateMemoryLearningOwner, type MemoryLearningOwner } from '@dsh-enhanced/assistant-growth-contract'
-import type { LearningConfig } from '@dsh-enhanced/assistant-memory-learning'
-import type { MemoryReviewConfig } from '@dsh-enhanced/assistant-verifier'
-import type { MemoryLearningAdoptionGrant } from '@dsh-enhanced/personal-memory'
+import { growthObjectDigest, validateMemoryLearningOwner, type MemoryLearningOwner } from '@dsh-ray/assistant-growth-contract'
+import type { LearningConfig } from '@dsh-ray/assistant-memory-learning'
+import type { MemoryReviewConfig } from '@dsh-ray/assistant-verifier'
+import type { MemoryLearningAdoptionGrant } from '@dsh-ray/personal-memory'
 
 export interface RsiMemoryLearningSetup {
   learning: LearningConfig
@@ -30,13 +30,13 @@ function installedPeer<T>(name: string): T {
 
 /** Resolve optional public validators only inside the opted-in memory setup path. */
 export function getRsiMemoryLearningValidators(): {
-  validateLearningConfig: typeof import('@dsh-enhanced/assistant-memory-learning').validateLearningConfig
-  validateMemoryReviewConfig: typeof import('@dsh-enhanced/assistant-verifier').validateMemoryReviewConfig
-  validateMemoryLearningAdoptionGrant: typeof import('@dsh-enhanced/personal-memory').validateMemoryLearningAdoptionGrant
+  validateLearningConfig: typeof import('@dsh-ray/assistant-memory-learning').validateLearningConfig
+  validateMemoryReviewConfig: typeof import('@dsh-ray/assistant-verifier').validateMemoryReviewConfig
+  validateMemoryLearningAdoptionGrant: typeof import('@dsh-ray/personal-memory').validateMemoryLearningAdoptionGrant
 } {
-  const learning = installedPeer<typeof import('@dsh-enhanced/assistant-memory-learning')>('@dsh-enhanced/assistant-memory-learning')
-  const verifier = installedPeer<typeof import('@dsh-enhanced/assistant-verifier')>('@dsh-enhanced/assistant-verifier')
-  const memory = installedPeer<typeof import('@dsh-enhanced/personal-memory')>('@dsh-enhanced/personal-memory')
+  const learning = installedPeer<typeof import('@dsh-ray/assistant-memory-learning')>('@dsh-ray/assistant-memory-learning')
+  const verifier = installedPeer<typeof import('@dsh-ray/assistant-verifier')>('@dsh-ray/assistant-verifier')
+  const memory = installedPeer<typeof import('@dsh-ray/personal-memory')>('@dsh-ray/personal-memory')
   if (typeof learning.validateLearningConfig !== 'function' || typeof verifier.validateMemoryReviewConfig !== 'function'
     || typeof memory.validateMemoryLearningAdoptionGrant !== 'function') fail('installed memory validators are unavailable')
   return { validateLearningConfig: learning.validateLearningConfig,

@@ -1,4 +1,4 @@
-import type { LinuxRuntime, LinuxCgroupRoots } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRuntime, LinuxCgroupRoots } from '@dsh-ray/assistant-isolation'
 import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
 import { isAbsolute, join, normalize, sep } from 'node:path'
@@ -44,7 +44,7 @@ function parse(source: string, label: string): { document: Document; rows: YAMLS
   return { document, rows: document.contents }
 }
 function row(rows: YAMLSeq, bundle: Bundle, required: boolean): YAMLMap | undefined {
-  return findExactRow(rows, bundle, { required, label: `install @dsh-enhanced/${bundle} before autonomy setup` }, fail)
+  return findExactRow(rows, bundle, { required, label: `install @dsh-ray/${bundle} before autonomy setup` }, fail)
 }
 function path(value: unknown, label: string): string {
   if (!isScalar(value) || typeof value.value !== 'string' || value.tag !== undefined && value.tag !== 'tag:yaml.org,2002:str') fail(`${label} must be a literal absolute path`)
@@ -149,13 +149,13 @@ function materializeAutonomyProfile(input: AutonomyProfileInput, source: string,
     const required = (requiredBundles as readonly Bundle[]).includes(bundle)
     const inherited = row(effective.rows, bundle, required); const existing = row(target.rows, bundle, false)
     if (!inherited) {
-      if (existing) fail(`effective profile is missing @dsh-enhanced/${bundle}`)
+      if (existing) fail(`effective profile is missing @dsh-ray/${bundle}`)
       continue
     }
     const base = inherited.has('config') ? map(inherited.get('config', true), bundle) : target.document.createNode({}) as YAMLMap
     const config = existing?.has('config') ? mergeConfigMaps(base, map(existing.get('config', true), bundle), fail) : map(base.clone(), bundle)
     explicit.set(bundle, existing?.has('config') ? new Set(map(existing.get('config', true), bundle).items.map(pair => scalar(pair.key, 'config key'))) : new Set())
-    const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${bundle}`, name: `@dsh-enhanced/${bundle}` }) as YAMLMap
+    const destination = existing ?? target.document.createNode({ id: `dsh-ray-${bundle}`, name: `@dsh-ray/${bundle}` }) as YAMLMap
     destination.set('config', config); if (!existing) target.rows.add(destination); configs.set(bundle, config)
   }
   const isolation = configs.get('assistant-isolation')!; const actions = configs.get('assistant-actions')!; const credentials = configs.get('credentials-keychain')!
@@ -226,7 +226,7 @@ function materializeAutonomyProfile(input: AutonomyProfileInput, source: string,
       }
     }
     if (existing !== undefined || updated) {
-      const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${spec.slug}`, name: `@dsh-enhanced/${spec.slug}` }) as YAMLMap
+      const destination = existing ?? target.document.createNode({ id: `dsh-ray-${spec.slug}`, name: `@dsh-ray/${spec.slug}` }) as YAMLMap
       destination.set('config', config)
       if (existing === undefined) target.rows.add(destination)
     }

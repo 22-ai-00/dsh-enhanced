@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
-import type { NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { NativeMacRuntime } from '@dsh-ray/assistant-isolation'
 import { afterEach, expect, test } from 'vitest'
 import { PluginBehaviorRunner } from '../src/plugin-behavior-runner.js'
 

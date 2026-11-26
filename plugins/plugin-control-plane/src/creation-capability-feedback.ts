@@ -1,6 +1,6 @@
-import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-ray/assistant-delivery'
 import type { AssistantEvaluationService, EvaluationCanonicalLearningEvidenceTuple,
-  TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
+  TrustedTaskLearningProjectionReceipt } from '@dsh-ray/assistant-evaluation'
 import { controlPlaneDigest } from './store.js'
 import type { CreationCapabilityAttributionArm, CreationCapabilityAttributionDelta, CreationCapabilityAttributionStratum,
   CreationCapabilityAvailabilityAttribution, CreationCapabilityCallEvidence, CreationCapabilityOrdinaryUseLatency, CreationCapabilityOrdinaryUseMeasures,
@@ -686,7 +686,7 @@ CreationCapabilityOrdinaryUseTrend | undefined {
  */
 export function inspectCreationCapabilityBenefitWindow(
   input: CreationCapabilityFeedbackInput & { minimumWindowRevisions?: number; window?: { start: number; end: number } },
-): import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitWindowStats | undefined {
+): import('@dsh-ray/assistant-growth-contract').RevisionBenefitWindowStats | undefined {
   const read = readAssociationRows(input, true, input.window)
   const receipt = input.record.receipt
   if (!read || !receipt) return undefined
@@ -708,7 +708,7 @@ export function inspectCreationCapabilityBenefitWindow(
       outputTokensTotal += row.tokenUsage.output
     }
   }
-  const stats: import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitWindowStats = {
+  const stats: import('@dsh-ray/assistant-growth-contract').RevisionBenefitWindowStats = {
     protocol: 'assistant-growth/revision-benefit-window/v1', artifactSha256: receipt.artifactSha256,
     windowStart, windowEnd, taskRevisions: rows.length, correctedOrWithdrawn, failed, reworked,
     latencyMsTotal, tokensTotal, inputTokensTotal, outputTokensTotal,
@@ -717,7 +717,7 @@ export function inspectCreationCapabilityBenefitWindow(
   return stats
 }
 
-function validateWindowStatsShallow(value: import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitWindowStats): void {
+function validateWindowStatsShallow(value: import('@dsh-ray/assistant-growth-contract').RevisionBenefitWindowStats): void {
   // Local guard so the feedback module does not import the evaluator: shape
   // and cross-field bounds only.
   const included = Math.max(0, value.taskRevisions - value.correctedOrWithdrawn)

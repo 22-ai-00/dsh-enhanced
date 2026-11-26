@@ -5,7 +5,7 @@ import type { RsiLocalCohort } from './rsi-local-cohort.js'
 import { mergeRsiLocalOverrides, rsiLocalDependencyOverrides } from './rsi-local-install.js'
 import { rsiLocalUpdateBundles, type RsiLocalRootExtension } from './rsi-local-roots-extension.js'
 
-const INTERNAL = '@dsh-enhanced/'
+const INTERNAL = '@dsh-ray/'
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const VERSION = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$/u

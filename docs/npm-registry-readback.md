@@ -17,7 +17,7 @@
 ## 可复现的真实只读探针
 
 ```sh
-pnpm --filter @dsh-enhanced/plugin-control-plane build
+pnpm --filter @dsh-ray/plugin-control-plane build
 DSH_NPM_REGISTRY_LIVE=1 node scripts/e2e/npm-registry-readback.mjs \
   --output /tmp/dsh-npm-readback.json
 ```

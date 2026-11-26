@@ -30,7 +30,7 @@ async function fixture() {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'source-adoption-authority-')); roots.push(root); const now = Date.now()
   const key = generateKeyPairSync('ed25519'); const keyPath = join(root, 'key.pem'); await writeFile(keyPath, key.privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 }); await chmod(keyPath, 0o600)
   const controlPath = join(root, 'control.sqlite'); const db = new DatabaseSync(controlPath); db.close(); await chmod(controlPath, 0o600)
-  const candidate: CatalogEntry = { id: 'health-helper', package: '@dsh-enhanced/health-helper', version: '1.2.3', integrity: 'sha512-YQ==', dshBaseline: '0.1.0', registry: { id: 'registry', locator: 'https://registry.example/', reference: 'https://registry.example/health-helper-1.2.3.tgz' }, capabilities: ['health'], authorities: ['network'], requires: [] }
+  const candidate: CatalogEntry = { id: 'health-helper', package: '@dsh-ray/health-helper', version: '1.2.3', integrity: 'sha512-YQ==', dshBaseline: '0.1.0', registry: { id: 'registry', locator: 'https://registry.example/', reference: 'https://registry.example/health-helper-1.2.3.tgz' }, capabilities: ['health'], authorities: ['network'], requires: [] }
   const catalogPath = join(root, 'catalog.json'); await writeFile(catalogPath, `${JSON.stringify({ schemaVersion: 1, entries: [candidate] })}\n`, { mode: 0o600 }); await chmod(catalogPath, 0o600)
   const loaded = await loadCatalogWithMetadata(catalogPath); const released = loaded.catalog.entries[0]!
   const source = owner(); const sourcePlan = { id: 'source-plan', status: 'release-complete' } as PluginSourcePlan
@@ -59,7 +59,7 @@ test('refuses fixed-policy, owner-binding, and current-catalog drift', async () 
 test('freezes the grant and rejects protected candidates', async () => {
   const value = await fixture(); await authorizeSourceAdoption(value.config, value.request)
   await expect(authorizeSourceAdoption({ ...value.config, grant: { ...value.config.grant, receiptTtlMs: 29_000 } }, value.request)).rejects.toThrow('refused')
-  expect(() => validateSourceAdoptionAuthorityConfig({ ...value.config, grant: { ...value.config.grant, policies: [{ ...value.config.grant.policies[0]!, candidateId: 'plugin-control-plane', packageName: '@dsh-enhanced/plugin-control-plane' }] } })).toThrow('refused')
+  expect(() => validateSourceAdoptionAuthorityConfig({ ...value.config, grant: { ...value.config.grant, policies: [{ ...value.config.grant.policies[0]!, candidateId: 'plugin-control-plane', packageName: '@dsh-ray/plugin-control-plane' }] } })).toThrow('refused')
 })
 
 
@@ -78,7 +78,7 @@ test('requires the owner grant to explicitly cover signed handoff terms', async 
 
 test('requires exact owner authorization for the signed deployment input list', async () => {
   const value = await fixture()
-  value.plan.dossier.hostDeploymentInputs = ['node_modules/@dsh-enhanced/health-helper/lib/index.js']
+  value.plan.dossier.hostDeploymentInputs = ['node_modules/@dsh-ray/health-helper/lib/index.js']
   await expect(authorizeSourceAdoption(value.config, value.request)).rejects.toThrow('refused')
   value.config.grant.hostDeploymentInputs = ['different.js']
   await expect(authorizeSourceAdoption(value.config, value.request)).rejects.toThrow('refused')

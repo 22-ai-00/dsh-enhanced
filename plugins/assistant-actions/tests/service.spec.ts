@@ -8,10 +8,10 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { AssistantIsolationService } from '@dsh-enhanced/assistant-isolation'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { AssistantIsolationService } from '@dsh-ray/assistant-isolation'
 import { nativeIsolationConfig, cleanupNativeIsolation } from './helpers/native-isolation.ts'
-import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
+import { CredentialsKeychainService } from '@dsh-ray/credentials-keychain'
 import { createHash } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
 import type { request as httpsRequest } from 'node:https'
@@ -89,15 +89,15 @@ test.runIf(process.platform === 'linux')('real ToolRuntime, Keychain and HTTP ex
     await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(ApprovalService, { policy: 'ask' })
     await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow', budgets: [{ id: 'commits', metric: 'dispatches', limit: 3, periodMs: 60_000, scope: 'subject' }], rules: [
       { id: 'action', effect: 'allow', subject: { kind: 'agent', id: 'primary' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:fix' }, budget: { id: 'commits', amount: 1 } },
-      { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
+      { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
     ] })
-    await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(secretRoot, 'token'), consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }] })
+    await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(secretRoot, 'token'), consumers: ['dsh-ray-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }] })
     ctx.provide('agents' as never, { get: (id: string) => id === owner.id ? owner : undefined } as never)
     ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } }) } as never)
     // Exercise the actual Isolation routing exception; no isolation job is submitted.
     await ctx.plugin(AssistantIsolationService, await nativeIsolationConfig(join(root, 'isolation'), [{ id: 'offline', revision: 1, principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: root, agentPreset: 'primary', expiresAt: grant.expiresAt, maxRuns: 1, maxTotalDurationMs: 60_000 }]))
     let asks = 0; let allowHostCanary = true; ctx.on('approval/request', async () => { asks++; return allowHostCanary ? 'allowed-once' : 'rejected' })
-    const load = async () => await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) {
+    const load = async () => await ctx.plugin({ name: 'dsh-ray-assistant-actions', apply(runtime: Context) {
       new AssistantActionsService(runtime, { stateRoot, grants: [grant] }, input => commitOnGitHub(input, transport))
     } }) as unknown as { dispose(): Promise<void> }
     let hostExecutions = 0

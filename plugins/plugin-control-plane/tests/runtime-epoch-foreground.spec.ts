@@ -2,7 +2,7 @@ import { chmod } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
-import type { ForegroundTaskIdentity } from '@dsh-enhanced/assistant-delivery'
+import type { ForegroundTaskIdentity } from '@dsh-ray/assistant-delivery'
 import * as release from '../src/release.js'
 vi.mock('../src/release.js', async importOriginal => ({ ...await importOriginal<typeof release>(), invokeSourceReleaseAdapter: vi.fn() }))
 import { createForegroundDeploymentObserver, queueRuntimeEpoch } from '../src/foreground-deployment-runtime.js'

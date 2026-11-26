@@ -1104,28 +1104,28 @@ describe('Tier 1 — F02–F07: Policy, Evaluation, WorkItems, Proactive & Bench
 
       const setup = await loadPluginSetup()
       const bundlesYaml = [
-        '- id: dsh-enhanced-assistant-work-items',
-        '  name: "@dsh-enhanced/assistant-work-items"',
+        '- id: dsh-ray-assistant-work-items',
+        '  name: "@dsh-ray/assistant-work-items"',
         '  config:',
         '    enabled: false',
         '    mode: observe',
         `    databasePath: ${ws.sqlitePath('wi')}`,
         `    workRoot: ${ws.workspace}`,
-        '- id: dsh-enhanced-assistant-evaluation',
-        '  name: "@dsh-enhanced/assistant-evaluation"',
+        '- id: dsh-ray-assistant-evaluation',
+        '  name: "@dsh-ray/assistant-evaluation"',
         '  config:',
         `    databasePath: ${ws.sqlitePath('eval')}`,
         '    notificationOutcomesEnabled: false',
         '    attentionTuningAutoAdopt: false',
         '    attentionLooseningEnabled: false',
-        '- id: dsh-enhanced-assistant-proactive',
-        '  name: "@dsh-enhanced/assistant-proactive"',
+        '- id: dsh-ray-assistant-proactive',
+        '  name: "@dsh-ray/assistant-proactive"',
         '  config:',
         `    databasePath: ${ws.sqlitePath('pro')}`,
         '    intakeEvaluation:',
         '      enabled: false',
-        '- id: dsh-enhanced-assistant-delivery',
-        '  name: "@dsh-enhanced/assistant-delivery"',
+        '- id: dsh-ray-assistant-delivery',
+        '  name: "@dsh-ray/assistant-delivery"',
         '  config:',
         `    databasePath: ${ws.sqlitePath('del')}`,
         `    spoolPath: ${join(ws.stateDir, 'spool')}`,
@@ -1144,15 +1144,15 @@ describe('Tier 1 — F02–F07: Policy, Evaluation, WorkItems, Proactive & Bench
       const res = await applyPreset({ dshHome: ws.dshHome, profile: 'web' }, { readDump })
       expect(res.changed).toBe(true)
       expect(res.changes).toContainEqual({
-        id: 'dsh-enhanced-assistant-work-items',
+        id: 'dsh-ray-assistant-work-items',
         key: 'enabled',
         from: false,
         to: true,
       })
 
       const patchDoc = parseCordisPatch(await readFile(join(profileDir, 'cordis.patch.yml'), 'utf8'))
-      const wiConfig = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-enhanced-assistant-work-items'))
-      const evalConfig = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-enhanced-assistant-evaluation'))
+      const wiConfig = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-ray-assistant-work-items'))
+      const evalConfig = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-ray-assistant-evaluation'))
       expect(wiConfig.enabled).toBe(true)
       expect(evalConfig.notificationOutcomesEnabled).toBe(true)
       expect(evalConfig.attentionTuningAutoAdopt).toBe(true)
@@ -1167,19 +1167,19 @@ describe('Tier 1 — F02–F07: Policy, Evaluation, WorkItems, Proactive & Bench
         await writeFile(join(dir, 'cordis.patch.yml'), '[]\n', 'utf8')
       }
       const bundlesYaml = [
-        '- id: dsh-enhanced-assistant-work-items',
-        '  name: "@dsh-enhanced/assistant-work-items"',
+        '- id: dsh-ray-assistant-work-items',
+        '  name: "@dsh-ray/assistant-work-items"',
         '  config:',
         '    enabled: false',
         '    mode: observe',
         `    databasePath: ${ws.sqlitePath('wi')}`,
         `    workRoot: ${ws.workspace}`,
-        '- id: dsh-enhanced-assistant-evaluation',
-        '  name: "@dsh-enhanced/assistant-evaluation"',
+        '- id: dsh-ray-assistant-evaluation',
+        '  name: "@dsh-ray/assistant-evaluation"',
         '  config:',
         `    databasePath: ${ws.sqlitePath('eval')}`,
-        '- id: dsh-enhanced-assistant-proactive',
-        '  name: "@dsh-enhanced/assistant-proactive"',
+        '- id: dsh-ray-assistant-proactive',
+        '  name: "@dsh-ray/assistant-proactive"',
         '  config:',
         `    databasePath: ${ws.sqlitePath('pro')}`,
       ].join('\n')

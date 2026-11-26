@@ -7,9 +7,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
   version: string
 }
 
-describe('dsh-enhanced-assistant-verifier', () => {
+describe('dsh-ray-assistant-verifier', () => {
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-assistant-verifier')
+    expect(name).toBe('dsh-ray-assistant-verifier')
     expect(version).toBe(manifest.version)
   })
 

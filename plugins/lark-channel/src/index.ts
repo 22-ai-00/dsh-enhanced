@@ -3,7 +3,7 @@ import { Config } from './config.js'
 import { LarkChannelService } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-lark-channel'
+export const name = 'dsh-ray-lark-channel'
 export const inject = ['assistantDelivery']
 export { Config, LarkChannelService, version }
 export * from './types.js'
@@ -79,7 +79,7 @@ export function apply(ctx: Context, config: import('./config.js').Config): void 
   } catch (error) {
     // A rejected configuration must stay recoverable: never brick the loader tree,
     // just leave the connector disabled until the owner fixes the entry.
-    ctx.logger.error(`dsh-enhanced-lark-channel: configuration rejected; connector stays disabled: ${error instanceof Error ? error.message : String(error)}`)
+    ctx.logger.error(`dsh-ray-lark-channel: configuration rejected; connector stays disabled: ${error instanceof Error ? error.message : String(error)}`)
     return
   }
   if (normalized.enabled && normalized.credentialHandle !== undefined) {

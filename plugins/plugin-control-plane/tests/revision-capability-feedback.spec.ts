@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
-import { normalizeForegroundToolArguments } from '@dsh-enhanced/assistant-delivery'
+import { normalizeForegroundToolArguments } from '@dsh-ray/assistant-delivery'
 import { describe, expect, test, vi } from 'vitest'
 import { revisionCallArgumentsDigest } from '../src/revision-capability-journal.js'
-import type { EvaluationCanonicalLearningEvidenceTuple } from '@dsh-enhanced/assistant-evaluation'
-import { revisionBenefitContractDigest, type RevisionBenefitContract } from '@dsh-enhanced/assistant-growth-contract'
+import type { EvaluationCanonicalLearningEvidenceTuple } from '@dsh-ray/assistant-evaluation'
+import { revisionBenefitContractDigest, type RevisionBenefitContract } from '@dsh-ray/assistant-growth-contract'
 import { evaluateRevisionBenefitEvidence, inspectRevisionCapabilityBenefitWindow,
   revisionBenefitPairedWindows, revisionBenefitWindowsArePaired, mergeRevisionBenefitWindows,
   revisionBenefitObservationDeadline, autoRollbackInferiorRevision } from '../src/revision-capability-feedback.js'

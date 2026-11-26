@@ -1,4 +1,4 @@
-# @dsh-enhanced/lark-channel
+# @dsh-ray/lark-channel
 
 飞书/Lark 的薄协议适配器：把 WebSocket 长连接消息写入 `assistant-delivery` 的 typed Inbox，并把已经落盘的 Outbox intent 转成飞书发送或回复 API。本包不拥有配对、会话、重试或授权真源。
 
@@ -32,19 +32,19 @@ Linux 成对升级会在候选 Host 首次启动前，核验旧 manifest 的冻�
 ## 兼容性
 
 - DeepSeek Harness / Cordis / Node.js 基线见仓库[兼容性说明](../../docs/compatibility.md)（通过 `assistant-delivery` 消费当前基线语义）。
-- `@dsh-enhanced/assistant-delivery`：同批发布版本；本包的 supervised setup 使用当前发布切片的私有 capability。
+- `@dsh-ray/assistant-delivery`：同批发布版本；本包的 supervised setup 使用当前发布切片的私有 capability。
 - `@deepseek-ai/dsh-user-questions`：由 DSH 定义 Agent-scoped `user-questions/request` answerer waterfall。Web Host 通过 Remote Events 提供 scoped answerer；飞书通道要承接 `ask_user_question` 时也必须直接注册同一 scope 的 answerer。
-- `@dsh-enhanced/credentials-keychain`：handle 模式使用同批发布版本；env fallback 不要求其激活。
-- 普通个人助理场景同时安装 `@dsh-enhanced/preference-learning`。向导会只为完成 owner 对话产生有界偏好证据及读取 active snapshot 的两项能力；它们不依赖广义 Agent 工具开关，也不要求 Health/Heartbeat/Recovery。
-- 分级自治成长激活器要求有效 profile 同时启用 `@dsh-enhanced/personal-assistant`、`@dsh-enhanced/assistant-automations`、`@dsh-enhanced/assistant-heartbeat`、`@dsh-enhanced/assistant-evaluation`、`@dsh-enhanced/preference-learning`、`@dsh-enhanced/assistant-evolution`、`@dsh-enhanced/assistant-growth-experiments`、`@dsh-enhanced/assistant-health` 与 `@dsh-enhanced/assistant-recovery`。Policy、Memory 与 Wiki 由 personal-assistant 这一 profile row 提供。Recovery 仍是无模型 Host runbook；独立的 `supervised-growth-analyst` 每天最多一次，只能 review/propose adoption，preview 强制 paused，active 前逐项证明定义和私有 scratch，且只有审批路由、没有普通结果投递。workflow lane 使用 Delivery 私有、可撤销的 content-free trace sink，以及独立预算、owner-bound approval、prefix-bounded dynamic Automation identity 和 exact binding delivery；Lark 文本、卡片或回调本身不能制造 trace 或 learned workflow。默认不授予 learned workflow 任意工具。旧 `supervised-growth` Heartbeat 只在升级时被安全暂停。
+- `@dsh-ray/credentials-keychain`：handle 模式使用同批发布版本；env fallback 不要求其激活。
+- 普通个人助理场景同时安装 `@dsh-ray/preference-learning`。向导会只为完成 owner 对话产生有界偏好证据及读取 active snapshot 的两项能力；它们不依赖广义 Agent 工具开关，也不要求 Health/Heartbeat/Recovery。
+- 分级自治成长激活器要求有效 profile 同时启用 `@dsh-ray/personal-assistant`、`@dsh-ray/assistant-automations`、`@dsh-ray/assistant-heartbeat`、`@dsh-ray/assistant-evaluation`、`@dsh-ray/preference-learning`、`@dsh-ray/assistant-evolution`、`@dsh-ray/assistant-growth-experiments`、`@dsh-ray/assistant-health` 与 `@dsh-ray/assistant-recovery`。Policy、Memory 与 Wiki 由 personal-assistant 这一 profile row 提供。Recovery 仍是无模型 Host runbook；独立的 `supervised-growth-analyst` 每天最多一次，只能 review/propose adoption，preview 强制 paused，active 前逐项证明定义和私有 scratch，且只有审批路由、没有普通结果投递。workflow lane 使用 Delivery 私有、可撤销的 content-free trace sink，以及独立预算、owner-bound approval、prefix-bounded dynamic Automation identity 和 exact binding delivery；Lark 文本、卡片或回调本身不能制造 trace 或 learned workflow。默认不授予 learned workflow 任意工具。旧 `supervised-growth` Heartbeat 只在升级时被安全暂停。
 - 官方 `@larksuiteoapi/node-sdk`：固定 `1.76.0`。该版在握手超时和关闭 socket 时保留错误监听，避免异步错误终止 Host；`type=card` 回调仍由本包的 CardKit 桥处理。
 
 ## 安装
 
-先配置 `@dsh-enhanced/assistant-policy`、`@dsh-enhanced/assistant-delivery` 与 `@dsh-enhanced/preference-learning`，再安装本包：
+先配置 `@dsh-ray/assistant-policy`、`@dsh-ray/assistant-delivery` 与 `@dsh-ray/preference-learning`，再安装本包：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/lark-channel
+dsh plugin --profile web add @dsh-ray/lark-channel
 dsh --profile web --dump-config
 ```
 
@@ -59,8 +59,8 @@ dsh --profile web --dump-config
 源码工作区也可运行：
 
 ```sh
-pnpm --filter @dsh-enhanced/lark-channel build
-pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
+pnpm --filter @dsh-ray/lark-channel build
+pnpm --filter @dsh-ray/lark-channel run onboard --profile web --create-app
 ```
 
 向导不会把 App Secret 放进 argv、profile 或日志。macOS 使用 Keychain，Linux 优先 Secret Service、无桌面环境降级为严格权限的 protected-file，Windows 使用 best-effort DPAPI。完整流程、已有应用接入和平台排障见[安装文档](docs/setup.md)。
@@ -98,7 +98,7 @@ config:
 
 `requireMentionInGroups` 控制群内是否必须直接 @ 机器人。`groupTopicThreads`（默认关）开启后，飞书话题群消息以 `thread_id` + 发送者 principal 作为会话 lane：首条消息与其后续回复落在同一 Delivery conversation，回复通过 `reply_in_thread` 留在同一话题，而不是新开顶层消息；principal 参与 key，owner 与 allowlisted peer bot 在同一话题不会互相占用 binding。限制：没有 `replyToEventId` 的后台通知（例如 WorkItem 报告）仍按顶层发送，会新建一个话题；owner/工作项回复携带 `replyToEventId`，不受影响。关闭时保持按发送者合成的顶层 lane。peer bot 的精确白名单、open_id 取得方法与真实渠道验收见 [peer agent 真实渠道验收与白名单配置](../../docs/peer-agent-verification.md)。
 
-`credentialHandle` 应由 `@dsh-enhanced/credentials-keychain` 提供，并只允许 consumer `dsh-enhanced-lark-channel`、purpose `connect`。兼容部署可改用 `appSecretEnv`，两者只能选一个；配置不接受 `appSecret` 等明文字段。
+`credentialHandle` 应由 `@dsh-ray/credentials-keychain` 提供，并只允许 consumer `dsh-ray-lark-channel`、purpose `connect`。兼容部署可改用 `appSecretEnv`，两者只能选一个；配置不接受 `appSecret` 等明文字段。
 
 Calendar v4 读取默认关闭；每页响应上限为 1 MiB，超限请求失败且不推进事件游标。只有同时满足以下条件时，连接器才会读取一个页面：该 ID 位于 `allowedCalendarIds`、应用已被授予并发布 `calendar:calendar:readonly`、调用方已通过自身的 owner/Policy 授权。`event-triggers` 使用此窄桥观察一个预先选定的日历；它不能列出日历，不能取得 app secret 或 tenant token，也不能凭 `credentialPurpose: connect` 自动取得 Calendar 范围。使用官方向导更新应用范围时运行 `dsh-lark-setup --create-app --calendar-readonly`，然后由操作员把实际授权的 exact Calendar ID 填入 `allowedCalendarIds`。
 
@@ -167,12 +167,12 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 - `ask_user_question` 的卡片是另一条即时交互路径：本包有向原飞书会话发送/原位更新 CardKit 2.0 卡片、并接收 `card.action.trigger` callback 的网络权限。选项仅以签名 callback capability 提交；自由文本只接受 exact owner 对原卡的明确回复。它不把卡片点击或匹配回复写成普通 Inbox/新 turn，且问题内容会在原会话显示，群聊并不保密。
 - 记忆、Wiki 和行为学习提案使用 Card 2.0 审批按钮，签名绑定会话、提案版本与有效期；回调操作人另按 owner 授权校验。行为学习卡会把 scope、情境、guidance、版本、证据和回滚原因逐字段以纯文本展示；提案内容不会作为 Markdown 或卡片组件解释。点击后卡片只确认 Policy 决策已写入持久账本，明确不把“批准”误报成“变更已生效”。投递失败且已经过期的提案需要重新提交，升级不会自动批准或补发旧卡。
 - 消息通道运行时网络仅访问所选飞书/Lark OpenAPI、token 与 WebSocket endpoint；图片读取使用固定消息资源端点，不接受消息或模型提供的 URL，并关闭重定向。
-- 安装阶段的 `dsh-rsi-setup --prepare-source` 执行 Git，在 `$DSH_HOME/rsi-sources/<profile>` 写入私有源码与 bare 发布仓库；npm 来源访问固定官方 GitHub 仓库的精确版本 tag，本地来源只复制已提交内容。支持常用代理与 CA 环境变量，不执行安装脚本；此命令不使用飞书凭据或浏览器，详见 [RSI 配置](docs/rsi-setup.md)。
-- `dsh-rsi-setup --prepare-local-update` 在 Home 外准备本地上游与现有修复分支合并后的源码和 tarball。Linux 准备摘要固定的原生运行时（schema 3）及离线 bubblewrap 构建，全程不接触 Docker；已移除 `--docker-path` 与旧镜像构建器，历史 Docker 收据仅只读解码用于迁移，两类收据互斥不续跑。它可联网下载固定 Node/pnpm 与冻结依赖，但候选 build/pack 不带网络、凭据或原 Home；不会停服或激活更新，原生候选的停机激活迁移随原生安装事务交付。pre-owner 安装可使用 checkout 维护事务，已有 owner 的完整迁移仍未交付，详见 [RSI 配置](docs/rsi-setup.md)。
+- 安装阶段的 `dsh-ray-setup --prepare-source` 执行 Git，在 `$DSH_HOME/rsi-sources/<profile>` 写入私有源码与 bare 发布仓库；npm 来源访问固定官方 GitHub 仓库的精确版本 tag，本地来源只复制已提交内容。支持常用代理与 CA 环境变量，不执行安装脚本；此命令不使用飞书凭据或浏览器，详见 [RSI 配置](docs/rsi-setup.md)。
+- `dsh-ray-setup --prepare-local-update` 在 Home 外准备本地上游与现有修复分支合并后的源码和 tarball。Linux 准备摘要固定的原生运行时（schema 3）及离线 bubblewrap 构建，全程不接触 Docker；已移除 `--docker-path` 与旧镜像构建器，历史 Docker 收据仅只读解码用于迁移，两类收据互斥不续跑。它可联网下载固定 Node/pnpm 与冻结依赖，但候选 build/pack 不带网络、凭据或原 Home；不会停服或激活更新，原生候选的停机激活迁移随原生安装事务交付。pre-owner 安装可使用 checkout 维护事务，已有 owner 的完整迁移仍未交付，详见 [RSI 配置](docs/rsi-setup.md)。
 - checkout 的 `local-service-upgrade` 在停服前以无 registry 凭据的私有配置准备旧图和最终候选图，重新校验候选锁与策略，并在空 node_modules 的临时 Home 中实际断网调用原生 DSH 安装。首次服务操作前重核外部候选、原 Home 与缓存；停服后的正式副本继续核对同一依赖图、包清单和配置，失败保留证据。pre-owner 的 Docker→native 和 native→native 可迁移基础 runtime、release 资源及 cohort；正式阶段绑定实际目录身份，恢复拒绝复制产生的新 inode。事务会写入独立缓存及 Home 副本、切换 systemd 服务；它不启用 owner scheduler 或扩大授权，完整活服务升级仍未验收。用法与恢复见[安装器指南](../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)。
 - macOS 安装使用系统 Perl 的内核 `flock` 串行化同一用户、同名 profile 的 LaunchAgent 操作，使用 `plutil`/`launchctl` 核对服务归属并管理当前用户服务；运行检查核对状态与 PID。同名目标属于另一 DSH_HOME 时拒绝修改，替换失败时尝试恢复旧定义与注册状态。原生学习另串行化 Home 配置，写入私有计划、有限授权、恢复日志和 HMAC observer 密钥。新安装从冻结源码清单和锁文件准备私有 Node、pnpm 及依赖，候选构建和行为检查使用本机 Seatbelt；Host 也是原生 Node。支持范围与失败恢复见[原生 macOS 学习](docs/rsi-setup.md#原生-macos-学习)。
 - Linux 安装的 `--prepare-build` 还自动准备私有授权运行时和本地发布资源，也可单独执行 `--prepare-authorities`：从同版本已安装 Control Plane 复制官方程序及模块、固定独立 Node，运行副本做版本/模块检查，并生成 14 个独立 Ed25519 身份和本地 registry/catalog。共享契约从 Control Plane 声明的依赖解析，接受包内依赖边、同一 pnpm 虚拟包目录内的相邻依赖边，以及安装器生成的受管 profile 内经 profile 清单、pnpm 工作区、安装元数据和两份锁文件共同核验的 hoisted 直接依赖边；普通扁平项目或任意祖先目录的同名包不能替代它。核验材料在复制前后保持一致，目录和密钥仅当前用户可读写；重复执行核验固定内容并保留发布/状态进展。此步骤需要文件写入与子进程权限，不需要网络、浏览器或飞书凭据，不执行 npm lifecycle，不签发 owner grant 或启动 Host。
-- Linux 的 `dsh-rsi-setup --prepare-build` 准备摘要固定的原生运行时：从 nodejs.org 与 npm registry 下载官方 Node v22.23.2、pnpm 11.7.0，经 bubblewrap 私有命名空间与无凭据环境先 `pnpm fetch` 再离线 `--frozen-lockfile --ignore-scripts` 安装，保存 schema 3 sourceBuild（运行时全树摘要）与 schema 2 `releaseBuild`（工具链/store/cache 三树副本加 `runtimeDigest`），全程不调用 Docker CLI、daemon、socket 或镜像。环境前置（Linux x64/arm64、bwrap/unshare/mount 等）缺失时经 `--optional-build` 报告 `buildUnavailable`/`releaseBuildUnavailable` 并保留源码与已验证运行时；完整性错误始终致命。旧 Docker 镜像构建路径已下线，`--docker-path` 不再是 CLI 选项；历史 Docker 收据只用于只读迁移解码，不能被续跑。随后候选检查使用离线完整仓库 sandbox；安装期间不会读取主机 Docker registry 凭据或启动候选 Host。Mac 则准备受摘要固定的私有 Node、pnpm 与冻结清单依赖，并在候选期用 Seatbelt 离线执行。当前 runtime 支持与资源上限见 [RSI 配置](docs/rsi-setup.md)。
+- Linux 的 `dsh-ray-setup --prepare-build` 准备摘要固定的原生运行时：从 nodejs.org 与 npm registry 下载官方 Node v22.23.2、pnpm 11.7.0，经 bubblewrap 私有命名空间与无凭据环境先 `pnpm fetch` 再离线 `--frozen-lockfile --ignore-scripts` 安装，保存 schema 3 sourceBuild（运行时全树摘要）与 schema 2 `releaseBuild`（工具链/store/cache 三树副本加 `runtimeDigest`），全程不调用 Docker CLI、daemon、socket 或镜像。环境前置（Linux x64/arm64、bwrap/unshare/mount 等）缺失时经 `--optional-build` 报告 `buildUnavailable`/`releaseBuildUnavailable` 并保留源码与已验证运行时；完整性错误始终致命。旧 Docker 镜像构建路径已下线，`--docker-path` 不再是 CLI 选项；历史 Docker 收据只用于只读迁移解码，不能被续跑。随后候选检查使用离线完整仓库 sandbox；安装期间不会读取主机 Docker registry 凭据或启动候选 Host。Mac 则准备受摘要固定的私有 Node、pnpm 与冻结清单依赖，并在候选期用 Seatbelt 离线执行。当前 runtime 支持与资源上限见 [RSI 配置](docs/rsi-setup.md)。
 - Linux 新 `--install-owner` 使用原生完整仓库边界：基础运行时导出发布工具链，repository schema 4 固定双 UID、系统工具快照与已委派 cgroup v1 四控制器或统一 cgroup v2 子树，独立行为运行时支持工具创建、修订、配对回归及有限采用。准备阶段使用固定归档和冻结依赖；候选不读取 owner 凭据、浏览器、验收答案或网络。首次授权前创建五个空 runner 账本，在独立 seal 文件中固定目录/数据库身份，并把引用纳入原授权摘要；读取、安装重试和直接重启都不能补造丢失账本。旧 Docker 安装不再可续跑：安装器会 fail-closed 拒绝，需显式迁移，且不重建资源、不续期或新增创建/修订授权。
 - `requestTimeoutMs`（默认 30 秒）为常规 OpenAPI 请求设置硬 deadline，`imageDownloadTimeoutMs` 独立限制图片下载。SDK 会把可下传的 AbortSignal 交给底层 HTTP；若调用已经被服务端接收后超时，最终消息保留 Delivery 的 `unknown_after_send` 语义，绝不自动重发或假称未发送。
 - App Secret 不写 Delivery 数据库、工具参数、health、route、日志或异常；Linux protected-file 没有额外静态加密，同 UID、root 和可读备份仍能取得内容。
@@ -200,7 +200,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 MIT
 
 The Linux RSI bootstrap and cgroup modules are compatibility adapters over the
-non-activating `@dsh-enhanced/assistant-isolation/native-resources` subentry.
+non-activating `@dsh-ray/assistant-isolation/native-resources` subentry.
 RSI still verifies its own source-workspace receipt before/after shared preparation
 and re-reads the fixed Git manifest objects. Its public exports, schema-3 runtime
 receipt layout and private runtime cache paths remain compatible. Ordinary native

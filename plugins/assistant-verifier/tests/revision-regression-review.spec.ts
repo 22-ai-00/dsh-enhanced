@@ -8,7 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { canonicalGrowthJson, growthObjectDigest, pluginRevisionVerificationSigningPayload,
   sourceGrowthEvidenceDigest, sourceGrowthRunDigest, verifyPluginRevisionRegressionCertificate,
   type PluginCreationVerificationCertificate, type PluginRevisionVerificationCertificate,
-  type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  type SourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import { afterEach, expect, test, vi } from 'vitest'
 import { CreationReviewStore } from '../src/creation-review-store.ts'
 import { CreationReviewRuntime, compileCreationReviewConfig, projectCreationSchemas,
@@ -18,7 +18,7 @@ import { RevisionRegressionReviewRuntime, compileRevisionRegressionReviewConfig,
 import { AssistantVerifierService } from '../src/service.ts'
 
 const observer = vi.hoisted(() => ({ run: vi.fn(), close: vi.fn(async () => {}) }))
-vi.mock('@dsh-enhanced/assistant-isolation', () => ({ NativeMacVerifierRunner: class {
+vi.mock('@dsh-ray/assistant-isolation', () => ({ NativeMacVerifierRunner: class {
   run(...args: unknown[]) { return observer.run(...args) }
   close() { return observer.close() }
 },

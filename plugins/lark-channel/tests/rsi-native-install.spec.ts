@@ -325,7 +325,7 @@ describe('native pluginRevision transaction and runner directory preparation', (
       generation: 1, policyRef: 'owner-policy', status: 'active' as const, createdAt: 1, updatedAt: 1, version: 1,
       owner: { id: 'principal-record', principal, role: 'owner' as const, status: 'active' as const, createdAt: 1, updatedAt: 1, version: 1 },
     }
-    const baseRow = (name: string, config: object, extra = {}) => ({ id: `dsh-enhanced-${name}`, name: `@dsh-enhanced/${name}`, config, ...extra })
+    const baseRow = (name: string, config: object, extra = {}) => ({ id: `dsh-ray-${name}`, name: `@dsh-ray/${name}`, config, ...extra })
     const baseRows = [
       baseRow('personal-assistant', {
         assistantPolicy: { databasePath: join(home, 'policy.sqlite'), budgets: [], rules: [] },
@@ -337,7 +337,7 @@ describe('native pluginRevision transaction and runner directory preparation', (
         agentProvider: 'deepseek-official', agentModel: 'deepseek-v4-flash' }),
       baseRow('assistant-verifier', { databasePath: join(home, 'verifier.sqlite') }),
       baseRow('assistant-growth-driver', { provider: 'owner-provider', model: 'owner-model' }),
-      { id: 'dsh-enhanced-assistant-memory-learning', name: '@dsh-enhanced/assistant-memory-learning', disabled: true },
+      { id: 'dsh-ray-assistant-memory-learning', name: '@dsh-ray/assistant-memory-learning', disabled: true },
       baseRow('plugin-control-plane', {}),
       baseRow('lark-channel', { enabled: true }),
       baseRow('assistant-proactive', {}),
@@ -471,11 +471,11 @@ describe('native pluginRevision transaction and runner directory preparation', (
     const toggleOff = await applySelfIterationProfileToggle({ dshHome, profile, enable: false })
     expect(toggleOff).toMatchObject({ ok: true, state: 'disabled' })
     const disabledPatch = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-    for (const id of ['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning',
-      'dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items']) {
+    for (const id of ['dsh-ray-assistant-growth-driver', 'dsh-ray-assistant-memory-learning',
+      'dsh-ray-assistant-proactive', 'dsh-ray-assistant-work-items']) {
       expect(disabledPatch.find(row => row.id === id)?.disabled).toBe(true)
     }
-    expect(disabledPatch.find(row => row.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(false)
+    expect(disabledPatch.find(row => row.id === 'dsh-ray-assistant-work-items')?.config?.enabled).toBe(false)
 
     await expect(installNativeRsiOwnerDeployment({ dshHome, profile }, ports)).rejects.toThrow()
 
@@ -484,11 +484,11 @@ describe('native pluginRevision transaction and runner directory preparation', (
     }, ports)
     expect(afterDisableUpgrade.mode).toBe('ready')
     const reenabledPatch = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-    for (const id of ['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning',
-      'dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items']) {
+    for (const id of ['dsh-ray-assistant-growth-driver', 'dsh-ray-assistant-memory-learning',
+      'dsh-ray-assistant-proactive', 'dsh-ray-assistant-work-items']) {
       expect(reenabledPatch.find(row => row.id === id)?.disabled).toBe(false)
     }
-    expect(reenabledPatch.find(row => row.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(true)
-    expect(reenabledPatch.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')?.config?.enabled).toBe(true)
+    expect(reenabledPatch.find(row => row.id === 'dsh-ray-assistant-work-items')?.config?.enabled).toBe(true)
+    expect(reenabledPatch.find(row => row.id === 'dsh-ray-assistant-growth-driver')?.config?.enabled).toBe(true)
   })
 })

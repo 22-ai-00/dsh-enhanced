@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { EvaluationCanonicalLearningEvidenceTuple } from '@dsh-enhanced/assistant-evaluation'
+import type { EvaluationCanonicalLearningEvidenceTuple } from '@dsh-ray/assistant-evaluation'
 import { controlPlaneDigest } from '../src/store.js'
 import { DEFAULT_MINIMUM_SAMPLES, inspectCreationCapabilityOrdinaryUseReport, inspectCreationCapabilityTaskAssociations,
   type CreationCapabilityFeedbackInput } from '../src/creation-capability-feedback.js'

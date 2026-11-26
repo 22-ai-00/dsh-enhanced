@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-memory-wiki-bridge
-      name: '@dsh-enhanced/memory-wiki-bridge'
+    - id: dsh-ray-memory-wiki-bridge
+      name: '@dsh-ray/memory-wiki-bridge'
       inject:
         - personalMemory
         - personalWiki

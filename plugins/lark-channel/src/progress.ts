@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type {
   DeliveryProgressIntent, DeliveryProgressJournal, DeliveryProgressRecord, DeliveryProgressUpdate,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import type { LarkProgressEvent, LarkProgressHandle, LarkTransport } from './types.js'
 
 const MAX_EVENT_CONTENT_CHARS = 4_096

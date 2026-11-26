@@ -96,8 +96,8 @@ function makeHost(dshHome: string, profileDir: string, profileName = 'desktop', 
 function baseStatus(overrides: Partial<OwnerConsoleStatus> = {}): OwnerConsoleStatus {
   return {
     feishu: { mode: 'handle', installed: false, enabled: false, appIdConfigured: false, connected: false, connection: 'absent' },
-    traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: 'traex' },
-    agy: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: 'agy' },
+    traex: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: 'traex' },
+    agy: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: 'agy' },
     defaultModel: { entry: 'agent-default-model', available: true, provider: 'deepseek-official', model: 'deepseek-v4-flash' },
     llmProviders: [{ id: 'deepseek-official', name: 'DeepSeek' }],
     host: { settings: true, pluginManager: true, bundles: 'ok', plugins: 'ok' },
@@ -173,32 +173,32 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
       name: '@dsh-profile/desktop',
       bundles: {
-        '@dsh-enhanced/acp': true,
-        '@dsh-enhanced/assistant-isolation': true,
-        '@dsh-enhanced/personal-assistant': true,
-        '@dsh-enhanced/assistant-policy': true,
-        '@dsh-enhanced/assistant-automations': true,
-        '@dsh-enhanced/personal-memory': true,
-        '@dsh-enhanced/personal-wiki': true,
-        '@dsh-enhanced/assistant-memory-learning': true,
-        '@dsh-enhanced/assistant-delivery': true,
-        '@dsh-enhanced/traex-acp-provider': true,
+        '@dsh-ray/acp': true,
+        '@dsh-ray/assistant-isolation': true,
+        '@dsh-ray/personal-assistant': true,
+        '@dsh-ray/assistant-policy': true,
+        '@dsh-ray/assistant-automations': true,
+        '@dsh-ray/personal-memory': true,
+        '@dsh-ray/personal-wiki': true,
+        '@dsh-ray/assistant-memory-learning': true,
+        '@dsh-ray/assistant-delivery': true,
+        '@dsh-ray/traex-acp-provider': true,
       },
     }, null, 2))
 
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-isolation',
-      "  name: '@dsh-enhanced/assistant-isolation'",
+      '- id: dsh-ray-assistant-isolation',
+      "  name: '@dsh-ray/assistant-isolation'",
       '  config:',
       '    backend: linux-native',
-      '- id: dsh-enhanced-assistant-policy',
-      "  name: '@dsh-enhanced/assistant-policy'",
+      '- id: dsh-ray-assistant-policy',
+      "  name: '@dsh-ray/assistant-policy'",
       '  config:',
       '    toolDefaultEffect: allow',
       '    autoReview:',
       '      enabled: true',
-      '- id: dsh-enhanced-traex-acp-provider',
-      "  name: '@dsh-enhanced/traex-acp-provider'",
+      '- id: dsh-ray-traex-acp-provider',
+      "  name: '@dsh-ray/traex-acp-provider'",
       '  config:',
       '    enabled: false',
       '',
@@ -215,7 +215,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     )
 
     const traexDescriptor: SettingsDescriptor = {
-      ns: 'dsh-enhanced-traex-acp-provider',
+      ns: 'dsh-ray-traex-acp-provider',
       schema: {},
       value: { enabled: false, command: 'traex' },
       revision: 1,
@@ -223,17 +223,17 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     }
     const status = baseStatus({
       bundles: [
-        { name: '@dsh-enhanced/acp', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-acp', moduleName: '@dsh-enhanced/acp' }] },
-        { name: '@dsh-enhanced/assistant-isolation', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-isolation', moduleName: '@dsh-enhanced/assistant-isolation' }] },
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
-        { name: '@dsh-enhanced/assistant-policy', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-policy', moduleName: '@dsh-enhanced/assistant-policy' }] },
-        { name: '@dsh-enhanced/assistant-memory-learning', installed: true, enabled: true, removable: true, error: { code: 'CONFIG_ERROR', diagnostic: 'Invalid memory learning configuration fields' }, rows: [{ rowId: 'dsh-enhanced-assistant-memory-learning', moduleName: '@dsh-enhanced/assistant-memory-learning' }] },
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
+        { name: '@dsh-ray/acp', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-acp', moduleName: '@dsh-ray/acp' }] },
+        { name: '@dsh-ray/assistant-isolation', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-isolation', moduleName: '@dsh-ray/assistant-isolation' }] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-personal-assistant', moduleName: '@dsh-ray/personal-assistant' }] },
+        { name: '@dsh-ray/assistant-policy', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-policy', moduleName: '@dsh-ray/assistant-policy' }] },
+        { name: '@dsh-ray/assistant-memory-learning', installed: true, enabled: true, removable: true, error: { code: 'CONFIG_ERROR', diagnostic: 'Invalid memory learning configuration fields' }, rows: [{ rowId: 'dsh-ray-assistant-memory-learning', moduleName: '@dsh-ray/assistant-memory-learning' }] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] },
       ],
       plugins: [
         { entryId: 'web-app', moduleName: '@deepseek-ai/dsh-web-app', enabled: true, fiberPhase: 'active' },
-        { entryId: 'dsh-enhanced-acp', moduleName: '@dsh-enhanced/acp', enabled: true, fiberPhase: 'failed', diagnostic: 'DUPLICATE INSERT ID: cordis-host-runner' },
-        { entryId: 'dsh-enhanced-assistant-isolation', moduleName: '@dsh-enhanced/assistant-isolation', enabled: true, fiberPhase: 'failed', diagnostic: 'CONFIG_ERROR' },
+        { entryId: 'dsh-ray-acp', moduleName: '@dsh-ray/acp', enabled: true, fiberPhase: 'failed', diagnostic: 'DUPLICATE INSERT ID: cordis-host-runner' },
+        { entryId: 'dsh-ray-assistant-isolation', moduleName: '@dsh-ray/assistant-isolation', enabled: true, fiberPhase: 'failed', diagnostic: 'CONFIG_ERROR' },
       ],
     })
 
@@ -264,32 +264,32 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     })
     expect(repairRes.applied).toBe(true)
     expect(toggledOff).toEqual(expect.arrayContaining([
-      '@dsh-enhanced/acp',
-      '@dsh-enhanced/assistant-isolation',
-      '@dsh-enhanced/assistant-memory-learning',
-      '@dsh-enhanced/assistant-policy',
-      '@dsh-enhanced/assistant-automations',
-      '@dsh-enhanced/personal-memory',
-      '@dsh-enhanced/personal-wiki',
+      '@dsh-ray/acp',
+      '@dsh-ray/assistant-isolation',
+      '@dsh-ray/assistant-memory-learning',
+      '@dsh-ray/assistant-policy',
+      '@dsh-ray/assistant-automations',
+      '@dsh-ray/personal-memory',
+      '@dsh-ray/personal-wiki',
     ]))
-    expect(mutateMock).toHaveBeenCalledWith('dsh-enhanced-traex-acp-provider', [
+    expect(mutateMock).toHaveBeenCalledWith('dsh-ray-traex-acp-provider', [
       { op: 'set', path: ['enabled'], value: true },
       { op: 'set', path: ['command'], value: fakeTraex },
     ], 1)
 
     const updatedPkg = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as { bundles: Record<string, boolean> }
-    expect(updatedPkg.bundles['@dsh-enhanced/acp']).toBe(false)
-    expect(updatedPkg.bundles['@dsh-enhanced/assistant-policy']).toBe(false)
-    expect(updatedPkg.bundles['@dsh-enhanced/personal-assistant']).toBe(true)
+    expect(updatedPkg.bundles['@dsh-ray/acp']).toBe(false)
+    expect(updatedPkg.bundles['@dsh-ray/assistant-policy']).toBe(false)
+    expect(updatedPkg.bundles['@dsh-ray/personal-assistant']).toBe(true)
 
     const patchDoc = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJSON() as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-    const pa = patchDoc.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    const pa = patchDoc.find(r => r.id === 'dsh-ray-personal-assistant')!
     expect(pa.config!['assistantPolicy']).toMatchObject({ toolDefaultEffect: 'allow', autoReview: { enabled: true } })
     const paRules = (pa.config!['assistantPolicy'] as { rules: Array<{ id: string }> }).rules
-    expect(paRules.some(r => r.id === 'dsh-enhanced-owner-route-owner-lark-primary')).toBe(true)
-    expect(patchDoc.some(r => r.id === 'dsh-enhanced-assistant-policy')).toBe(false)
+    expect(paRules.some(r => r.id === 'dsh-ray-owner-route-owner-lark-primary')).toBe(true)
+    expect(patchDoc.some(r => r.id === 'dsh-ray-assistant-policy')).toBe(false)
 
-    const delivery = patchDoc.find(r => r.id === 'dsh-enhanced-assistant-delivery')!
+    const delivery = patchDoc.find(r => r.id === 'dsh-ray-assistant-delivery')!
     const ownerRoutes = delivery.config?.['ownerRoutes'] as Array<Record<string, unknown>>
     expect(ownerRoutes).toHaveLength(1)
     expect(ownerRoutes[0]).toMatchObject({
@@ -322,7 +322,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const status = baseStatus({
       traex: { installed: false, enabled: false, command: '' },
       agy: { installed: false, enabled: false, command: '' },
-      bundles: [{ name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] }],
+      bundles: [{ name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] }],
     })
     const host = makeHost(dshHome, profileDir, 'desktop')
     const repair = await applyDoctorRepair({
@@ -362,7 +362,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const host = makeHost(dshHome, profileDir, 'desktop')
     const stored: Array<{ locator: unknown; secret: string }> = []
     const larkDesc: SettingsDescriptor = {
-      ns: 'dsh-enhanced-lark-channel',
+      ns: 'dsh-ray-lark-channel',
       schema: {},
       value: { enabled: false, account: 'primary', tenant: 'personal' },
       revision: 2,
@@ -387,20 +387,20 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(resMac.applied).toBe(true)
     expect(resMac.note).not.toContain('super-secret-value-xyz')
     expect(resMac.note).toContain('DeepSeek Harness.app')
-    expect(resMac.note).toContain('dsh-rsi restart')
+    expect(resMac.note).toContain('dsh-ray restart')
     expect(stored).toHaveLength(1)
     expect(stored[0]!.secret).toBe('super-secret-value-xyz')
     const yamlText = readFileSync(patchPath, 'utf8')
     expect(yamlText).not.toContain('super-secret-value-xyz')
     const doc = parseDocument(yamlText, JS_PARSE_TAG).toJSON() as Array<{ id: string; config?: Record<string, unknown> }>
-    const kc = doc.find(r => r.id === 'dsh-enhanced-credentials-keychain')!
+    const kc = doc.find(r => r.id === 'dsh-ray-credentials-keychain')!
     expect(kc.config?.['handles']).toEqual([expect.objectContaining({
       id: 'lark-app-secret-primary',
       provider: 'macos-keychain',
-      consumers: ['dsh-enhanced-lark-channel'],
+      consumers: ['dsh-ray-lark-channel'],
       purposes: ['connect'],
     })])
-    const pa = doc.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    const pa = doc.find(r => r.id === 'dsh-ray-personal-assistant')!
     const rules = (pa.config!['assistantPolicy'] as { rules: Array<Record<string, unknown>> }).rules
     expect(rules.some(r => r['id'] === 'lark-channel-credential-primary'
       && (r['resource'] as Record<string, unknown>)['id'] === 'lark-app-secret-primary')).toBe(true)
@@ -426,7 +426,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(mutate).not.toHaveBeenCalled()
     expect(reloadEntry).not.toHaveBeenCalled()
     const linuxDoc = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJSON() as Array<{ id: string; config?: Record<string, unknown> }>
-    const linuxHandle = (linuxDoc.find(r => r.id === 'dsh-enhanced-credentials-keychain')!.config!['handles'] as Array<{ path?: string }>)[0]!
+    const linuxHandle = (linuxDoc.find(r => r.id === 'dsh-ray-credentials-keychain')!.config!['handles'] as Array<{ path?: string }>)[0]!
     expect(linuxHandle.path).toBeDefined()
     expect(existsSync(linuxHandle.path!)).toBe(true)
     expect(readFileSync(linuxHandle.path!, 'utf8')).toBe('linux-secret-123')
@@ -527,8 +527,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
 
     // 1) Customized deny/narrowed rules bound to the same principal must be preserved verbatim
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       '      rules:',
@@ -581,7 +581,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(resSame.applied).toBe(true)
 
     const docSame = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJSON() as Array<{ id: string; config?: Record<string, unknown> }>
-    const rulesSame = (docSame.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['assistantPolicy'] as { rules: Array<Record<string, unknown>> }).rules
+    const rulesSame = (docSame.find(r => r.id === 'dsh-ray-personal-assistant')!.config!['assistantPolicy'] as { rules: Array<Record<string, unknown>> }).rules
     expect(rulesSame.find(r => r['id'] === 'lark-owner-capability-*-primary')).toMatchObject({
       effect: 'deny',
       subject: { workspace: '/custom/ws', principal: samePrincipal },
@@ -594,8 +594,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
 
     // 2) Existing owner binding with capability/tool rules removed (`dsh-lark-setup --agent-tools disable`) must NOT re-open tools
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       '      rules:',
@@ -646,7 +646,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     })
     expect(resDisabled.applied).toBe(true)
     const docDisabled = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJSON() as Array<{ id: string; config?: Record<string, unknown> }>
-    const rulesDisabled = (docDisabled.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['assistantPolicy'] as { rules: Array<Record<string, unknown>> }).rules
+    const rulesDisabled = (docDisabled.find(r => r.id === 'dsh-ray-personal-assistant')!.config!['assistantPolicy'] as { rules: Array<Record<string, unknown>> }).rules
     expect(rulesDisabled.some(r => r['id'] === 'lark-owner-capability-*-primary')).toBe(false)
     expect(rulesDisabled.some(r => r['id'] === 'lark-owner-tool-*-primary')).toBe(false)
 
@@ -666,7 +666,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     })
     expect(resNew.applied).toBe(true)
     const docNew = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJSON() as Array<{ id: string; config?: Record<string, unknown> }>
-    const rulesNew = (docNew.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['assistantPolicy'] as { rules: Array<Record<string, unknown>> }).rules
+    const rulesNew = (docNew.find(r => r.id === 'dsh-ray-personal-assistant')!.config!['assistantPolicy'] as { rules: Array<Record<string, unknown>> }).rules
     expect(rulesNew.find(r => r['id'] === 'lark-owner-capability-*-primary')).toMatchObject({
       effect: 'allow',
       subject: expect.objectContaining({ principal: 'lark/primary/personal/ou_owner_new' }),
@@ -679,8 +679,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
 
     // 4) Legacy unscoped deny rule (no subject.principal) and legacy reply without principal with tools disabled must NOT be widened on re-scan
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       '      rules:',
@@ -744,7 +744,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     })
     expect(resLegacy.applied).toBe(true)
     const docLegacy = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJSON() as Array<{ id: string; config?: Record<string, unknown> }>
-    const rulesLegacy = (docLegacy.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['assistantPolicy'] as { rules: Array<Record<string, unknown>> }).rules
+    const rulesLegacy = (docLegacy.find(r => r.id === 'dsh-ray-personal-assistant')!.config!['assistantPolicy'] as { rules: Array<Record<string, unknown>> }).rules
     expect(rulesLegacy.find(r => r['id'] === 'lark-owner-tool-*-primary')).toMatchObject({ effect: 'deny' })
     expect(rulesLegacy.some(r => r['id'] === 'lark-owner-capability-*-primary')).toBe(false)
   })
@@ -761,7 +761,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     makeDeliveryDb(externalDbPath, false)
 
     const splitPolicyDesc: SettingsDescriptor = {
-      ns: 'dsh-enhanced-assistant-policy',
+      ns: 'dsh-ray-assistant-policy',
       schema: {},
       value: {
         databasePath: join(dshHome, 'assistant-policy', 'policy.sqlite'),
@@ -784,7 +784,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       applies: 'live',
     }
     const keychainDesc: SettingsDescriptor = {
-      ns: 'dsh-enhanced-credentials-keychain',
+      ns: 'dsh-ray-credentials-keychain',
       schema: {},
       value: {
         handles: [
@@ -795,7 +795,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       applies: 'live',
     }
     const deliveryDesc: SettingsDescriptor = {
-      ns: 'dsh-enhanced-assistant-delivery',
+      ns: 'dsh-ray-assistant-delivery',
       schema: {},
       value: {
         databasePath: externalDbPath,
@@ -824,9 +824,9 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const yamlText = readFileSync(patchPath, 'utf8')
     expect(yamlText).toContain("databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')")
     const parsed = parseDocument(yamlText, JS_PARSE_TAG).toJSON() as Array<{ id: string; config?: Record<string, unknown> }>
-    // Must write into dsh-enhanced-assistant-policy, NOT create a phantom dsh-enhanced-personal-assistant row
-    expect(parsed.some(r => r.id === 'dsh-enhanced-personal-assistant')).toBe(false)
-    const policyCfg = parsed.find(r => r.id === 'dsh-enhanced-assistant-policy')!.config!
+    // Must write into dsh-ray-assistant-policy, NOT create a phantom dsh-ray-personal-assistant row
+    expect(parsed.some(r => r.id === 'dsh-ray-personal-assistant')).toBe(false)
+    const policyCfg = parsed.find(r => r.id === 'dsh-ray-assistant-policy')!.config!
     expect(policyCfg['toolDefaultEffect']).toBe('deny')
     expect(policyCfg['proposalMaintenanceIntervalMs']).toBe(15_000)
     expect(policyCfg['autoReview']).toEqual({ enabled: true, timeoutMs: 30_000, maxTokens: 512 })
@@ -836,7 +836,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(splitRules.some(r => r['id'] === 'lark-channel-credential-primary')).toBe(true)
 
     // Existing non-Lark keychain handle from descriptors must survive whole-value replacement
-    const kcHandles = (parsed.find(r => r.id === 'dsh-enhanced-credentials-keychain')!.config!['handles'] as Array<{ id: string }>).map(h => h.id)
+    const kcHandles = (parsed.find(r => r.id === 'dsh-ray-credentials-keychain')!.config!['handles'] as Array<{ id: string }>).map(h => h.id)
     expect(kcHandles).toEqual(['other-service-secret', 'lark-app-secret-primary'])
 
     // External out-of-$DSH_HOME SQLite DB must remain completely untouched (0 rows)
@@ -876,8 +876,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const { dshHome, profileDir, patchPath } = makeTempHome()
     // Simulate a profile hit by the real-world bug: verifier row lacking databasePath + alias-mangled policy rules
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
@@ -926,8 +926,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       '          actions: [execute]',
       '          resource: { kind: tool, id: "*" }',
       '          context: { initiators: [external] }',
-      '- id: dsh-enhanced-assistant-verifier',
-      '  name: "@dsh-enhanced/assistant-verifier"',
+      '- id: dsh-ray-assistant-verifier',
+      '  name: "@dsh-ray/assistant-verifier"',
       '  config:',
       '    memoryReviews:',
       '      authorityId: lark-memory-review-desktop',
@@ -938,12 +938,12 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const host = makeHost(dshHome, profileDir, 'desktop')
     const status = baseStatus({
       bundles: [
-        { name: '@dsh-enhanced/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-verifier', moduleName: '@dsh-enhanced/assistant-verifier' }] },
+        { name: '@dsh-ray/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-verifier', moduleName: '@dsh-ray/assistant-verifier' }] },
       ],
       plugins: [
         {
-          entryId: 'include:dsh-enhanced-assistant-verifier',
-          moduleName: '@dsh-enhanced/assistant-verifier',
+          entryId: 'include:dsh-ray-assistant-verifier',
+          moduleName: '@dsh-ray/assistant-verifier',
           enabled: true,
           fiberPhase: 'failed',
           diagnostic: 'invalid config: - $.databasePath missing required value (at databasePath)',
@@ -957,7 +957,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(ids).toContain('missing-verifier-database-path')
     expect(ids).toContain('corrupted-policy-alias-rules')
     // Must NOT fall through to generic stalled-bundle disable for assistant-verifier
-    expect(ids).not.toContain('stalled-bundle:@dsh-enhanced/assistant-verifier')
+    expect(ids).not.toContain('stalled-bundle:@dsh-ray/assistant-verifier')
 
     const repaired = await applyDoctorRepair({
       host,
@@ -978,12 +978,12 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(repairedRaw).not.toMatch(/&a\d+|\*a\d+/u)
     const repairedDoc = parseDocument(repairedRaw, JS_PARSE_TAG)
     const rows = repairedDoc.toJS() as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-    const verifier = rows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!
+    const verifier = rows.find(r => r.id === 'dsh-ray-assistant-verifier')!
     expect(verifier.disabled).toBeUndefined()
     expect(verifier.config?.['databasePath']).toBe("dshHomePath('assistant-verifier/verification.sqlite')")
     expect(verifier.config?.['memoryReviews']).toEqual({ authorityId: 'lark-memory-review-desktop', maxReviews: 300 })
 
-    const pa = rows.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    const pa = rows.find(r => r.id === 'dsh-ray-personal-assistant')!
     const paPolicy = pa.config!['assistantPolicy'] as Record<string, unknown>
     const rules = paPolicy['rules'] as Array<Record<string, unknown>>
     expect(rules.find(r => r['id'] === 'wizard-lark-mem-review-desktop')?.['subject']).toMatchObject({
@@ -999,8 +999,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
 
     // Verify applyFeishuVaultConfig resolves legacy YAML anchors (&a1/*a1) instead of turning them into { source: 'a1' }
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
@@ -1041,7 +1041,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(afterVaultRaw).not.toContain('source: a2')
     expect(afterVaultRaw).not.toMatch(/&a\d+|\*a\d+/u)
     const afterVaultRows = parseDocument(afterVaultRaw, JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, unknown> }>
-    const afterRules = ((afterVaultRows.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['assistantPolicy'] as Record<string, unknown>)['rules'] as Array<Record<string, unknown>>)
+    const afterRules = ((afterVaultRows.find(r => r.id === 'dsh-ray-personal-assistant')!.config!['assistantPolicy'] as Record<string, unknown>)['rules'] as Array<Record<string, unknown>>)
     expect(afterRules.find(r => r['id'] === 'rule-alias')?.['subject']).toEqual({ kind: 'background', id: 'assistant-memory-learning' })
     expect(afterRules.find(r => r['id'] === 'rule-alias')?.['context']).toEqual({ initiators: ['background'] })
   })
@@ -1078,14 +1078,14 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     }
 
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
       "    defaultWorkspace: !!js dshHomePath('assistant-workspace')",
       '    defaultAgentPreset: standard',
-      '- id: dsh-enhanced-assistant-dreaming',
-      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '- id: dsh-ray-assistant-dreaming',
+      '  name: "@dsh-ray/assistant-dreaming"',
       '  config:',
       '    enabled: true',
       '    retired: false',
@@ -1290,8 +1290,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       db.close()
     }
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
       "    defaultWorkspace: !!js dshHomePath('assistant-workspace')",
@@ -1312,7 +1312,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const host = makeHost(dshHome, profileDir, 'desktop')
     const status = baseStatus({
       bundles: [
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] },
       ],
     })
     const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
@@ -1345,8 +1345,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
 
     // Even if an ownerRoute explicitly uses !!js dshHomePath(...), inspectOwnerRoute must evaluate it to a real path
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
       '    ownerRoutes:',
@@ -1372,8 +1372,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     makeDeliveryDb(deliveryDbPath, true)
     const ws = join(realpathSync(dshHome), 'assistant-workspace')
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
       "    spoolPath: !!js dshHomePath('assistant-delivery/spool')",
@@ -1387,8 +1387,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       '        agentPreset: standard',
       '        policyRef: owner-dm',
       '        minimumGeneration: 1',
-      '- id: dsh-enhanced-assistant-dreaming',
-      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '- id: dsh-ray-assistant-dreaming',
+      '  name: "@dsh-ray/assistant-dreaming"',
       '  config:',
       `    databasePath: ${join(dshHome, 'assistant-dreaming', 'desktop.sqlite')}`,
       '    enabled: true',
@@ -1431,7 +1431,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     // Running Doctor repair immediately updates owner-lark-primary to ou_new_owner and unlocks AutonomyWizard
     const status = baseStatus({
       bundles: [
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] },
       ],
     })
     const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
@@ -1538,29 +1538,29 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
 
   it('never auto-disables core bundles on failure and restores disabled personal-assistant on real dsh.profile.bundles manifest', async () => {
     const { dshHome, profileDir, patchPath } = makeTempHome()
-    // 1) Failed core bundle (@dsh-enhanced/personal-assistant) must NEVER become auto-fixable stalled-bundle disable
+    // 1) Failed core bundle (@dsh-ray/personal-assistant) must NEVER become auto-fixable stalled-bundle disable
     writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
       name: 'dsh-profile-desktop',
       private: true,
       dependencies: {
-        '@dsh-enhanced/personal-assistant': '0.1.78',
-        '@dsh-enhanced/assistant-policy': '0.1.78',
-        '@dsh-enhanced/assistant-delivery': '0.1.78',
-        '@dsh-enhanced/lark-channel': '0.1.78',
+        '@dsh-ray/personal-assistant': '0.1.78',
+        '@dsh-ray/assistant-policy': '0.1.78',
+        '@dsh-ray/assistant-delivery': '0.1.78',
+        '@dsh-ray/lark-channel': '0.1.78',
       },
       dsh: {
         profile: {
           bundles: [
-            '@dsh-enhanced/personal-assistant',
-            '@dsh-enhanced/assistant-delivery',
-            '@dsh-enhanced/lark-channel',
+            '@dsh-ray/personal-assistant',
+            '@dsh-ray/assistant-delivery',
+            '@dsh-ray/lark-channel',
           ],
         },
       },
     }, null, 2), 'utf8')
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
@@ -1575,17 +1575,17 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
     const failedPaStatus = baseStatus({
       bundles: [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-personal-assistant', moduleName: '@dsh-ray/personal-assistant' }] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-lark-channel', moduleName: '@dsh-ray/lark-channel' }] },
       ],
       plugins: [
-        { entryId: 'pa', moduleName: '@dsh-enhanced/personal-assistant', enabled: true, fiberPhase: 'failed', diagnostic: 'transient reload error' },
+        { entryId: 'pa', moduleName: '@dsh-ray/personal-assistant', enabled: true, fiberPhase: 'failed', diagnostic: 'transient reload error' },
       ],
     })
     const failedReport = await inspectSetupDoctor({ host, status: failedPaStatus, descriptors: [], prober, platform: 'darwin', env: {}, now: 1000 })
-    expect(failedReport.issues.some(i => i.id === 'stalled-bundle:@dsh-enhanced/personal-assistant')).toBe(false)
-    const coreIssue = failedReport.issues.find(i => i.id === 'core-bundle-failed:@dsh-enhanced/personal-assistant')
+    expect(failedReport.issues.some(i => i.id === 'stalled-bundle:@dsh-ray/personal-assistant')).toBe(false)
+    const coreIssue = failedReport.issues.find(i => i.id === 'core-bundle-failed:@dsh-ray/personal-assistant')
     expect(coreIssue).toBeDefined()
     expect(coreIssue!.autoFixable).toBe(false)
 
@@ -1594,23 +1594,23 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       name: 'dsh-profile-desktop',
       private: true,
       dependencies: {
-        '@dsh-enhanced/personal-assistant': '0.1.78',
-        '@dsh-enhanced/assistant-policy': '0.1.78',
-        '@dsh-enhanced/assistant-delivery': '0.1.78',
-        '@dsh-enhanced/lark-channel': '0.1.78',
+        '@dsh-ray/personal-assistant': '0.1.78',
+        '@dsh-ray/assistant-policy': '0.1.78',
+        '@dsh-ray/assistant-delivery': '0.1.78',
+        '@dsh-ray/lark-channel': '0.1.78',
       },
       dsh: {
         profile: {
           bundles: [
-            '@dsh-enhanced/assistant-delivery',
-            '@dsh-enhanced/lark-channel',
+            '@dsh-ray/assistant-delivery',
+            '@dsh-ray/lark-channel',
           ],
         },
       },
     }, null, 2), 'utf8')
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
@@ -1623,8 +1623,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       '          context: { initiators: [foreground] }',
       '      budgets: []',
       '  disabled: true',
-      '- id: dsh-enhanced-lark-channel',
-      '  name: "@dsh-enhanced/lark-channel"',
+      '- id: dsh-ray-lark-channel',
+      '  name: "@dsh-ray/lark-channel"',
       '  config:',
       '    enabled: true',
       '    appId: cli_aabbccddeeff0011',
@@ -1638,13 +1638,13 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
         { name: 'assistantSkills', available: true },
       ],
       bundles: [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
-        { name: '@dsh-enhanced/assistant-policy', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-policy', moduleName: '@dsh-enhanced/assistant-policy' }] },
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-ray-personal-assistant', moduleName: '@dsh-ray/personal-assistant' }] },
+        { name: '@dsh-ray/assistant-policy', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-ray-assistant-policy', moduleName: '@dsh-ray/assistant-policy' }] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-lark-channel', moduleName: '@dsh-ray/lark-channel' }] },
       ],
       plugins: [
-        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'pending' },
+        { entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'pending' },
       ],
     })
     const disabledReport = await inspectSetupDoctor({ host, status: disabledStatus, descriptors: [], prober, platform: 'darwin', env: {}, now: 1001 })
@@ -1659,7 +1659,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       listPlugins: async () => [],
       setBundleEnabled: vi.fn(async (_pkg: string, _enabled: boolean) => {
         const currentRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; disabled?: boolean }>
-        patchDisabledWhenManagerCalled = currentRows.find(r => r.id === 'dsh-enhanced-personal-assistant')?.disabled
+        patchDisabledWhenManagerCalled = currentRows.find(r => r.id === 'dsh-ray-personal-assistant')?.disabled
         return { target: _pkg, changed: true, application: 'restart-required' as const }
       }),
       setPluginEnabled: async () => ({ target: '', changed: false, application: 'applied' as const }),
@@ -1679,29 +1679,29 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       now: 1002,
     })
     expect(repaired.applied).toBe(true)
-    expect(repaired.note).toContain('@dsh-enhanced/personal-assistant')
-    expect(manager.setBundleEnabled).toHaveBeenCalledWith('@dsh-enhanced/personal-assistant', true)
+    expect(repaired.note).toContain('@dsh-ray/personal-assistant')
+    expect(manager.setBundleEnabled).toHaveBeenCalledWith('@dsh-ray/personal-assistant', true)
     // Patch file must already have `disabled` cleared BEFORE pluginManager.setBundleEnabled runs!
     expect(patchDisabledWhenManagerCalled).toBeUndefined()
 
     const updatedPkg = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as { dsh: { profile: { bundles: string[] } } }
-    expect(updatedPkg.dsh.profile.bundles).toContain('@dsh-enhanced/personal-assistant')
+    expect(updatedPkg.dsh.profile.bundles).toContain('@dsh-ray/personal-assistant')
     const updatedRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-    const restoredPa = updatedRows.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    const restoredPa = updatedRows.find(r => r.id === 'dsh-ray-personal-assistant')!
     expect(restoredPa.disabled).toBeUndefined()
     expect((restoredPa.config!['assistantPolicy'] as { rules: Array<{ id: string }> }).rules.some(r => r.id === 'keep-existing-rule')).toBe(true)
 
     // 3) applyFeishuVaultConfig also clears stale disabled: true on personal-assistant & assistant-delivery
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  disabled: true',
       '  config:',
       '    assistantPolicy:',
       "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
       '      rules: []',
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  disabled: true',
       '  config: {}',
       '',
@@ -1720,8 +1720,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     })
     expect(vaultRes.applied).toBe(true)
     const afterVault = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; disabled?: boolean }>
-    expect(afterVault.find(r => r.id === 'dsh-enhanced-personal-assistant')?.disabled).toBeUndefined()
-    expect(afterVault.find(r => r.id === 'dsh-enhanced-assistant-delivery')?.disabled).toBeUndefined()
+    expect(afterVault.find(r => r.id === 'dsh-ray-personal-assistant')?.disabled).toBeUndefined()
+    expect(afterVault.find(r => r.id === 'dsh-ray-assistant-delivery')?.disabled).toBeUndefined()
   })
 
   it('detects and auto-repairs frozen personal-memory learning grant conflict by rotating authority generation', async () => {
@@ -1750,16 +1750,16 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
       name: 'dsh-profile-desktop',
       dependencies: {
-        '@dsh-enhanced/personal-assistant': '0.1.78',
-        '@dsh-enhanced/assistant-verifier': '0.1.78',
-        '@dsh-enhanced/assistant-memory-learning': '0.1.78',
+        '@dsh-ray/personal-assistant': '0.1.78',
+        '@dsh-ray/assistant-verifier': '0.1.78',
+        '@dsh-ray/assistant-memory-learning': '0.1.78',
       },
       dsh: {
         profile: {
           bundles: [
-            '@dsh-enhanced/personal-assistant',
-            '@dsh-enhanced/assistant-verifier',
-            '@dsh-enhanced/assistant-memory-learning',
+            '@dsh-ray/personal-assistant',
+            '@dsh-ray/assistant-verifier',
+            '@dsh-ray/assistant-memory-learning',
           ],
         },
       },
@@ -1778,8 +1778,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       maxMutations: 300,
     }
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
@@ -1804,16 +1804,16 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       `        reviewAuthorityDigest: ${adoptObj.reviewAuthorityDigest}`,
       `        expiresAt: ${adoptObj.expiresAt}`,
       `        maxMutations: ${adoptObj.maxMutations}`,
-      '- id: dsh-enhanced-assistant-verifier',
-      '  name: "@dsh-enhanced/assistant-verifier"',
+      '- id: dsh-ray-assistant-verifier',
+      '  name: "@dsh-ray/assistant-verifier"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-verifier/verification.sqlite')",
       '    memoryReviews:',
       `      authorityId: ${reviewObj.authorityId}`,
       `      expiresAt: ${reviewObj.expiresAt}`,
       `      maxReviews: ${reviewObj.maxReviews}`,
-      '- id: dsh-enhanced-assistant-memory-learning',
-      '  name: "@dsh-enhanced/assistant-memory-learning"',
+      '- id: dsh-ray-assistant-memory-learning',
+      '  name: "@dsh-ray/assistant-memory-learning"',
       '  disabled: false',
       '  config:',
       `    databasePath: ${join(dshHome, 'assistant-memory-learning', 'desktop.sqlite')}`,
@@ -1830,14 +1830,14 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
     const status = baseStatus({
       bundles: [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
-        { name: '@dsh-enhanced/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-verifier', moduleName: '@dsh-enhanced/assistant-verifier' }] },
-        { name: '@dsh-enhanced/assistant-memory-learning', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-memory-learning', moduleName: '@dsh-enhanced/assistant-memory-learning' }] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-personal-assistant', moduleName: '@dsh-ray/personal-assistant' }] },
+        { name: '@dsh-ray/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-verifier', moduleName: '@dsh-ray/assistant-verifier' }] },
+        { name: '@dsh-ray/assistant-memory-learning', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-memory-learning', moduleName: '@dsh-ray/assistant-memory-learning' }] },
       ],
       plugins: [
-        { entryId: 'pa', moduleName: '@dsh-enhanced/personal-assistant', enabled: true, fiberPhase: 'failed', diagnostic: 'learning grant authority changed' },
-        { entryId: 'ver', moduleName: '@dsh-enhanced/assistant-verifier', enabled: true, fiberPhase: 'active' },
-        { entryId: 'mem', moduleName: '@dsh-enhanced/assistant-memory-learning', enabled: true, fiberPhase: 'pending' },
+        { entryId: 'pa', moduleName: '@dsh-ray/personal-assistant', enabled: true, fiberPhase: 'failed', diagnostic: 'learning grant authority changed' },
+        { entryId: 'ver', moduleName: '@dsh-ray/assistant-verifier', enabled: true, fiberPhase: 'active' },
+        { entryId: 'mem', moduleName: '@dsh-ray/assistant-memory-learning', enabled: true, fiberPhase: 'pending' },
       ],
     })
 
@@ -1845,7 +1845,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const conflictIssue = report.issues.find(i => i.id === 'memory-learning-grant-conflict')
     expect(conflictIssue).toBeDefined()
     expect(conflictIssue?.autoFixable).toBe(true)
-    expect(report.issues.some(i => i.id === 'core-bundle-failed:@dsh-enhanced/personal-assistant')).toBe(false)
+    expect(report.issues.some(i => i.id === 'core-bundle-failed:@dsh-ray/personal-assistant')).toBe(false)
 
     const repaired = await applyDoctorRepair({
       host,
@@ -1863,9 +1863,9 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(repaired.note).toContain('g2')
 
     const updatedRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, any> }>
-    const pa = updatedRows.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!
-    const ver = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!
-    const mem = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+    const pa = updatedRows.find(r => r.id === 'dsh-ray-personal-assistant')!.config!
+    const ver = updatedRows.find(r => r.id === 'dsh-ray-assistant-verifier')!.config!
+    const mem = updatedRows.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config!
     expect(pa['personalMemory']['automaticLearning']['authorityId']).toBe('lark-memory-adopt-desktop-g2')
     expect(ver['memoryReviews']['authorityId']).toBe('lark-memory-review-desktop-g2')
     expect(mem['authorityId']).toBe('lark-memory-extract-desktop-g2')
@@ -1907,17 +1907,17 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
       name: 'dsh-profile-desktop',
       dependencies: {
-        '@dsh-enhanced/personal-assistant': '0.1.78',
-        '@dsh-enhanced/assistant-verifier': '0.1.78',
-        '@dsh-enhanced/assistant-memory-learning': '0.1.78',
-        '@dsh-enhanced/lark-channel': '0.1.78',
+        '@dsh-ray/personal-assistant': '0.1.78',
+        '@dsh-ray/assistant-verifier': '0.1.78',
+        '@dsh-ray/assistant-memory-learning': '0.1.78',
+        '@dsh-ray/lark-channel': '0.1.78',
       },
       dsh: {
         profile: {
           bundles: [
-            '@dsh-enhanced/assistant-verifier',
-            '@dsh-enhanced/assistant-memory-learning',
-            '@dsh-enhanced/lark-channel',
+            '@dsh-ray/assistant-verifier',
+            '@dsh-ray/assistant-memory-learning',
+            '@dsh-ray/lark-channel',
           ],
         },
       },
@@ -1934,8 +1934,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     }
 
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  disabled: true',
       '  config:',
       '    assistantPolicy:',
@@ -1959,8 +1959,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       '        kinds: [fact, experience]',
       '        operations: [add, replace, remove]',
       '        workItemExperiences: false',
-      '- id: dsh-enhanced-assistant-verifier',
-      '  name: "@dsh-enhanced/assistant-verifier"',
+      '- id: dsh-ray-assistant-verifier',
+      '  name: "@dsh-ray/assistant-verifier"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-verifier/verification.sqlite')",
       '    memoryReviews:',
@@ -1973,8 +1973,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       '      maxOutputTokens: 2048',
       '      timeoutMs: 60000',
       '      workItemExperiences: false',
-      '- id: dsh-enhanced-assistant-memory-learning',
-      '  name: "@dsh-enhanced/assistant-memory-learning"',
+      '- id: dsh-ray-assistant-memory-learning',
+      '  name: "@dsh-ray/assistant-memory-learning"',
       '  disabled: false',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-memory-learning/desktop.sqlite')",
@@ -2009,13 +2009,13 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
         { name: 'assistantSkills', available: true },
       ],
       bundles: [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
-        { name: '@dsh-enhanced/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-verifier', moduleName: '@dsh-enhanced/assistant-verifier' }] },
-        { name: '@dsh-enhanced/assistant-memory-learning', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-memory-learning', moduleName: '@dsh-enhanced/assistant-memory-learning' }] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-ray-personal-assistant', moduleName: '@dsh-ray/personal-assistant' }] },
+        { name: '@dsh-ray/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-verifier', moduleName: '@dsh-ray/assistant-verifier' }] },
+        { name: '@dsh-ray/assistant-memory-learning', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-memory-learning', moduleName: '@dsh-ray/assistant-memory-learning' }] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-lark-channel', moduleName: '@dsh-ray/lark-channel' }] },
       ],
       plugins: [
-        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'pending' },
+        { entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'pending' },
       ],
     })
 
@@ -2037,11 +2037,11 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(repaired.note).toContain('g2')
 
     const updatedRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; disabled?: boolean; config?: Record<string, any> }>
-    const paRow = updatedRows.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    const paRow = updatedRows.find(r => r.id === 'dsh-ray-personal-assistant')!
     expect(paRow.disabled).toBeUndefined()
     const adoptCfg = paRow.config!['personalMemory']['automaticLearning'] as Record<string, unknown>
-    const reviewCfg = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!['memoryReviews'] as Record<string, unknown>
-    const memCfg = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config! as Record<string, unknown>
+    const reviewCfg = updatedRows.find(r => r.id === 'dsh-ray-assistant-verifier')!.config!['memoryReviews'] as Record<string, unknown>
+    const memCfg = updatedRows.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config! as Record<string, unknown>
 
     // !!js databasePath MUST be resolved to a valid absolute path (never leaked as raw "dshHomePath(...)" string!)
     expect(String(memCfg['databasePath'])).not.toContain('dshHomePath(')
@@ -2098,26 +2098,26 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
       name: 'dsh-profile-desktop',
       dependencies: {
-        '@dsh-enhanced/assistant-policy': '0.1.78',
-        '@dsh-enhanced/personal-memory': '0.1.78',
-        '@dsh-enhanced/assistant-verifier': '0.1.78',
-        '@dsh-enhanced/assistant-memory-learning': '0.1.78',
+        '@dsh-ray/assistant-policy': '0.1.78',
+        '@dsh-ray/personal-memory': '0.1.78',
+        '@dsh-ray/assistant-verifier': '0.1.78',
+        '@dsh-ray/assistant-memory-learning': '0.1.78',
       },
       dsh: {
         profile: {
           bundles: [
-            '@dsh-enhanced/assistant-policy',
-            '@dsh-enhanced/personal-memory',
-            '@dsh-enhanced/assistant-verifier',
-            '@dsh-enhanced/assistant-memory-learning',
+            '@dsh-ray/assistant-policy',
+            '@dsh-ray/personal-memory',
+            '@dsh-ray/assistant-verifier',
+            '@dsh-ray/assistant-memory-learning',
           ],
         },
       },
     }, null, 2), 'utf8')
 
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-policy',
-      '  name: "@dsh-enhanced/assistant-policy"',
+      '- id: dsh-ray-assistant-policy',
+      '  name: "@dsh-ray/assistant-policy"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
       '    rules:',
@@ -2135,8 +2135,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       '        actions: [adopt]',
       '        resource: { kind: memory, id: "learning:lark-memory-adopt-desktop" }',
       '    budgets: []',
-      '- id: dsh-enhanced-personal-memory',
-      '  name: "@dsh-enhanced/personal-memory"',
+      '- id: dsh-ray-personal-memory',
+      '  name: "@dsh-ray/personal-memory"',
       '  config:',
       "    databasePath: !!js dshHomePath('personal-memory/memory.sqlite')",
       '    automaticLearning:',
@@ -2150,8 +2150,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       '      maxRecordTtlMs: 7776000000',
       '      kinds: [fact, experience]',
       '      operations: [add, replace, remove]',
-      '- id: dsh-enhanced-assistant-verifier',
-      '  name: "@dsh-enhanced/assistant-verifier"',
+      '- id: dsh-ray-assistant-verifier',
+      '  name: "@dsh-ray/assistant-verifier"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-verifier/verification.sqlite')",
       '    memoryReviews:',
@@ -2164,8 +2164,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       '      maxOutputTokens: 2048',
       '      timeoutMs: 60000',
       '      model: { provider: super-relay, model: auto_model/alwaysday1 }',
-      '- id: dsh-enhanced-assistant-memory-learning',
-      '  name: "@dsh-enhanced/assistant-memory-learning"',
+      '- id: dsh-ray-assistant-memory-learning',
+      '  name: "@dsh-ray/assistant-memory-learning"',
       '  disabled: false',
       '  config:',
       `    databasePath: ${learningDbPath}`,
@@ -2195,10 +2195,10 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
     const status = baseStatus({
       bundles: [
-        { name: '@dsh-enhanced/assistant-policy', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-policy', moduleName: '@dsh-enhanced/assistant-policy' }] },
-        { name: '@dsh-enhanced/personal-memory', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-memory', moduleName: '@dsh-enhanced/personal-memory' }] },
-        { name: '@dsh-enhanced/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-verifier', moduleName: '@dsh-enhanced/assistant-verifier' }] },
-        { name: '@dsh-enhanced/assistant-memory-learning', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-memory-learning', moduleName: '@dsh-enhanced/assistant-memory-learning' }] },
+        { name: '@dsh-ray/assistant-policy', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-policy', moduleName: '@dsh-ray/assistant-policy' }] },
+        { name: '@dsh-ray/personal-memory', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-personal-memory', moduleName: '@dsh-ray/personal-memory' }] },
+        { name: '@dsh-ray/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-verifier', moduleName: '@dsh-ray/assistant-verifier' }] },
+        { name: '@dsh-ray/assistant-memory-learning', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-memory-learning', moduleName: '@dsh-ray/assistant-memory-learning' }] },
       ],
     })
 
@@ -2223,10 +2223,10 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(repaired.applied).toBe(true)
 
     const updatedRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, any> }>
-    const splitMem = updatedRows.find(r => r.id === 'dsh-enhanced-personal-memory')!.config!
-    const splitPol = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-policy')!.config!
-    const splitVer = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!
-    const splitLearner = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+    const splitMem = updatedRows.find(r => r.id === 'dsh-ray-personal-memory')!.config!
+    const splitPol = updatedRows.find(r => r.id === 'dsh-ray-assistant-policy')!.config!
+    const splitVer = updatedRows.find(r => r.id === 'dsh-ray-assistant-verifier')!.config!
+    const splitLearner = updatedRows.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config!
 
     expect(splitMem['automaticLearning']['authorityId']).toBe('lark-memory-adopt-desktop-g2')
     expect(splitVer['memoryReviews']['authorityId']).toBe('lark-memory-review-desktop-g2')
@@ -2283,8 +2283,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const newKey = 'lark/primary/personal/ou_new_linked_2'
     const syntheticAppId = ['cli', 'aabbccddeeff0011'].join('_')
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  config:',
       '    assistantPolicy:',
       `      databasePath: ${join(canonicalHome, 'assistant-policy', 'policy.sqlite')}`,
@@ -2298,8 +2298,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       '          resource: { kind: message, id: "*" }',
       '          context: { initiators: [external] }',
       '      budgets: []',
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       `    databasePath: ${dbPath}`,
       `    spoolPath: ${join(canonicalHome, 'assistant-delivery', 'spool')}`,
@@ -2313,8 +2313,8 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       '        agentPreset: standard',
       '        policyRef: owner-dm',
       '        minimumGeneration: 3',
-      '- id: dsh-enhanced-lark-channel',
-      '  name: "@dsh-enhanced/lark-channel"',
+      '- id: dsh-ray-lark-channel',
+      '  name: "@dsh-ray/lark-channel"',
       '  config:',
       '    enabled: true',
       `    appId: ${syntheticAppId}`,
@@ -2327,9 +2327,9 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
     const status = baseStatus({
       bundles: [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-personal-assistant', moduleName: '@dsh-ray/personal-assistant' }] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-lark-channel', moduleName: '@dsh-ray/lark-channel' }] },
       ],
     })
 
@@ -2367,7 +2367,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     }
 
     const updatedRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, any> }>
-    const deliveryCfg = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-delivery')!.config!
+    const deliveryCfg = updatedRows.find(r => r.id === 'dsh-ray-assistant-delivery')!.config!
     expect(deliveryCfg['ownerRoutes'][0]['principal']['user']).toBe('ou_new_linked_2')
 
     const after = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 3004 })
@@ -2381,17 +2381,17 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       const { dshHome, profileDir, patchPath } = makeTempHome()
       writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
         name: 'profile-desktop',
-        bundles: { '@dsh-enhanced/assistant-isolation': true },
+        bundles: { '@dsh-ray/assistant-isolation': true },
       }, null, 2))
       const patchLines = [
-        '- id: dsh-enhanced-assistant-isolation',
-        "  name: '@dsh-enhanced/assistant-isolation'",
+        '- id: dsh-ray-assistant-isolation',
+        "  name: '@dsh-ray/assistant-isolation'",
         ...(backend === undefined ? [] : ['  config:', `    backend: ${JSON.stringify(backend)}`]),
       ]
       writeFileSync(patchPath, `${patchLines.join('\n')}\n`, 'utf8')
       const status = baseStatus({
         bundles: [
-          { name: '@dsh-enhanced/assistant-isolation', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-isolation', moduleName: '@dsh-enhanced/assistant-isolation' }] },
+          { name: '@dsh-ray/assistant-isolation', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-isolation', moduleName: '@dsh-ray/assistant-isolation' }] },
         ],
       })
       const host = makeHost(dshHome, profileDir, 'desktop')
@@ -2432,7 +2432,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
         issueIds: ['unsupported-platform-isolation'], platform, env: {}, now: 12345,
       })
       expect(repair.applied).toBe(true)
-      expect(toggledOff).toContain('@dsh-enhanced/assistant-isolation')
+      expect(toggledOff).toContain('@dsh-ray/assistant-isolation')
     }
   })
 })

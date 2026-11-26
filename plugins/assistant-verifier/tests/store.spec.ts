@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createTaskAcceptanceContract, createTaskVerificationReceipt, type TaskAcceptanceContract, type TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { createTaskAcceptanceContract, createTaskVerificationReceipt, type TaskAcceptanceContract, type TaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
 import { AcceptanceStore, AcceptanceStoreError } from '../src/store.ts'
 
 const cleanup: string[] = []

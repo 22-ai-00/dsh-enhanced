@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { isSourceOwnerContinuation } from '@dsh-enhanced/assistant-growth-contract'
-import type { GoalScope, OwnerGoalExecutionSnapshotInput } from '@dsh-enhanced/assistant-goals'
-import type { CommitOwnerAnchoredWorkflowTraceServiceResult } from '@dsh-enhanced/assistant-delivery'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import { isSourceOwnerContinuation } from '@dsh-ray/assistant-growth-contract'
+import type { GoalScope, OwnerGoalExecutionSnapshotInput } from '@dsh-ray/assistant-goals'
+import type { CommitOwnerAnchoredWorkflowTraceServiceResult } from '@dsh-ray/assistant-delivery'
 import type { GrowthOwnerScopeConfig } from './config.js'
 
 /**

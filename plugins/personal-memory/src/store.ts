@@ -6,8 +6,8 @@ import {
   validatePreferenceMemoryPromotionCancellationRequest,
   withPreferenceMemoryPromotionCancellationReceiptDigest,
   withPreferenceMemoryPromotionResultDigest,
-} from '@dsh-enhanced/assistant-growth-contract'
-import { APPROVAL_DISPLAY_BUDGET } from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-growth-contract'
+import { APPROVAL_DISPLAY_BUDGET } from '@dsh-ray/assistant-policy'
 import { MemoryDatabaseError, openMemoryDatabase } from './sqlite.js'
 import { MemoryEvidenceLedger } from './evidence-ledger.js'
 import { tokenizeMemory } from './tokenize.js'

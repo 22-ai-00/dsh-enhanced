@@ -4,9 +4,9 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync } from 'node:fs'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { CredentialsKeychainService } from '@dsh-ray/credentials-keychain'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventTriggersService } from '../src/service.ts'
 import { EVENT_OBSERVER_EXECUTOR } from '../src/observer.ts'
@@ -47,7 +47,7 @@ async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = '
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), budgets: [{ id: 'repository-observations', metric: 'requests', limit: 100, periodMs: 60_000, scope: 'subject' }], rules: [
     { id: 'observer-reconcile', effect: 'allow', subject: { kind: 'background', id: EVENT_OBSERVER_EXECUTOR, workspace: root, principal: 'owner:one' }, actions: ['observe', 'reconcile', 'execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
     { id: 'repository-observe', effect: 'allow', subject: { kind: 'background', id: 'event-triggers:repository', workspace: root, principal: 'owner:one' }, actions: ['observe'], resource: { kind: 'network', id: `https://api.github.com/repos/${repository}` }, context: { initiators: ['background'] }, budget: { id: 'repository-observations', amount: 1 } },
-    { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' }, context: { initiators: ['background'] } },
+    { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' }, context: { initiators: ['background'] } },
     { id: 'event-ingest', effect: 'allow', subject: { kind: 'external', id: 'event-triggers:repository', workspace: root }, actions: ['ingest'], resource: { kind: 'automation', id: 'repository-target' }, context: { initiators: ['external'] } },
   ] })
   await ctx.plugin(AssistantAutomationsService, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0, allowUnbudgetedExecution: true })
@@ -84,13 +84,13 @@ async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = '
     await provideActions()
   } else {
     await ctx.plugin({ name: 'credentials-keychain-fixture', apply(runtime: Context) {
-      new CredentialsKeychainService(runtime, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'environment', environmentName: 'GITHUB_TOKEN', consumers: ['dsh-enhanced-event-triggers'], purposes: ['github.observe'], maxLeaseMs: 30_000 }] }, { env: { GITHUB_TOKEN: 'repository-fixture-token' } })
+      new CredentialsKeychainService(runtime, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'environment', environmentName: 'GITHUB_TOKEN', consumers: ['dsh-ray-event-triggers'], purposes: ['github.observe'], maxLeaseMs: 30_000 }] }, { env: { GITHUB_TOKEN: 'repository-fixture-token' } })
     } })
   }
   const config = { databasePath: join(root, 'events.sqlite'), pollerEnabled: false, pollIntervalMs: 1_000, requestTimeoutMs, maxBodyBytes: 16_384, triggers: [{ id: 'repository', kind: 'github-repository' as const, automationId: 'repository-target', repository, branch, baseBranch, ...(deliveryMode === undefined ? {} : { deliveryMode }), ...(external ? { externalGrant: { id: 'operator-grant', revision: 1, digest: 'd'.repeat(64) } } : { credentialHandle: 'github' }), fireWhen: 'changed' as const, debounceMs: 0, cooldownMs: 0, maxFires: 10, observerLifetime: external ? 'goal' as const : lifetime, observer: { workspace: root, preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: Date.now() + 60_000, budgetId: 'repository-observations' } }] }
   const install = async () => {
     let service!: EventTriggersService
-    const fiber = await ctx.plugin({ name: 'dsh-enhanced-event-triggers', apply(runtime: Context) { service = new EventTriggersService(runtime, config, { fetcher, lookup: async () => [{ address: '93.184.216.34', family: 4 }] }) } })
+    const fiber = await ctx.plugin({ name: 'dsh-ray-event-triggers', apply(runtime: Context) { service = new EventTriggersService(runtime, config, { fetcher, lookup: async () => [{ address: '93.184.216.34', family: 4 }] }) } })
     return { service, fiber }
   }
   const installDefault = async () => {

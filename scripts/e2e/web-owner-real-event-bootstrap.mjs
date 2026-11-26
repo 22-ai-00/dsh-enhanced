@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 
-export const name = 'dsh-enhanced-web-owner-real-event-bootstrap'
+export const name = 'dsh-ray-web-owner-real-event-bootstrap'
 export const inject = ['assistantAutomations']
 
 const executorId = 'web-owner-real-event-source/v1'

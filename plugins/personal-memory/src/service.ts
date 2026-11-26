@@ -12,15 +12,15 @@ import Schema from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { REVALIDATABLE_READ_TOOLS, revalidateFileEvidence } from './evidence-filesystem.js'
-import type {} from '@dsh-enhanced/assistant-goals'
+import type {} from '@dsh-ray/assistant-goals'
 import type {
   AssistantDeliveryService,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import type {
   ApprovalDispatchRouteV2,
   AssistantPolicyService,
   PolicyDecision,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import { MemoryPromotionCancelledError, MemoryProposalManager } from './proposals.js'
 import { MemoryLearningService } from './learning-service.js'
 import { validateMemoryLearningAdoptionGrant } from './learning-adoptions.js'
@@ -63,7 +63,7 @@ import {
   type PreferenceMemoryPromotionSubmissionReceipt,
   type MemoryLearningOwner,
   type MemoryLearningReviewRequest,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 
 export interface Config {
   databasePath: string
@@ -183,7 +183,7 @@ function decisionError(decision: PolicyDecision): PersonalMemoryError {
   return new PersonalMemoryError('policy-denied', `personal-memory policy denied operation: ${decision.reasonCode}`)
 }
 
-const APPROVAL_SOURCE_ID = 'dsh-enhanced-personal-memory'
+const APPROVAL_SOURCE_ID = 'dsh-ray-personal-memory'
 
 export class PersonalMemoryService extends Service {
   static Config = configSchema
@@ -880,7 +880,7 @@ export class PersonalMemoryService extends Service {
         if (message.role !== 'user' || !message.content.some(block => block.type === 'text')) return false
         const kind: string | undefined = message.source?.kind
         return kind === 'user' || kind === 'delivery'
-          || kind === 'assistant-automations' || kind === 'plugin:@dsh-enhanced/assistant-automations'
+          || kind === 'assistant-automations' || kind === 'plugin:@dsh-ray/assistant-automations'
       })
       let query = ''
       for (const block of humanTask?.content ?? []) {

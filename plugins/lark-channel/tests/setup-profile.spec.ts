@@ -28,7 +28,7 @@ const RETIRED_TOOL_IDS = [
 ] as const
 
 const fixture = `
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   config:
     assistantPolicy:
       databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
@@ -43,7 +43,7 @@ const fixture = `
     personalMemory: { databasePath: /tmp/memory.sqlite }
     personalWiki: { vaultRoot: /tmp/wiki, databasePath: /tmp/wiki.sqlite }
     assistantAutomations: { databasePath: /tmp/automations.sqlite, runsPath: /tmp/runs }
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config:
     defaultWorkspace: !!js dshHomePath('assistant-workspace')
     defaultAgentPreset: standard
@@ -65,7 +65,7 @@ describe('Lark Web-profile onboarding patch', () => {
 
   test('recognizes an unconfigured channel bundle as a new owner installation', () => {
     const base = lark.refreshLarkAgentPolicyPatch({ profilePatch: fixture, dshHome: '/Users/test/.dsh', agentTools: 'enable' })
-    const profilePatch = base + '\n- id: dsh-enhanced-lark-channel\n  config: { enabled: false, account: primary, appId: "" }\n'
+    const profilePatch = base + '\n- id: dsh-ray-lark-channel\n  config: { enabled: false, account: primary, appId: "" }\n'
     const configured = lark.configureLarkProfilePatch({
       profilePatch, dshHome: '/Users/test/.dsh', appId: 'cli_0123456789abcdef', account: 'primary',
       tenant: 'personal', domain: 'feishu', ownerUserId: 'ou_owner',
@@ -85,9 +85,9 @@ describe('Lark Web-profile onboarding patch', () => {
     const rows = parse(enabled, {
       customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
     })
-    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-ray-personal-assistant')
       .config.assistantPolicy.rules
-    expect(rules.find((rule: { id: string }) => rule.id === 'dsh-enhanced-foreground-capability-*'))
+    expect(rules.find((rule: { id: string }) => rule.id === 'dsh-ray-foreground-capability-*'))
       .toMatchObject({
         effect: 'allow',
         subject: { kind: 'agent', id: '*', workspace: '*' },
@@ -104,7 +104,7 @@ describe('Lark Web-profile onboarding patch', () => {
       dshHome: '/Users/test/.dsh',
       agentTools: 'disable',
     })
-    expect(disabled).not.toContain('dsh-enhanced-foreground-capability-')
+    expect(disabled).not.toContain('dsh-ray-foreground-capability-')
     expect(disabled).toContain('keep-user-rule')
   })
 
@@ -135,16 +135,16 @@ describe('Lark Web-profile onboarding patch', () => {
     const after = parse(enabled, {
       customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
     })
-    const beforeChannel = before.find((row: { id: string }) => row.id === 'dsh-enhanced-lark-channel')
-    const afterChannel = after.find((row: { id: string }) => row.id === 'dsh-enhanced-lark-channel')
-    const beforeCredentials = before.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain')
-    const afterCredentials = after.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain')
+    const beforeChannel = before.find((row: { id: string }) => row.id === 'dsh-ray-lark-channel')
+    const afterChannel = after.find((row: { id: string }) => row.id === 'dsh-ray-lark-channel')
+    const beforeCredentials = before.find((row: { id: string }) => row.id === 'dsh-ray-credentials-keychain')
+    const afterCredentials = after.find((row: { id: string }) => row.id === 'dsh-ray-credentials-keychain')
     expect(afterChannel).toEqual(beforeChannel)
     expect(afterCredentials).toEqual(beforeCredentials)
 
-    const rules = after.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+    const rules = after.find((row: { id: string }) => row.id === 'dsh-ray-personal-assistant')
       .config.assistantPolicy.rules
-    expect(rules.find((rule: { id: string }) => rule.id === 'dsh-enhanced-foreground-capability-*'))
+    expect(rules.find((rule: { id: string }) => rule.id === 'dsh-ray-foreground-capability-*'))
       .toBeDefined()
     expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-capability-*-secondary'))
       .toMatchObject({ subject: { id: 'standard', workspace: '/Users/test/.dsh/assistant-workspace' } })
@@ -165,7 +165,7 @@ describe('Lark Web-profile onboarding patch', () => {
       dshHome: '/Users/test/.dsh',
       agentTools: 'disable',
     })
-    expect(disabled).not.toContain('dsh-enhanced-foreground-capability-')
+    expect(disabled).not.toContain('dsh-ray-foreground-capability-')
     expect(disabled).not.toContain('lark-foreground-capability-')
     expect(disabled).not.toContain('lark-owner-capability-')
     expect(disabled).not.toContain('lark-owner-tool-')
@@ -174,7 +174,7 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(disabled).toContain('lark-owner-preference-snapshot-secondary')
 
     const channelDisabled = enabled.replace(
-      /(id: dsh-enhanced-lark-channel[\s\S]*?\n\s+enabled:) true/u,
+      /(id: dsh-ray-lark-channel[\s\S]*?\n\s+enabled:) true/u,
       '$1 false',
     )
     expect(channelDisabled).not.toBe(enabled)
@@ -208,7 +208,7 @@ describe('Lark Web-profile onboarding patch', () => {
     const rows = parse(configured, {
       customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
     })
-    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-ray-personal-assistant')
       .config.assistantPolicy.rules as PolicyRuleShape[]
 
     expect(rules.find(rule => rule.id === 'lark-owner-preference-signal-secondary')).toEqual({
@@ -337,7 +337,7 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(disabled).not.toContain('lark-owner-tool-*-secondary')
 
     const channelDisabled = polluted.replace(
-      /(id: dsh-enhanced-lark-channel[\s\S]*?\n\s+enabled:) true/u,
+      /(id: dsh-ray-lark-channel[\s\S]*?\n\s+enabled:) true/u,
       '$1 false',
     )
     const disabledChannel = refresh({
@@ -381,7 +381,7 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(secondary).not.toContain('lark-owner-reply-primary')
     expect(secondary).not.toContain('lark-owner-preference-signal-primary')
     expect(secondary).not.toContain('lark-owner-preference-snapshot-primary')
-    expect(secondary).not.toContain('lark-owner-approval-dsh-enhanced-personal-memory-primary')
+    expect(secondary).not.toContain('lark-owner-approval-dsh-ray-personal-memory-primary')
     expect(secondary).not.toContain('lark-channel-credential-primary')
     expect(secondary).not.toContain('id: lark-app-secret-primary')
     expect(secondary).toContain('lark-owner-capability-*-secondary')
@@ -401,7 +401,7 @@ describe('Lark Web-profile onboarding patch', () => {
       keychainAccount: 'secondary',
       agentTools: 'disable',
     })
-    expect(disabled).not.toContain('dsh-enhanced-foreground-capability-*')
+    expect(disabled).not.toContain('dsh-ray-foreground-capability-*')
     expect(disabled).not.toContain('lark-owner-capability-')
     expect(disabled).not.toContain('lark-owner-tool-')
   })
@@ -424,7 +424,7 @@ describe('Lark Web-profile onboarding patch', () => {
       .replace('      budgets: []', `
         - id: lark-channel-credential-primary
           effect: allow
-          subject: { kind: background, id: dsh-enhanced-lark-channel }
+          subject: { kind: background, id: dsh-ray-lark-channel }
           actions: [credential.use]
           resource: { kind: credential, id: lark-app-secret-primary }
           context: { initiators: [background] }
@@ -434,11 +434,11 @@ describe('Lark Web-profile onboarding patch', () => {
           actions: [approval.decide, ingest]
           resource: { kind: message, id: "*" }
           context: { initiators: [external] }
-        - id: lark-owner-approval-dsh-enhanced-personal-memory-primary
+        - id: lark-owner-approval-dsh-ray-personal-memory-primary
           effect: allow
           subject:
             kind: background
-            id: dsh-enhanced-personal-memory
+            id: dsh-ray-personal-memory
             workspace: /Users/test/.dsh/assistant-workspace
             principal: lark/primary/personal/ou_primary
           actions: [approval.send]
@@ -456,7 +456,7 @@ describe('Lark Web-profile onboarding patch', () => {
           actions: [send]
           resource: { kind: message, id: private }
           context: { initiators: [foreground] }
-        - id: custom-lark-owner-approval-dsh-enhanced-personal-memory-user-defined
+        - id: custom-lark-owner-approval-dsh-ray-personal-memory-user-defined
           effect: deny
           subject: { kind: background, id: local-user-plugin }
           actions: [read]
@@ -465,7 +465,7 @@ describe('Lark Web-profile onboarding patch', () => {
       budgets: []`)
       .replace('    handles:\n', `    handles:
       - id: lark-app-secret-primary
-        consumers: [dsh-enhanced-lark-channel]
+        consumers: [dsh-ray-lark-channel]
         purposes: [connect]
         maxLeaseMs: 86400000
         provider: macos-keychain
@@ -485,14 +485,14 @@ describe('Lark Web-profile onboarding patch', () => {
     const assertRetiredSweep = (profilePatch: string, currentAccount: string): void => {
       expect(profilePatch).not.toContain('lark-channel-credential-primary')
       expect(profilePatch).not.toContain('lark-owner-ingress-primary')
-      expect(profilePatch).not.toContain('lark-owner-approval-dsh-enhanced-personal-memory-primary')
+      expect(profilePatch).not.toContain('lark-owner-approval-dsh-ray-personal-memory-primary')
       expect(profilePatch).not.toContain('id: lark-app-secret-primary')
       expect(profilePatch).toContain(`lark-channel-credential-${currentAccount}`)
       expect(profilePatch).toContain(`lark-owner-ingress-${currentAccount}`)
       expect(profilePatch).toContain(`id: lark-app-secret-${currentAccount}`)
       expect(profilePatch).toContain('custom-lark-channel-credential-user-defined')
       expect(profilePatch).toContain('custom-lark-owner-ingress-user-defined')
-      expect(profilePatch).toContain('custom-lark-owner-approval-dsh-enhanced-personal-memory-user-defined')
+      expect(profilePatch).toContain('custom-lark-owner-approval-dsh-ray-personal-memory-user-defined')
       expect(profilePatch).toContain('id: custom-lark-app-secret-user-defined')
     }
 
@@ -555,7 +555,7 @@ describe('Lark Web-profile onboarding patch', () => {
       budgets: []`)
     const malformedHandle = configured.replace('    handles:\n', `    handles:
       - id: lark-app-secret-primary
-        consumers: [dsh-enhanced-lark-channel, local-user-plugin]
+        consumers: [dsh-ray-lark-channel, local-user-plugin]
         purposes: [connect]
         maxLeaseMs: 86400000
         provider: macos-keychain
@@ -588,7 +588,7 @@ describe('Lark Web-profile onboarding patch', () => {
       keychainAccount: 'secondary',
     }
     const configured = configure({ profilePatch: fixture, ...common })
-    const handlePattern = /(id: lark-app-secret-secondary\n\s+consumers:\n\s+- dsh-enhanced-lark-channel)/u
+    const handlePattern = /(id: lark-app-secret-secondary\n\s+consumers:\n\s+- dsh-ray-lark-channel)/u
     const shared = configured.replace(handlePattern, '$1\n          - local-user-plugin')
     const duplicated = configured.replace(
       /(\s+- id: lark-app-secret-secondary[\s\S]*?\n\s+account: secondary)/u,
@@ -633,16 +633,16 @@ describe('Lark Web-profile onboarding patch', () => {
       credential: `
         - id: lark-channel-credential-secondary
           effect: allow
-          subject: { kind: background, id: dsh-enhanced-lark-channel }
+          subject: { kind: background, id: dsh-ray-lark-channel }
           actions: [credential.use]
           resource: { kind: credential, id: lark-app-secret-secondary }
           context: { initiators: [background] }`,
       approval: `
-        - id: lark-owner-approval-dsh-enhanced-personal-memory-secondary
+        - id: lark-owner-approval-dsh-ray-personal-memory-secondary
           effect: allow
           subject:
             kind: background
-            id: dsh-enhanced-personal-memory
+            id: dsh-ray-personal-memory
             workspace: /Users/test/.dsh/assistant-workspace
             principal: lark/secondary/personal/ou_attacker
           actions: [approval.send]
@@ -684,34 +684,34 @@ describe('Lark Web-profile onboarding patch', () => {
     const explicitlyActive = annotate(
       annotate(
         configured,
-        'dsh-enhanced-lark-channel',
-        "  name: '@dsh-enhanced/lark-channel'\n  disabled: false\n",
+        'dsh-ray-lark-channel',
+        "  name: '@dsh-ray/lark-channel'\n  disabled: false\n",
       ),
-      'dsh-enhanced-credentials-keychain',
-      "  name: '@dsh-enhanced/credentials-keychain'\n  disabled: false\n",
+      'dsh-ray-credentials-keychain',
+      "  name: '@dsh-ray/credentials-keychain'\n  disabled: false\n",
     )
     expect(() => configure({ profilePatch: explicitlyActive, ...common })).not.toThrow()
 
     const invalidRows = {
       larkName: annotate(
         configured,
-        'dsh-enhanced-lark-channel',
+        'dsh-ray-lark-channel',
         "  name: '@user/wrong-lark-package'\n",
       ),
-      larkDisabled: annotate(configured, 'dsh-enhanced-lark-channel', '  disabled: true\n'),
+      larkDisabled: annotate(configured, 'dsh-ray-lark-channel', '  disabled: true\n'),
       larkExpression: annotate(
         configured,
-        'dsh-enhanced-lark-channel',
+        'dsh-ray-lark-channel',
         "  disabled: !!js process.env.DISABLE_LARK\n",
       ),
       credentialName: annotate(
         configured,
-        'dsh-enhanced-credentials-keychain',
+        'dsh-ray-credentials-keychain',
         "  name: '@user/wrong-credential-package'\n",
       ),
       credentialDisabled: annotate(
         configured,
-        'dsh-enhanced-credentials-keychain',
+        'dsh-ray-credentials-keychain',
         '  disabled: true\n',
       ),
     }
@@ -892,7 +892,7 @@ describe('Lark Web-profile onboarding patch', () => {
       id: string
       config: { assistantPolicy: { rules: PolicyRuleShape[] } }
     }[]
-    const rules = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+    const rules = rows.find(row => row.id === 'dsh-ray-personal-assistant')!
       .config.assistantPolicy.rules
     const matching = rules.filter(rule =>
       rule.subject.kind === 'agent'
@@ -916,7 +916,7 @@ describe('Lark Web-profile onboarding patch', () => {
         id: string
         config: { assistantPolicy: { rules: PolicyRuleShape[] } }
       }[]
-      const disabledRules = disabledRows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      const disabledRules = disabledRows.find(row => row.id === 'dsh-ray-personal-assistant')!
         .config.assistantPolicy.rules
       expect(disabledRules).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: 'user-global-external-tool-allow', effect: 'allow' }),
@@ -974,7 +974,7 @@ describe('Lark Web-profile onboarding patch', () => {
       id: string
       config: { assistantPolicy?: { rules: PolicyRuleShape[] } }
     }[]
-    const rules = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+    const rules = rows.find(row => row.id === 'dsh-ray-personal-assistant')!
       .config.assistantPolicy!.rules
     const wildcard = rules.find(rule => rule.id === 'lark-owner-tool-*-primary')
     expect(wildcard).toBeDefined()
@@ -1003,15 +1003,15 @@ describe('Lark Web-profile onboarding patch', () => {
       id: string
       config: { assistantPolicy?: { rules: PolicyRuleShape[] } }
     }[]
-    const rules = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+    const rules = rows.find(row => row.id === 'dsh-ray-personal-assistant')!
       .config.assistantPolicy!.rules
-    const foreground = rules.find(rule => rule.id === 'dsh-enhanced-foreground-capability-*')
+    const foreground = rules.find(rule => rule.id === 'dsh-ray-foreground-capability-*')
     expect(foreground).toBeDefined()
     foreground!.effect = 'deny'
     rules.push(structuredClone(foreground!))
 
     expect(() => configure({ profilePatch: JSON.stringify(rows), ...common }))
-      .toThrow(/duplicate managed foreground rule dsh-enhanced-foreground-capability-\*/iu)
+      .toThrow(/duplicate managed foreground rule dsh-ray-foreground-capability-\*/iu)
   })
 
   test('does not preserve principal-less Agent allows when the configured owner ingress is missing', () => {
@@ -1033,7 +1033,7 @@ describe('Lark Web-profile onboarding patch', () => {
       id: string
       config: { assistantPolicy?: { rules: PolicyRuleShape[] } }
     }[]
-    const rules = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+    const rules = rows.find(row => row.id === 'dsh-ray-personal-assistant')!
       .config.assistantPolicy!.rules
     const ingressIndex = rules.findIndex(rule => rule.id === 'lark-owner-ingress-primary')
     expect(ingressIndex).toBeGreaterThanOrEqual(0)
@@ -1070,7 +1070,7 @@ describe('Lark Web-profile onboarding patch', () => {
       id: string
       config: { assistantPolicy?: { rules: PolicyRuleShape[] } }
     }[]
-    const rules = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+    const rules = rows.find(row => row.id === 'dsh-ray-personal-assistant')!
       .config.assistantPolicy!.rules
     const ingressIndex = rules.findIndex(rule => rule.id === 'lark-owner-ingress-primary')
     expect(ingressIndex).toBeGreaterThanOrEqual(0)
@@ -1146,7 +1146,7 @@ describe('Lark Web-profile onboarding patch', () => {
       id: string
       config: { assistantPolicy: { rules: PolicyRuleShape[] } }
     }[]
-    const legacyRule = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+    const legacyRule = rows.find(row => row.id === 'dsh-ray-personal-assistant')!
       .config.assistantPolicy.rules
       .find(rule => rule.id === 'lark-owner-tool-bash-primary')
     expect(legacyRule).toMatchObject({
@@ -1305,7 +1305,7 @@ describe('Lark Web-profile onboarding patch', () => {
       'lark-owner-ingress-*',
       'lark-owner-approval-unknown-primary',
       'lark-channel-credential-*',
-      'dsh-enhanced-foreground-capability-unknown',
+      'dsh-ray-foreground-capability-unknown',
       'lark-foreground-tool-unknown',
     ]) {
       const polluted = fixture.replace('      budgets: []', `
@@ -1756,16 +1756,16 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(output).not.toMatch(/appSecret|secretValue|ou_other/)
 
     const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
-    const credentials = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain')
+    const credentials = rows.find((row: { id: string }) => row.id === 'dsh-ray-credentials-keychain')
     expect(credentials.config.handles).toEqual([expect.objectContaining({
       id: 'lark-app-secret-primary',
       provider: 'macos-keychain',
       service: 'dsh/lark/web/primary',
       account: 'primary',
-      consumers: ['dsh-enhanced-lark-channel'],
+      consumers: ['dsh-ray-lark-channel'],
       purposes: ['connect'],
     })])
-    const channel = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-lark-channel')
+    const channel = rows.find((row: { id: string }) => row.id === 'dsh-ray-lark-channel')
     expect(channel.config).toMatchObject({
       enabled: true,
       account: 'primary',
@@ -1779,7 +1779,7 @@ describe('Lark Web-profile onboarding patch', () => {
       requestTimeoutMs: 30_000,
       imageDownloadTimeoutMs: 30_000,
     })
-    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-ray-personal-assistant')
       .config.assistantPolicy.rules
     expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-reply-primary')).toMatchObject({
       subject: {
@@ -1819,10 +1819,10 @@ describe('Lark Web-profile onboarding patch', () => {
     const approvalRules = rules.filter((rule: { id: string }) => rule.id.startsWith('lark-owner-approval-'))
     expect(approvalRules).toHaveLength(4)
     expect(approvalRules.map((rule: { subject: { id: string } }) => rule.subject.id).sort()).toEqual([
-      'dsh-enhanced-assistant-evolution',
-      'dsh-enhanced-assistant-automations',
-      'dsh-enhanced-personal-memory',
-      'dsh-enhanced-personal-wiki',
+      'dsh-ray-assistant-evolution',
+      'dsh-ray-assistant-automations',
+      'dsh-ray-personal-memory',
+      'dsh-ray-personal-wiki',
     ].sort())
     expect(approvalRules).toEqual(approvalRules.map((rule: object) => expect.objectContaining({
       ...rule,
@@ -1860,7 +1860,7 @@ describe('Lark Web-profile onboarding patch', () => {
     const preserved = configure(input)
     const output = configure({ ...input, profilePatch: preserved, agentTools: 'enable' })
     const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
-    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-ray-personal-assistant')
       .config.assistantPolicy.rules
 
     expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-reply-primary'))
@@ -1898,7 +1898,7 @@ describe('Lark Web-profile onboarding patch', () => {
       agentTools: 'enable',
     })
     const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
-    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-ray-personal-assistant')
       .config.assistantPolicy.rules
     const legacyReplies = rules.filter((rule: { id: string }) =>
       rule.id.startsWith('lark-owner-reply-primary-legacy-standard-'))
@@ -1993,11 +1993,11 @@ describe('Lark Web-profile onboarding patch', () => {
     }
     const enabled = configure({ ...common, agentTools: 'enable' })
     const denied = enabled.replace(
-      /(id: dsh-enhanced-foreground-capability-\*\n\s+effect:) allow/u,
+      /(id: dsh-ray-foreground-capability-\*\n\s+effect:) allow/u,
       '$1 deny',
     )
     const narrowed = enabled.replace(
-      /(id: dsh-enhanced-foreground-capability-\*[\s\S]*?\n\s+actions:\n\s+-) "\*"/u,
+      /(id: dsh-ray-foreground-capability-\*[\s\S]*?\n\s+actions:\n\s+-) "\*"/u,
       '$1 execute',
     )
     expect(denied).not.toBe(enabled)
@@ -2008,9 +2008,9 @@ describe('Lark Web-profile onboarding patch', () => {
         id: string
         config: { assistantPolicy: { rules: PolicyRuleShape[] } }
       }[]
-      return rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      return rows.find(row => row.id === 'dsh-ray-personal-assistant')!
         .config.assistantPolicy.rules
-        .find(rule => rule.id === 'dsh-enhanced-foreground-capability-*')!
+        .find(rule => rule.id === 'dsh-ray-foreground-capability-*')!
     }
     expect(foregroundRule(denied)).toMatchObject({ effect: 'deny', actions: ['*'] })
     expect(foregroundRule(narrowed)).toMatchObject({ effect: 'allow', actions: ['execute'] })
@@ -2020,9 +2020,9 @@ describe('Lark Web-profile onboarding patch', () => {
         id: string
         config: { assistantPolicy: { rules: PolicyRuleShape[] } }
       }[]
-      return rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      return rows.find(row => row.id === 'dsh-ray-personal-assistant')!
         .config.assistantPolicy.rules
-        .find(rule => rule.id === 'dsh-enhanced-foreground-capability-*')!
+        .find(rule => rule.id === 'dsh-ray-foreground-capability-*')!
     }
     expect(disabledRule(denied)).toMatchObject({ effect: 'deny', actions: ['*'] })
     expect(disabledRule(narrowed)).toBeUndefined()
@@ -2032,9 +2032,9 @@ describe('Lark Web-profile onboarding patch', () => {
         id: string
         config: { assistantPolicy: { rules: PolicyRuleShape[] } }
       }[]
-      return rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      return rows.find(row => row.id === 'dsh-ray-personal-assistant')!
         .config.assistantPolicy.rules
-        .find(rule => rule.id === 'dsh-enhanced-foreground-capability-*')
+        .find(rule => rule.id === 'dsh-ray-foreground-capability-*')
     }
     expect(refreshedRule(denied)).toMatchObject({ effect: 'deny', actions: ['*'] })
     expect(refreshedRule(narrowed)).toBeUndefined()
@@ -2055,12 +2055,12 @@ describe('Lark Web-profile onboarding patch', () => {
       keychainAccount: 'primary',
     }
     const enabled = configure({ ...common, agentTools: 'enable' })
-    const initiatorPattern = /(id: dsh-enhanced-foreground-capability-\*[\s\S]*?context:\n\s+)initiators:\n\s+- foreground/u
+    const initiatorPattern = /(id: dsh-ray-foreground-capability-\*[\s\S]*?context:\n\s+)initiators:\n\s+- foreground/u
     const variants = {
       external: enabled.replace(initiatorPattern, '$1initiators: [external]'),
       mixed: enabled.replace(initiatorPattern, '$1initiators: [external, foreground]'),
       principal: enabled.replace(
-        /(id: dsh-enhanced-foreground-capability-\*[\s\S]*?\n\s+workspace: "\*")/u,
+        /(id: dsh-ray-foreground-capability-\*[\s\S]*?\n\s+workspace: "\*")/u,
         '$1\n            principal: "*"',
       ),
     }
@@ -2104,7 +2104,7 @@ describe('Lark Web-profile onboarding patch', () => {
       refresh({ profilePatch: legacyDeny, dshHome: common.dshHome, agentTools: 'enable' }),
     ]) {
       expect(enabled).not.toContain('lark-foreground-tool-primary')
-      expect(enabled).toMatch(/id: dsh-enhanced-foreground-capability-\*\n\s+effect: allow/u)
+      expect(enabled).toMatch(/id: dsh-ray-foreground-capability-\*\n\s+effect: allow/u)
     }
   })
 
@@ -2125,11 +2125,11 @@ describe('Lark Web-profile onboarding patch', () => {
     const enabled = configure({ ...common, agentTools: 'enable' })
     const crossPlaneDeny = enabled
       .replace(
-        /(id: dsh-enhanced-foreground-capability-\*\n\s+effect:) allow/u,
+        /(id: dsh-ray-foreground-capability-\*\n\s+effect:) allow/u,
         '$1 deny',
       )
       .replace(
-        /(id: dsh-enhanced-foreground-capability-\*[\s\S]*?context:\n\s+initiators:\n\s+-) foreground/u,
+        /(id: dsh-ray-foreground-capability-\*[\s\S]*?context:\n\s+initiators:\n\s+-) foreground/u,
         '$1 external',
       )
     expect(crossPlaneDeny).not.toBe(enabled)
@@ -2142,7 +2142,7 @@ describe('Lark Web-profile onboarding patch', () => {
       agentTools: 'enable',
     })).toThrow(/foreground deny.*external.*refusing/iu)
     expect(configure({ ...common, profilePatch: crossPlaneDeny, agentTools: 'disable' }))
-      .toContain('dsh-enhanced-foreground-capability-*')
+      .toContain('dsh-ray-foreground-capability-*')
   })
 
   test('scopes reply and tool rules to the Delivery-configured workspace', () => {
@@ -2163,7 +2163,7 @@ describe('Lark Web-profile onboarding patch', () => {
       agentTools: 'enable',
     })
     const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
-    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-ray-personal-assistant')
       .config.assistantPolicy.rules
 
     expect(rules.filter((rule: { id: string }) => rule.id.startsWith('lark-owner-'))
@@ -2223,7 +2223,7 @@ describe('Lark Web-profile onboarding patch', () => {
     })
 
     const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
-    const credentials = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain')
+    const credentials = rows.find((row: { id: string }) => row.id === 'dsh-ray-credentials-keychain')
     expect(credentials.config.handles).toEqual([expect.objectContaining({
       provider: 'linux-secret-service',
       service: 'dsh/lark/web/primary',
@@ -2250,7 +2250,7 @@ describe('Lark Web-profile onboarding patch', () => {
     })
 
     const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
-    const credentials = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain')
+    const credentials = rows.find((row: { id: string }) => row.id === 'dsh-ray-credentials-keychain')
     expect(credentials.config.handles).toEqual([expect.objectContaining({
       provider: 'linux-protected-file',
       path: credentialPath,
@@ -2299,7 +2299,7 @@ describe('Lark Web-profile onboarding patch', () => {
     })
 
     const rows = parse(second, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
-    const handles = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain').config.handles
+    const handles = rows.find((row: { id: string }) => row.id === 'dsh-ray-credentials-keychain').config.handles
     expect(handles).toEqual([expect.objectContaining({ provider: 'linux-protected-file', path: secondPath })])
     expect(handles).toHaveLength(1)
   })
@@ -2336,7 +2336,7 @@ describe('Lark Web-profile onboarding patch', () => {
     })
 
     const rows = parse(second, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
-    const handles = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain').config.handles
+    const handles = rows.find((row: { id: string }) => row.id === 'dsh-ray-credentials-keychain').config.handles
     expect(handles).toEqual([expect.objectContaining({ provider: 'linux-secret-service', account: 'primary' })])
     expect(handles).toHaveLength(1)
     expect(handles[0]).not.toHaveProperty('path')
@@ -2382,12 +2382,12 @@ describe('Lark Web-profile onboarding patch', () => {
     })
 
     const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
-    const credentials = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain')
+    const credentials = rows.find((row: { id: string }) => row.id === 'dsh-ray-credentials-keychain')
     expect(credentials.config.handles).toEqual([expect.objectContaining({
       provider: 'windows-dpapi',
       path: credentialPath,
     })])
-    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-ray-personal-assistant')
       .config.assistantPolicy.rules
     // The grant is one platform-agnostic wildcard, so no per-shell rule exists.
     expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-tool-*-primary'))
@@ -2431,7 +2431,7 @@ describe('Lark Web-profile onboarding patch', () => {
       id: string
       effect: string
     }[] } } }[])
-      .find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .find(row => row.id === 'dsh-ray-personal-assistant')!
       .config.assistantPolicy.rules
       .filter(rule => rule.id.startsWith('lark-owner-tool-'))
     // The DSH home changes with the platform, so the previous absolute workspace
@@ -2486,7 +2486,7 @@ describe('Lark Web-profile onboarding patch', () => {
     }
     // Only the wildcard survives, and it carries no residual denial.
     const survivingTools = (parse(upgraded) as { id: string; config: { assistantPolicy: { rules: PolicyRuleShape[] } } }[])
-      .find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .find(row => row.id === 'dsh-ray-personal-assistant')!
       .config.assistantPolicy.rules
       .filter(rule => rule.id.startsWith('lark-owner-tool-'))
     expect(survivingTools.map(rule => rule.resource.id)).toEqual(['*'])
@@ -2512,7 +2512,7 @@ describe('Lark Web-profile onboarding patch', () => {
     }
     const enabled = configure({ ...common, agentTools: 'enable' })
     const rules = (parse(enabled) as { id: string; config: { assistantPolicy: { rules: PolicyRuleShape[] } } }[])
-      .find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .find(row => row.id === 'dsh-ray-personal-assistant')!
       .config.assistantPolicy.rules
 
     const wildcard = rules.find(item => item.id === 'lark-owner-tool-*-primary')
@@ -2529,7 +2529,7 @@ describe('Lark Web-profile onboarding patch', () => {
       context: { initiators: ['external'] },
     })
 
-    const foreground = rules.find(item => item.id === 'dsh-enhanced-foreground-capability-*')
+    const foreground = rules.find(item => item.id === 'dsh-ray-foreground-capability-*')
     expect(foreground).toMatchObject({
       effect: 'allow',
       subject: { kind: 'agent', id: '*', workspace: '*' },
@@ -2630,7 +2630,7 @@ describe('Lark Web-profile onboarding patch', () => {
 
     const disabled = configure({ ...common, profilePatch: enabled, agentTools: 'disable' })
     expect(disabled).not.toContain('lark-owner-tool-')
-    expect(disabled).not.toContain('dsh-enhanced-foreground-capability-')
+    expect(disabled).not.toContain('dsh-ray-foreground-capability-')
     expect(disabled).not.toContain('lark-foreground-capability-')
     expect(disabled).not.toContain('lark-owner-capability-')
   })

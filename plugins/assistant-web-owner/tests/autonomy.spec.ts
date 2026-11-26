@@ -3,7 +3,7 @@ import { realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { describe, expect, it } from 'vitest'
 import { parseDocument } from 'yaml'
 import { prepareAutonomyProfile as prepareProfile, validateAutonomyOptions, type AutonomyLinuxConfig, type AutonomyProfileInput, type FiniteAutonomyTerms } from '../src/autonomy.ts'
@@ -28,24 +28,24 @@ const input: AutonomyProfileInput = {
 const finite: FiniteAutonomyTerms = { maxRuns: 3, leaseMs: 60_000, maxTotalDurationMs: 120_000 }
 const publishedUserHome = join(realpathSync(tmpdir()), `web-owner-published-defaults-${process.pid}`)
 const rows = (home = join(publishedUserHome, '.dsh')) => `
-- id: dsh-enhanced-assistant-isolation
-  name: '@dsh-enhanced/assistant-isolation'
+- id: dsh-ray-assistant-isolation
+  name: '@dsh-ray/assistant-isolation'
   config: {}
-- id: dsh-enhanced-assistant-actions
-  name: '@dsh-enhanced/assistant-actions'
+- id: dsh-ray-assistant-actions
+  name: '@dsh-ray/assistant-actions'
   config: {}
-- id: dsh-enhanced-credentials-keychain
-  name: '@dsh-enhanced/credentials-keychain'
+- id: dsh-ray-credentials-keychain
+  name: '@dsh-ray/credentials-keychain'
   config:
     databasePath: !!js dshHomePath('credentials-keychain/ledger.sqlite')
     handles: []
-- id: dsh-enhanced-assistant-skills
-  name: '@dsh-enhanced/assistant-skills'
+- id: dsh-ray-assistant-skills
+  name: '@dsh-ray/assistant-skills'
   config:
     databasePath: ${join(home, 'assistant-skills.sqlite')}
     allowedTools: [read, write]
-- id: dsh-enhanced-assistant-proactive
-  name: '@dsh-enhanced/assistant-proactive'
+- id: dsh-ray-assistant-proactive
+  name: '@dsh-ray/assistant-proactive'
   config:
     databasePath: ${join(home, 'assistant-proactive.sqlite')}
     profiles: []
@@ -67,14 +67,14 @@ describe('prepareAutonomyProfile', () => {
     const source = `# keep\n- id: custom\n  config: { expression: !!js dshHomePath('custom') }\n`
     const patch = prepareAutonomyProfile(input, source, rows(), owner, 1_000)
     expect(patch).toContain('!!js')
-    expect(config(patch, 'dsh-enhanced-assistant-actions').grants).toEqual([])
-    expect(config(patch, 'dsh-enhanced-assistant-isolation').stateRoot).toBe('/dsh-autonomy-fixture/home/assistant-isolation/web')
-    expect(config(patch, 'dsh-enhanced-assistant-actions').stateRoot).toBe('/dsh-autonomy-fixture/home/assistant-actions/web')
-    expect(config(patch, 'dsh-enhanced-credentials-keychain').databasePath).toBe('/dsh-autonomy-fixture/home/credentials-keychain/web.sqlite')
-    expect(config(patch, 'dsh-enhanced-assistant-skills')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-skills/skills.sqlite', allowedTools: ['read', 'write'] })
-    expect(config(patch, 'dsh-enhanced-assistant-proactive')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-proactive/proactive.sqlite', profiles: [] })
-    expect(`${config(patch, 'dsh-enhanced-assistant-proactive').databasePath}.preparations`).toBe('/dsh-autonomy-fixture/home/assistant-proactive/proactive.sqlite.preparations')
-    expect(config(patch, 'dsh-enhanced-assistant-isolation').grants).toEqual([{
+    expect(config(patch, 'dsh-ray-assistant-actions').grants).toEqual([])
+    expect(config(patch, 'dsh-ray-assistant-isolation').stateRoot).toBe('/dsh-autonomy-fixture/home/assistant-isolation/web')
+    expect(config(patch, 'dsh-ray-assistant-actions').stateRoot).toBe('/dsh-autonomy-fixture/home/assistant-actions/web')
+    expect(config(patch, 'dsh-ray-credentials-keychain').databasePath).toBe('/dsh-autonomy-fixture/home/credentials-keychain/web.sqlite')
+    expect(config(patch, 'dsh-ray-assistant-skills')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-skills/skills.sqlite', allowedTools: ['read', 'write'] })
+    expect(config(patch, 'dsh-ray-assistant-proactive')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-proactive/proactive.sqlite', profiles: [] })
+    expect(`${config(patch, 'dsh-ray-assistant-proactive').databasePath}.preparations`).toBe('/dsh-autonomy-fixture/home/assistant-proactive/proactive.sqlite.preparations')
+    expect(config(patch, 'dsh-ray-assistant-isolation').grants).toEqual([{
       id: 'autonomy-web', revision: 1, principalDigest: createHash('sha256').update('web/web/local/operator').digest('hex'), principalRecordId: 'owner-record', principalVersion: 7,
       workspace: '/srv/workspace', agentPreset: 'standard', expiresAt: 61_000, maxRuns: 3, maxTotalDurationMs: 120_000,
     }])
@@ -82,8 +82,8 @@ describe('prepareAutonomyProfile', () => {
 
   it('rejects disabled, duplicate, drifted Linux descriptor, and custom grant conflicts', () => {
     const effective = rows()
-    expect(() => prepareAutonomyProfile(input, '[]', effective.replace('id: dsh-enhanced-assistant-actions', 'id: dsh-enhanced-assistant-actions\n  disabled: true'), owner)).toThrow(/disabled/)
-    expect(() => prepareAutonomyProfile(input, '[]', `${effective}- id: dsh-enhanced-assistant-isolation\n`, owner)).toThrow(/duplicate/)
+    expect(() => prepareAutonomyProfile(input, '[]', effective.replace('id: dsh-ray-assistant-actions', 'id: dsh-ray-assistant-actions\n  disabled: true'), owner)).toThrow(/disabled/)
+    expect(() => prepareAutonomyProfile(input, '[]', `${effective}- id: dsh-ray-assistant-isolation\n`, owner)).toThrow(/duplicate/)
     const configured = prepareAutonomyProfile(input, '[]', effective, owner, 1_000)
     const drifted = configured.replace('c'.repeat(64), 'e'.repeat(64))
     expect(() => prepareAutonomyProfile(input, drifted, drifted, owner, 2_000)).toThrow(/descriptor differs/)
@@ -94,7 +94,7 @@ describe('prepareAutonomyProfile', () => {
   it('refuses to rewrite an existing Docker profile', () => {
     const effective = rows()
     for (const config of [`{ image: 'sha256:${'a'.repeat(64)}' }`, '{ backend: docker }', '{ dockerPath: /usr/bin/docker }', '{ socketPath: /var/run/docker.sock }']) {
-      const docker = effective.replace("name: '@dsh-enhanced/assistant-isolation'\n  config: {}", `name: '@dsh-enhanced/assistant-isolation'\n  config: ${config}`)
+      const docker = effective.replace("name: '@dsh-ray/assistant-isolation'\n  config: {}", `name: '@dsh-ray/assistant-isolation'\n  config: ${config}`)
       expect(() => prepareAutonomyProfile(input, '[]', docker, owner)).toThrow(/existing Docker isolation requires explicit migration/)
     }
   })
@@ -103,21 +103,21 @@ describe('prepareAutonomyProfile', () => {
     const first = prepareAutonomyProfile(input, '[]', rows(), owner, 1_000)
     const retry = prepareAutonomyProfile(input, first, first, owner, 9_000_000)
     expect(retry).toBe(first)
-    expect(config(retry, 'dsh-enhanced-assistant-isolation').grants).toEqual(config(first, 'dsh-enhanced-assistant-isolation').grants)
+    expect(config(retry, 'dsh-ray-assistant-isolation').grants).toEqual(config(first, 'dsh-ray-assistant-isolation').grants)
     expect(() => prepareAutonomyProfile(input, first, first, { id: 'other', version: 7 }, 2_000)).toThrow(/managed isolation grant differs/)
   })
 
   it('does not create an isolation grant when owner identity is absent', () => {
     const patch = prepareAutonomyProfile(input, '[]', rows(), undefined, 1_000)
-    expect(config(patch, 'dsh-enhanced-assistant-isolation').grants).toEqual([])
+    expect(config(patch, 'dsh-ray-assistant-isolation').grants).toEqual([])
   })
 
   it('only replaces the published credential default and prevalidates grants without an owner', () => {
     const effective = rows()
-    const inherited = prepareAutonomyProfile(input, '- id: dsh-enhanced-credentials-keychain\n  config: { handles: [] }\n', effective)
-    expect(config(inherited, 'dsh-enhanced-credentials-keychain').databasePath).toBe('/dsh-autonomy-fixture/home/credentials-keychain/web.sqlite')
+    const inherited = prepareAutonomyProfile(input, '- id: dsh-ray-credentials-keychain\n  config: { handles: [] }\n', effective)
+    expect(config(inherited, 'dsh-ray-credentials-keychain').databasePath).toBe('/dsh-autonomy-fixture/home/credentials-keychain/web.sqlite')
     const customPath = effective.replace("databasePath: !!js dshHomePath('credentials-keychain/ledger.sqlite')", 'databasePath: /dsh-autonomy-fixture/home/custom/credentials.sqlite')
-    expect(config(prepareAutonomyProfile(input, '[]', customPath), 'dsh-enhanced-credentials-keychain').databasePath).toBe('/dsh-autonomy-fixture/home/custom/credentials.sqlite')
+    expect(config(prepareAutonomyProfile(input, '[]', customPath), 'dsh-ray-credentials-keychain').databasePath).toBe('/dsh-autonomy-fixture/home/custom/credentials.sqlite')
     const outside = effective.replace("databasePath: !!js dshHomePath('credentials-keychain/ledger.sqlite')", 'databasePath: /srv/credentials.sqlite')
     expect(() => prepareAutonomyProfile(input, '[]', outside)).toThrow(/Credential databasePath/)
     const arbitraryJs = effective.replace("dshHomePath('credentials-keychain/ledger.sqlite')", "dshHomePath('other.sqlite')")
@@ -128,15 +128,15 @@ describe('prepareAutonomyProfile', () => {
 
   it('preserves safe custom state databases and rejects paths outside DSH_HOME', () => {
     const custom = `
-- id: dsh-enhanced-assistant-skills
+- id: dsh-ray-assistant-skills
   config: { databasePath: /dsh-autonomy-fixture/home/custom/learned.sqlite }
-- id: dsh-enhanced-assistant-proactive
+- id: dsh-ray-assistant-proactive
   config: { databasePath: /dsh-autonomy-fixture/home/custom/opportunities.sqlite }
 `
     const effective = rows()
     const patch = prepareAutonomyProfile(input, custom, effective, owner, 1_000)
-    expect(config(patch, 'dsh-enhanced-assistant-skills')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/custom/learned.sqlite', allowedTools: ['read', 'write'] })
-    expect(config(patch, 'dsh-enhanced-assistant-proactive')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/custom/opportunities.sqlite', profiles: [] })
+    expect(config(patch, 'dsh-ray-assistant-skills')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/custom/learned.sqlite', allowedTools: ['read', 'write'] })
+    expect(config(patch, 'dsh-ray-assistant-proactive')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/custom/opportunities.sqlite', profiles: [] })
     for (const value of ['/srv/skills.sqlite', '/dsh-autonomy-fixture/home/assistant-skills/../skills.sqlite', "!!js dshHomePath('assistant-skills/skills.sqlite')"]) {
       const unsafe = effective.replace(join(publishedUserHome, '.dsh', 'assistant-skills.sqlite'), value)
       expect(() => prepareAutonomyProfile(input, '[]', unsafe, owner, 1_000)).toThrow(/Skills databasePath/)
@@ -147,14 +147,14 @@ describe('prepareAutonomyProfile', () => {
 
   it('materializes a missing state database field without overwriting explicit siblings', () => {
     const source = `
-- id: dsh-enhanced-assistant-skills
+- id: dsh-ray-assistant-skills
   config: { allowedTools: [read] }
-- id: dsh-enhanced-assistant-proactive
+- id: dsh-ray-assistant-proactive
   config: { profiles: [{ id: custom }] }
 `
     const patch = prepareAutonomyProfile(input, source, rows(), owner, 1_000)
-    expect(config(patch, 'dsh-enhanced-assistant-skills')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-skills/skills.sqlite', allowedTools: ['read'] })
-    expect(config(patch, 'dsh-enhanced-assistant-proactive')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-proactive/proactive.sqlite', profiles: [{ id: 'custom' }] })
+    expect(config(patch, 'dsh-ray-assistant-skills')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-skills/skills.sqlite', allowedTools: ['read'] })
+    expect(config(patch, 'dsh-ray-assistant-proactive')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-proactive/proactive.sqlite', profiles: [{ id: 'custom' }] })
   })
 
   it('rejects existing ancestor symlink escapes and accepts nonexistent nested state paths', async () => {
@@ -171,19 +171,19 @@ describe('prepareAutonomyProfile', () => {
         ['assistant-proactive', 'databasePath', 'Proactive databasePath'],
       ] as const
       for (const [slug, field, label] of cases) {
-        const escaped = `- id: dsh-enhanced-${slug}\n  config: { ${field}: ${join(dshHome, 'link', 'outside.sqlite')} }\n`
+        const escaped = `- id: dsh-ray-${slug}\n  config: { ${field}: ${join(dshHome, 'link', 'outside.sqlite')} }\n`
         expect(() => prepareAutonomyProfile(localInput, escaped, rows(), owner, 1_000)).toThrow(label)
       }
       const safe = `
-- id: dsh-enhanced-assistant-isolation
+- id: dsh-ray-assistant-isolation
   config: { stateRoot: ${join(dshHome, 'new', 'isolation')} }
-- id: dsh-enhanced-assistant-actions
+- id: dsh-ray-assistant-actions
   config: { stateRoot: ${join(dshHome, 'new', 'actions')} }
-- id: dsh-enhanced-credentials-keychain
+- id: dsh-ray-credentials-keychain
   config: { databasePath: ${join(dshHome, 'new', 'credentials.sqlite')} }
-- id: dsh-enhanced-assistant-skills
+- id: dsh-ray-assistant-skills
   config: { databasePath: ${join(dshHome, 'new', 'skills.sqlite')} }
-- id: dsh-enhanced-assistant-proactive
+- id: dsh-ray-assistant-proactive
   config: { databasePath: ${join(dshHome, 'new', 'proactive.sqlite')} }
 `
       expect(() => prepareAutonomyProfile(localInput, safe, rows(), owner, 1_000)).not.toThrow()
@@ -198,14 +198,14 @@ describe('prepareAutonomyProfile', () => {
       const aliasedInput = { ...input, dshHome: alias, workspace: join(root, 'workspace'), isolation: { ...input.isolation, linux: linuxFor(physical) } }
       const patch = prepareAutonomyProfile(aliasedInput, '[]', rows(), owner, 1_000)
       const canonical = await realpath(physical)
-      expect(config(patch, 'dsh-enhanced-assistant-isolation').stateRoot).toBe(join(canonical, 'assistant-isolation', 'web'))
-      expect(config(patch, 'dsh-enhanced-assistant-actions').stateRoot).toBe(join(canonical, 'assistant-actions', 'web'))
-      expect(config(patch, 'dsh-enhanced-credentials-keychain').databasePath).toBe(join(canonical, 'credentials-keychain', 'web.sqlite'))
-      expect(config(patch, 'dsh-enhanced-assistant-skills').databasePath).toBe(join(canonical, 'assistant-skills', 'skills.sqlite'))
-      expect(config(patch, 'dsh-enhanced-assistant-proactive').databasePath).toBe(join(canonical, 'assistant-proactive', 'proactive.sqlite'))
+      expect(config(patch, 'dsh-ray-assistant-isolation').stateRoot).toBe(join(canonical, 'assistant-isolation', 'web'))
+      expect(config(patch, 'dsh-ray-assistant-actions').stateRoot).toBe(join(canonical, 'assistant-actions', 'web'))
+      expect(config(patch, 'dsh-ray-credentials-keychain').databasePath).toBe(join(canonical, 'credentials-keychain', 'web.sqlite'))
+      expect(config(patch, 'dsh-ray-assistant-skills').databasePath).toBe(join(canonical, 'assistant-skills', 'skills.sqlite'))
+      expect(config(patch, 'dsh-ray-assistant-proactive').databasePath).toBe(join(canonical, 'assistant-proactive', 'proactive.sqlite'))
 
       const state = join(physical, 'state'); await mkdir(state); await symlink(join(state, 'target'), join(physical, 'leaf'))
-      const leaf = `- id: dsh-enhanced-assistant-skills\n  config: { databasePath: ${join(physical, 'leaf')} }\n`
+      const leaf = `- id: dsh-ray-assistant-skills\n  config: { databasePath: ${join(physical, 'leaf')} }\n`
       expect(() => prepareAutonomyProfile({ ...aliasedInput, dshHome: physical }, leaf, rows(), owner, 1_000)).toThrow(/symbolic link/)
     } finally { await rm(root, { recursive: true, force: true }) }
   })
@@ -216,16 +216,16 @@ describe('prepareAutonomyProfile', () => {
       const home = join(root, 'home'); const dshHome = join(home, '.dsh'); await mkdir(home); await mkdir(dshHome)
       const effective = rows(dshHome); const localInput = localInputAt(dshHome, join(root, 'workspace'))
       const explicit = `
-- id: dsh-enhanced-assistant-skills
+- id: dsh-ray-assistant-skills
   config: { databasePath: ${join(home, '.dsh', 'assistant-skills.sqlite')} }
-- id: dsh-enhanced-assistant-proactive
+- id: dsh-ray-assistant-proactive
   config: { databasePath: ${join(home, '.dsh', 'assistant-proactive.sqlite')} }
 `
       await writeFile(join(dshHome, 'assistant-skills.sqlite-wal'), 'old')
       await writeFile(join(dshHome, 'assistant-proactive.sqlite.preparations-shm'), 'old')
       const explicitPatch = prepareWithHome(home, localInput, explicit, effective, owner, 1_000)
-      expect(config(explicitPatch, 'dsh-enhanced-assistant-skills').databasePath).toBe(join(home, '.dsh', 'assistant-skills.sqlite'))
-      expect(config(explicitPatch, 'dsh-enhanced-assistant-proactive').databasePath).toBe(join(home, '.dsh', 'assistant-proactive.sqlite'))
+      expect(config(explicitPatch, 'dsh-ray-assistant-skills').databasePath).toBe(join(home, '.dsh', 'assistant-skills.sqlite'))
+      expect(config(explicitPatch, 'dsh-ray-assistant-proactive').databasePath).toBe(join(home, '.dsh', 'assistant-proactive.sqlite'))
 
       expect(() => prepareWithHome(home, localInput, '[]', effective, owner, 1_000)).toThrow(/offline migration/)
       await rm(join(dshHome, 'assistant-skills.sqlite-wal'))
@@ -240,13 +240,13 @@ describe('prepareAutonomyProfile', () => {
       await mkdir(physical); await mkdir(outside); await symlink(physical, alias); await symlink(outside, join(physical, 'escape'))
       const localInput = { ...input, dshHome: alias, workspace: join(root, 'workspace'), isolation: { ...input.isolation, linux: linuxFor(physical) } }
       const safe = `
-- id: dsh-enhanced-assistant-skills
+- id: dsh-ray-assistant-skills
   config:
     comparisons: [{ id: local, stateRoot: ${join(alias, 'comparison', 'local')} }]
     externalHoldouts: [{ id: external, execution: { stateRoot: ${join(alias, 'holdout', 'external')} } }]
 `
       const patch = prepareAutonomyProfile(localInput, safe, rows(), owner, 1_000)
-      const skills = config(patch, 'dsh-enhanced-assistant-skills') as { comparisons: Array<{ stateRoot: string }>; externalHoldouts: Array<{ execution: { stateRoot: string } }> }
+      const skills = config(patch, 'dsh-ray-assistant-skills') as { comparisons: Array<{ stateRoot: string }>; externalHoldouts: Array<{ execution: { stateRoot: string } }> }
       expect(skills.comparisons[0]!.stateRoot).toBe(join(physical, 'comparison', 'local'))
       expect(skills.externalHoldouts[0]!.execution.stateRoot).toBe(join(physical, 'holdout', 'external'))
       const escaped = safe.replace(join(alias, 'holdout', 'external'), join(alias, 'escape', 'external'))
@@ -261,7 +261,7 @@ describe('prepareAutonomyProfile', () => {
     ]) expect(() => validateAutonomyOptions(value as never)).toThrow(/Docker isolation was removed; use the linux-native backend/)
     const effective = rows()
     for (const config of [`{ image: 'sha256:${'a'.repeat(64)}' }`, '{ backend: docker }']) {
-      const docker = effective.replace("name: '@dsh-enhanced/assistant-isolation'\n  config: {}", `name: '@dsh-enhanced/assistant-isolation'\n  config: ${config}`)
+      const docker = effective.replace("name: '@dsh-ray/assistant-isolation'\n  config: {}", `name: '@dsh-ray/assistant-isolation'\n  config: ${config}`)
       expect(() => prepareAutonomyProfile(input, '[]', docker, owner)).toThrow(/existing Docker isolation requires explicit migration/)
     }
   })
@@ -274,19 +274,19 @@ describe('prepareAutonomyProfile', () => {
 
   it('scopes optional goals, dreaming, memory-learning and growth usage DBs under canonical DSH_HOME and skips disabled rows', () => {
     const extraRows = rows() + [
-      `- id: dsh-enhanced-assistant-goals`,
-      `  name: '@dsh-enhanced/assistant-goals'`,
+      `- id: dsh-ray-assistant-goals`,
+      `  name: '@dsh-ray/assistant-goals'`,
       `  config:`,
       `    databasePath: ${join(publishedUserHome, '.dsh', 'assistant-goals.sqlite')}`,
-      `- id: dsh-enhanced-assistant-dreaming`,
-      `  name: '@dsh-enhanced/assistant-dreaming'`,
+      `- id: dsh-ray-assistant-dreaming`,
+      `  name: '@dsh-ray/assistant-dreaming'`,
       `  config: {}`,
-      `- id: dsh-enhanced-assistant-memory-learning`,
-      `  name: '@dsh-enhanced/assistant-memory-learning'`,
+      `- id: dsh-ray-assistant-memory-learning`,
+      `  name: '@dsh-ray/assistant-memory-learning'`,
       `  disabled: true`,
       `  config: {}`,
-      `- id: dsh-enhanced-assistant-growth-driver`,
-      `  name: '@dsh-enhanced/assistant-growth-driver'`,
+      `- id: dsh-ray-assistant-growth-driver`,
+      `  name: '@dsh-ray/assistant-growth-driver'`,
       `  config:`,
       `    usageLearning:`,
       `      enabled: true`,
@@ -294,10 +294,10 @@ describe('prepareAutonomyProfile', () => {
       '',
     ].join('\n')
     const patch = prepareAutonomyProfile(input, '[]', extraRows, owner, 1_000)
-    expect(config(patch, 'dsh-enhanced-assistant-goals').databasePath).toBe('/dsh-autonomy-fixture/home/assistant-goals/web.sqlite')
-    expect(config(patch, 'dsh-enhanced-assistant-dreaming')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-dreaming/web.sqlite' })
-    expect(object(patch).some(row => row.id === 'dsh-enhanced-assistant-memory-learning')).toBe(false)
-    expect((config(patch, 'dsh-enhanced-assistant-growth-driver').usageLearning as Record<string, unknown>).databasePath)
+    expect(config(patch, 'dsh-ray-assistant-goals').databasePath).toBe('/dsh-autonomy-fixture/home/assistant-goals/web.sqlite')
+    expect(config(patch, 'dsh-ray-assistant-dreaming')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-dreaming/web.sqlite' })
+    expect(object(patch).some(row => row.id === 'dsh-ray-assistant-memory-learning')).toBe(false)
+    expect((config(patch, 'dsh-ray-assistant-growth-driver').usageLearning as Record<string, unknown>).databasePath)
       .toBe('/dsh-autonomy-fixture/home/assistant-growth-driver/web-usage.sqlite')
     const escaped = extraRows.replace(join(publishedUserHome, '.dsh', 'assistant-goals.sqlite'), '/outside/goals.sqlite')
     expect(() => prepareAutonomyProfile(input, '[]', escaped, owner, 1_000)).toThrow(/Goals databasePath must be within DSH_HOME/)

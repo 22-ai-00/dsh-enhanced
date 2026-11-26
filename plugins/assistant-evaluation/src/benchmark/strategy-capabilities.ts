@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { assertStrategyPolicyConfiguration, strategyPolicyRecipe } from './strategy-policy.js'
 
 export const strategyBenchmarkMinimalRecipe = Object.freeze({
@@ -232,18 +232,18 @@ function fixedModule(resolverDirectory: string, packageName: string): StrategyCa
  */
 export function createFixedStrategyCapabilityExpectation(input: FixedStrategyCapabilityExpectationInput): Readonly<StrategyCapabilityExpectation> {
   const resolverDirectory = resolve(checkedText(input.resolverDirectory, 'resolver directory'))
-  const goals = fixedModule(resolverDirectory, '@dsh-enhanced/assistant-goals')
-  const isolation = fixedModule(resolverDirectory, '@dsh-enhanced/assistant-isolation')
-  const policyModule = fixedModule(resolverDirectory, '@dsh-enhanced/assistant-policy')
-  const runtime = fixedModule(resolverDirectory, '@dsh-enhanced/assistant-evaluation')
-  const loaded = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-session-persistence', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver', '@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-session-persistence-jsonl', '@dsh-enhanced/assistant-delivery', '@dsh-enhanced/assistant-verifier'].map(name => fixedModule(resolverDirectory, name))
+  const goals = fixedModule(resolverDirectory, '@dsh-ray/assistant-goals')
+  const isolation = fixedModule(resolverDirectory, '@dsh-ray/assistant-isolation')
+  const policyModule = fixedModule(resolverDirectory, '@dsh-ray/assistant-policy')
+  const runtime = fixedModule(resolverDirectory, '@dsh-ray/assistant-evaluation')
+  const loaded = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-session-persistence', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver', '@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-session-persistence-jsonl', '@dsh-ray/assistant-delivery', '@dsh-ray/assistant-verifier'].map(name => fixedModule(resolverDirectory, name))
   if (input.modelProvider === 'deepseek-goal-metered') {
-    loaded.push(fixedModule(resolverDirectory, '@dsh-enhanced/assistant-deepseek-budget'))
+    loaded.push(fixedModule(resolverDirectory, '@dsh-ray/assistant-deepseek-budget'))
     loaded.push(fixedModule(resolverDirectory, '@deepseek-ai/dsh-credentials'))
   }
   if (input.modelProvider === 'traex-agent') {
     // Call-count route: the ACP provider carries no credentials package and emits no token usage.
-    loaded.push(fixedModule(resolverDirectory, '@dsh-enhanced/traex-acp-provider'))
+    loaded.push(fixedModule(resolverDirectory, '@dsh-ray/traex-acp-provider'))
   }
   const sources: StrategyCapabilitySourceGroups = { common: { tools: [goals, isolation], policy: [policyModule], runtime: [runtime, ...loaded] },
     strategy: { guide: [goals], tool: [goals], policy: [policyModule], runtime: [goals, ...loaded] } }

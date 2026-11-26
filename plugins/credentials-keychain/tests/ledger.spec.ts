@@ -19,7 +19,7 @@ async function fixture() {
 describe('credential lease ledger', () => {
   test('creates an idempotent secret-free lease and survives restart', async () => {
     const f = await fixture()
-    const input = { handleId: 'lark-secret', consumer: 'dsh-enhanced-lark-channel', purpose: 'connect',
+    const input = { handleId: 'lark-secret', consumer: 'dsh-ray-lark-channel', purpose: 'connect',
       idempotencyKey: 'lark:startup:1', ttlMs: 5_000 }
     const first = f.ledger.begin(input)
     expect(first).toMatchObject({ replayed: false, record: { status: 'active', expiresAt: 6_000, version: 1 } })

@@ -41,12 +41,12 @@ async function file(path: string, source: string, mode = 0o600) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 }); await writeFile(path, source, { mode }); await chmod(path, mode)
 }
 async function installSourceReader(home: string, packageName = 'lark-channel') {
-  const source = resolve('plugins', packageName), target = join(home, 'profiles/target/node_modules/@dsh-enhanced', packageName)
+  const source = resolve('plugins', packageName), target = join(home, 'profiles/target/node_modules/@dsh-ray', packageName)
   await mkdir(target, { recursive: true, mode: 0o700 })
   for (const entry of ['lib', 'package.json']) await cp(join(source, entry), join(target, entry), { recursive: true, dereference: true })
   const dependencies = join(target, 'node_modules'); await mkdir(dependencies, { mode: 0o700 })
   for (const entry of await readdir(join(source, 'node_modules'))) {
-    if (entry === '@dsh-enhanced') {
+    if (entry === '@dsh-ray') {
       await mkdir(join(dependencies, entry), { mode: 0o700 })
       for (const child of await readdir(join(source, 'node_modules', entry))) {
         const destination = join(dependencies, entry, child)
@@ -225,8 +225,8 @@ describe.skipIf(process.platform !== 'linux')('frozen RSI scanner owner source',
     const stagedBefore = await fingerprint(stagedManifest)
     const probeMarker = 'ORIGINAL_HOME_SOURCE_PROGRAM_EXECUTED'
     await writeFile(f.manifestPath, 'broken original Home business manifest')
-    const originalReader = join(f.home, 'profiles/target/node_modules/@dsh-enhanced/lark-channel/lib/rsi-host-update.js')
-    const originalContract = join(f.home, 'profiles/target/node_modules/@dsh-enhanced/lark-channel/node_modules/@dsh-enhanced/assistant-growth-contract/lib/index.js')
+    const originalReader = join(f.home, 'profiles/target/node_modules/@dsh-ray/lark-channel/lib/rsi-host-update.js')
+    const originalContract = join(f.home, 'profiles/target/node_modules/@dsh-ray/lark-channel/node_modules/@dsh-ray/assistant-growth-contract/lib/index.js')
     for (const path of [originalReader, originalContract]) await writeFile(path,
       `${await readFile(path, 'utf8')}\nprocess.stderr.write(${JSON.stringify(probeMarker)}); throw new Error(${JSON.stringify(probeMarker)})\n`)
     const originalBefore = await fingerprint(f.manifestPath)
@@ -293,7 +293,7 @@ describe.skipIf(process.platform !== 'linux')('frozen RSI scanner owner source',
 
   test('rejects an external growth-contract entry before executing that validator', async () => {
     const f = await fixture()
-    const dependency = join(f.home, 'profiles/target/node_modules/@dsh-enhanced/lark-channel/node_modules/@dsh-enhanced/assistant-growth-contract')
+    const dependency = join(f.home, 'profiles/target/node_modules/@dsh-ray/lark-channel/node_modules/@dsh-ray/assistant-growth-contract')
     const external = join(f.f.root, 'external-contract')
     await cp(dependency, external, { recursive: true, dereference: true })
     const entry = join(external, 'lib/index.js')
@@ -309,7 +309,7 @@ describe.skipIf(process.platform !== 'linux')('frozen RSI scanner owner source',
 
   test('pins the in-Home growth-contract entry before loading the validator', async () => {
     const f = await fixture()
-    const entry = join(f.home, 'profiles/target/node_modules/@dsh-enhanced/lark-channel/node_modules/@dsh-enhanced/assistant-growth-contract/lib/index.js')
+    const entry = join(f.home, 'profiles/target/node_modules/@dsh-ray/lark-channel/node_modules/@dsh-ray/assistant-growth-contract/lib/index.js')
     const probe = globalThis as typeof globalThis & { __scannerContractAfterPinExecuted?: boolean }
     delete probe.__scannerContractAfterPinExecuted
     faults.afterRead = async path => {

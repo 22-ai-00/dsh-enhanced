@@ -46,7 +46,7 @@ function fixture(homePath = '/private/test-owner-home') {
     hostPlanDigest: hash(JSON.stringify(plan)), installer: oldInstaller,
     original: { resources: { root: join(homePath, 'rsi-authorities', profile), installationId: 'installation',
       identities: { host } }, manifest: { sourceReviews: { owner: { id: 'original-owner' } } } } }
-  const proof = { protocol: 'dsh-enhanced/host-owner-program-update/v1', homePath, profile, installer: oldInstaller,
+  const proof = { protocol: 'dsh-ray/host-owner-program-update/v1', homePath, profile, installer: oldInstaller,
     ownerUpdate, candidate: { sourceCommit: 'd'.repeat(40) } }
   const services = [profile, coordinator].map((name, index) => ({ profile: name,
     unit: `dsh-profile-${name}.service`, wasActive: true,
@@ -60,7 +60,7 @@ function fixture(homePath = '/private/test-owner-home') {
     startTimestamp: 'Fri 2026-01-02 00:00:00.192232 UTC', startedAt: Date.parse('2026-01-02T00:00:00.193Z') }))
   const manifest = { version: 4, operation: 'host-update', state: 'preparing', homePath,
     canonicalHome: homePath, profile, id: transactionId, createdAt,
-    transactionPath: `${homePath}.dsh-enhanced-transaction`, bindingDigest: 'e'.repeat(64),
+    transactionPath: `${homePath}.dsh-ray-transaction`, bindingDigest: 'e'.repeat(64),
     originalIdentity: { dev: '1', ino: '2', uid: 1000, mode: 16832 }, services,
     serviceMasks: [{}, {}], serviceStartBarriers: [{}, {}], containmentMasks: [],
     containmentMaskIntents: [], containmentStartBarriers: [],
@@ -307,7 +307,7 @@ test('Lark stability rejects every disconnect after the first accepted sample', 
 
 test.skipIf(process.platform !== 'linux')('a deterministic archived transaction is complete only with its signed intent and receipt', async () => {
   const f = await diskFixture()
-  const transactionRoot = `${f.home}.dsh-enhanced-transaction`
+  const transactionRoot = `${f.home}.dsh-ray-transaction`
   await mkdir(transactionRoot, { mode: 0o700 })
   const runtime = { version: '0.2.1-rc.2', root: '/private/hosts/0.2.1-rc.2',
     dshPath: '/private/hosts/0.2.1-rc.2/node_modules/.bin/dsh',
@@ -316,7 +316,7 @@ test.skipIf(process.platform !== 'linux')('a deterministic archived transaction 
   const binding = `${JSON.stringify({ schemaVersion: 1, cacheRoot: '/private/hosts',
     version: runtime.version, receiptDigest: runtime.receiptDigest })}\n`
   const plan = { schemaVersion: 1, status: 'current', canonicalHome: f.home,
-    bindingPath: join(f.home, '.dsh-rsi-host.json'), originalBindingSource: binding,
+    bindingPath: join(f.home, '.dsh-ray-host.json'), originalBindingSource: binding,
     originalBindingDigest: hash(binding), originalRuntime: runtime,
     candidateRuntime: runtime, candidateBindingSource: binding }
   const services = f.manifest.services.map((service: typeof f.manifest.services[number], index: number) => ({
@@ -383,7 +383,7 @@ test.skipIf(process.platform !== 'linux')('a deterministic archived transaction 
   await rename(f.home, previousHome)
   await cp(previousHome, f.home, { recursive: true })
   expect(statIdentity(await lstat(f.home))).not.toEqual(persisted.originalIdentity)
-  const nextRoot = `${f.home}.dsh-enhanced-transaction`
+  const nextRoot = `${f.home}.dsh-ray-transaction`
   await mkdir(nextRoot, { mode: 0o700 })
   const next = structuredClone(persisted)
   next.id = '22222222-2222-4222-8222-222222222222'

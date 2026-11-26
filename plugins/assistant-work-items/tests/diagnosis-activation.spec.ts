@@ -8,7 +8,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { AssistantWorkItemsService } from '../src/service.ts'
 import { normalizeConfig, type Config } from '../src/config.ts'
 import { DIAGNOSIS_OWNER, DIAGNOSIS_SOURCE, diagnosisDefinitionHash } from '../src/diagnosis-contract.ts'
-import type { HostAutomationDefinition } from '@dsh-enhanced/assistant-automations'
+import type { HostAutomationDefinition } from '@dsh-ray/assistant-automations'
 
 // Unit boundary tests: real Cordis lifecycle and SQLite; owner/Policy/Automations are recorded stubs.
 // No native Agent, real authorization decision, budget accounting or delivery is claimed here.

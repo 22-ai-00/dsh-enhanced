@@ -81,8 +81,8 @@ export async function readSessionAudit(home, workspace, sessionId) {
   const events = stdout.split('\n').filter(Boolean).map(line => JSON.parse(line))
   // Older profiles hoist the peer into the profile; newer installs keep it under the linked
   // assistant-delivery plugin that the Host loaded, so fall back to that resolution.
-  const policyPath = [join(home, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'assistant-policy', 'lib', 'index.js'),
-    join(root, 'plugins', 'assistant-delivery', 'node_modules', '@dsh-enhanced', 'assistant-policy', 'lib', 'index.js')].find(path => existsSync(path))
+  const policyPath = [join(home, 'profiles', 'web', 'node_modules', '@dsh-ray', 'assistant-policy', 'lib', 'index.js'),
+    join(root, 'plugins', 'assistant-delivery', 'node_modules', '@dsh-ray', 'assistant-policy', 'lib', 'index.js')].find(path => existsSync(path))
   if (policyPath === undefined) throw new Error('assistant-policy library is unavailable for the Session audit')
   const policy = await import(pathToFileURL(policyPath).href)
   const selected = events.map(compact).filter(Boolean)

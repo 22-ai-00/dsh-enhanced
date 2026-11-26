@@ -19,7 +19,7 @@ const baseCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository,
 const baselinePath = 'scripts/e2e/fixtures/npm-release-0.1.32.json'
 const baselineBytes = execFileSync('git', ['show', `${baseCommit}:${baselinePath}`], { cwd: repository })
 const baseline = JSON.parse(baselineBytes)
-const approved = baseline.registry.results.find(item => item.name === '@dsh-enhanced/plugin-control-plane' && item.version === '0.1.32' && item.ok)
+const approved = baseline.registry.results.find(item => item.name === '@dsh-ray/plugin-control-plane' && item.version === '0.1.32' && item.ok)
 if (!approved) throw new Error('Committed approved npm artifact is missing')
 const paths = ['plugins/plugin-control-plane/src/registry-fetch.ts', 'plugins/plugin-control-plane/lib/registry-fetch.js',
   'plugins/plugin-control-plane/src/release.ts', 'plugins/plugin-control-plane/lib/release.js',

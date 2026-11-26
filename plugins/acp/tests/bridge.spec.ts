@@ -156,7 +156,7 @@ async function makeHarness(): Promise<Harness> {
   })
 
   await ctx.plugin({
-    name: 'dsh-enhanced-acp-test',
+    name: 'dsh-ray-acp-test',
     inject: [...AcpPlugin.inject],
     apply: (inner: Context) => AcpPlugin.apply(inner, {
       stream: agentStream,
@@ -190,7 +190,7 @@ describe('native-first DSH ACP bridge', () => {
     })
     expect(initialized).toMatchObject({
       protocolVersion: PROTOCOL_VERSION,
-      agentInfo: { name: 'dsh-enhanced-acp', version: AcpPlugin.version },
+      agentInfo: { name: 'dsh-ray-acp', version: AcpPlugin.version },
       agentCapabilities: {
         promptCapabilities: { image: false, audio: false, embeddedContext: false },
         _meta: { dsh: expect.objectContaining({ nativeSessionControls: true }) },

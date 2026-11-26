@@ -60,7 +60,7 @@ describe('benchmark operator commands', () => {
     expect(corpus.tasks.every((task: Record<string, unknown>) => !('acceptance' in task) && !('memories' in task))).toBe(true)
     output.chunks.length = 0
     expect(await benchmarkCli(['doctor', '--suite', 'memory-v1'], output.io)).toBe(0)
-    expect(JSON.parse(output.chunks.join('')).packages).toContainEqual({ name: '@dsh-enhanced/personal-memory', available: true })
+    expect(JSON.parse(output.chunks.join('')).packages).toContainEqual({ name: '@dsh-ray/personal-memory', available: true })
     const root = await workspace(); const file = join(root, 'observed.json'); const input = configuration('a'.repeat(64))
     input.model.temperature = null; input.model.inputLimitMode = 'estimate'; input.model.outputLimitMode = 'observed'
     await writeFile(file, JSON.stringify(input)); output.chunks.length = 0

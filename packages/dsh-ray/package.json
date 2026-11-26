@@ -1,0 +1,59 @@
+{
+  "name": "dsh-ray",
+  "version": "0.1.88",
+  "description": "Global dsh-ray command: status, doctor, web-url, and full purge for DSH Ray plugin installations.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "bin": {
+    "dsh-ray": "./bin/dsh-ray.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
+    "directory": "packages/dsh-ray"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "purge",
+    "uninstall",
+    "diagnostics",
+    "cli"
+  ],
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "dependencies": {
+    "yaml": "2.9.0"
+  }
+}

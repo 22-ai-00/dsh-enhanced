@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import {
   growthObjectDigest,
   workflowArgumentShapeDigest,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parseWorkflowCommand } from '../src/workflow-command.ts'
 import { DeliveryStore } from '../src/store.ts'

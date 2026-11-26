@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import {
   HoldoutEvidenceStore, type HoldoutEvidenceVerifier, type HoldoutPlanCompletion, type HoldoutRunEvidence,
 } from './holdout-evidence.js'

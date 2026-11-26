@@ -5,7 +5,7 @@ import {
 } from 'node:fs'
 import type { BigIntStats } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import { benchmarkPlanDigest, benchmarkResultParser, benchmarkSchedule, benchmarkSnapshot, parseBenchmarkMetrics, parseBenchmarkPlan } from './schema.js'
 import { holdoutEnvelopeDigest, type SignedHoldoutFinish, type SignedHoldoutManifest, type SignedHoldoutVerdict } from './holdout-protocol.js'
 import type { BenchmarkCell, BenchmarkMetrics, BenchmarkPlan, BenchmarkResult, BenchmarkVersions } from './types.js'

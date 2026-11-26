@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { parseBenchmarkPlan, type BenchmarkPlan } from '@dsh-enhanced/assistant-evaluation/benchmark'
-import type { OutcomeEnvelope } from '@dsh-enhanced/assistant-evaluation'
+import { parseBenchmarkPlan, type BenchmarkPlan } from '@dsh-ray/assistant-evaluation/benchmark'
+import type { OutcomeEnvelope } from '@dsh-ray/assistant-evaluation'
 import {
   assertWp04CandidateOrigin,
   clusterEpisodes,

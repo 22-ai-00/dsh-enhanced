@@ -11,12 +11,12 @@ const recoveryRoot = join(repoRoot, 'plugins', 'assistant-recovery')
 const temporaryRoots: string[] = []
 const lastReleaseWithoutRecoveryHostSeams = '0.1.7'
 const requiredHostPeers = [
-  '@dsh-enhanced/assistant-automations',
-  '@dsh-enhanced/assistant-delivery',
-  '@dsh-enhanced/assistant-evaluation',
-  '@dsh-enhanced/assistant-evolution',
-  '@dsh-enhanced/assistant-health',
-  '@dsh-enhanced/preference-learning',
+  '@dsh-ray/assistant-automations',
+  '@dsh-ray/assistant-delivery',
+  '@dsh-ray/assistant-evaluation',
+  '@dsh-ray/assistant-evolution',
+  '@dsh-ray/assistant-health',
+  '@dsh-ray/preference-learning',
 ] as const
 
 function tarTextEntries(compressed: Buffer): ReadonlyMap<string, string> {
@@ -85,7 +85,7 @@ afterEach(async () => {
 
 describe('assistant-recovery packed contract', () => {
   test('packed manifest rejects the published peer set that lacks required Host seams', async () => {
-    const packRoot = await mkdtemp(join(tmpdir(), 'dsh-enhanced-recovery-pack-'))
+    const packRoot = await mkdtemp(join(tmpdir(), 'dsh-ray-recovery-pack-'))
     temporaryRoots.push(packRoot)
     const result = spawnSync(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', [
       '--dir', recoveryRoot, 'pack', '--pack-destination', packRoot, '--json',

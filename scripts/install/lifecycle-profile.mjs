@@ -12,15 +12,15 @@ import { candidateHostUnitSource, classifyHostUnitBytes, finiteHostUnitStartLimi
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const VALIDATOR_PATH = join(dirname(SCRIPT_PATH), 'lifecycle-config.mjs')
-const SANDBOX_VALIDATOR_PATH = '/run/dsh-enhanced-lifecycle-config.mjs'
+const SANDBOX_VALIDATOR_PATH = '/run/dsh-ray-lifecycle-config.mjs'
 const MANIFEST_VERSION = 1
 const SERVICE_MANIFEST_VERSION = 2
 const SUPERVISED_SERVICE_MANIFEST_VERSION = 3
 const HOST_UPDATE_MANIFEST_VERSION = 4
 const LOCAL_SOURCE_MANIFEST_VERSION = 5
-const TRANSACTION_SUFFIX = '.dsh-enhanced-transaction'
+const TRANSACTION_SUFFIX = '.dsh-ray-transaction'
 const WEB_READY_MARKER = 'dsh web: http://127.0.0.1:'
-const HOST_READY_MARKER = 'dsh-enhanced host ready: v1'
+const HOST_READY_MARKER = 'dsh-ray host ready: v1'
 
 // appReady commits after the native Loader activation audit. New enhanced
 // cohorts report it without requiring a Web surface; retain native Web output
@@ -34,9 +34,9 @@ function hasHostReadyMarker(stdout, stderr = '') {
 const LARK_STATE_PREFIX = 'lark-channel: '
 const LARK_ACCEPTED_STATES = new Set(['connected', 'connected-with-gap'])
 const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
-const OWNER_PROGRAM_PROTOCOL = 'dsh-enhanced/host-owner-program-update/v1'
+const OWNER_PROGRAM_PROTOCOL = 'dsh-ray/host-owner-program-update/v1'
 const isOwnerSourceProof = proof => proof?.protocol === OWNER_PROGRAM_PROTOCOL
-  || proof?.protocol === 'dsh-enhanced/host-owner-source-repair/v1'
+  || proof?.protocol === 'dsh-ray/host-owner-source-repair/v1'
 const sourceOwner = proof => proof?.protocol === OWNER_PROGRAM_PROTOCOL ? proof.ownerUpdate : proof?.ownerRepair
 const sourceOwnerNext = proof => proof?.protocol === OWNER_PROGRAM_PROTOCOL ? proof.ownerUpdateNext : proof?.ownerRepairNext
 
@@ -59,15 +59,15 @@ function hostOwnerProgramSelection(plan, services, profile) {
   }
   return { coordinatorProfile }
 }
-const MANAGED_PACKAGE = /^@dsh-enhanced\/[a-z0-9-]+$/u
+const MANAGED_PACKAGE = /^@dsh-ray\/[a-z0-9-]+$/u
 const SEMVER_PRERELEASE_IDENTIFIER = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)'
 const SEMVER_SOURCE = `(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-${SEMVER_PRERELEASE_IDENTIFIER}(?:\\.${SEMVER_PRERELEASE_IDENTIFIER})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?`
-const MANAGED_EXACT_SPEC = new RegExp(`^(@dsh-enhanced/[a-z0-9-]+)@(${SEMVER_SOURCE})$`, 'u')
+const MANAGED_EXACT_SPEC = new RegExp(`^(@dsh-ray/[a-z0-9-]+)@(${SEMVER_SOURCE})$`, 'u')
 const EXACT_SEMVER = new RegExp(`^${SEMVER_SOURCE}$`, 'u')
 const NARROW_DIST_TAG = /^[A-Za-z][A-Za-z0-9._-]*$/u
-const NPM_COHORT_ANCHOR = '@dsh-enhanced/personal-assistant'
-const RSI_COORDINATOR_PACKAGES = ['@dsh-enhanced/assistant-automations', '@dsh-enhanced/assistant-policy', '@dsh-enhanced/plugin-control-plane']
-const ANCESTOR_CHAIN_ENV = 'DSH_ENHANCED_LIFECYCLE_ANCESTORS'
+const NPM_COHORT_ANCHOR = '@dsh-ray/personal-assistant'
+const RSI_COORDINATOR_PACKAGES = ['@dsh-ray/assistant-automations', '@dsh-ray/assistant-policy', '@dsh-ray/plugin-control-plane']
+const ANCESTOR_CHAIN_ENV = 'DSH_RAY_LIFECYCLE_ANCESTORS'
 const LOCK_PARENT_FD_PATH = '/proc/self/fd/3'
 const ALLOWED_WEB_BUNDLES = new Set(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
 const SYSTEMD_UNIT = /^dsh-profile-([A-Za-z0-9][A-Za-z0-9._-]{0,63})\.service$/u
@@ -95,16 +95,16 @@ const SUPERVISED_UPGRADE_PHASES = new Set([
 const SUPERVISED_UNINSTALL_PHASES = new Set([
   'source-pending', 'source-attested', 'clean-target-validated', 'clean-target-pending', 'clean-target-accepted',
 ])
-const SUPERVISED_UPGRADE_PROTOCOL = 'dsh-enhanced/supervised-lifecycle/v1'
-const SUPERVISED_UNINSTALL_PROTOCOL = 'dsh-enhanced/supervised-uninstall/v1'
-const SERVICE_CLEANUP_PROTOCOL = 'dsh-enhanced/service-cleanup/v1'
+const SUPERVISED_UPGRADE_PROTOCOL = 'dsh-ray/supervised-lifecycle/v1'
+const SUPERVISED_UNINSTALL_PROTOCOL = 'dsh-ray/supervised-uninstall/v1'
+const SERVICE_CLEANUP_PROTOCOL = 'dsh-ray/service-cleanup/v1'
 const SUPERVISED_POLL_INTERVAL_MS = 100
-const SCANNER_RETIREMENT_PROTOCOL = 'dsh-enhanced/scanner-retirement-transaction/v1'
+const SCANNER_RETIREMENT_PROTOCOL = 'dsh-ray/scanner-retirement-transaction/v1'
 const SCANNER_RETIREMENT_TIMEOUT_MS = 30_000
 const SCANNER_RETIREMENT_ARTIFACT_MAX_BYTES = 8 * 1024 * 1024
 const SCANNER_RETIREMENT_SOURCE_PROGRAM = String.raw`
 import { pathToFileURL } from 'node:url'
-const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
   const filteredEmitWarning = function emitWarning(warning, ...rest) {
@@ -133,7 +133,7 @@ const helper = await import(pathToFileURL(helperPath).href)
 process.stdout.write(JSON.stringify(await helper.inspectRsiScannerOwnerSource({ homePath, physicalHome: homePath, profile })))
 `
 const SQLITE_WARNING_FILTER_SNIPPET = String.raw`
-const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
   const filteredEmitWarning = function emitWarning(warning, ...rest) {
@@ -165,7 +165,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
   const filteredEmitWarning = function emitWarning(warning, ...rest) {
@@ -199,7 +199,7 @@ const read = async (path, expected) => {
 const source = await read(sourcePath, sourceDigest)
 if (source.homePath !== home || source.profile !== profile) throw new Error('scanner retirement source scope differs')
 const require = createRequire(join(home, 'profiles', profile, 'package.json'))
-const lark = await import(require.resolve('@dsh-enhanced/lark-channel'))
+const lark = await import(require.resolve('@dsh-ray/lark-channel'))
 const scope = { dshHome: home, profile, owner: source.ownerSource.owner, effectiveConfig: source.effectiveConfig }
 const dump = () => {
   const result = spawnSync(dsh, ['--profile', profile, '--dump-config'], {
@@ -238,7 +238,7 @@ import { spawnSync } from 'node:child_process'
 import { readFile, writeFile, rename } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
-const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
   const filteredEmitWarning = function emitWarning(warning, ...rest) {
@@ -271,11 +271,11 @@ const jsonDigest = value => digest(canonical(value))
 const require = createRequire(join(home, 'profiles', profile, 'package.json'))
 const load = async name => import(require.resolve(name))
 const [lark, delivery, recovery, automations] = await Promise.all([
-  load('@dsh-enhanced/lark-channel'), load('@dsh-enhanced/assistant-delivery'),
-  load('@dsh-enhanced/assistant-recovery'), load('@dsh-enhanced/assistant-automations'),
+  load('@dsh-ray/lark-channel'), load('@dsh-ray/assistant-delivery'),
+  load('@dsh-ray/assistant-recovery'), load('@dsh-ray/assistant-automations'),
 ])
 const dump = (runtimeOverlay = false) => {
-  const overlay = process.env.DSH_ENHANCED_SUPERVISED_PREVIEW_OVERLAY
+  const overlay = process.env.DSH_RAY_SUPERVISED_PREVIEW_OVERLAY
   const result = spawnSync(dsh, ['--profile', profile,
     ...(runtimeOverlay && overlay ? ['--patch', overlay] : []), '--dump-config'], {
     encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, env: { ...process.env, DSH_HOME: home },
@@ -284,7 +284,7 @@ const dump = (runtimeOverlay = false) => {
   return String(result.stdout ?? '')
 }
 const previewOverlayPath = () => {
-  const overlayPath = process.env.DSH_ENHANCED_SUPERVISED_PREVIEW_OVERLAY
+  const overlayPath = process.env.DSH_RAY_SUPERVISED_PREVIEW_OVERLAY
   if (typeof overlayPath !== 'string'
     || !isAbsolute(overlayPath) || (overlayPath !== home && !overlayPath.startsWith(home + sep))) {
     throw new Error('supervised preview requires a runtime overlay path inside DSH_HOME')
@@ -411,7 +411,7 @@ process.stdout.write(JSON.stringify(output))
 const SUPERVISED_CAPABILITY_PROGRAM = String.raw`
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
-const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
   const filteredEmitWarning = function emitWarning(warning, ...rest) {
@@ -439,8 +439,8 @@ const [home, profile] = process.argv.slice(1)
 const require = createRequire(join(home, 'profiles', profile, 'package.json'))
 const load = async name => import(require.resolve(name))
 const [lark, delivery, recovery, automations] = await Promise.all([
-  load('@dsh-enhanced/lark-channel'), load('@dsh-enhanced/assistant-delivery'),
-  load('@dsh-enhanced/assistant-recovery'), load('@dsh-enhanced/assistant-automations'),
+  load('@dsh-ray/lark-channel'), load('@dsh-ray/assistant-delivery'),
+  load('@dsh-ray/assistant-recovery'), load('@dsh-ray/assistant-automations'),
 ])
 const required = [
   [lark, 'captureSupervisedGrowthLifecycleAttestation'], [lark, 'configureSupervisedGrowthProfilePatch'],
@@ -454,7 +454,7 @@ if (required.some(([module, name]) => typeof module[name] !== 'function')) throw
 if (typeof recovery.RECOVERY_CATALOG_DIGEST !== 'string' || !/^[0-9a-f]{64}$/u.test(recovery.RECOVERY_CATALOG_DIGEST)) {
   throw new Error('Recovery catalog identity is unavailable')
 }
-process.stdout.write(JSON.stringify({ protocol: 'dsh-enhanced/supervised-lifecycle-capability/v1' }))
+process.stdout.write(JSON.stringify({ protocol: 'dsh-ray/supervised-lifecycle-capability/v1' }))
 `
 
 class LifecycleError extends Error {
@@ -661,7 +661,7 @@ async function canonicalJointCandidateHome(physicalHomePath, homePath) {
 }
 
 function rendezvousLockPath(homePath) {
-  return `/tmp/.dsh-enhanced-lifecycle-${currentUid()}-${sha256(homePath)}.lock`
+  return `/tmp/.dsh-ray-lifecycle-${currentUid()}-${sha256(homePath)}.lock`
 }
 
 function assertOwnedPrivateEntry(entry, path, kind) {
@@ -741,7 +741,7 @@ async function fsyncPath(path, directory = false) {
 }
 
 async function withLifecycleLock(homePath, invocation) {
-  const lockPath = `${homePath}.dsh-enhanced-lifecycle.lock`
+  const lockPath = `${homePath}.dsh-ray-lifecycle.lock`
   const parent = dirname(lockPath)
   const rendezvousPath = rendezvousLockPath(homePath)
   let parentDescriptor
@@ -782,11 +782,11 @@ async function withLifecycleLock(homePath, invocation) {
       || linkedRendezvous.dev !== rendezvous.dev || linkedRendezvous.ino !== rendezvous.ino) {
       fail(`生命周期全局协调锁身份不稳定或权限不安全：${rendezvousPath}`)
     }
-    const flockExecutable = process.env.DSH_ENHANCED_LIFECYCLE_FLOCK ?? '/usr/bin/flock'
+    const flockExecutable = process.env.DSH_RAY_LIFECYCLE_FLOCK ?? '/usr/bin/flock'
     try {
       await run('/bin/bash', [
         '-c', 'flock_command="$1"; shift; "$flock_command" -n -E 75 3 || exit $?; "$flock_command" -n -E 75 4 || exit $?; "$flock_command" -n -E 75 5 || exit $?; exec "$@"',
-        'dsh-enhanced-lifecycle-lock', flockExecutable,
+        'dsh-ray-lifecycle-lock', flockExecutable,
         process.execPath, SCRIPT_PATH, ...invocation, '--lock-held',
       ], {
         env: { ...process.env, [ANCESTOR_CHAIN_ENV]: JSON.stringify(ancestorChain) },
@@ -805,7 +805,7 @@ async function withLifecycleLock(homePath, invocation) {
 }
 
 async function assertLifecycleLocksHeld(homePath) {
-  const lockPath = `${homePath}.dsh-enhanced-lifecycle.lock`
+  const lockPath = `${homePath}.dsh-ray-lifecycle.lock`
   const parent = dirname(lockPath)
   assertAncestorChainStable(homePath)
   const checks = [
@@ -1284,7 +1284,7 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot, identit
   const programUpdate = migration?.localSource?.protocol === OWNER_PROGRAM_PROTOCOL
   if (migration?.localSource !== undefined && (migration.localSource === null
     || typeof migration.localSource !== 'object' || Array.isArray(migration.localSource)
-    || !ownerRepair && migration.localSource.protocol !== 'dsh-enhanced/host-local-source-update/v1'
+    || !ownerRepair && migration.localSource.protocol !== 'dsh-ray/host-local-source-update/v1'
     || migration.localSource.homePath !== expected.homePath || migration.localSource.profile !== expected.profile)) {
     fail('joint source migration proof is invalid')
   }
@@ -1376,7 +1376,7 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot, identit
           'sourceCohortDigest', 'ownerGrantDigest', 'oldInstaller', 'readinessInstaller',
           'issuedAt', 'authority', 'keyId', 'signature'])
       || migration.programReadinessRecovery.permit.protocol
-        !== 'dsh-enhanced/owner-program-readiness-recovery/v1'
+        !== 'dsh-ray/owner-program-readiness-recovery/v1'
       || migration.programReadinessRecovery.permit.transactionId !== manifest.id
       || migration.programReadinessRecovery.permit.homePath !== expected.homePath
       || migration.programReadinessRecovery.permit.profile !== expected.profile
@@ -1394,7 +1394,7 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot, identit
         'baseManifestDigest', 'immutableManifestDigest', 'originalIdentity', 'unitBeforeDigests',
         'activeServices', 'sourceProofDigest', 'hostPlanDigest', 'ownerGrantDigest', 'oldInstaller',
         'readinessInstaller', 'issuedAt', 'authority', 'keyId', 'signature'])
-      || permit.protocol !== 'dsh-enhanced/owner-program-rollback-readiness-recovery/v1'
+      || permit.protocol !== 'dsh-ray/owner-program-rollback-readiness-recovery/v1'
       || permit.transactionId !== manifest.id || permit.homePath !== expected.homePath
       || permit.profile !== expected.profile
       || !isDeepStrictEqual(permit.oldInstaller, migration.localSource.installer)) {
@@ -1613,7 +1613,7 @@ async function readScannerRetirementEvidence(physicalTransactionRoot, manifest) 
   if (journal === undefined) return undefined
   const source = await readScannerArtifact(physicalTransactionRoot, manifest, journal.sourceArtifact)
   if (!exactKeys(source, ['protocol', 'transactionId', 'homePath', 'profile', 'source', 'effectiveConfig', 'ownerSource'])
-    || source.protocol !== 'dsh-enhanced/scanner-retirement-source/v1' || source.transactionId !== manifest.id
+    || source.protocol !== 'dsh-ray/scanner-retirement-source/v1' || source.transactionId !== manifest.id
     || source.homePath !== manifest.homePath || source.profile !== manifest.profile
     || scannerBindingDigest(source.source) !== journal.sourceDigest
     || typeof source.effectiveConfig !== 'string' || sha256(source.effectiveConfig) !== source.source.effectiveConfigDigest
@@ -2635,13 +2635,13 @@ function parseBoundedMilliseconds(name, defaultValue, maximum) {
 
 function serviceTimeouts() {
   return {
-    stop: parseBoundedMilliseconds('DSH_ENHANCED_SERVICE_STOP_TIMEOUT_MS', 30_000, 300_000),
-    ready: parseBoundedMilliseconds('DSH_ENHANCED_SERVICE_READY_TIMEOUT_MS', 30_000, 300_000),
-    stability: parseBoundedMilliseconds('DSH_ENHANCED_SERVICE_STABILITY_MS', 12_000, 60_000),
+    stop: parseBoundedMilliseconds('DSH_RAY_SERVICE_STOP_TIMEOUT_MS', 30_000, 300_000),
+    ready: parseBoundedMilliseconds('DSH_RAY_SERVICE_READY_TIMEOUT_MS', 30_000, 300_000),
+    stability: parseBoundedMilliseconds('DSH_RAY_SERVICE_STABILITY_MS', 12_000, 60_000),
     // 稳定性窗口内要求连续通过的样本数；两点（接受点 + 窗口末点）采样抓不住
     // connected→disconnected→connected 这类末点状态复原的窗口内抖动。
     stabilitySamples: parseBoundedInteger(
-      'DSH_ENHANCED_SERVICE_STABILITY_SAMPLES', process.env.DSH_ENHANCED_SERVICE_STABILITY_SAMPLES, 4, 16),
+      'DSH_RAY_SERVICE_STABILITY_SAMPLES', process.env.DSH_RAY_SERVICE_STABILITY_SAMPLES, 4, 16),
   }
 }
 
@@ -4725,7 +4725,7 @@ async function assertRsiCoordinatorActivation(homePath, service, startedAt) {
   const program = String.raw`
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
-const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
   const filteredEmitWarning = function emitWarning(warning, ...rest) {
@@ -4751,8 +4751,8 @@ if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
 }
 const [home, profile, contractSource, since] = process.argv.slice(1)
 const require = createRequire(join(home, 'profiles', profile, 'package.json'))
-const { listActiveAutomationsLocally } = await import(require.resolve('@dsh-enhanced/assistant-automations'))
-const { controlPlaneDigest } = await import(require.resolve('@dsh-enhanced/plugin-control-plane'))
+const { listActiveAutomationsLocally } = await import(require.resolve('@dsh-ray/assistant-automations'))
+const { controlPlaneDigest } = await import(require.resolve('@dsh-ray/plugin-control-plane'))
 const { scope, coordinatorId } = JSON.parse(contractSource)
 const id = 'adoption-coordinator-' + controlPlaneDigest({ coordinatorId, scope }).slice(0,40)
 const registration = listActiveAutomationsLocally(join(home,'rsi-coordinators',profile,'automations.sqlite')).find(item => item.id === id)
@@ -4778,7 +4778,7 @@ async function rsiCoordinatorUpgradeTargets(targets) {
       if (match) packages.set(match[1], { target, version: match[2] })
     }
   }
-  const anchor = packages.get('@dsh-enhanced/plugin-control-plane')
+  const anchor = packages.get('@dsh-ray/plugin-control-plane')
   if (!anchor || !EXACT_SEMVER.test(anchor.version)) fail('RSI 升级必须包含精确的 Control Plane cohort。')
   if ([...packages.values()].some(entry => entry.version !== anchor.version)) fail('RSI 目标全部受管包必须使用同一 cohort。')
   const result = []
@@ -4884,7 +4884,7 @@ function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraE
   if (pnpmStoreFd !== undefined && pnpmStorePath !== undefined) {
     args.push('--dir', dirname(pnpmStorePath), '--ro-bind-fd', String(pnpmStoreFd), pnpmStorePath)
   }
-  if (pnpmCacheFd !== undefined) args.push('--ro-bind-fd', String(pnpmCacheFd), '/run/dsh-enhanced-pnpm-cache')
+  if (pnpmCacheFd !== undefined) args.push('--ro-bind-fd', String(pnpmCacheFd), '/run/dsh-ray-pnpm-cache')
   for (const workspace of workspaceFds) args.push('--dir', dirname(workspace.path), '--ro-bind-fd', String(workspace.fd), workspace.path)
   for (const resource of localPackageFds) args.push('--dir', dirname(resource.path), '--bind-fd', String(resource.fd), resource.path)
   for (const [name, value] of Object.entries(extraEnvironment)) args.push('--setenv', name, value)
@@ -5020,10 +5020,10 @@ function compactSupervisedSnapshot(snapshot, requireAttestation = true) {
     || requireAttestation && (snapshot.automations.inFlightCount !== 0
       || recoveryBootstrap.status !== 'succeeded' || recoveryBootstrap.attestationValid !== true
       || recoveryBootstrap.generation < 1)
-    || snapshot.managedProjection?.protocol !== 'dsh-enhanced/supervised-growth-managed-automations/v1'
+    || snapshot.managedProjection?.protocol !== 'dsh-ray/supervised-growth-managed-automations/v1'
     || !validDigest(snapshot.managedProjection.digest)
     || !validDigest(snapshot.ownerBindingDigest)
-    || requireAttestation && (snapshot.attestation?.protocol !== 'dsh-enhanced/supervised-growth-lifecycle-attestation/v1'
+    || requireAttestation && (snapshot.attestation?.protocol !== 'dsh-ray/supervised-growth-lifecycle-attestation/v1'
       || !validDigest(snapshot.attestation.attestationDigest)
       || !Array.isArray(snapshot.attestation.externalProviderExemptions))
     || !validDigest(snapshot.effectiveConfigDigest) || !validDigest(snapshot.semanticDigest)) {
@@ -5164,7 +5164,7 @@ function sourceRestoreAcceptance({ manifest, homePath, profile, dshExecutable, t
 }
 
 function supervisedPreviewOverlayPaths(context) {
-  const name = `.dsh-enhanced-disable-lark-${context.transactionId}.yml`
+  const name = `.dsh-ray-disable-lark-${context.transactionId}.yml`
   return {
     name,
     stagePath: join(context.stageHome, name),
@@ -5173,7 +5173,7 @@ function supervisedPreviewOverlayPaths(context) {
 }
 
 function supervisedPreviewOverlayEnvironment(paths) {
-  return { DSH_ENHANCED_SUPERVISED_PREVIEW_OVERLAY: paths.logicalPath }
+  return { DSH_RAY_SUPERVISED_PREVIEW_OVERLAY: paths.logicalPath }
 }
 
 async function runSupervisedOperator(context, action, nonce, extraEnvironment) {
@@ -5209,7 +5209,7 @@ async function captureScannerRetirementSource({ manifest, physicalTransactionRoo
   const ownerSource = parseJsonOutput(ownerResult.stdout, 'scanner-retirement-source')
   await assertCriticalDirectory(sandbox.stageHome, manifest.stagedIdentity)
   const sourceArtifact = await writeScannerArtifact(physicalTransactionRoot, manifest, 'source', {
-    protocol: 'dsh-enhanced/scanner-retirement-source/v1', transactionId: manifest.id,
+    protocol: 'dsh-ray/scanner-retirement-source/v1', transactionId: manifest.id,
     homePath: manifest.homePath, profile: manifest.profile, source: manifest.supervisedLifecycle.source, effectiveConfig, ownerSource,
   })
   const scannerRetirement = { protocol: SCANNER_RETIREMENT_PROTOCOL, phase: 'source-bound', transactionId: manifest.id,
@@ -5279,7 +5279,7 @@ async function assertScannerRetirementPersistent({ manifest, physicalTransaction
 
 function validSupervisedCapabilityProof(proof) {
   return typeof proof === 'object' && proof !== null
-    && proof.protocol === 'dsh-enhanced/supervised-lifecycle-capability/v1'
+    && proof.protocol === 'dsh-ray/supervised-lifecycle-capability/v1'
     && Object.keys(proof).length === 1
 }
 
@@ -5433,7 +5433,7 @@ async function awaitSupervisedDirectSuccessor(context, baseline, stage, timeoutM
 
 async function validateComposedConfig(context, label) {
   const dumped = await sandboxRun(context, [context.dshExecutable, '--profile', context.profile, '--dump-config'], { capture: true })
-  const physicalPath = join(context.stageHome, `.dsh-enhanced-${label}-${context.transactionId}.yml`)
+  const physicalPath = join(context.stageHome, `.dsh-ray-${label}-${context.transactionId}.yml`)
   const logicalPath = join(context.homePath, basename(physicalPath))
   await writeFile(physicalPath, dumped.stdout, { mode: 0o600, flag: 'wx' })
   try {
@@ -5572,12 +5572,12 @@ async function validateUpgradeTargets(targets, expectedNames) {
       let targetManifest
       try { targetManifest = JSON.parse(await readFile(join(target, 'package.json'), 'utf8')) }
       catch { fail(`无法读取升级目标 manifest：${target}`) }
-      if (typeof targetManifest.name !== 'string' || !MANAGED_PACKAGE.test(targetManifest.name)) fail(`升级目标不是 @dsh-enhanced/* bundle：${target}`)
+      if (typeof targetManifest.name !== 'string' || !MANAGED_PACKAGE.test(targetManifest.name)) fail(`升级目标不是 @dsh-ray/* bundle：${target}`)
       actualNames.push(targetManifest.name)
       continue
     }
     const match = MANAGED_EXACT_SPEC.exec(target)
-    if (match === null) fail(`升级目标必须是本地绝对路径或精确版本的 @dsh-enhanced/* 包：${target}`)
+    if (match === null) fail(`升级目标必须是本地绝对路径或精确版本的 @dsh-ray/* 包：${target}`)
     actualNames.push(match[1])
   }
   const actual = [...new Set(actualNames)].sort()
@@ -5903,7 +5903,7 @@ async function prepareNpmUpgrade({ current, profile, pnpmPath, dshExecutable, ta
   const sourceEnvironment = { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false' }
   const sourceConfig = await npmEffectiveConfig(pnpmPath, await realpath(current.profilePath), sourceEnvironment)
   const configuration = npmConfigurationSnapshot(sourceConfig)
-  const rootPath = await mkdtemp('/tmp/dsh-enhanced-npm-')
+  const rootPath = await mkdtemp('/tmp/dsh-ray-npm-')
   const rootIdentity = identity(await lstat(rootPath))
   const dispose = async () => {
     await assertCriticalDirectory(rootPath, rootIdentity)
@@ -5983,7 +5983,7 @@ async function performNpmUpgrade({
   await assertRsiPairUpgradeSource(homePath, profile, undefined)
   const current = await readProfile(physicalHomePath, profile)
   const expectedManaged = managedNames(current.manifest)
-  if (expectedManaged.length === 0) fail('当前 profile 没有可升级的 @dsh-enhanced/* 顶层依赖。')
+  if (expectedManaged.length === 0) fail('当前 profile 没有可升级的 @dsh-ray/* 顶层依赖。')
   const thirdParty = thirdPartyBundles(current.manifest)
   if (thirdParty.length > 0) fail(`检测到无法证明状态路径的第三方顶层 bundle，拒绝 upgrade：${thirdParty.join(', ')}`)
   const npmPath = await realpath(npmExecutable).catch(() => fail('npm executable must exist'))
@@ -6017,7 +6017,7 @@ async function performNpmServiceUpgrade({
   await assertRsiPairUpgradeSource(homePath, profile, pair)
   const current = await readProfile(physicalHomePath, profile)
   const expectedManaged = managedNames(current.manifest)
-  if (expectedManaged.length === 0) fail('当前 profile 没有可升级的 @dsh-enhanced/* 顶层依赖。')
+  if (expectedManaged.length === 0) fail('当前 profile 没有可升级的 @dsh-ray/* 顶层依赖。')
   const thirdParty = thirdPartyBundles(current.manifest)
   if (thirdParty.length > 0) fail(`检测到无法证明状态路径的第三方顶层 bundle，拒绝 upgrade：${thirdParty.join(', ')}`)
   const npmPath = await realpath(npmExecutable).catch(() => fail('npm executable must exist'))
@@ -6153,12 +6153,12 @@ async function installUpgradeIntoStage({ sandbox, current, stagedProfile, target
     await writeNpmMetadata(stagedProfile.profilePath, npmPreparation.metadata)
     const npmOptions = {
       extraEnvironment: {
-        HOME: '/run/dsh-enhanced-pnpm-cache/home', XDG_CONFIG_HOME: '/run/dsh-enhanced-pnpm-cache/config',
-        pnpm_config_userconfig: '/run/dsh-enhanced-pnpm-cache/home/.npmrc',
+        HOME: '/run/dsh-ray-pnpm-cache/home', XDG_CONFIG_HOME: '/run/dsh-ray-pnpm-cache/config',
+        pnpm_config_userconfig: '/run/dsh-ray-pnpm-cache/home/.npmrc',
         ...(process.env.CI === undefined ? {} : { CI: process.env.CI }),
         pnpm_config_offline: 'true', pnpm_config_frozen_store: 'true', pnpm_config_package_import_method: 'copy',
         pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false',
-        pnpm_config_store_dir: pnpmStore.storePath, pnpm_config_cache_dir: '/run/dsh-enhanced-pnpm-cache',
+        pnpm_config_store_dir: pnpmStore.storePath, pnpm_config_cache_dir: '/run/dsh-ray-pnpm-cache',
       }, pnpmStore, npmPreparation,
     }
     const configResult = await sandboxRun(sandbox, [npmPreparation.pnpmPath, '--dir', join(homePath, 'profiles', profile), 'config', 'list', '--json'], { ...npmOptions, capture: true })
@@ -6186,15 +6186,15 @@ async function installUpgradeIntoStage({ sandbox, current, stagedProfile, target
 function validLocalSourceManifest(manifest) {
   const proof = manifest?.localSourceMaintenance
   if (manifest?.version !== LOCAL_SOURCE_MANIFEST_VERSION) return proof === undefined
-  const native = proof?.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v3'
-  const extended = proof?.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v2' || native && proof.extension !== undefined
+  const native = proof?.protocol === 'dsh-ray/pre-owner-source-maintenance/v3'
+  const extended = proof?.protocol === 'dsh-ray/pre-owner-source-maintenance/v2' || native && proof.extension !== undefined
   return manifest.operation === 'upgrade' && manifest.rsiCoordinator === undefined
     && proof !== null && typeof proof === 'object'
     && exactKeys(proof, ['protocol', 'installer', 'preparationRoot', 'preparationDigest', 'original', 'candidate', 'bwrapExecutable', 'driverDigest',
       ...(native ? ['candidateBackend', 'nativeResources'] : []),
       ...(extended ? ['extension', 'expectedCandidateSemanticDigest'] : [])])
     && (extended ? proof.extension === 'memory-learning' && validDigest(proof.expectedCandidateSemanticDigest)
-      : native || proof.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v1')
+      : native || proof.protocol === 'dsh-ray/pre-owner-source-maintenance/v1')
     && (!native || proof.candidateBackend === 'linux-native' && ['docker', 'linux-native'].includes(proof.original?.backend)
       && (proof.candidate === null ? proof.nativeResources === null : validLocalSourceNativeResources(proof, manifest)))
     && typeof proof.preparationRoot === 'string' && isAbsolute(proof.preparationRoot)
@@ -6600,7 +6600,7 @@ async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpm
   if (original.lockfile === undefined || original.workspace === undefined) fail('local source requires a pinned old lockfile and workspace')
   const sourceConfig = await assertNpmVerificationPolicy(pnpmPath, current.profilePath, localSourceOriginalNpmEnvironment(), pnpmExecutable)
   const configuration = npmConfigurationSnapshot(sourceConfig)
-  const rootPath = await mkdtemp('/tmp/dsh-enhanced-local-pnpm-')
+  const rootPath = await mkdtemp('/tmp/dsh-ray-local-pnpm-')
   const rootIdentity = identity(await lstat(rootPath))
   const dispose = async () => { await assertCriticalDirectory(rootPath, rootIdentity); await rm(rootPath, { recursive: true }) }
   try {
@@ -6713,12 +6713,12 @@ async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpm
 // This runner is only used with the anonymous candidate Home assembled below.
 // Ordinary lifecycle sandboxes keep their unconditional network namespace.
 async function runLocalSourceCandidate({ homePath, stageHome, profile, proof, bwrapExecutable, preparation, caches }, command, online = false) {
-  const cacheMount = '/run/dsh-enhanced-local-pnpm-cache'
+  const cacheMount = '/run/dsh-ray-local-pnpm-cache'
   // preparation.storePath is pnpm's resolved v11 directory, not its parent.
   // Keep that suffix or pnpm silently nests a second store, which the stopped
   // installation (bound to the original v11 path) would never read.
   if (basename(preparation.storePath) !== 'v11') fail('local candidate requires the resolved pnpm v11 store')
-  const storeMount = '/run/dsh-enhanced-local-pnpm-store/v11'
+  const storeMount = '/run/dsh-ray-local-pnpm-store/v11'
   const helper = await localSourceHelper()
   await helper.assertLocalSourceInstaller(proof.installer)
   if (proof.driverDigest !== await localSourceDriverDigest()) fail('local candidate driver changed')
@@ -6951,7 +6951,7 @@ async function prepareLocalSourcePackageCaches(transactionRoot, pnpmStore, prepa
       { sourcePath: store, identity: identity(await lstat(store)), path: pnpmStore.storePath },
       ...(sandboxHiddenStorePath(pnpmStore.localSource.alias.path) && pnpmStore.localSource.alias.path !== pnpmStore.storePath
         ? [{ sourcePath: store, identity: identity(await lstat(store)), path: pnpmStore.localSource.alias.path }] : []),
-      { sourcePath: cache, identity: identity(await lstat(cache)), path: '/run/dsh-enhanced-local-pnpm-cache' },
+      { sourcePath: cache, identity: identity(await lstat(cache)), path: '/run/dsh-ray-local-pnpm-cache' },
     ] }
   } catch (error) { await dispose(); throw error }
 }
@@ -6976,13 +6976,13 @@ async function localSourceSandbox(context, action, input, pnpmStore, packageCach
         ...(packageCaches === undefined ? {} : {
           ...localSourcePnpmManagerEnvironment(),
           PATH: `${dirname(packageCaches.pnpmPath)}:${process.env.PATH ?? '/usr/bin:/bin'}`,
-          HOME: '/run/dsh-enhanced-local-pnpm-cache/home',
-          XDG_CONFIG_HOME: '/run/dsh-enhanced-local-pnpm-cache/config',
-          pnpm_config_userconfig: '/run/dsh-enhanced-local-pnpm-cache/home/.npmrc',
+          HOME: '/run/dsh-ray-local-pnpm-cache/home',
+          XDG_CONFIG_HOME: '/run/dsh-ray-local-pnpm-cache/config',
+          pnpm_config_userconfig: '/run/dsh-ray-local-pnpm-cache/home/.npmrc',
         }),
         ...(pnpmStore === undefined ? {} : { pnpm_config_store_dir: pnpmStore.storePath, pnpm_config_frozen_store: 'true' }),
         ...(packageCaches === undefined ? {} : { pnpm_config_store_dir: pnpmStore.localSource.alias.path,
-          pnpm_config_cache_dir: '/run/dsh-enhanced-local-pnpm-cache', pnpm_config_frozen_store: 'false', pnpm_config_verify_store_integrity: 'true' }) },
+          pnpm_config_cache_dir: '/run/dsh-ray-local-pnpm-cache', pnpm_config_frozen_store: 'false', pnpm_config_verify_store_integrity: 'true' }) },
     })
     if (packageCaches !== undefined) await assertLocalPnpmExecutable(packageCaches.pnpmExecutable)
     return parseJsonOutput(result.stdout, 'pre-owner local source')
@@ -7015,7 +7015,7 @@ async function composeLocalSourceSnapshot({ homePath, physicalHome = homePath, p
   await assertNoMounts(physicalHome)
   await assertSnapshotTreeSafe(physicalHome, homePath, true)
   const canonicalPhysicalHome = await realpath(physicalHome)
-  if (copiedOriginal && (proof.protocol !== 'dsh-enhanced/pre-owner-source-maintenance/v3' || selection !== 'original'
+  if (copiedOriginal && (proof.protocol !== 'dsh-ray/pre-owner-source-maintenance/v3' || selection !== 'original'
     || canonicalPhysicalHome !== join(`${homePath}${TRANSACTION_SUFFIX}`, 'staged-home'))) fail('invalid copied original source snapshot')
   // A freshly copied original stage retains the original receipt, but has new
   // runtime inodes. Only this known, pre-mutation stage may compare contents;
@@ -7032,7 +7032,7 @@ async function composeLocalSourceSnapshot({ homePath, physicalHome = homePath, p
     const result = await localSourceSandbox({ stageHome, homePath, profile, dshExecutable, bwrapExecutable },
       'configs', { proof, homePath, profile, dshPath: dshExecutable })
     if (selection !== undefined) {
-      const native = proof.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v3'
+      const native = proof.protocol === 'dsh-ray/pre-owner-source-maintenance/v3'
       const verified = await localSourceSandbox({ stageHome, homePath, profile, dshExecutable, bwrapExecutable },
         native ? 'verify-composition' : 'verify', { proof, homePath, profile, dshPath: dshExecutable, selection, configs: result.configs })
       if (native && !isDeepStrictEqual(verified, { verified: true })) fail('native composition did not verify its frozen selection')
@@ -7119,11 +7119,11 @@ async function performLifecycle({
     fail('无法归类的 profile 仍含受管顶层依赖；拒绝 uninstall。')
   }
   if (operation === 'upgrade') {
-    if (expectedManaged.length === 0) fail('当前 profile 没有可升级的 @dsh-enhanced/* 顶层依赖。')
+    if (expectedManaged.length === 0) fail('当前 profile 没有可升级的 @dsh-ray/* 顶层依赖。')
     if (localSourceMaintenance === undefined) await validateUpgradeTargets(targets, expectedManaged)
   } else {
     if (expectedManaged.length === 0) {
-      process.stdout.write('profile 生命周期事务：uninstall 已完成；当前 profile 没有 @dsh-enhanced/* 顶层依赖。\n')
+      process.stdout.write('profile 生命周期事务：uninstall 已完成；当前 profile 没有 @dsh-ray/* 顶层依赖。\n')
       return
     }
   }
@@ -7361,7 +7361,7 @@ async function performLifecycle({
     if (operation === 'upgrade') {
       if (localSourceMaintenance !== undefined) {
         await assertLocalSourceHome({ manifest, physicalHome: stageHome, selection: 'original', dshExecutable, bwrapExecutable,
-          copiedOriginal: manifest.localSourceMaintenance.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v3' })
+          copiedOriginal: manifest.localSourceMaintenance.protocol === 'dsh-ray/pre-owner-source-maintenance/v3' })
         const helper = await localSourceHelper()
         // The fd path anchors the transaction, while source/resource APIs must
         // receive a canonical physical Home. Prove both names retain its inode.
@@ -7376,7 +7376,7 @@ async function performLifecycle({
         }
         await assertApiStage()
         const staged = await helper.prepareLocalSourceStage({ homePath, stageHome: canonicalStageHome, profile, proof: manifest.localSourceMaintenance })
-        const candidateMaintenance = manifest.localSourceMaintenance.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v3'
+        const candidateMaintenance = manifest.localSourceMaintenance.protocol === 'dsh-ray/pre-owner-source-maintenance/v3'
           ? { ...manifest.localSourceMaintenance, nativeResources: staged.resources } : manifest.localSourceMaintenance
         await assertApiStage()
         const dsh = { path: dshExecutable, pin: { path: dshExecutable, sha256: sha256(await readFile(dshExecutable)), interpreter: null } }
@@ -8105,7 +8105,7 @@ async function completeHostProgramRollbackReadinessRecovery({ homePath, physical
   parentFsyncPath = LOCK_PARENT_FD_PATH }) {
   const helper = await import('./owner-program-rollback-recovery.mjs')
   const verifyArchivedIntent = async intent => {
-    const prefix = `${homePath}.dsh-enhanced-rollback-recovered-${profile}-`
+    const prefix = `${homePath}.dsh-ray-rollback-recovered-${profile}-`
     if (typeof intent?.transactionId !== 'string' || typeof intent.archivePath !== 'string'
       || !isAbsolute(intent.archivePath) || resolve(intent.archivePath) !== intent.archivePath
       || dirname(intent.archivePath) !== dirname(homePath) || !intent.archivePath.startsWith(prefix)) {
@@ -8256,7 +8256,7 @@ async function completeHostProgramRollbackReadinessRecovery({ homePath, physical
 }
 
 async function verifyHostPlanBinding(plan, homePath, selection = 'original') {
-  const path = join(homePath, '.dsh-rsi-host.json')
+  const path = join(homePath, '.dsh-ray-host.json')
   if (plan.schemaVersion === 2 && selection === 'original') {
     if (await existingIdentity(path) !== undefined) fail('unbound original Home acquired a Host binding after planning')
   } else {
@@ -8574,7 +8574,7 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     const stagedIdentity = identity(await lstat(stageHome))
     manifest = await writeManifest(physicalTransactionRoot, { ...manifest, stagedIdentity,
       hostMigration: { ...manifest.hostMigration, phase: 'prepared' } }, 'preparing')
-    await writeFileAtomic(join(stageHome, '.dsh-rsi-host.json'), plan.candidateBindingSource)
+    await writeFileAtomic(join(stageHome, '.dsh-ray-host.json'), plan.candidateBindingSource)
     if (localSource) {
       const { stageHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
       localSource = await stageHostLocalSourceUpdate({ proof: localSource, homePath, stageHome })
@@ -8618,7 +8618,7 @@ function assertHostOwnerSuccessorAdmission(manifest, permissionPreset) {
     || manifest.state !== 'swapped' || migration?.phase !== 'starting'
     || migration.candidateEverStarted !== true || manifest.serviceAcceptance !== undefined
     || migration.nativeSettingsImport !== undefined || migration.plan?.status !== 'current'
-    || migration.localSource?.protocol !== 'dsh-enhanced/host-owner-source-repair/v1'
+    || migration.localSource?.protocol !== 'dsh-ray/host-owner-source-repair/v1'
     || !migration.localSource.ownerRepairNext
     || manifest.serviceMasks?.length !== 2 || manifest.serviceStartBarriers?.length !== 2
     || manifest.containmentMasks?.length !== 0 || manifest.containmentMaskIntents?.length !== 0
@@ -9386,7 +9386,7 @@ async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath
 }
 
 async function main() {
-  const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+  const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
   if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
     const originalEmitWarning = process.emitWarning
     const filteredEmitWarning = function emitWarning(warning, ...rest) {
@@ -9431,7 +9431,7 @@ async function main() {
   }
   await assertLifecycleLocksHeld(homePath)
   if (operation !== 'host-owner-repair-successor'
-    && await existingIdentity(anchoredSibling(`${homePath}.dsh-enhanced-owner-successor.json`)) !== undefined) {
+    && await existingIdentity(anchoredSibling(`${homePath}.dsh-ray-owner-successor.json`)) !== undefined) {
     fail('pending owner successor requires the same reviewed checkout and explicit successor command')
   }
   if (operation === 'local-service-upgrade' || operation === 'local-service-recover') {
@@ -9655,7 +9655,7 @@ export const lifecycleProfileTest = Object.freeze({
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {
   main().catch(error => {
-    process.stderr.write(`dsh-enhanced lifecycle: ${error instanceof Error ? error.message : String(error)}\n`)
+    process.stderr.write(`dsh-ray lifecycle: ${error instanceof Error ? error.message : String(error)}\n`)
     process.exitCode = error instanceof LifecycleError ? error.exitCode : 1
   })
 }

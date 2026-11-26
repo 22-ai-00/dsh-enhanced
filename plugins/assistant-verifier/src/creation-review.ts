@@ -2,7 +2,7 @@ import { createHash, createPrivateKey, createPublicKey, type KeyObject } from 'n
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import { canonicalGrowthJson, growthObjectDigest, sourceGrowthEvidenceDigest, validateCreationAcceptanceAuthorityRef,
   verifyPluginCreationVerificationCertificate,
   validateSourceGrowthRunBinding, validateAnySourceGrowthRunBinding, anySourceGrowthRunDigest,
@@ -10,7 +10,7 @@ import { canonicalGrowthJson, growthObjectDigest, sourceGrowthEvidenceDigest, va
   type AnySourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding,
   type WorkItemGrowthAuthorityPins, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationRequest,
   type PluginCreationVerificationResult, type PluginCreationVerificationCertificate,
-  type PluginCreationVerificationLinuxExecution, type PluginCreationVerificationMacosExecution } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginCreationVerificationLinuxExecution, type PluginCreationVerificationMacosExecution } from '@dsh-ray/assistant-growth-contract'
 import { CreationReviewStore } from './creation-review-store.js'
 import { projectReviewPublicIdentity } from './review-authority-lineage.js'
 import { runNativeCreationTurn, type CreationModel } from './creation-review-native.js'
@@ -311,7 +311,7 @@ export interface PreparedCreationPort {
   withPreparedCreationFence<T>(input: { planId: string; planDigest: string; artifactSha256: string;
     growthRunDigest: string; referenceDigest: string }, callback: () => T): T
   inspectPreparedCreationLinuxBuild?(planId: string, signal: AbortSignal): Promise<{
-    runtime: import('@dsh-enhanced/assistant-isolation').LinuxRuntime; evidenceDigest: string
+    runtime: import('@dsh-ray/assistant-isolation').LinuxRuntime; evidenceDigest: string
   }>
   inspectPreparedCreationReviewContext(planId: string, signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }>
 }
@@ -598,7 +598,7 @@ export class CreationReviewRuntime {
         signal.throwIfAborted()
         if (build.evidenceDigest !== buildEvidenceDigest) throw new Error('Linux build evidence snapshot changed')
         const [{ linuxRuntimeDigest }, { linuxPluginBehaviorRuntimeDigest, readLinuxPluginBehaviorPreparation }] = await Promise.all([
-          import('@dsh-enhanced/assistant-isolation'), import('./linux-behavior-runtime.js'),
+          import('@dsh-ray/assistant-isolation'), import('./linux-behavior-runtime.js'),
         ])
         const preparation = await readLinuxPluginBehaviorPreparation({ runtime: build.runtime,
           root: dirname(config.runner.runtime.runtime.root.path), signal })

@@ -225,7 +225,7 @@ test.each(['unchanged', 'missing-watch', 'closed-watch', 'pending-plan', 'watchi
     }
     if (state === 'wrong-activation') db.prepare('UPDATE activation_watch SET activation_id=? WHERE plan_id=?').run('changed', f.plan.id)
     if (state === 'wrong-fence') db.prepare('UPDATE activation_watch SET fence=fence+1 WHERE plan_id=?').run(f.plan.id)
-    if (state === 'wrong-package') db.prepare('UPDATE activation_watch SET package_name=? WHERE plan_id=?').run('@dsh-enhanced/other', f.plan.id)
+    if (state === 'wrong-package') db.prepare('UPDATE activation_watch SET package_name=? WHERE plan_id=?').run('@dsh-ray/other', f.plan.id)
     if (state === 'wrong-version') db.prepare('UPDATE activation_watch SET package_version=? WHERE plan_id=?').run('0.1.999', f.plan.id)
     if (state === 'wrong-integrity') db.prepare('UPDATE activation_watch SET package_integrity=? WHERE plan_id=?').run('changed', f.plan.id)
     if (state === 'corrupt-watch-closure') {

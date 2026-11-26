@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual as same } from 'node:util'
 import { assertLocalSourceInstaller, bindLocalSourceInstaller } from './local-source-maintenance.mjs'
 
-const protocol = 'dsh-enhanced/owner-program-rollback-readiness-recovery/v1'
+const protocol = 'dsh-ray/owner-program-rollback-readiness-recovery/v1'
 const reviewedRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const digest = value => createHash('sha256').update(value).digest('hex')
 const canonical = value => value === null || typeof value !== 'object' ? JSON.stringify(value)
@@ -22,7 +22,7 @@ const identity = entry => ({ dev: String(entry.dev), ino: String(entry.ino), uid
 const fail = message => { throw new Error(`Owner program rollback readiness recovery: ${message}`) }
 
 export function rollbackRecoveryIntentPath(homePath, profile) {
-  return `${homePath}.dsh-enhanced-rollback-readiness-${profile}.intent.json`
+  return `${homePath}.dsh-ray-rollback-readiness-${profile}.intent.json`
 }
 
 function transactionPath(homePath, profile, transactionId, kind) {
@@ -30,7 +30,7 @@ function transactionPath(homePath, profile, transactionId, kind) {
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(transactionId)) {
     fail('invalid transaction evidence scope')
   }
-  return `${homePath}.dsh-enhanced-rollback-readiness-${profile}-${transactionId}.${kind}.json`
+  return `${homePath}.dsh-ray-rollback-readiness-${profile}-${transactionId}.${kind}.json`
 }
 
 export function rollbackRecoveryTransactionIntentPath(homePath, profile, transactionId) {
@@ -45,7 +45,7 @@ export function rollbackRecoveryArchivePath(homePath, profile, permit) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(profile)
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(permit?.transactionId)
     || !/^[a-f0-9]{64}$/u.test(permit?.baseManifestDigest)) fail('invalid deterministic archive scope')
-  return `${homePath}.dsh-enhanced-rollback-recovered-${profile}-${permit.transactionId}`
+  return `${homePath}.dsh-ray-rollback-recovered-${profile}-${permit.transactionId}`
     + `-${permit.baseManifestDigest.slice(0, 16)}-${digest(canonical(permit)).slice(0, 16)}`
 }
 
@@ -79,13 +79,13 @@ function scope(manifest, homePath, profile) {
   const coordinator = `rsi-${profile.slice(0, 43)}-${digest(profile).slice(0, 12)}`
   if (manifest?.version !== 4 || manifest.operation !== 'host-update' || manifest.state !== 'preparing'
     || manifest.homePath !== homePath || manifest.canonicalHome !== homePath || manifest.profile !== profile
-    || manifest.transactionPath !== `${homePath}.dsh-enhanced-transaction`
+    || manifest.transactionPath !== `${homePath}.dsh-ray-transaction`
     || migration?.phase !== 'prepared' || migration.candidateEverStarted !== false
     || migration.plan?.schemaVersion !== 1 || migration.plan.status !== 'current'
     || !same(migration.plan.originalRuntime, migration.plan.candidateRuntime)
     || migration.programReadinessRecovery !== undefined || migration.nativeSettingsImport !== undefined
     || manifest.serviceAcceptance !== undefined
-    || proof?.protocol !== 'dsh-enhanced/host-owner-program-update/v1'
+    || proof?.protocol !== 'dsh-ray/host-owner-program-update/v1'
     || owner?.homePath !== homePath || owner.profile !== profile || owner.coordinatorProfile !== coordinator
     || !same(owner.hostPlan, migration.plan) || owner.hostPlanDigest !== digest(JSON.stringify(migration.plan))
     || !same(proof.installer, owner.installer) || proof.ownerUpdateNext !== undefined

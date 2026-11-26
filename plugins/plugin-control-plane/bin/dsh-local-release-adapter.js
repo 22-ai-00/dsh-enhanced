@@ -1356,7 +1356,7 @@ function buildPhase(request, config, context, hooks) {
       properties: [{ name: 'dsh:file-bytes', value: String(file.bytes) }] })) }
   const sbomPath = join(outputs, 'sbom.cdx.json'); immutableCopy(sbomPath, Buffer.from(`${canonicalReleaseValue(sbom)}\n`), 0o600)
   const provenance = { _type: 'https://in-toto.io/Statement/v1', subject: [{ name: packageName, digest: { sha256: tarballSha256 } }],
-    predicateType: 'https://slsa.dev/provenance/v1', predicate: { buildDefinition: { buildType: 'https://dsh-enhanced.dev/build/local-isolated/v1',
+    predicateType: 'https://slsa.dev/provenance/v1', predicate: { buildDefinition: { buildType: 'https://dsh-ray.dev/build/local-isolated/v1',
       externalParameters: { packagePath, packageVersion, manifestNormalization: 'sort-direct-dependency-maps-v1' },
       resolvedDependencies: [{ uri: pathToFileURL(gitValue.remote).href, digest: { gitCommit: mergeCommit } }] },
     runDetails: { builder: { id: `dsh-local-release-adapter:${config.authority}:${config.keyId}` }, metadata: { invocationId: request.operationId },

@@ -19,8 +19,8 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
-import type { DeliveryAdapter, DeliveryOwnerLineage, InboundEnvelope, OutboundIntent, OwnerRouteValidationReceipt } from '@dsh-enhanced/assistant-delivery/types'
-import { AssistantPolicyService, type PolicyRule } from '@dsh-enhanced/assistant-policy'
+import type { DeliveryAdapter, DeliveryOwnerLineage, InboundEnvelope, OutboundIntent, OwnerRouteValidationReceipt } from '@dsh-ray/assistant-delivery/types'
+import { AssistantPolicyService, type PolicyRule } from '@dsh-ray/assistant-policy'
 import { benchmarkSnapshot } from './schema.js'
 
 /** Public structural surface avoids the Evaluation ↔ Delivery service declaration build cycle. */
@@ -152,7 +152,7 @@ export async function createBenchmarkStrategyOwnerRuntime(
   const account = `cell-${fingerprint.slice(12)}`
   const principal = Object.freeze({ channel, account, tenant: 'isolated', user: `owner-${fingerprint}` })
   const conversation = Object.freeze({ channel, account, tenant: 'isolated', kind: 'dm' as const, chat: `private-${fingerprint}` })
-  const deliveryPackage = '@dsh-enhanced/assistant-delivery'
+  const deliveryPackage = '@dsh-ray/assistant-delivery'
   const deliveryModule = await import(deliveryPackage)
   if (typeof deliveryModule.AssistantDeliveryService !== 'function' || typeof deliveryModule.externalPrincipalId !== 'function') throw new Error('benchmark Delivery peer lacks required public APIs')
   const principalId: string = deliveryModule.externalPrincipalId(principal)

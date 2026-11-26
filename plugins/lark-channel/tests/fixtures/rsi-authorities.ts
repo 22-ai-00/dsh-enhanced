@@ -23,7 +23,7 @@ export interface RsiAuthorityFixture {
 export async function createRsiAuthorityFixture(live = false): Promise<RsiAuthorityFixture> {
   // macOS 上 os.tmpdir() 经 /var → /private/var 符号链接；safeFile 的 canonical
   // 检查会拒绝非规范化路径，夹具先 realpath 到真实路径。
-  const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-rsi-authorities-'))
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-ray-authorities-'))
   await chmod(root, 0o700)
   const privateDirectory = async (name: string): Promise<string> => {
     const path = join(root, name)
@@ -80,10 +80,10 @@ export async function createRsiAuthorityFixture(live = false): Promise<RsiAuthor
     principalRecordId: 'owner-record', principalVersion: 7, workspace: repository, agentPreset: 'primary' }
   const expiresAt = Date.now() + 60_000
   const policy = { id: 'task-observations', expiresAt, maximumObservations: 2, minimumChecks: 1, maximumChecks: 2, lookbackMs: 1_000 }
-  const sourcePolicy = { targetBranch: 'dev', candidateId: 'health-helper', packageName: '@dsh-enhanced/health-helper', packagePath: 'plugins/health-helper',
+  const sourcePolicy = { targetBranch: 'dev', candidateId: 'health-helper', packageName: '@dsh-ray/health-helper', packagePath: 'plugins/health-helper',
     dshBaseline: '0.1.0', capabilities: ['health'], authorities: ['network'], requires: [], registryId: 'fixture-registry',
     registryLocator: pathToFileURL(registry).href, catalogId: 'fixture-catalog', catalogPath, minimumReproducibleBuilds: 2 }
-  const adoptionPolicy = { candidateId: 'health-helper', packageName: '@dsh-enhanced/health-helper', dshBaseline: '0.1.0',
+  const adoptionPolicy = { candidateId: 'health-helper', packageName: '@dsh-ray/health-helper', dshBaseline: '0.1.0',
     capabilities: ['health'], authorities: ['network'], requires: [], registryId: 'fixture-registry', registryLocator: pathToFileURL(registry).href }
   const authorityPath = (name: string) => join(root, `${name}.json`)
   const approvals = { schemaVersion: 1, authority: approval.authority, keyId: approval.keyId, keyPath: approval.keyPath,
@@ -103,7 +103,7 @@ export async function createRsiAuthorityFixture(live = false): Promise<RsiAuthor
   const observations = { schemaVersion: 1, authority: observation.authority, keyId: observation.keyId, keyPath: observation.keyPath,
     statePath: join(root, 'observation-state.sqlite'), controlDatabasePath: controlPath,
     grant: { policy, owner, installationId: adoptions.grant.installationId, ledger: adoptions.grant.ledger, profilePath,
-      packages: ['@dsh-enhanced/health-helper'], receiptTtlMs: 30_000 } }
+      packages: ['@dsh-ray/health-helper'], receiptTtlMs: 30_000 } }
   const terms = { protocol: 'dsh-bounded-live/v1', maximumWindowMs: 60_000, minimumTasks: 1, authority: qualification.authority, keyId: qualification.keyId }
   const handoff = { schemaVersion: 1, coordinatorId: 'coordinator', maximumWindowMs: 60_000, commit: 'target-host' }
   const hostDeploymentInputs = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml']
@@ -111,7 +111,7 @@ export async function createRsiAuthorityFixture(live = false): Promise<RsiAuthor
   const qualifications = { schemaVersion: 1, authority: qualification.authority, keyId: qualification.keyId, keyPath: qualification.keyPath,
     statePath: join(root, 'qualification-state.sqlite'), controlDatabasePath: controlPath,
     grant: { id: 'qualification-grant', expiresAt, maxQualifications: 2, owner, installationId: adoptions.grant.installationId,
-      ledger: adoptions.grant.ledger, profilePath, packages: ['@dsh-enhanced/health-helper'], terms, receiptTtlMs: 30_000 } }
+      ledger: adoptions.grant.ledger, profilePath, packages: ['@dsh-ray/health-helper'], terms, receiptTtlMs: 30_000 } }
   for (const [name, value] of Object.entries({ approvals, releases, adoptions, observations, qualifications })) await writePrivate(authorityPath(name), `${JSON.stringify(value)}\n`)
   const trustPath = join(root, 'trust.json')
   await writePrivate(trustPath, `${JSON.stringify({ schemaVersion: 4, installationId: adoptions.grant.installationId, dshHome: home,
@@ -165,7 +165,7 @@ export async function createRsiAuthorityFixture(live = false): Promise<RsiAuthor
       const resolverConfigPath = join(root, 'resolver.json')
       const resolverConfig = { schemaVersion: 1, statePath: join(root, 'resolver-state.sqlite'), controlDatabasePath: controlPath,
         trustPath, template, grant: { id: 'host-grant', notBefore: Date.now() - 1000, expiresAt,
-          maximumReloads: 2, owner, profile: { name: 'target', path: profilePath }, packages: ['@dsh-enhanced/health-helper'],
+          maximumReloads: 2, owner, profile: { name: 'target', path: profilePath }, packages: ['@dsh-ray/health-helper'],
           coordinatorId: 'coordinator', hostDeploymentInputs, liveQualification: terms } }
       await writePrivate(resolverConfigPath, `${JSON.stringify(resolverConfig)}\n`)
       const wrapperPath = join(root, 'wrapper.json')

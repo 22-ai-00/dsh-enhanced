@@ -3,7 +3,7 @@ import { AssistantDreamingService } from './runtime.js'
 import type { DreamingConfig } from './config.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-dreaming'
+export const name = 'dsh-ray-assistant-dreaming'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {

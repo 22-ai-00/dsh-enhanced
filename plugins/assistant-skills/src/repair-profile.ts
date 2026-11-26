@@ -1,6 +1,6 @@
 import { isAbsolute } from 'node:path'
-import type { GoalScope } from '@dsh-enhanced/assistant-goals'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { GoalScope } from '@dsh-ray/assistant-goals'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { ExternalHoldoutProfile } from './external-holdout.js'
 import type { SkillBinding } from './definition.js'
 import { repairFileTools } from './repair-workspace-path.js'

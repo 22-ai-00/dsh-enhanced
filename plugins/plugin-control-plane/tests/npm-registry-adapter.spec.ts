@@ -39,7 +39,7 @@ async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' | 'publis
   let bytes = Buffer.from('owner-signed-tarball')
   if (mode.startsWith('publish')) {
     const stage = join(root, 'packed'); await mkdir(join(stage, 'package'), { recursive: true, mode: 0o700 })
-    await writeFile(join(stage, 'package', 'package.json'), JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '1.2.3',
+    await writeFile(join(stage, 'package', 'package.json'), JSON.stringify({ name: '@dsh-ray/health-helper', version: '1.2.3',
       dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { prepublishOnly: 'exit 91' } }))
     const tarball = join(stage, 'package.tgz'); execFileSync('/usr/bin/tar', ['-czf', tarball, '-C', stage, 'package'])
     bytes = await readFile(tarball)
@@ -65,8 +65,8 @@ async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' | 'publis
         }); return
       }
       if (!publication.stored) { response.writeHead(404); response.end(); return }
-      if (request.url === '/%40dsh-enhanced%2Fhealth-helper/1.2.3') {
-        response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '1.2.3',
+      if (request.url === '/%40dsh-ray%2Fhealth-helper/1.2.3') {
+        response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ name: '@dsh-ray/health-helper', version: '1.2.3',
           dist: { integrity: sri(publication.stored), tarball: `${server.origin}/package.tgz` } })); return
       }
       if (request.url === '/package.tgz') { response.writeHead(200); response.end(publication.stored); return }
@@ -89,7 +89,7 @@ async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' | 'publis
   })() : await startLocalHttpsRegistry({ ...tls, handle(request) {
     seen.push(request.path)
     if (mode === 'missing') return { status: 404 }
-    if (request.path === '/%40dsh-enhanced%2Fhealth-helper/1.2.3') return { status: 200, bytes: Buffer.from(JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '1.2.3',
+    if (request.path === '/%40dsh-ray%2Fhealth-helper/1.2.3') return { status: 200, bytes: Buffer.from(JSON.stringify({ name: '@dsh-ray/health-helper', version: '1.2.3',
       dist: { integrity: sri(served), tarball: `${server.origin}/package.tgz` } })) }
     if (request.path === '/package.tgz') return { status: 200, bytes: served }
     return { status: 404 }
@@ -103,7 +103,7 @@ async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' | 'publis
   const configPath = join(root, 'config.json'); const saveConfig = () => writeFile(configPath, JSON.stringify(config), { mode: 0o600 }); await saveConfig()
   vi.stubEnv('DSH_RELEASE_REGISTRY_VERIFY_CONFIG', configPath)
   const artifact: SourceReleaseArtifact = { sourceName: 'health-helper', candidateId: 'health-helper', packagePath: 'plugins/health-helper',
-    packageName: '@dsh-enhanced/health-helper', packageVersion: '1.2.3', tarballPath: join(root, 'package.tgz'), tarballBytes: bytes.length,
+    packageName: '@dsh-ray/health-helper', packageVersion: '1.2.3', tarballPath: join(root, 'package.tgz'), tarballBytes: bytes.length,
     tarballSha256: sha(bytes), tarballIntegrity: sri(bytes), sbomPath: join(root, 'sbom.json'), sbomSha256: sha('{}'),
     provenancePath: join(root, 'provenance.json'), provenanceSha256: sha('{"build":1}'), mergedCommit: 'a'.repeat(40),
     dshBaseline: '0.1.0', capabilities: ['health'], authorities: ['read-only: health'], requires: [] }
@@ -216,7 +216,7 @@ describe.skipIf(process.platform !== 'linux')('pinned npm publish adapter', () =
     await expect(new Ed25519SourceReleaseAuthority(f.publisherPublicKey, f.publisherConfig.authority, f.publisherConfig.keyId)
       .verify(receipt, { ...f.plan, revision: 6 }, f.publisherRequest)).resolves.toMatchObject({ outcome: 'passed' })
     expect(f.publication.attempts).toBe(1); expect(f.publication.authorization).toBe('Bearer fixture-token')
-    expect(f.seen).toEqual(['/@dsh-enhanced%2fhealth-helper'])
+    expect(f.seen).toEqual(['/@dsh-ray%2fhealth-helper'])
     expect(f.publication.body).toMatchObject({ access: 'public', 'dist-tags': { next: '1.2.3' }, versions: { '1.2.3': {
       name: f.artifact.packageName, version: f.artifact.packageVersion, dist: { tarball: f.authorization.releasePolicy.registryReference,
         integrity: f.artifact.tarballIntegrity } } } })

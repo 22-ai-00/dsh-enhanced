@@ -1,5 +1,5 @@
 import type { AutomationArtifactStore } from './artifacts.js'
-import type { DeliveryPresentationUpdate } from '@dsh-enhanced/assistant-delivery'
+import type { DeliveryPresentationUpdate } from '@dsh-ray/assistant-delivery'
 import { HostAutomationExecutorRegistry } from './host-executors.js'
 import { AutomationStoreError, type AutomationStore } from './store.js'
 import { isHostAutomationDefinition, legacyAutomationExecutionDiagnostic } from './types.js'

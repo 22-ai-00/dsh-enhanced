@@ -9,7 +9,7 @@ const phases = ['pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-v
  * registered service. Explicit manifest values can replace a prior binding. */
 export async function resolveRsiServiceEnvironments(manifest: RsiSetupManifest, home: string,
   ambient: NodeJS.ProcessEnv = process.env): Promise<RsiServiceEnvironments | undefined> {
-  const { loadTrustConfig } = await import('@dsh-enhanced/plugin-control-plane')
+  const { loadTrustConfig } = await import('@dsh-ray/plugin-control-plane')
   const trust = await loadTrustConfig(manifest.controlPlane.trustPath)
   const targetNames = phases.flatMap(phase => {
     const name = `DSH_RELEASE_${phase.toUpperCase().replaceAll('-', '_')}_CONFIG`

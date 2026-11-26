@@ -149,11 +149,11 @@ const root = join('plugins', name)
 await Promise.all(['README.md', 'cordis.patch.yml', 'package.json', 'src/index.ts', 'src/version.ts', 'tests/index.spec.ts',
   'tsconfig.build.json', 'tsconfig.json', 'LICENSE'].map(path => access(join(root, path))))
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
-if (manifest.name !== '@dsh-enhanced/' + name || manifest.dsh?.bundle?.patch !== './cordis.patch.yml') throw new Error('invalid generated manifest')
+if (manifest.name !== '@dsh-ray/' + name || manifest.dsh?.bundle?.patch !== './cordis.patch.yml') throw new Error('invalid generated manifest')
 const patch = await readFile(join(root, 'cordis.patch.yml'), 'utf8')
-if (!patch.includes("name: '@dsh-enhanced/" + name + "'")) throw new Error('invalid generated patch')
+if (!patch.includes("name: '@dsh-ray/" + name + "'")) throw new Error('invalid generated patch')
 const catalog = await readFile('plugins/README.md', 'utf8')
-const row = '| [' + name + '](' + name + ') | \`@dsh-enhanced/' + name + '\` | 实验性 |'
+const row = '| [' + name + '](' + name + ') | \`@dsh-ray/' + name + '\` | 实验性 |'
 if (catalog.split(row).length !== 2) throw new Error('generated catalog row is missing or duplicated')
 `)
   execFileSync('/usr/bin/git', ['init', repository]); execFileSync('/usr/bin/git', ['-C', repository, 'config', 'user.name', 'Test'])
@@ -384,7 +384,7 @@ function releaseSuccessEvidence(request: SourceReleaseRequest): SourceReleaseRec
 // (release state is driven directly through durable store primitives), then
 // advances a ready source plan through all eight applied phases to
 // release-complete and returns the CatalogEntry the owner catalog must admit.
-async function releasedCompleteSource(value: Awaited<ReturnType<typeof fixture>>, suffix: string, registry = { locator: 'https://registry.example.invalid', reference: '@dsh-enhanced/health-helper@0.1.0' }): Promise<{ plan: PluginSourcePlan; released: CatalogEntryShape }> {
+async function releasedCompleteSource(value: Awaited<ReturnType<typeof fixture>>, suffix: string, registry = { locator: 'https://registry.example.invalid', reference: '@dsh-ray/health-helper@0.1.0' }): Promise<{ plan: PluginSourcePlan; released: CatalogEntryShape }> {
   const ready = await readySource(value, suffix)
   const catalogPath = join(value.control, 'catalog.json')
   const adapterKeys = generateKeyPairSync('ed25519')
@@ -396,7 +396,7 @@ async function releasedCompleteSource(value: Awaited<ReturnType<typeof fixture>>
     kind: 'dsh-source-release-authorization', authorizationId: `release-authorization-${suffix}`, authority: 'release-owner',
     keyId: 'release-owner-key', planId: ready.id, planDigest: ready.digest, baseCommit: ready.baseCommit,
     checkedTreeDigest: ready.sourceCheck!.treeDigest, checkedPatchDigest: ready.sourceCheck!.patchDigest, scope: ready.scope,
-    releasePolicy: { targetBranch: 'main', candidateId: ready.name, packageName: '@dsh-enhanced/health-helper',
+    releasePolicy: { targetBranch: 'main', candidateId: ready.name, packageName: '@dsh-ray/health-helper',
       packageVersion: '0.1.0', packagePath: 'plugins/health-helper', dshBaseline: '0.1.0-rc.8', capabilities: ['health'],
       authorities: ['read-only: health'], requires: [], registryId: 'fixture-registry',
       registryLocator: registry.locator, registryReference: registry.reference,
@@ -548,12 +548,12 @@ describe.sequential('trusted staged CLI', () => {
     const pluginRoot = join(source.worktree, 'plugins', 'health-helper')
     await Promise.all(['README.md', 'cordis.patch.yml', 'package.json', 'src/index.ts', 'src/version.ts', 'tests/index.spec.ts',
       'tsconfig.build.json', 'tsconfig.json', 'LICENSE'].map(path => readFile(join(pluginRoot, path), 'utf8')))
-    expect(JSON.parse(await readFile(join(pluginRoot, 'package.json'), 'utf8'))).toMatchObject({ name: '@dsh-enhanced/health-helper',
+    expect(JSON.parse(await readFile(join(pluginRoot, 'package.json'), 'utf8'))).toMatchObject({ name: '@dsh-ray/health-helper',
       dsh: { bundle: { patch: './cordis.patch.yml' } } })
-    expect(await readFile(join(pluginRoot, 'cordis.patch.yml'), 'utf8')).toContain("name: '@dsh-enhanced/health-helper'")
-    expect(await readFile(join(pluginRoot, 'tests', 'index.spec.ts'), 'utf8')).toContain("describe('dsh-enhanced-health-helper'")
-    expect(await readFile(join(pluginRoot, 'README.md'), 'utf8')).toContain('# @dsh-enhanced/health-helper')
-    expect(await readFile(join(source.worktree, 'plugins', 'README.md'), 'utf8')).toContain('@dsh-enhanced/health-helper')
+    expect(await readFile(join(pluginRoot, 'cordis.patch.yml'), 'utf8')).toContain("name: '@dsh-ray/health-helper'")
+    expect(await readFile(join(pluginRoot, 'tests', 'index.spec.ts'), 'utf8')).toContain("describe('dsh-ray-health-helper'")
+    expect(await readFile(join(pluginRoot, 'README.md'), 'utf8')).toContain('# @dsh-ray/health-helper')
+    expect(await readFile(join(source.worktree, 'plugins', 'README.md'), 'utf8')).toContain('@dsh-ray/health-helper')
   }, 30_000)
 
   test('fails closed when the real generator additionally changes a file outside its approved scope', async () => {
@@ -634,10 +634,10 @@ describe.sequential('trusted staged CLI', () => {
       kind: 'dsh-source-release-authorization', authorizationId: 'release-authorization-1', authority: 'release-owner', keyId: 'release-owner-key',
       planId: ready.id, planDigest: ready.digest, baseCommit: ready.baseCommit, checkedTreeDigest: ready.sourceCheck!.treeDigest,
       checkedPatchDigest: ready.sourceCheck!.patchDigest, scope: ready.scope, releasePolicy: { targetBranch: 'main', candidateId: 'health-helper',
-        packageName: '@dsh-enhanced/health-helper', packageVersion: '0.1.8', packagePath: 'plugins/health-helper', dshBaseline: '0.1.0-rc.8',
+        packageName: '@dsh-ray/health-helper', packageVersion: '0.1.8', packagePath: 'plugins/health-helper', dshBaseline: '0.1.0-rc.8',
         capabilities: ['health'], authorities: ['read-only: health'], requires: [], registryId: 'fixture-registry',
         registryLocator: 'https://registry.example.invalid', catalogId: 'owner-catalog', catalogPath,
-        minimumReproducibleBuilds: 2, registryReference: '@dsh-enhanced/health-helper@0.1.8' }, authorizedAt: now, expiresAt: now + 30_000 }
+        minimumReproducibleBuilds: 2, registryReference: '@dsh-ray/health-helper@0.1.8' }, authorizedAt: now, expiresAt: now + 30_000 }
     const authorization: SourceReleaseAuthorization = { ...unsigned,
       signature: sign(null, Buffer.from(sourceReleaseAuthorizationSigningPayload(unsigned)), authorizationKeys.privateKey).toString('base64') }
     const authorizationPath = join(value.control, 'release-authorization.json')
@@ -733,7 +733,7 @@ describe.sequential('trusted staged CLI', () => {
   test('activation-plan fails closed when the same-id admitted catalog entry drifted from the released content', async () => {
     const value = await fixture(); const { plan: source, released } = await releasedCompleteSource(value, 'activation-drifted')
     const drifted = { ...released, version: '9.9.9',
-      registry: { ...released.registry, reference: '@dsh-enhanced/health-helper@9.9.9' } }
+      registry: { ...released.registry, reference: '@dsh-ray/health-helper@9.9.9' } }
     await writeFile(join(value.control, 'catalog.json'), `${JSON.stringify({ schemaVersion: 1, entries: [drifted] })}\n`, { mode: 0o600 })
     await expect(runActivationPlan(value, source.id, 'web', 'activation:cli:drifted'))
       .rejects.toThrow('released candidate is not the exact admitted owner catalog entry')

@@ -4,11 +4,11 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { ControlPlaneCliError } from './errors.js'
 import { verifyRevisedPluginWorkspace, type SourceRevisionBinding } from './source-revision.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
-import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import type { PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { verifyCreatedPluginWorkspace, type SourceCreationBinding } from './source-creation.js'
 import { runLocalCommand } from './source-workspace.js'
 import type { SourcePreparedEvidence } from './types.js'
-import type { LinuxRuntime, LinuxCgroupRoots, LinuxRunnerStateSeal, LinuxSystemSnapshot, LinuxUserNamespaceMapping, NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRuntime, LinuxCgroupRoots, LinuxRunnerStateSeal, LinuxSystemSnapshot, LinuxUserNamespaceMapping, NativeMacRuntime } from '@dsh-ray/assistant-isolation'
 
 export interface NativeSourceBuildConfig {
   backend: 'macos-seatbelt'
@@ -478,7 +478,7 @@ for (const relative of required) {
 const json = bytes => { try { return JSON.parse(bytes.toString('utf8')) } catch { fail('invalid package manifest') } }
 const originalManifest = json(original.get(pluginRoot + '/package.json').bytes)
 const actualManifest = json(artifact.get('package/package.json').bytes)
-const expectedName = '@dsh-enhanced/' + pluginRoot.slice('plugins/'.length)
+const expectedName = '@dsh-ray/' + pluginRoot.slice('plugins/'.length)
 if (originalManifest.name !== expectedName || actualManifest.name !== expectedName
   || originalManifest.dsh?.bundle?.patch !== './cordis.patch.yml'
   || actualManifest.dsh?.bundle?.patch !== './cordis.patch.yml') fail('package identity or bundle patch changed')

@@ -9,7 +9,7 @@ import {
   workflowCandidateSignature as sharedWorkflowCandidateSignature,
   workflowScopeKey,
   workflowTraceRevisionDigest as sharedWorkflowTraceRevisionDigest,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import { openGrowthExperimentsDatabase } from './sqlite.js'
 import type {
   GrowthExperiment,

@@ -1,4 +1,4 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { GoalExecutionRun, GoalScope, GoalRecord, HostFailureEvidenceSummary, OwnerGoalRunProof } from './types.js'
 
 export interface VerifiedWorkflowSource {

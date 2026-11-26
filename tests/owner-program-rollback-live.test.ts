@@ -74,7 +74,7 @@ async function fixture() {
   roots.push(directory)
   const fakeHome = join(directory, 'user'), homePath = join(directory, 'home')
   process.env.HOME = fakeHome
-  const transactionRoot = `${homePath}.dsh-enhanced-transaction`
+  const transactionRoot = `${homePath}.dsh-ray-transaction`
   const userControl = join(fakeHome, '.config', 'systemd', 'user.control')
   const wants = join(fakeHome, '.config', 'systemd', 'user', 'default.target.wants')
   await mkdir(userControl, { recursive: true, mode: 0o700 })
@@ -84,10 +84,10 @@ async function fixture() {
   const runtime = await runtimeFixture(directory)
   const bindingSource = `${JSON.stringify({ schemaVersion: 1, cacheRoot: runtime.cacheRoot,
     version: runtime.version, receiptDigest: runtime.receiptDigest })}\n`
-  await writeFile(join(homePath, '.dsh-rsi-host.json'), bindingSource, { mode: 0o600 })
+  await writeFile(join(homePath, '.dsh-ray-host.json'), bindingSource, { mode: 0o600 })
   const { cacheRoot: _cacheRoot, ...hostRuntime } = runtime
   const plan = { schemaVersion: 1, status: 'current', canonicalHome: homePath,
-    bindingPath: join(homePath, '.dsh-rsi-host.json'), originalBindingSource: bindingSource,
+    bindingPath: join(homePath, '.dsh-ray-host.json'), originalBindingSource: bindingSource,
     originalBindingDigest: sha256(bindingSource), originalRuntime: hostRuntime,
     candidateRuntime: hostRuntime, candidateBindingSource: bindingSource }
   const profileBytes = Buffer.from('{"name":"fixture-owner"}\n')
@@ -191,7 +191,7 @@ async function fixture() {
     original: { resources, manifest: { targetProfile: profile, coordinatorProfile: coordinator,
       sourceReviews: { owner: { id: 'original-owner' } },
       controlPlane: { taskObservations: { scope }, sourceAdoptions: { handoff: { coordinatorId } } } } } }
-  const proof = { protocol: 'dsh-enhanced/host-owner-program-update/v1', homePath, profile,
+  const proof = { protocol: 'dsh-ray/host-owner-program-update/v1', homePath, profile,
     installer: oldInstaller, ownerUpdate, candidate: { sourceCommit: 'd'.repeat(40) } }
   const manifest = { version: 4, operation: 'host-update', state: 'preparing', homePath,
     canonicalHome: homePath, profile, id: transactionId, createdAt: '2026-01-01T00:00:00.000Z',
@@ -232,7 +232,7 @@ async function fixture() {
   const receiptPath = rollbackRecoveryReceiptPath(homePath, profile, transactionId)
   await writeFile(journalctlExecutable, `#!${process.execPath}\n`
     + `const fs=require('node:fs');const state=JSON.parse(fs.readFileSync(${JSON.stringify(journalModePath)},'utf8'));\n`
-    + `process.stdout.write('dsh-enhanced host ready: v1\\n');\n`
+    + `process.stdout.write('dsh-ray host ready: v1\\n');\n`
     + `if(process.argv.includes('--unit')&&process.argv[process.argv.indexOf('--unit')+1]==='dsh-profile-owner.service')process.stdout.write('lark-channel: '+(state.disconnected||state.disconnectAfterReceipt&&fs.existsSync(${JSON.stringify(receiptPath)})?'disconnected':'connected')+'\\n')\n`,
   { mode: 0o700 })
   const sessionPath = join(homePath, 'sessions', 'owner.jsonl')

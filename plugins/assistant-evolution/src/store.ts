@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import type { ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalDispatchRoute } from '@dsh-ray/assistant-policy'
 import { openEvolutionDatabase } from './sqlite.js'
 import { evolutionMutationReview } from './review.js'
 import type {

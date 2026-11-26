@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-heartbeat
-      name: '@dsh-enhanced/assistant-heartbeat'
+    - id: dsh-ray-assistant-heartbeat
+      name: '@dsh-ray/assistant-heartbeat'
       inject:
         - assistantPolicy
         - assistantAutomations

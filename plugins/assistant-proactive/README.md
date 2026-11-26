@@ -1,11 +1,11 @@
-# @dsh-enhanced/assistant-proactive
+# @dsh-ray/assistant-proactive
 
 为已获主人授权的目标事件等待增加机会筛选。事件经过合并窗口、静默时段、收益阈值、冷却及每目标预算判断后，保存静默记录、向主人发送提醒，或交回 Goals 恢复原目标。实际执行继续使用原会话、Policy、预算和独立验收。
 
 ## 安装
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-proactive
+dsh plugin --profile web add @dsh-ray/assistant-proactive
 dsh --profile web --dump-config
 ```
 
@@ -88,7 +88,7 @@ intakeEvaluation:
 
 ### 目标生命周期清理与 intake 路由辅助（无轮询定时器）
 
-- **目标退役自动退订（WP11 / WP19）**：暴露 Host 接口 `registerGoalUnsubscribeHook(hook)` 与 `retireGoalSources(input)`，并在 `closeWait(waitId, scope, reason)` 与 Cordis `goal/changed`（仅 `complete` / `clear` 终态，基于事件 + microtask，不新增 `setInterval`）时关闭关联的待决机会、取消排队准备任务，并在可选 peer `@dsh-enhanced/event-triggers` 存在时调用 `unsubscribeGoalSources` 触发对应目标来源的有界退订；多轮等待仍处于 `paused` 阶段的目标不会因单轮 `cancelled` 而被误退订。
+- **目标退役自动退订（WP11 / WP19）**：暴露 Host 接口 `registerGoalUnsubscribeHook(hook)` 与 `retireGoalSources(input)`，并在 `closeWait(waitId, scope, reason)` 与 Cordis `goal/changed`（仅 `complete` / `clear` 终态，基于事件 + microtask，不新增 `setInterval`）时关闭关联的待决机会、取消排队准备任务，并在可选 peer `@dsh-ray/event-triggers` 存在时调用 `unsubscribeGoalSources` 触发对应目标来源的有界退订；多轮等待仍处于 `paused` 阶段的目标不会因单轮 `cancelled` 而被误退订。
 - **确定性 intake 路由辅助（WP20 / WP12）**：导出纯函数 `planProactiveIntakeRoute()` / `toWorkItemIntakePayload()` 与 Host 方法 `routeIntakeObservation()`，结合当前 `intakeEvaluationHealth()` 将标准事件观测或 `WorkItemIntakeInput` 归类为 `explicit` / `inferred` / `ignore` 及 `admit-explicit` / `evaluate-inferred` / `observe-only` / `filtered`（bot 上限降为 `inferred`，文本需匹配 `observationDigest`），不调用模型、不写账本且不授予执行权。
 
 对话示例：`为当前目标等待 report-file 触发器，使用 useful-report 机会策略，截止时间为一小时后。` 模型在当前主人请求中调用 `goal_wait_event`，显式提供 `opportunity_profile: useful-report`，以及实际目标 ID、native revision、触发器 ID 和毫秒时间戳。未知策略在暂停前被拒绝；省略策略保留 Goals 原有行为。
@@ -120,4 +120,4 @@ intakeEvaluation:
 
 ## 兼容性
 
-遵循仓库 [兼容性基线](../../docs/compatibility.md)。可选服务缺失时不授予执行能力。`intakeEvaluation` 需要的宿主 `llm` 与 `@dsh-enhanced/assistant-work-items`（`intakeLedger.evaluation.enabled: true`）都是可选 peer；缺失或未启用时本插件不注册评估者、行为与未配置一致。
+遵循仓库 [兼容性基线](../../docs/compatibility.md)。可选服务缺失时不授予执行能力。`intakeEvaluation` 需要的宿主 `llm` 与 `@dsh-ray/assistant-work-items`（`intakeLedger.evaluation.enabled: true`）都是可选 peer；缺失或未启用时本插件不注册评估者、行为与未配置一致。

@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { version } from './version.js'
 import { AssistantIsolationService, Config } from './service.js'
 
-export const name = 'dsh-enhanced-assistant-isolation'
+export const name = 'dsh-ray-assistant-isolation'
 export { version, AssistantIsolationService, Config }
 export { type AssistantIsolationServiceOptions } from './service.js'
 export { validateConfig, defaultLimits, type ValidatedConfig, type ValidateConfigOptions, type MacosIsolationConfig, type WindowsIsolationConfig } from './config.js'

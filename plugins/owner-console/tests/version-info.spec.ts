@@ -117,7 +117,7 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
     const emptyCtx = new Context()
     const report = await collectOwnerConsoleVersionInfo(emptyCtx, { now: 1_700_000_000_000 })
     expect(OwnerConsoleVersionReportSchema.parse(report)).toEqual(report)
-    expect(report.protocol).toBe('dsh-rsi/version/v1')
+    expect(report.protocol).toBe('dsh-ray/version/v1')
     expect(report.schemaVersion).toBe(1)
     expect(report.dshHome).toBeNull()
     expect(report.plugins.state).toBe('unavailable')
@@ -143,9 +143,9 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
       join(home, 'plugin-control-plane', 'control.sqlite'),
       'CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT); CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT);',
     )
-    mkdirSync(join(home, '.dsh-rsi-upgrade-backups'), { recursive: true })
-    mkdirSync(join(home, '.dsh-enhanced'), { recursive: true })
-    writeFileSync(join(home, '.dsh-enhanced', 'upgrade-history.jsonl'), '', 'utf8')
+    mkdirSync(join(home, '.dsh-ray-upgrade-backups'), { recursive: true })
+    mkdirSync(join(home, '.dsh-ray'), { recursive: true })
+    writeFileSync(join(home, '.dsh-ray', 'upgrade-history.jsonl'), '', 'utf8')
 
     const ctx = new Context()
     ctx.provide('profileContext' as never, { home, dir: join(home, 'profiles', 'web'), name: 'web' } as never)
@@ -169,11 +169,11 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
     const home = makeTempDir('oc-version-data-')
     const outsideDir = makeTempDir('oc-version-outside-')
     const profileDir = join(home, 'profiles', 'web')
-    mkdirSync(join(profileDir, 'node_modules', '@dsh-enhanced', 'owner-console'), { recursive: true })
+    mkdirSync(join(profileDir, 'node_modules', '@dsh-ray', 'owner-console'), { recursive: true })
 
-    // .dsh-rsi-host.json (0600 regular file)
+    // .dsh-ray-host.json (0600 regular file)
     writeFileSync(
-      join(home, '.dsh-rsi-host.json'),
+      join(home, '.dsh-ray-host.json'),
       JSON.stringify({ schemaVersion: 1, version: '0.2.2-rc.5', cacheRoot: join(home, 'cache'), receiptDigest: 'a'.repeat(64) }),
       { encoding: 'utf8', mode: 0o600 },
     )
@@ -190,12 +190,12 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
       CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT);
       CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT);
       CREATE TABLE activation_watch (plan_id TEXT PRIMARY KEY, package_name TEXT, package_version TEXT, state TEXT);
-      INSERT INTO source_plans VALUES ('p-create-1', '@dsh-enhanced/evolved-alpha', 'create', 'release-complete');
-      INSERT INTO source_plans VALUES ('p-rev-1', '@dsh-enhanced/evolved-alpha', 'modify', 'release-complete');
-      INSERT INTO source_plans VALUES ('p-draft-1', '@dsh-enhanced/evolved-beta', 'create', 'draft');
+      INSERT INTO source_plans VALUES ('p-create-1', '@dsh-ray/evolved-alpha', 'create', 'release-complete');
+      INSERT INTO source_plans VALUES ('p-rev-1', '@dsh-ray/evolved-alpha', 'modify', 'release-complete');
+      INSERT INTO source_plans VALUES ('p-draft-1', '@dsh-ray/evolved-beta', 'create', 'draft');
       INSERT INTO activation_plans VALUES ('p-create-1', 'web', 'activated');
       INSERT INTO activation_plans VALUES ('p-rb-1', 'web', 'rolled-back');
-      INSERT INTO activation_watch VALUES ('p-create-1', '@dsh-enhanced/evolved-alpha', '1.2.0', 'watching');
+      INSERT INTO activation_watch VALUES ('p-create-1', '@dsh-ray/evolved-alpha', '1.2.0', 'watching');
       `,
     )
     createSqlite(
@@ -205,13 +205,13 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
       INSERT INTO adoptions VALUES (
         'p-create-1',
         'active',
-        '{"plan":{"name":"@dsh-enhanced/evolved-alpha"}}',
+        '{"plan":{"name":"@dsh-ray/evolved-alpha"}}',
         '{"version":"1.2.0"}'
       );
       INSERT INTO adoptions VALUES (
         'p-create-closed',
         'closed',
-        '{"plan":{"name":"@dsh-enhanced/evolved-retired"}}',
+        '{"plan":{"name":"@dsh-ray/evolved-retired"}}',
         '{"version":"0.9.0"}'
       );
       `,
@@ -223,7 +223,7 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
       CREATE TABLE versions (plan_id TEXT PRIMARY KEY, entry_id TEXT, role TEXT, certificate_json TEXT);
       CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, entry_id TEXT);
       CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT, entry_id TEXT, from_plan_id TEXT, to_plan_id TEXT, at INTEGER);
-      INSERT INTO entries VALUES ('e1', '@dsh-enhanced/evolved-alpha', 'p-rev-1', 2);
+      INSERT INTO entries VALUES ('e1', '@dsh-ray/evolved-alpha', 'p-rev-1', 2);
       INSERT INTO versions VALUES ('p-rev-1', 'e1', 'revision', '{}');
       INSERT INTO adoptions VALUES ('p-rev-1', 'active', 'e1');
       INSERT INTO rollbacks VALUES (1, 'rb-1', 'e1', 'p-rev-0', 'p-create-1', 1000);
@@ -332,25 +332,25 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
       "CREATE TABLE recovery_runs (id TEXT PRIMARY KEY, status TEXT); INSERT INTO recovery_runs VALUES ('rr1', 'succeeded');",
     )
 
-    // 7. upgrade-history.jsonl & .dsh-rsi-upgrade-backups/ (with symlink child ignored)
-    mkdirSync(join(home, '.dsh-enhanced'), { recursive: true })
+    // 7. upgrade-history.jsonl & .dsh-ray-upgrade-backups/ (with symlink child ignored)
+    mkdirSync(join(home, '.dsh-ray'), { recursive: true })
     writeFileSync(
-      join(home, '.dsh-enhanced', 'upgrade-history.jsonl'),
+      join(home, '.dsh-ray', 'upgrade-history.jsonl'),
       `${JSON.stringify({ at: 100, toVersion: '0.1.83' })}\n${JSON.stringify({ at: 200, toVersion: '0.1.84' })}\n`,
       'utf8',
     )
-    mkdirSync(join(home, '.dsh-rsi-upgrade-backups', 'doctor-100'), { recursive: true })
-    mkdirSync(join(home, '.dsh-rsi-upgrade-backups', '2026-11-24-1'), { recursive: true })
-    symlinkSync(outsideDir, join(home, '.dsh-rsi-upgrade-backups', 'evil-link'))
+    mkdirSync(join(home, '.dsh-ray-upgrade-backups', 'doctor-100'), { recursive: true })
+    mkdirSync(join(home, '.dsh-ray-upgrade-backups', '2026-11-24-1'), { recursive: true })
+    symlinkSync(outsideDir, join(home, '.dsh-ray-upgrade-backups', 'evil-link'))
 
     const ctx = new Context()
     ctx.provide('profileContext' as never, { home, dir: profileDir, name: 'web' } as never)
     ctx.provide('pluginManager' as never, {
       listBundles: async () => [
-        { name: '@dsh-enhanced/owner-console', version: '0.1.83', enabled: true, installed: true, removable: false, optional: false },
+        { name: '@dsh-ray/owner-console', version: '0.1.83', enabled: true, installed: true, removable: false, optional: false },
         // Also present in evolved ledger -> must enrich evolved & NOT double-count in core!
-        { name: '@dsh-enhanced/evolved-alpha', version: '1.2.0', enabled: true, installed: true, removable: true, optional: false },
-        { name: '@dsh-enhanced/dep-helper', version: '0.1.83', enabled: true, installed: true, removable: false, optional: false, error: { code: 'not-bundle' } },
+        { name: '@dsh-ray/evolved-alpha', version: '1.2.0', enabled: true, installed: true, removable: true, optional: false },
+        { name: '@dsh-ray/dep-helper', version: '0.1.83', enabled: true, installed: true, removable: false, optional: false, error: { code: 'not-bundle' } },
       ],
       listPlugins: async () => [],
     } as never)
@@ -366,10 +366,10 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
     // Core vs Evolved strictly separated
     expect(report.plugins.state).toBe('ok')
     expect(report.plugins.coreCount).toBe(1)
-    expect(report.plugins.core[0]).toMatchObject({ name: '@dsh-enhanced/owner-console', kind: 'core', installKind: 'npm', enabled: true })
+    expect(report.plugins.core[0]).toMatchObject({ name: '@dsh-ray/owner-console', kind: 'core', installKind: 'npm', enabled: true })
     expect(report.plugins.evolvedCount).toBe(2) // evolved-alpha + evolved-retired
     expect(report.plugins.activeEvolvedCount).toBe(1)
-    expect(report.plugins.evolved.find(e => e.name === '@dsh-enhanced/evolved-alpha')).toMatchObject({
+    expect(report.plugins.evolved.find(e => e.name === '@dsh-ray/evolved-alpha')).toMatchObject({
       kind: 'evolved',
       installKind: 'adopted',
       version: '1.2.0',
@@ -425,7 +425,7 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
     ctx.provide('loader' as never, {
       entries: () => [{
         id: 'wi',
-        options: { id: 'wi', name: '@dsh-enhanced/assistant-work-items', config: { databasePath: roDbPath } },
+        options: { id: 'wi', name: '@dsh-ray/assistant-work-items', config: { databasePath: roDbPath } },
       }],
     } as never)
     ctx.provide('assistantDreaming' as never, { health: () => ({ counts: { runs: 5 } }) } as never)
@@ -507,7 +507,7 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
     const profileDir = join(home, 'profiles', 'web')
     mkdirSync(profileDir, { recursive: true })
     writeFileSync(
-      join(home, '.dsh-rsi-host.json'),
+      join(home, '.dsh-ray-host.json'),
       JSON.stringify({
         schemaVersion: 1,
         version: `0.2.2-${'v'.repeat(200)}`,
@@ -550,7 +550,7 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
     ctxLongNames.provide('profileContext' as never, { home, dir: profileDir, name: 'web' } as never)
     ctxLongNames.provide('pluginManager' as never, {
       listBundles: async () => [{
-        name: `@dsh-enhanced/${'long-plugin-'.repeat(25)}`,
+        name: `@dsh-ray/${'long-plugin-'.repeat(25)}`,
         version: `1.0.0-${'b'.repeat(200)}`,
         enabled: true,
         installed: true,
@@ -615,7 +615,7 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
     // 6. source_plans prepared-revise on core plugin must NOT move it to evolved[]
     createSqlite(
       join(cpDir, 'control.sqlite'),
-      "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT); INSERT INTO source_plans VALUES ('sp-rev', '@dsh-enhanced/assistant-work-items', 'prepared-revise', 'release-complete');",
+      "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT); INSERT INTO source_plans VALUES ('sp-rev', '@dsh-ray/assistant-work-items', 'prepared-revise', 'release-complete');",
     )
 
     const ctx = new Context()

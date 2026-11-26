@@ -46,12 +46,12 @@ async function fixture() {
   const now = Date.now(), approvalKey = generateKeyPairSync('ed25519')
   const owner = { authorityId: 'owner', authorityHash: hex('a'), principalId: 'principal', principalRecordId: 'record',
     principalVersion: 1, workspace: '/workspace', agentPreset: 'default' }
-  const candidate = { id: 'health-helper', package: '@dsh-enhanced/health-helper', version: '1.2.3', integrity: 'sha512-YQ==',
+  const candidate = { id: 'health-helper', package: '@dsh-ray/health-helper', version: '1.2.3', integrity: 'sha512-YQ==',
     dshBaseline: '0.1.5-rc.3', capabilities: ['health'], authorities: [], requires: [] }
   const liveQualification = { protocol: 'dsh-bounded-live/v1' as const, maximumWindowMs: 60_000, minimumTasks: 1,
     authority: 'live-authority', keyId: 'live-key' }
   const handoffTerms = { schemaVersion: 1 as const, coordinatorId: 'coordinator', maximumWindowMs: 60_000, commit: 'target-host' as const }
-  const input = 'node_modules/@dsh-enhanced/health-helper/lib/index.js'
+  const input = 'node_modules/@dsh-ray/health-helper/lib/index.js'
   const profileFiles = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(name => ({ path: join(profilePath, name), sha256: hex('b') }))
   const deploymentFiles = [{ input, path: join(profilePath, input), sha256: hex('c') }]
   const plan = { id: 'plan', digest: hex('d'), status: 'awaiting-reload', revision: 4, createdAt: now - 1_000, expiresAt: now + 60_000,
@@ -79,7 +79,7 @@ async function fixture() {
         targets: [{ entryId: 'candidate', module: candidate.package, configDigest: hex('4'), services: ['healthService'] }] } },
     recoveryReadiness: { client: { path: '/owner/recovery-observer.js', sha256: hex('5') },
       observer: { socketPath: join(root, 'recovery-observer.sock'), keyPath: join(root, 'recovery-observer.key'), profilePath,
-        targets: [{ entryId: 'old-capability', module: '@dsh-enhanced/old-capability', configDigest: hex('6'), services: ['oldService'] }] } } }
+        targets: [{ entryId: 'old-capability', module: '@dsh-ray/old-capability', configDigest: hex('6'), services: ['oldService'] }] } } }
   const request: HostAttestationRequest = { schemaVersion: 2, kind: 'dsh-host-attestation-request', operationId: 'operation-reload',
     requestedAt: now, receiptTtlMs: 30_000, installationId: plan.installationId, ledger: plan.ledger,
     plan: { id: plan.id, digest: plan.digest }, activation: { id: 'activation', fence: 1 }, profile: { name: 'test', path: profilePath },
@@ -196,7 +196,7 @@ test('runtime epoch denies expired standing authority and drift in owner, source
   context.source.owner.principalId = 'other-owner'
   await expect(resolveSystemdHostAuthority(config, request)).rejects.toThrow('refused')
   context.source.owner.principalId = 'principal'
-  context.released.package = '@dsh-enhanced/other-package'
+  context.released.package = '@dsh-ray/other-package'
   await expect(resolveSystemdHostAuthority(config, request)).rejects.toThrow('refused')
   context.released.package = f.context.plan.candidate.package
   await expect(resolveSystemdHostAuthority({ ...config, grant: { ...config.grant, coordinatorId: 'other-coordinator' } }, request))
@@ -204,7 +204,7 @@ test('runtime epoch denies expired standing authority and drift in owner, source
   await expect(resolveSystemdHostAuthority({ ...config, grant: { ...config.grant,
     liveQualification: { ...config.grant.liveQualification, authority: 'other-live-authority' } } }, request)).rejects.toThrow('refused')
   await expect(resolveSystemdHostAuthority({ ...config, grant: { ...config.grant,
-    hostDeploymentInputs: ['node_modules/@dsh-enhanced/other-package/lib/index.js'] } }, request)).rejects.toThrow('refused')
+    hostDeploymentInputs: ['node_modules/@dsh-ray/other-package/lib/index.js'] } }, request)).rejects.toThrow('refused')
   context.request = { ...request, issuer: { ...request.issuer, sha256: hex('9') } }
   await expect(resolveSystemdHostAuthority(config, context.request)).rejects.toThrow('refused')
   context.request = request
@@ -212,7 +212,7 @@ test('runtime epoch denies expired standing authority and drift in owner, source
   originalTrust.hostAttestor.sha256 = hex('9')
   await expect(resolveSystemdHostAuthority(config, request)).rejects.toThrow('refused')
   originalTrust.hostAttestor.sha256 = request.issuer.sha256
-  context.witness.inputs = ['node_modules/@dsh-enhanced/other-package/lib/index.js']
+  context.witness.inputs = ['node_modules/@dsh-ray/other-package/lib/index.js']
   await expect(resolveSystemdHostAuthority(config, request)).rejects.toThrow('refused')
   context.witness.inputs = [...config.grant.hostDeploymentInputs]
   Object.assign(context.handoff, { revokedAt: requestedAt - 1 })
@@ -255,7 +255,7 @@ test('rejects unsafe grant paths, protected packages, and missing deployment inp
   const f = await fixture()
   expect(() => validateSystemdHostAuthorityConfig({ ...f.config, statePath: join(f.config.grant.profile.path, 'state.sqlite') })).toThrow('refused')
   expect(() => validateSystemdHostAuthorityConfig({ ...f.config, grant: { ...f.config.grant,
-    packages: ['@dsh-enhanced/plugin-control-plane'] } })).toThrow('refused')
+    packages: ['@dsh-ray/plugin-control-plane'] } })).toThrow('refused')
   f.context.witness = undefined as unknown as typeof f.context.witness
   await expect(resolveSystemdHostAuthority(f.config, f.request)).rejects.toThrow('refused')
 })

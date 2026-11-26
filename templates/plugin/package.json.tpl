@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/{{PLUGIN_NAME}}"
   },
   "keywords": [

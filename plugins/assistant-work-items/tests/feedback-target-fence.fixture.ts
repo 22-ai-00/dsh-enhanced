@@ -1,4 +1,4 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { DatabaseSync } from 'node:sqlite'
 import { vi } from 'vitest'
 import { normalizeConfig, type Config } from '../src/config.ts'

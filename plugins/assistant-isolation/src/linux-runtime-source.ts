@@ -10,7 +10,7 @@ const COMMIT = /^[a-f0-9]{40}$/u
 const ROOTS = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']
 const MANIFEST = /^(?:plugins|packages)\/[a-z0-9-]+\/package\.json$/u
 const MAX_OUTPUT = 4_194_304
-const OFFICIAL = 'https://github.com/22-ai-00/dsh-enhanced.git'
+const OFFICIAL = 'https://github.com/22-ai-00/dsh-ray.git'
 export interface FrozenLinuxRuntimeSource {
   version: string
   sourceCommit: string
@@ -179,7 +179,7 @@ export function copyLinuxRuntimeManifests(source: FrozenLinuxRuntimeSource): Map
   const sorted = new Map([...files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
   let root: { name?: string; version?: string; packageManager?: string }
   try { root = JSON.parse(decode(sorted.get('package.json')!)) } catch { return fail('frozen root manifest invalid') }
-  if (root?.name !== 'dsh-enhanced' || root.version !== source.version || root.packageManager !== 'pnpm@11.7.0') fail('frozen root manifest identity differs')
+  if (root?.name !== 'dsh-ray' || root.version !== source.version || root.packageManager !== 'pnpm@11.7.0') fail('frozen root manifest identity differs')
   packageConfiguration(root)
   const workspaces = new Set([...sorted.keys()].filter(name => MANIFEST.test(name)).map(dirname))
   const packageNames = new Set<string>()

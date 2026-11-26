@@ -1,4 +1,4 @@
-# @dsh-enhanced/event-triggers
+# @dsh-ray/event-triggers
 
 把受限 file、HTTPS/JSON、Lark Calendar 和 HMAC webhook 边缘条件转换成 `assistant-automations` 的稳定 external occurrence。插件先在自己的 SQLite outbox 持久化 fire，再调用 Automations；下游失败或重启时重放相同 event id，不直接创建 Agent 或发送消息。失败项采用持久退避重试，已删除或禁用 trigger 的遗留事件进入 quarantine，不会阻塞后续事件。
 
@@ -7,17 +7,17 @@
 ## 安装与默认状态
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/event-triggers
+dsh plugin --profile web add @dsh-ray/event-triggers
 dsh --profile web --dump-config
 ```
 
 默认 `triggers: []`、`pollerEnabled: true`（在 Cordis 配置与 `cordis.patch.yml` 中默认开启轮询；显式配置 `pollerEnabled: false` 可仅保留 outbox 投递与 webhook）。File/HTTP/Task/Calendar/Email 来源需要给 `background:event-triggers:<id>` 的 filesystem/network `observe` 明确 Policy 规则；Webhook 还需要 `external:webhook:<id>` 的 automation `accept` 规则，Automations 本身会再次验证 external `ingest`。
 
-`github-repository` 来源以结构化状态摘要产生变化事件，响应内容不进入模型上下文。嵌入式配置绑定 `repository`、`branch`、`baseBranch` 和 `credentialHandle`，只读固定 `api.github.com` 的分支 check-runs、目标 PR 和 reviews。Keychain handle 须允许 consumer `dsh-enhanced-event-triggers`、purpose `github.observe`；每次请求受租约、固定 HTTPS 出口、正文上限和共同 deadline 约束，截断或不一致的提交状态拒绝生成事件。外部 `external-unix-v1` 配置以 `externalGrant: { id, revision, digest }` 替代 `credentialHandle`，两者必须恰有一个；它要求 `observerLifetime: goal` 和 observer。Event Triggers 不取得 GitHub 凭据或网络 transport，而是通过已注入的 `assistantActions.readRepositoryEventObservation` 获取仅含 `sha256:` 指纹和 `truthy: true` 的已验证观测。
+`github-repository` 来源以结构化状态摘要产生变化事件，响应内容不进入模型上下文。嵌入式配置绑定 `repository`、`branch`、`baseBranch` 和 `credentialHandle`，只读固定 `api.github.com` 的分支 check-runs、目标 PR 和 reviews。Keychain handle 须允许 consumer `dsh-ray-event-triggers`、purpose `github.observe`；每次请求受租约、固定 HTTPS 出口、正文上限和共同 deadline 约束，截断或不一致的提交状态拒绝生成事件。外部 `external-unix-v1` 配置以 `externalGrant: { id, revision, digest }` 替代 `credentialHandle`，两者必须恰有一个；它要求 `observerLifetime: goal` 和 observer。Event Triggers 不取得 GitHub 凭据或网络 transport，而是通过已注入的 `assistantActions.readRepositoryEventObservation` 获取仅含 `sha256:` 指纹和 `truthy: true` 的已验证观测。
 
 该来源必须配置 `observer`：准确 workspace/preset、principalId/principalRecordId/principalVersion、ownerRouteId、绝对 expiresAt 和 budgetId。它复用 Automations 的有限 Host 执行器，不调用模型；另需 Delivery 验证 owner route，Policy 授权观测、凭据、来源执行和下游 ingest。Web Owner 的 `repositoryDelivery.events` 可生成这些配置及有限轮询/执行预算。原有未配置 observer 的来源保持既有行为。
 
-`lark-calendar` 是独立安装后可选的只读来源，需要同时安装并启用 `@dsh-enhanced/lark-channel`。配置必须提供一个精确 `calendarId`、`observer`，以及静态 Unix-second `startTime`/`endTime` 窗口或相对轮询时间的滚动窗口（`lookbackSeconds`/`lookaheadSeconds` 与可选量化步长 `windowStepSeconds`；静态与滚动参数互斥）。滚动窗口在每次轮询时基于当前时钟解析为 `[max(0, baseSec - lookbackSeconds), baseSec + lookaheadSeconds]`，不影响静态触发器的 `configDigest`。它不会调用 Calendar list，也不会枚举或探测其他日历。Lark Channel 的 `allowedCalendarIds` 默认空；该 exact ID 必须同时在其中，且 Event Triggers 必须有 exact `network:lark-calendar:<calendarId>` 的 background `observe` Policy 规则。两个门都通过后，连接器才以其受限 SDK/token 生命周期读取 `GET /open-apis/calendar/v4/calendars/{calendar_id}/events` 的窗口分页。app secret、tenant token、page token 和日历正文都不进入 Event Triggers 的配置摘要、SQLite outbox、envelope 或健康日志。
+`lark-calendar` 是独立安装后可选的只读来源，需要同时安装并启用 `@dsh-ray/lark-channel`。配置必须提供一个精确 `calendarId`、`observer`，以及静态 Unix-second `startTime`/`endTime` 窗口或相对轮询时间的滚动窗口（`lookbackSeconds`/`lookaheadSeconds` 与可选量化步长 `windowStepSeconds`；静态与滚动参数互斥）。滚动窗口在每次轮询时基于当前时钟解析为 `[max(0, baseSec - lookbackSeconds), baseSec + lookaheadSeconds]`，不影响静态触发器的 `configDigest`。它不会调用 Calendar list，也不会枚举或探测其他日历。Lark Channel 的 `allowedCalendarIds` 默认空；该 exact ID 必须同时在其中，且 Event Triggers 必须有 exact `network:lark-calendar:<calendarId>` 的 background `observe` Policy 规则。两个门都通过后，连接器才以其受限 SDK/token 生命周期读取 `GET /open-apis/calendar/v4/calendars/{calendar_id}/events` 的窗口分页。app secret、tenant token、page token 和日历正文都不进入 Event Triggers 的配置摘要、SQLite outbox、envelope 或健康日志。
 
 ```yaml
 triggers:

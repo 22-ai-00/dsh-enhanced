@@ -1,4 +1,4 @@
-import type { ApprovalProposalRouteStates } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalProposalRouteStates } from '@dsh-ray/assistant-policy'
 
 export type OwnerApprovalStatusRead = Readonly<{
   memory: ApprovalProposalRouteStates

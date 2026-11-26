@@ -7,14 +7,14 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { isSeq, parseDocument } from 'yaml'
 import { getExport, getExportFn, sha256Hex } from './helpers/assertions.ts'
-import { runBashCommand, runCommandProcess, runDshRsiInProcess, runNodeScript } from './helpers/cli-runner.ts'
+import { runBashCommand, runCommandProcess, runDshRayInProcess, runNodeScript } from './helpers/cli-runner.ts'
 import { createCordisHarness } from './helpers/cordis-harness.ts'
 import {
   loadAssistantDelivery,
   loadAssistantPolicy,
   loadAssistantWebOwnerSetup,
-  loadDshRsiCli,
-  loadDshRsiUpgrade,
+  loadDshRayCli,
+  loadDshRayUpgrade,
   loadLarkChannel,
   loadOwnerConsole,
   loadPackageModule,
@@ -40,14 +40,14 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       opts: { hostVersion?: string; seedHistory?: boolean } = {},
     ) {
       const profileDir = join(dshHome, 'profiles', profileName)
-      const enhancedDir = join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery')
+      const enhancedDir = join(profileDir, 'node_modules', '@dsh-ray', 'assistant-delivery')
       const cacheRoot = join(dshHome, 'host-cache')
       await mkdir(profileDir, { recursive: true, mode: 0o700 })
       await mkdir(enhancedDir, { recursive: true, mode: 0o700 })
       await mkdir(cacheRoot, { recursive: true, mode: 0o700 })
 
       const hostVersion = opts.hostVersion ?? '0.1.9'
-      const hostBindingPath = join(dshHome, '.dsh-rsi-host.json')
+      const hostBindingPath = join(dshHome, '.dsh-ray-host.json')
       await writeFile(
         hostBindingPath,
         JSON.stringify({
@@ -63,21 +63,21 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
         JSON.stringify({
           name: `dsh-profile-${profileName}`,
           private: true,
-          dependencies: { '@dsh-enhanced/assistant-delivery': '0.1.83' },
+          dependencies: { '@dsh-ray/assistant-delivery': '0.1.83' },
         }),
         { mode: 0o600 },
       )
       await writeFile(join(profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n', { mode: 0o600 })
       await writeFile(
         join(enhancedDir, 'package.json'),
-        JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: '0.1.83' }),
+        JSON.stringify({ name: '@dsh-ray/assistant-delivery', version: '0.1.83' }),
         { mode: 0o600 },
       )
       await writeFile(
         join(profileDir, 'cordis.patch.yml'),
         [
-          '- id: dsh-enhanced-assistant-delivery',
-          '  name: "@dsh-enhanced/assistant-delivery"',
+          '- id: dsh-ray-assistant-delivery',
+          '  name: "@dsh-ray/assistant-delivery"',
           '  config:',
           '    ownerRoutes:',
           '      - id: owner-route-1',
@@ -111,7 +111,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
     function mockUpgradeFetch(targetEnhanced = '0.1.84', targetDsh = '0.2.2-rc.5') {
       return async (url: string | URL) => {
         const str = String(url)
-        const latest = str.includes('@dsh-enhanced') || str.includes('dsh-rsi-cli') ? targetEnhanced : targetDsh
+        const latest = str.includes('@dsh-ray') || str.includes('dsh-ray') ? targetEnhanced : targetDsh
         return new Response(JSON.stringify({ 'dist-tags': { latest } }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
@@ -122,7 +122,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
     test('T1-F19-01: Host 0.1 -> 0.2 upgrade executes cleanly and preserves cordis.patch.yml & credentials', async () => {
       const ws = await workspaces.create('f19-host01-')
       const { profileDir, hostBindingPath } = await seedProfileFixture(ws.dshHome, 'web', { hostVersion: '0.1.9' })
-      const upg = await loadDshRsiUpgrade()
+      const upg = await loadDshRayUpgrade()
 
       const { report } = await upg.runUpgrade({
         dshHome: ws.dshHome,
@@ -154,7 +154,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
     test('T1-F19-02: existing-owner in-place upgrade preserves ownerRoutes principal bindings', async () => {
       const ws = await workspaces.create('f19-owner-')
       const { profileDir, hostBindingPath } = await seedProfileFixture(ws.dshHome, 'web', { hostVersion: '0.2.1-rc.2' })
-      const upg = await loadDshRsiUpgrade()
+      const upg = await loadDshRayUpgrade()
 
       const { report } = await upg.runUpgrade({
         dshHome: ws.dshHome,
@@ -185,7 +185,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
     test('T1-F19-03: non-empty creation & revision history migration preserves SQLite ledgers', async () => {
       const ws = await workspaces.create('f19-history-')
       const { hostBindingPath } = await seedProfileFixture(ws.dshHome, 'web', { hostVersion: '0.1.9', seedHistory: true })
-      const upg = await loadDshRsiUpgrade()
+      const upg = await loadDshRayUpgrade()
 
       const { report } = await upg.runUpgrade({
         dshHome: ws.dshHome,
@@ -216,7 +216,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
     test('T1-F19-04: failed post-upgrade verifyHealth triggers automatic rollback', async () => {
       const ws = await workspaces.create('f19-rollback-')
       const { hostBindingPath } = await seedProfileFixture(ws.dshHome, 'web', { hostVersion: '0.2.1-rc.2' })
-      const upg = await loadDshRsiUpgrade()
+      const upg = await loadDshRayUpgrade()
 
       const { report } = await upg.runUpgrade({
         dshHome: ws.dshHome,
@@ -332,12 +332,12 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       )
       const effectiveSource = [
         bundleSnippets.join('\n'),
-        '- id: dsh-enhanced-assistant-goals',
-        '  name: "@dsh-enhanced/assistant-goals"',
-        '- id: dsh-enhanced-assistant-web-owner',
-        '  name: "@dsh-enhanced/assistant-web-owner"',
-        '- id: dsh-enhanced-assistant-association',
-        '  name: "@dsh-enhanced/assistant-association"',
+        '- id: dsh-ray-assistant-goals',
+        '  name: "@dsh-ray/assistant-goals"',
+        '- id: dsh-ray-assistant-web-owner',
+        '  name: "@dsh-ray/assistant-web-owner"',
+        '- id: dsh-ray-assistant-association',
+        '  name: "@dsh-ray/assistant-association"',
         '  config:',
         '    enabled: true',
       ].join('\n')
@@ -359,18 +359,18 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
 
     test('T1-F20-05: common.sh standard slug arrays list assistant-association without dogfood preset', async () => {
       const script = await readInstallerCommonScript()
-      const core = parseBashArray(script, 'DSH_ENHANCED_CORE_PLUGIN_SLUGS')
-      const lark = parseBashArray(script, 'DSH_ENHANCED_LARK_PLUGIN_SLUGS')
-      const sup = parseBashArray(script, 'DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS')
+      const core = parseBashArray(script, 'DSH_RAY_CORE_PLUGIN_SLUGS')
+      const lark = parseBashArray(script, 'DSH_RAY_LARK_PLUGIN_SLUGS')
+      const sup = parseBashArray(script, 'DSH_RAY_SUPERVISED_GROWTH_PLUGIN_SLUGS')
       const combined = new Set([...core, ...lark, ...sup])
       expect(combined.has('assistant-association')).toBe(true)
     })
   })
 
-  describe('F21: R4 CLI (dsh-rsi enable|disable|upgrade) & NL Web/Lark controls + recovery', () => {
-    test('T1-F21-01: dsh-rsi parseArgs and CLI toggle self-iteration via enable and disable', async () => {
+  describe('F21: R4 CLI (dsh-ray enable|disable|upgrade) & NL Web/Lark controls + recovery', () => {
+    test('T1-F21-01: dsh-ray parseArgs and CLI toggle self-iteration via enable and disable', async () => {
       const ws = await workspaces.create('f21-cli-toggle-')
-      const cli = await loadDshRsiCli()
+      const cli = await loadDshRayCli()
       const parseArgs = getExportFn<(argv: readonly string[]) => Record<string, unknown>>(cli, 'parseArgs')
       expect(parseArgs(['enable', '--profile', 'web']).command).toBe('enable')
       expect(parseArgs(['disable', '--profile', 'web']).command).toBe('disable')
@@ -380,19 +380,19 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true }), 'utf8')
       await writeFile(
         join(profileDir, 'cordis.patch.yml'),
-        '- id: dsh-enhanced-assistant-work-items\n  name: "@dsh-enhanced/assistant-work-items"\n  config:\n    enabled: false\n',
+        '- id: dsh-ray-assistant-work-items\n  name: "@dsh-ray/assistant-work-items"\n  config:\n    enabled: false\n',
         'utf8',
       )
 
-      const dis = await runDshRsiInProcess(['disable', '--profile', 'web', '--dsh-home', ws.dshHome, '--json'])
+      const dis = await runDshRayInProcess(['disable', '--profile', 'web', '--dsh-home', ws.dshHome, '--json'])
       expect(dis.exitCode).toBe(0)
-      const en = await runDshRsiInProcess(['enable', '--profile', 'web', '--dsh-home', ws.dshHome, '--json'])
+      const en = await runDshRayInProcess(['enable', '--profile', 'web', '--dsh-home', ws.dshHome, '--json'])
       expect(en.exitCode).toBe(0)
     })
 
     test('T1-F21-02: unified upgradeAssistantAndRecover executes upgrade, migration, doctor and recovery', async () => {
       const ws = await workspaces.create('f21-upgrade-')
-      const cli = await loadDshRsiCli()
+      const cli = await loadDshRayCli()
       const upgradeAndRecover = getExportFn<(opts: Record<string, unknown>, deps?: Record<string, unknown>) => Promise<Record<string, unknown>>>(
         cli,
         'upgradeAssistantAndRecover',
@@ -501,7 +501,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
     test('T1-F22-02: verify-npm-release.mjs fails closed when 1 of 40 packages is missing on npm', async () => {
       const manifests = await readAllWorkspaceManifests()
       const targetVersion = manifests[0]!.version
-      const missingName = '@dsh-enhanced/assistant-association'
+      const missingName = '@dsh-ray/assistant-association'
 
       const server = createServer((req, res) => {
         const pkgName = decodeURIComponent((req.url ?? '/').slice(1))
@@ -569,7 +569,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
   })
 
   describe('F23: R1 cross-platform CI coverage in .github/workflows/ci.yml', () => {
-    test('T1-F23-01: ci.yml Windows job covers validate, build, and dsh-rsi-cli tests', async () => {
+    test('T1-F23-01: ci.yml Windows job covers validate, build, and dsh-ray tests', async () => {
       const wf = await parseWorkflowYaml<{
         jobs: Record<string, { 'runs-on'?: string; steps?: Array<{ run?: string }> }>
       }>('.github/workflows/ci.yml')
@@ -578,7 +578,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       const allWinRun = winJobs.flatMap(([, j]) => (j.steps ?? []).map(s => s.run ?? '')).join('\n')
       expect(allWinRun).toContain('pnpm run validate')
       expect(allWinRun).toContain('pnpm run build')
-      expect(allWinRun).toContain('dsh-rsi-cli')
+      expect(allWinRun).toContain('dsh-ray')
     })
 
     test('T1-F23-02: ci.yml Windows job covers assistant-isolation and assistant-actions', async () => {
@@ -593,7 +593,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       expect(allWinRun).toContain('assistant-actions')
     })
 
-    test('T1-F23-03: ci.yml macOS job covers validate, lint, build, assistant-isolation, dsh-rsi-cli & assistant-actions', async () => {
+    test('T1-F23-03: ci.yml macOS job covers validate, lint, build, assistant-isolation, dsh-ray & assistant-actions', async () => {
       const wf = await parseWorkflowYaml<{
         jobs: Record<string, { 'runs-on'?: string; steps?: Array<{ run?: string }> }>
       }>('.github/workflows/ci.yml')
@@ -605,7 +605,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       expect(macRuns).toContain('pnpm run lint')
       expect(macRuns).toContain('pnpm run build')
       expect(macRuns).toContain('assistant-isolation')
-      expect(macRuns).toContain('dsh-rsi-cli')
+      expect(macRuns).toContain('dsh-ray')
       expect(macRuns).toContain('assistant-actions')
     })
 
@@ -639,25 +639,25 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
   })
 
   describe('F26: Multi-channel & CLI version command + read-only self-iteration statistics', () => {
-    test('T1-F26-01: dsh-rsi --version, -V, version --short, bin/dsh-rsi.js, absent DSH_HOME JSON & common.sh probe compatibility', async () => {
+    test('T1-F26-01: dsh-ray --version, -V, version --short, bin/dsh-ray.js, absent DSH_HOME JSON & common.sh probe compatibility', async () => {
       const ws = await workspaces.create('f26-cli-ver-')
       const manifests = await readAllWorkspaceManifests()
       const expectedVersion = manifests[0]!.version
-      const cli = await loadDshRsiCli()
+      const cli = await loadDshRayCli()
       expect(cli.version).toBe(expectedVersion)
 
       for (const args of [['--version'], ['-V'], ['version', '--short']] as const) {
-        const res = await runDshRsiInProcess(args)
+        const res = await runDshRayInProcess(args)
         expect(res.exitCode, `Expected exit 0 for ${args.join(' ')}`).toBe(0)
         expect(res.stdout.trim()).toBe(expectedVersion)
       }
 
-      const binRes = await runNodeScript('packages/dsh-rsi-cli/bin/dsh-rsi.js', ['--version'])
+      const binRes = await runNodeScript('packages/dsh-ray/bin/dsh-ray.js', ['--version'])
       expect(binRes.exitCode).toBe(0)
       expect(binRes.stdout.trim()).toBe(expectedVersion)
 
       const absentHome = join(ws.root, 'absent-dsh-home')
-      const jsonRes = await runDshRsiInProcess(['version', '--json', '--dsh-home', absentHome], { DSH_HOME: absentHome })
+      const jsonRes = await runDshRayInProcess(['version', '--json', '--dsh-home', absentHome], { DSH_HOME: absentHome })
       expect(jsonRes.exitCode).toBe(0)
       const report = JSON.parse(jsonRes.stdout) as {
         schemaVersion: number
@@ -667,19 +667,19 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
         selfIteration: { dataState: string; totalIterations: number | null }
       }
       expect(report.schemaVersion).toBe(1)
-      expect(report.protocol).toBe('dsh-rsi/version/v1')
+      expect(report.protocol).toBe('dsh-ray/version/v1')
       expect(report.assistant.version).toBe(expectedVersion)
       expect(report.plugins.state).toBe('unavailable')
       expect(report.selfIteration.dataState).toBe('no-data')
       expect(report.selfIteration.totalIterations).toBeNull()
 
-      // Verify common.sh dsh_enhanced_ensure_rsi_cli works with both --version and legacy `version`-only mock
+      // Verify common.sh dsh_ray_ensure_rsi_cli works with both --version and legacy `version`-only mock
       const shimBin = join(ws.root, 'shim-bin')
       await mkdir(shimBin, { recursive: true, mode: 0o700 })
       await writeFile(join(shimBin, 'npm'), '#!/usr/bin/env bash\nexit 0\n', 'utf8')
       await chmod(join(shimBin, 'npm'), 0o755)
 
-      const legacyMock = join(shimBin, 'dsh-rsi')
+      const legacyMock = join(shimBin, 'dsh-ray')
       await writeFile(
         legacyMock,
         `#!/usr/bin/env bash\nif [[ "\${1:-}" == version ]]; then printf "%s\\n" "${expectedVersion}"; fi\n`,
@@ -689,10 +689,10 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       const envLegacy = await createIsolatedEnv(ws, { PATH: `${shimBin}:${process.env.PATH ?? '/usr/bin:/bin'}` })
       const legacyProbe = await runBashCommand([
         '-c',
-        `source "${join(repoRoot, 'scripts/install/common.sh')}" && dsh_enhanced_ensure_rsi_cli npm "${repoRoot}" "${expectedVersion}" 0`,
+        `source "${join(repoRoot, 'scripts/install/common.sh')}" && dsh_ray_ensure_rsi_cli npm "${repoRoot}" "${expectedVersion}" 0`,
       ], { env: envLegacy })
       expect(legacyProbe.exitCode).toBe(0)
-      expect(legacyProbe.stdout).toContain(`dsh-rsi 已就绪：${expectedVersion}`)
+      expect(legacyProbe.stdout).toContain(`dsh-ray 已就绪：${expectedVersion}`)
 
       await writeFile(
         legacyMock,
@@ -702,20 +702,20 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       await chmod(legacyMock, 0o755)
       const modernProbe = await runBashCommand([
         '-c',
-        `source "${join(repoRoot, 'scripts/install/common.sh')}" && dsh_enhanced_ensure_rsi_cli npm "${repoRoot}" "${expectedVersion}" 0`,
+        `source "${join(repoRoot, 'scripts/install/common.sh')}" && dsh_ray_ensure_rsi_cli npm "${repoRoot}" "${expectedVersion}" 0`,
       ], { env: envLegacy })
       expect(modernProbe.exitCode).toBe(0)
-      expect(modernProbe.stdout).toContain(`dsh-rsi 已就绪：${expectedVersion}`)
+      expect(modernProbe.stdout).toContain(`dsh-ray 已就绪：${expectedVersion}`)
     })
 
-    test('T1-F26-02: dsh-rsi version --json aggregates read-only SQLite ledgers without double-counting and passes OwnerConsoleVersionReportSchema', async () => {
+    test('T1-F26-02: dsh-ray version --json aggregates read-only SQLite ledgers without double-counting and passes OwnerConsoleVersionReportSchema', async () => {
       const ws = await workspaces.create('f26-cli-ledgers-')
       const manifests = await readAllWorkspaceManifests()
       const expectedVersion = manifests[0]!.version
       const typertMod = await loadPackageModule('owner-console/typert')
       const ReportSchema = getExport<{ parse: (input: unknown) => unknown }>(typertMod, 'OwnerConsoleVersionReportSchema')
 
-      const profilePkgDir = join(ws.dshHome, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'owner-console')
+      const profilePkgDir = join(ws.dshHome, 'profiles', 'web', 'node_modules', '@dsh-ray', 'owner-console')
       await mkdir(profilePkgDir, { recursive: true, mode: 0o700 })
       await writeFile(
         join(ws.dshHome, 'profiles', 'web', 'package.json'),
@@ -724,21 +724,21 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       )
       await writeFile(
         join(profilePkgDir, 'package.json'),
-        JSON.stringify({ name: '@dsh-enhanced/owner-console', version: expectedVersion }),
+        JSON.stringify({ name: '@dsh-ray/owner-console', version: expectedVersion }),
         'utf8',
       )
       await writeFile(
-        join(ws.dshHome, '.dsh-rsi-host.json'),
+        join(ws.dshHome, '.dsh-ray-host.json'),
         JSON.stringify({ schemaVersion: 1, version: '0.2.2-rc.5', cacheRoot: join(ws.root, 'cache'), receiptDigest: sha256Hex('host') }),
         { mode: 0o600 },
       )
-      await mkdir(join(ws.dshHome, '.dsh-enhanced'), { recursive: true, mode: 0o700 })
+      await mkdir(join(ws.dshHome, '.dsh-ray'), { recursive: true, mode: 0o700 })
       await writeFile(
-        join(ws.dshHome, '.dsh-enhanced', 'upgrade-history.jsonl'),
+        join(ws.dshHome, '.dsh-ray', 'upgrade-history.jsonl'),
         `${JSON.stringify({ at: 100, toVersion: expectedVersion })}\n`,
         'utf8',
       )
-      await mkdir(join(ws.dshHome, '.dsh-rsi-upgrade-backups', 'snap-1'), { recursive: true, mode: 0o700 })
+      await mkdir(join(ws.dshHome, '.dsh-ray-upgrade-backups', 'snap-1'), { recursive: true, mode: 0o700 })
 
       const execSql = async (rel: string, sql: string) => {
         const full = join(ws.dshHome, rel)
@@ -753,13 +753,13 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       await execSql('assistant-work-items/state.sqlite', "CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO work_item VALUES ('w1', 'settled'), ('w2', 'open');")
       await execSql('assistant-dreaming/state.sqlite', "CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT) STRICT; INSERT INTO dream_runs VALUES ('d1', 'completed');")
       await execSql('assistant-evolution/evolution.sqlite', "CREATE TABLE evolution_proposals (id TEXT PRIMARY KEY, status TEXT) STRICT; CREATE TABLE evolution_rules (id TEXT PRIMARY KEY, status TEXT) STRICT; CREATE TABLE evolution_autonomous_rollbacks (idempotency_key TEXT PRIMARY KEY) STRICT; INSERT INTO evolution_proposals VALUES ('ep1', 'approved'); INSERT INTO evolution_rules VALUES ('er1', 'active'); INSERT INTO evolution_autonomous_rollbacks VALUES ('rb1');")
-      await execSql('plugin-control-plane/control.sqlite', "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('sp-create', '@dsh-enhanced/evolved-demo', 'create', 'release-complete'), ('sp-rev', '@dsh-enhanced/evolved-demo', 'modify', 'release-complete'); INSERT INTO activation_plans VALUES ('sp-create', 'web', 'activated'), ('sp-rb', 'web', 'rolled-back');")
-      await execSql('plugin-control-plane/creation-adoptions.sqlite', `CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, certificate_json TEXT, receipt_json TEXT) STRICT; INSERT INTO adoptions VALUES ('sp-create', 'active', '{"plan":{"name":"@dsh-enhanced/evolved-demo"}}', '{"version":"0.1.0"}');`)
-      await execSql('plugin-control-plane/revision-adoptions.sqlite', "CREATE TABLE entries (entry_id TEXT PRIMARY KEY, name TEXT, current_plan_id TEXT, revision INTEGER) STRICT; CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, entry_id TEXT) STRICT; CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT) STRICT; INSERT INTO entries VALUES ('e1', '@dsh-enhanced/evolved-demo', 'sp-rev', 2); INSERT INTO adoptions VALUES ('sp-rev', 'active', 'e1');")
+      await execSql('plugin-control-plane/control.sqlite', "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('sp-create', '@dsh-ray/evolved-demo', 'create', 'release-complete'), ('sp-rev', '@dsh-ray/evolved-demo', 'modify', 'release-complete'); INSERT INTO activation_plans VALUES ('sp-create', 'web', 'activated'), ('sp-rb', 'web', 'rolled-back');")
+      await execSql('plugin-control-plane/creation-adoptions.sqlite', `CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, certificate_json TEXT, receipt_json TEXT) STRICT; INSERT INTO adoptions VALUES ('sp-create', 'active', '{"plan":{"name":"@dsh-ray/evolved-demo"}}', '{"version":"0.1.0"}');`)
+      await execSql('plugin-control-plane/revision-adoptions.sqlite', "CREATE TABLE entries (entry_id TEXT PRIMARY KEY, name TEXT, current_plan_id TEXT, revision INTEGER) STRICT; CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, entry_id TEXT) STRICT; CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT) STRICT; INSERT INTO entries VALUES ('e1', '@dsh-ray/evolved-demo', 'sp-rev', 2); INSERT INTO adoptions VALUES ('sp-rev', 'active', 'e1');")
       await execSql('assistant-association/association.sqlite', "CREATE TABLE assoc_param_profile_heads (scope_key TEXT PRIMARY KEY, active_version INTEGER) STRICT; CREATE TABLE assoc_param_profile_events (kind TEXT) STRICT; INSERT INTO assoc_param_profile_heads VALUES ('owner', 2); INSERT INTO assoc_param_profile_events VALUES ('adopted');")
       await execSql('assistant-evaluation/evaluation.sqlite', "CREATE TABLE evaluation_attention_tuning_events (kind TEXT) STRICT; CREATE TABLE evaluation_attention_loosening_decisions (proposal_id TEXT PRIMARY KEY, decision TEXT) STRICT; INSERT INTO evaluation_attention_tuning_events VALUES ('adopted'); INSERT INTO evaluation_attention_loosening_decisions VALUES ('lp1', 'adopted');")
 
-      const res = await runDshRsiInProcess(['version', '--json', '--dsh-home', ws.dshHome])
+      const res = await runDshRayInProcess(['version', '--json', '--dsh-home', ws.dshHome])
       expect(res.exitCode).toBe(0)
       const parsed = JSON.parse(res.stdout) as {
         assistant: { version: string }
@@ -783,8 +783,8 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       expect(parsed.selfIteration.rollbacks).toBe(2) // 1 activation rollback + 1 evo rollback
       expect(parsed.selfIteration.selfUpgrades).toBe(1)
       expect(parsed.selfIteration.backupSnapshotsCount).toBe(1)
-      expect(parsed.plugins.core.some(p => p.name === '@dsh-enhanced/owner-console')).toBe(true)
-      expect(parsed.plugins.evolved.some(p => p.name === '@dsh-enhanced/evolved-demo')).toBe(true)
+      expect(parsed.plugins.core.some(p => p.name === '@dsh-ray/owner-console')).toBe(true)
+      expect(parsed.plugins.evolved.some(p => p.name === '@dsh-ray/evolved-demo')).toBe(true)
       expect(parsed.plugins.evolvedCount).toBe(1)
     })
 
@@ -873,9 +873,9 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       const expectedVersion = manifests[0]!.version
       const summary = formatSummary({
         schemaVersion: 1,
-        protocol: 'dsh-rsi/version/v1',
+        protocol: 'dsh-ray/version/v1',
         generatedAt: 1_700_000_000_000,
-        assistant: { name: 'dsh-enhanced', version: expectedVersion, cliVersion: expectedVersion },
+        assistant: { name: 'dsh-ray', version: expectedVersion, cliVersion: expectedVersion },
         host: { packageName: '@deepseek-ai/dsh', boundVersion: '0.2.2-rc.5', boundStatus: 'ready', runningVersion: '0.2.2-rc.5' },
         profile: 'web',
         plugins: { state: 'ok', coreCount: 1, evolvedCount: 0, activeEvolvedCount: 0, core: [], evolved: [] },
@@ -1074,7 +1074,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       await drive()
       expect(sends).toHaveLength(3)
       for (const reply of sends) {
-        expect(reply.text).toContain('助手版本：dsh-enhanced v')
+        expect(reply.text).toContain('助手版本：dsh-ray v')
         expect(reply.text).toContain('自迭代演进统计')
       }
       expect(resumeSpy).not.toHaveBeenCalled()
@@ -1101,7 +1101,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
   })
 
   describe('F27: Surgical SQLite ExperimentalWarning suppression across CLI entrypoints', () => {
-    test('T1-F27-01: dsh-rsi.js subprocesses emit zero SQLite ExperimentalWarning across CLI commands and seeded upgrade --check', async () => {
+    test('T1-F27-01: dsh-ray.js subprocesses emit zero SQLite ExperimentalWarning across CLI commands and seeded upgrade --check', async () => {
       const ws = await workspaces.create('f27-cli-stderr-')
       const manifests = await readAllWorkspaceManifests()
       const expectedVersion = manifests[0]!.version
@@ -1113,7 +1113,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
         { args: ['version', '--short'], assertStdout: out => expect(out.trim()).toBe(expectedVersion) },
         {
           args: ['version', '--json', '--dsh-home', absentHome],
-          assertStdout: out => expect(JSON.parse(out)).toMatchObject({ protocol: 'dsh-rsi/version/v1', assistant: { version: expectedVersion } }),
+          assertStdout: out => expect(JSON.parse(out)).toMatchObject({ protocol: 'dsh-ray/version/v1', assistant: { version: expectedVersion } }),
         },
         {
           args: ['status', '--json', '--dsh-home', absentHome],
@@ -1124,7 +1124,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       ]
 
       for (const item of cleanCommands) {
-        const res = await runNodeScript('packages/dsh-rsi-cli/bin/dsh-rsi.js', item.args, { env: { DSH_HOME: absentHome } })
+        const res = await runNodeScript('packages/dsh-ray/bin/dsh-ray.js', item.args, { env: { DSH_HOME: absentHome } })
         expect(res.exitCode, `${item.args.join(' ')}: ${res.stderr}`).toBe(0)
         expect(res.stderr, item.args.join(' ')).toBe('')
         expect(res.stderr).not.toContain('ExperimentalWarning')
@@ -1135,14 +1135,14 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       // Seeded SQLite control-plane ledger + loopback registry ensures node:sqlite is actively opened during upgrade --check --json
       const seededHome = ws.dshHome
       const profileDir = join(seededHome, 'profiles', 'web')
-      const enhancedDir = join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery')
+      const enhancedDir = join(profileDir, 'node_modules', '@dsh-ray', 'assistant-delivery')
       const cpDir = join(seededHome, 'plugin-control-plane')
       await mkdir(enhancedDir, { recursive: true, mode: 0o700 })
       await mkdir(cpDir, { recursive: true, mode: 0o700 })
-      await writeFile(join(profileDir, 'cordis.patch.yml'), '- id: dsh-enhanced-assistant-delivery\n  name: "@dsh-enhanced/assistant-delivery"\n', 'utf8')
-      await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true, dependencies: { '@dsh-enhanced/assistant-delivery': expectedVersion } }), 'utf8')
+      await writeFile(join(profileDir, 'cordis.patch.yml'), '- id: dsh-ray-assistant-delivery\n  name: "@dsh-ray/assistant-delivery"\n', 'utf8')
+      await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true, dependencies: { '@dsh-ray/assistant-delivery': expectedVersion } }), 'utf8')
       await writeFile(join(profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n', 'utf8')
-      await writeFile(join(enhancedDir, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: expectedVersion }), 'utf8')
+      await writeFile(join(enhancedDir, 'package.json'), JSON.stringify({ name: '@dsh-ray/assistant-delivery', version: expectedVersion }), 'utf8')
       const db = new DatabaseSync(join(cpDir, 'web.sqlite'))
       try {
         db.exec('CREATE TABLE IF NOT EXISTS control_plane_meta (k TEXT PRIMARY KEY, v TEXT)')
@@ -1152,14 +1152,14 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
 
       const server = createServer((req, res) => {
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ 'dist-tags': { latest: (req.url ?? '').includes('dsh-enhanced') ? expectedVersion : '0.2.2-rc.5' } }))
+        res.end(JSON.stringify({ 'dist-tags': { latest: (req.url ?? '').includes('dsh-ray') ? expectedVersion : '0.2.2-rc.5' } }))
       })
       try {
         await new Promise<void>(resolveListen => server.listen(0, '127.0.0.1', resolveListen))
         const addr = server.address()
         if (!addr || typeof addr === 'string') throw new Error('Expected loopback address')
         const checkRes = await runNodeScript(
-          'packages/dsh-rsi-cli/bin/dsh-rsi.js',
+          'packages/dsh-ray/bin/dsh-ray.js',
           ['upgrade', '--check', '--json', '--dsh-home', seededHome, '--registry', `http://127.0.0.1:${addr.port}`],
           { env: { DSH_HOME: seededHome } },
         )
@@ -1192,7 +1192,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       )
       const res = await runCommandProcess(
         process.execPath,
-        ['--import', pathToFileURL(preloadPath).href, join(repoRoot, 'packages/dsh-rsi-cli/bin/dsh-rsi.js'), '--version'],
+        ['--import', pathToFileURL(preloadPath).href, join(repoRoot, 'packages/dsh-ray/bin/dsh-ray.js'), '--version'],
       )
       expect(res.exitCode, res.stderr).toBe(0)
       expect(res.stdout).toBe(`${expectedVersion}\n`)

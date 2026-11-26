@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-lark-channel
-      name: '@dsh-enhanced/lark-channel'
+    - id: dsh-ray-lark-channel
+      name: '@dsh-ray/lark-channel'
       inject:
         - assistantDelivery
       config:

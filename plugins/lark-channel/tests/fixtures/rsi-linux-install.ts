@@ -1,6 +1,6 @@
 import { chmod, mkdir } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import { linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { linuxRuntimeDigest, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import type { RsiAuthorityResources } from '../../src/rsi-authority-resources.js'
 import type { LinuxV1CgroupRoots } from '../../src/rsi-linux-cgroup-roots.js'
 import type { LinuxRsiCreationBuildEnvironment } from '../../src/rsi-linux-creation-build.js'

@@ -40,7 +40,7 @@ async function fixture() {
   const quietJournal = join(root, 'quiet-journal')
   const readyJournal = join(root, 'ready-journal')
   await writeFile(quietJournal, `#!${process.execPath}\nprocess.stdout.write('not ready\\n')\n`, { mode: 0o700 })
-  await writeFile(readyJournal, `#!${process.execPath}\nprocess.stdout.write('dsh-enhanced host ready: v1\\n')\n`, { mode: 0o700 })
+  await writeFile(readyJournal, `#!${process.execPath}\nprocess.stdout.write('dsh-ray host ready: v1\\n')\n`, { mode: 0o700 })
   const sourceProof = { ownerRepair: { coordinatorProfile } }
   return { root, homePath, profile, coordinatorProfile, services, statePath, systemctl, quietJournal,
     readyJournal, sourceProof }
@@ -61,7 +61,7 @@ describe('owner repair original readiness', () => {
     await writeFile(countedJournal, `#!${process.execPath}\n`
       + `const fs = require('node:fs'); const path = ${JSON.stringify(journalCount)};\n`
       + `fs.writeFileSync(path, String(Number(fs.readFileSync(path, 'utf8')) + 1));\n`
-      + `process.stdout.write('dsh-enhanced host ready: v1\\n');\n`, { mode: 0o700 })
+      + `process.stdout.write('dsh-ray host ready: v1\\n');\n`, { mode: 0o700 })
     let inspections = 0
     const activation = retryable(() => {
       inspections++

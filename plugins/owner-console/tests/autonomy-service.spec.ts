@@ -117,8 +117,8 @@ describe('owner console autonomy & dreaming overview/action RPCs', () => {
 
     ctx.provide('loader' as never, {
       entries: () => [{
-        id: 'include:dsh-enhanced-assistant-dreaming',
-        options: { id: 'dsh-enhanced-assistant-dreaming', name: '@dsh-enhanced/assistant-dreaming', disabled: false,
+        id: 'include:dsh-ray-assistant-dreaming',
+        options: { id: 'dsh-ray-assistant-dreaming', name: '@dsh-ray/assistant-dreaming', disabled: false,
           config: { scope: { workspace: '/ws/demo', preset: 'standard' } } },
         refresh: async () => undefined,
       }],

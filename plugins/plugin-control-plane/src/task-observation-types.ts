@@ -1,4 +1,4 @@
-import type { EvaluationCanonicalLearningEvidenceTuple } from '@dsh-enhanced/assistant-evaluation'
+import type { EvaluationCanonicalLearningEvidenceTuple } from '@dsh-ray/assistant-evaluation'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { SourceApprovalClientConfig } from './source-approval-client.js'
 import type { PostActivationObservationReceipt } from './types.js'

@@ -8,7 +8,7 @@ import {
   type ApprovalDispatchRoute,
   type ApprovalDispatchRouteV2,
   type ApprovalProposalSnapshot,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { WikiProposalManager, WikiProposalStore, WikiProposalStoreError } from '../src/proposals.ts'
 import type { WikiPageInput } from '../src/types.ts'
@@ -66,7 +66,7 @@ function proposalInput(title = 'Personal assistant') {
 
 const v2Dispatch: ApprovalDispatchRouteV2 = {
   routeVersion: 2,
-  sourceId: 'dsh-enhanced-personal-wiki',
+  sourceId: 'dsh-ray-personal-wiki',
   bindingId: 'binding-owner-dm',
   bindingVersion: 11,
   bindingGeneration: 4,

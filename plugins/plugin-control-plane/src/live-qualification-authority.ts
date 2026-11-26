@@ -13,7 +13,7 @@ import type { TaskObservationOwner } from './task-observation-types.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const DIGEST = /^[a-f0-9]{64}$/u
-const PACKAGE = /^@dsh-enhanced\/[a-z][a-z0-9-]*$/u
+const PACKAGE = /^@dsh-ray\/[a-z][a-z0-9-]*$/u
 const MAX_CONFIG = 65_536
 const MAX_REQUEST = 8_192
 const MAX_KEY = 32_768

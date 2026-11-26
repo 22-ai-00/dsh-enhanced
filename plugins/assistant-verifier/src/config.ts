@@ -1,6 +1,6 @@
 import Schema from '@deepseek-ai/schemastery'
-import { acceptanceCanonicalJson, acceptanceDigest, acceptanceProtocolForTask, createTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
-import type { AcceptanceTaskIdentity, TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest, acceptanceProtocolForTask, createTaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
+import type { AcceptanceTaskIdentity, TaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
 import type { AcceptanceTask } from './host.js'
 import { createVerifierAuthorities } from './drivers.js'
 import type { VerifierAuthority, VerifierAuthorityInput } from './drivers.js'

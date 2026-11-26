@@ -2,10 +2,10 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { defineTool, type ToolExecution } from '@deepseek-ai/dsh-tools'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import Schema from '@deepseek-ai/schemastery'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -79,7 +79,7 @@ export const DEFAULT_PROACTIVE_PROFILES: readonly OpportunityProfile[] = Object.
   }),
 ])
 
-export const name = 'dsh-enhanced-assistant-proactive'
+export const name = 'dsh-ray-assistant-proactive'
 export {
   version, OpportunityEngine, validateProfile, validateRuntimeContext, computeDynamicUtility,
   attentionOverlay, tuneProfile, proactiveAttentionCohort,

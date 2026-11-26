@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { growthObjectDigest, type MemoryLearningOwner } from '@dsh-enhanced/assistant-growth-contract'
+import { growthObjectDigest, type MemoryLearningOwner } from '@dsh-ray/assistant-growth-contract'
 import { createRsiMemoryLearningSetup, validateRsiMemoryLearningSetup, type RsiMemoryLearningSetup } from '../src/rsi-memory-learning.js'
 
 const owner: MemoryLearningOwner = { authorityId: 'owner-route', authorityHash: 'a'.repeat(64),

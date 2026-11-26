@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import type { HostAutomationDefinition } from '@dsh-enhanced/assistant-automations'
+import type { HostAutomationDefinition } from '@dsh-ray/assistant-automations'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import { AssistantWorkItemsService } from '../src/service.ts'

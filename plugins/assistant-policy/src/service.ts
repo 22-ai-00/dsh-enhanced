@@ -257,8 +257,8 @@ interface PreauthorizedTool {
 
 export type NativeFullReviewerReconciliation = 'not-applicable' | 'ready' | 'unavailable'
 
-const NATIVE_FULL_ADOPTIONS_GLOBAL_KEY = '__dshEnhancedAssistantPolicyNativeFullAdoptionsV1__'
-const NATIVE_FULL_UNSETTLED_GLOBAL_KEY = '__dshEnhancedAssistantPolicyNativeFullUnsettledV1__'
+const NATIVE_FULL_ADOPTIONS_GLOBAL_KEY = '__dshRayAssistantPolicyNativeFullAdoptionsV1__'
+const NATIVE_FULL_UNSETTLED_GLOBAL_KEY = '__dshRayAssistantPolicyNativeFullUnsettledV1__'
 
 interface NativeFullUnsettledState {
   readonly fingerprint: string
@@ -622,17 +622,17 @@ export class AssistantPolicyService extends Service {
     options?: { denialReason: string },
   ): () => void {
     this.assertActive()
-    const expectedCaller = ['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'action_github_compensate', 'action_github_compensation_status'].includes(definition.name) ? 'dsh-enhanced-assistant-actions'
-      : ['isolation_run', 'isolation_grants'].includes(definition.name) ? 'dsh-enhanced-assistant-isolation'
-      : ['goal_create', 'goal_context', 'goal_schedule', 'goal_strategy', 'goal_wait_event', 'goal_checkpoint'].includes(definition.name) ? 'dsh-enhanced-assistant-goals'
-      : definition.name === 'proactive_status' ? 'dsh-enhanced-assistant-proactive'
-      : definition.name === 'memory_manage' ? ['dsh-enhanced-personal-memory', 'PersonalMemoryService']
-      : definition.name === 'wiki_upsert' ? ['dsh-enhanced-personal-wiki', 'PersonalWikiService']
-      : definition.name === 'delivery_request_restart' ? ['dsh-enhanced-assistant-delivery', 'AssistantDeliveryService']
+    const expectedCaller = ['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'action_github_compensate', 'action_github_compensation_status'].includes(definition.name) ? 'dsh-ray-assistant-actions'
+      : ['isolation_run', 'isolation_grants'].includes(definition.name) ? 'dsh-ray-assistant-isolation'
+      : ['goal_create', 'goal_context', 'goal_schedule', 'goal_strategy', 'goal_wait_event', 'goal_checkpoint'].includes(definition.name) ? 'dsh-ray-assistant-goals'
+      : definition.name === 'proactive_status' ? 'dsh-ray-assistant-proactive'
+      : definition.name === 'memory_manage' ? ['dsh-ray-personal-memory', 'PersonalMemoryService']
+      : definition.name === 'wiki_upsert' ? ['dsh-ray-personal-wiki', 'PersonalWikiService']
+      : definition.name === 'delivery_request_restart' ? ['dsh-ray-assistant-delivery', 'AssistantDeliveryService']
       : ['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report', 'work_item_list', 'work_item_recall', 'work_item_read_source', 'work_item_continue', 'work_item_read_context'].includes(definition.name) ? 'AssistantWorkItemsService'
       : ['plugin_source_gaps', 'plugin_source_read', 'plugin_source_create', 'plugin_source_job_status',
-        'plugin_source_revision_targets', 'plugin_source_revision_inspect', 'plugin_source_revise'].includes(definition.name) ? 'dsh-enhanced-assistant-growth-driver'
-      : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-enhanced-assistant-skills' : undefined
+        'plugin_source_revision_targets', 'plugin_source_revision_inspect', 'plugin_source_revise'].includes(definition.name) ? 'dsh-ray-assistant-growth-driver'
+      : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-ray-assistant-skills' : undefined
     if (expectedCaller === undefined || !(Array.isArray(expectedCaller)
       ? expectedCaller.includes(caller.fiber.name) : caller.fiber.name === expectedCaller)) {
       throw new Error('assistant-policy: preauthorization is reserved for the exact owning assistant-actions, assistant-isolation, assistant-goals, assistant-proactive, assistant-skills, assistant-growth-driver, AssistantWorkItemsService, PersonalMemoryService or PersonalWikiService Fiber and tool')

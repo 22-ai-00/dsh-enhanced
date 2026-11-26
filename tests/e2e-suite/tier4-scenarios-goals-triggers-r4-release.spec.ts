@@ -8,7 +8,7 @@ import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { isSeq, parseDocument } from 'yaml'
 import { getExport, getExportFn, sha256Hex } from './helpers/assertions.ts'
-import { runBashCommand, runDshRsiInProcess, runNodeScript } from './helpers/cli-runner.ts'
+import { runBashCommand, runDshRayInProcess, runNodeScript } from './helpers/cli-runner.ts'
 import { createCordisHarness } from './helpers/cordis-harness.ts'
 import {
   loadAssistantActions,
@@ -26,8 +26,8 @@ import {
   loadBenchmarkRunner,
   loadBenchmarkStore,
   loadCredentialsKeychain,
-  loadDshRsiCli,
-  loadDshRsiUpgrade,
+  loadDshRayCli,
+  loadDshRayUpgrade,
   loadEventTriggers,
   loadFamiliesCorpus,
   loadLarkChannel,
@@ -89,14 +89,14 @@ async function seedProfileFixture(
   opts: { hostVersion?: string; seedHistory?: boolean } = {},
 ) {
   const profileDir = join(dshHome, 'profiles', profileName)
-  const enhancedDir = join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery')
+  const enhancedDir = join(profileDir, 'node_modules', '@dsh-ray', 'assistant-delivery')
   const cacheRoot = join(dshHome, 'host-cache')
   await mkdir(profileDir, { recursive: true, mode: 0o700 })
   await mkdir(enhancedDir, { recursive: true, mode: 0o700 })
   await mkdir(cacheRoot, { recursive: true, mode: 0o700 })
 
   const hostVersion = opts.hostVersion ?? '0.1.9'
-  const hostBindingPath = join(dshHome, '.dsh-rsi-host.json')
+  const hostBindingPath = join(dshHome, '.dsh-ray-host.json')
   await writeFile(
     hostBindingPath,
     JSON.stringify({
@@ -112,21 +112,21 @@ async function seedProfileFixture(
     JSON.stringify({
       name: `dsh-profile-${profileName}`,
       private: true,
-      dependencies: { '@dsh-enhanced/assistant-delivery': '0.1.83' },
+      dependencies: { '@dsh-ray/assistant-delivery': '0.1.83' },
     }),
     { mode: 0o600 },
   )
   await writeFile(join(profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n', { mode: 0o600 })
   await writeFile(
     join(enhancedDir, 'package.json'),
-    JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: '0.1.83' }),
+    JSON.stringify({ name: '@dsh-ray/assistant-delivery', version: '0.1.83' }),
     { mode: 0o600 },
   )
   await writeFile(
     join(profileDir, 'cordis.patch.yml'),
     [
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       '    ownerRoutes:',
       '      - id: owner-route-1',
@@ -163,7 +163,7 @@ async function seedProfileFixture(
 function mockUpgradeFetch(targetEnhanced = '0.1.84', targetDsh = '0.2.2-rc.5') {
   return async (url: string | URL) => {
     const str = String(url)
-    const latest = str.includes('@dsh-enhanced') || str.includes('dsh-rsi-cli') ? targetEnhanced : targetDsh
+    const latest = str.includes('@dsh-ray') || str.includes('dsh-ray') ? targetEnhanced : targetDsh
     return new Response(JSON.stringify({ 'dist-tags': { latest } }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -527,7 +527,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
           {
             id: 'cred-use',
             effect: 'allow',
-            subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' },
+            subject: { kind: 'background', id: 'dsh-ray-event-triggers' },
             actions: ['credential.use'],
             resource: { kind: 'credential', id: '*' },
             context: { initiators: ['background'] },
@@ -576,7 +576,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
                 id: 'cred-wh-s9',
                 provider: 'environment',
                 environmentName: 'DSH_E2E_WH_S9_SECRET',
-                consumers: ['dsh-enhanced-event-triggers'],
+                consumers: ['dsh-ray-event-triggers'],
                 purposes: ['verify-webhook'],
                 maxLeaseMs: 30_000,
               }],
@@ -589,7 +589,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
       const observer = makeTriggerObserver(ws.workspace, 'obs-budget')
       let trigSvc!: InstanceType<typeof triggersMod.EventTriggersService>
       await ctx1.plugin({
-        name: 'dsh-enhanced-event-triggers',
+        name: 'dsh-ray-event-triggers',
         apply(runtime: unknown) {
           trigSvc = new triggersMod.EventTriggersService(runtime as never, {
             databasePath: ws.sqlitePath('events'),
@@ -810,12 +810,12 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
     }
   }, 15_000)
 
-  test('T4-S10 (F19, F20, F21): WP17 0.1 -> 0.2 owner upgrade with non-empty history + rollback drill -> dsh-rsi CLI & NL Web/Lark enable/disable/upgrade + recovery', async () => {
+  test('T4-S10 (F19, F20, F21): WP17 0.1 -> 0.2 owner upgrade with non-empty history + rollback drill -> dsh-ray CLI & NL Web/Lark enable/disable/upgrade + recovery', async () => {
     const wsFail = await workspaces.create('t4-s10-rb-')
     const { profileDir: rbProfileDir, hostBindingPath: rbHostPath } = await seedProfileFixture(wsFail.dshHome, 'web', {
       hostVersion: '0.2.1-rc.2',
     })
-    const upg = await loadDshRsiUpgrade()
+    const upg = await loadDshRayUpgrade()
 
     // 1. Failed health check during upgrade triggers atomic rollback preserving ownerRoutes & credentials
     const { report: rbReport } = await upg.runUpgrade({
@@ -884,8 +884,8 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
       histDb.close()
     }
 
-    // 3. R4 CLI (dsh-rsi disable / enable) + upgradeAssistantAndRecover + NL Web/Lark controls (M5 contracts)
-    const cliMod = await loadDshRsiCli()
+    // 3. R4 CLI (dsh-ray disable / enable) + upgradeAssistantAndRecover + NL Web/Lark controls (M5 contracts)
+    const cliMod = await loadDshRayCli()
     const deliveryMod = await loadAssistantDelivery()
     const larkMod = await loadLarkChannel()
     const ownerMod = await loadOwnerConsole()
@@ -908,14 +908,14 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
     )
     const effective = [
       bundleSnippets.join('\n'),
-      '- id: dsh-enhanced-assistant-goals',
-      '  name: "@dsh-enhanced/assistant-goals"',
-      '- id: dsh-enhanced-assistant-web-owner',
-      '  name: "@dsh-enhanced/assistant-web-owner"',
-      '- id: dsh-enhanced-assistant-association',
-      '  name: "@dsh-enhanced/assistant-association"',
-      '- id: dsh-enhanced-assistant-work-items',
-      '  name: "@dsh-enhanced/assistant-work-items"',
+      '- id: dsh-ray-assistant-goals',
+      '  name: "@dsh-ray/assistant-goals"',
+      '- id: dsh-ray-assistant-web-owner',
+      '  name: "@dsh-ray/assistant-web-owner"',
+      '- id: dsh-ray-assistant-association',
+      '  name: "@dsh-ray/assistant-association"',
+      '- id: dsh-ray-assistant-work-items',
+      '  name: "@dsh-ray/assistant-work-items"',
       '  config:',
       '    enabled: true',
     ].join('\n')
@@ -934,8 +934,8 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
 
     const assertPatchToggled = async (expectedState: 'disabled' | 'enabled') => {
       const parsed = parseCordisPatch(await readFile(patchPath, 'utf8'))
-      const workItemsRow = findPatchRow(parsed.document, 'dsh-enhanced-assistant-work-items')
-      const webOwnerRow = findPatchRow(parsed.document, 'dsh-enhanced-assistant-web-owner')
+      const workItemsRow = findPatchRow(parsed.document, 'dsh-ray-assistant-work-items')
+      const webOwnerRow = findPatchRow(parsed.document, 'dsh-ray-assistant-web-owner')
       expect(workItemsRow).toBeDefined()
       if (expectedState === 'disabled') {
         expect(workItemsRow?.get('disabled') === true || getPatchConfig(workItemsRow).enabled === false).toBe(true)
@@ -947,14 +947,14 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
     }
     await assertPatchToggled('enabled')
 
-    const disCli = await runDshRsiInProcess(['disable', '--profile', 'web', '--dsh-home', ws.dshHome, '--json'])
+    const disCli = await runDshRayInProcess(['disable', '--profile', 'web', '--dsh-home', ws.dshHome, '--json'])
     expect(disCli.exitCode).toBe(0)
     const disCliJson = JSON.parse(disCli.stdout) as { ok?: boolean; state?: string; status?: string }
     expect(disCliJson.ok).toBe(true)
     expect(disCliJson.state ?? disCliJson.status).toBe('disabled')
     await assertPatchToggled('disabled')
 
-    const enCli = await runDshRsiInProcess(['enable', '--profile', 'web', '--dsh-home', ws.dshHome, '--json'])
+    const enCli = await runDshRayInProcess(['enable', '--profile', 'web', '--dsh-home', ws.dshHome, '--json'])
     expect(enCli.exitCode).toBe(0)
     const enCliJson = JSON.parse(enCli.stdout) as { ok?: boolean; state?: string; status?: string }
     expect(enCliJson.ok).toBe(true)
@@ -1065,7 +1065,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
       .filter(j => String(j['runs-on'] ?? '').includes('macos') || String(j['runs-on'] ?? '').includes('windows'))
       .flatMap(j => (j.steps ?? []).map(s => s.run ?? ''))
       .join('\n')
-    for (const slug of ['dsh-rsi-cli', 'assistant-isolation', 'assistant-actions']) {
+    for (const slug of ['dsh-ray', 'assistant-isolation', 'assistant-actions']) {
       expect(xplatCommands).toContain(slug)
     }
 
@@ -1073,9 +1073,9 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
     const script = await readInstallerCommonScript()
     const pluginSlugs = new Set(manifests.filter(m => m.kind === 'plugin').map(m => m.slug))
     const queuedSlugs = [
-      ...parseBashArray(script, 'DSH_ENHANCED_CORE_PLUGIN_SLUGS'),
-      ...parseBashArray(script, 'DSH_ENHANCED_LARK_PLUGIN_SLUGS'),
-      ...parseBashArray(script, 'DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS'),
+      ...parseBashArray(script, 'DSH_RAY_CORE_PLUGIN_SLUGS'),
+      ...parseBashArray(script, 'DSH_RAY_LARK_PLUGIN_SLUGS'),
+      ...parseBashArray(script, 'DSH_RAY_SUPERVISED_GROWTH_PLUGIN_SLUGS'),
     ]
     expect(queuedSlugs.filter(slug => !pluginSlugs.has(slug))).toEqual([])
 
@@ -1116,7 +1116,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
       expect(okRes.exitCode).toBe(0)
 
       // 1 of 40 returning 404 -> non-zero exit naming missing package
-      missingPackage = '@dsh-enhanced/assistant-association'
+      missingPackage = '@dsh-ray/assistant-association'
       const missRes = await runNodeScript('scripts/verify-npm-release.mjs', [
         '--tag',
         `v${targetVersion}`,
@@ -1130,7 +1130,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
       missingPackage = undefined
 
       // 1 of 40 returning stale version -> non-zero exit naming stale package
-      stalePackage = '@dsh-enhanced/dsh-rsi-cli'
+      stalePackage = 'dsh-ray'
       const staleRes = await runNodeScript('scripts/verify-npm-release.mjs', [
         '--tag',
         `v${targetVersion}`,
@@ -1150,7 +1150,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
     const ws = await workspaces.create('t4-s12-')
     const manifests = await readAllWorkspaceManifests()
     const expectedVersion = manifests[0]!.version
-    const cliMod = await loadDshRsiCli()
+    const cliMod = await loadDshRayCli()
     const ownerMod = await loadOwnerConsole()
     const deliveryMod = await loadAssistantDelivery()
     const larkMod = await loadLarkChannel()
@@ -1169,7 +1169,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
 
     // Phase 1: Absent DSH_HOME -> no-data
     const emptyHome = join(ws.root, 'empty-home')
-    const emptyCli = await runDshRsiInProcess(['version', '--json', '--dsh-home', emptyHome], { DSH_HOME: emptyHome })
+    const emptyCli = await runDshRayInProcess(['version', '--json', '--dsh-home', emptyHome], { DSH_HOME: emptyHome })
     expect(emptyCli.exitCode).toBe(0)
     const emptyJson = JSON.parse(emptyCli.stdout) as {
       assistant: { version: string }
@@ -1195,24 +1195,24 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
     expect(upgRes.healthy).toBe(true)
 
     const profileDir = join(ws.dshHome, 'profiles', 'lark')
-    await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'), { recursive: true, mode: 0o700 })
+    await mkdir(join(profileDir, 'node_modules', '@dsh-ray', 'assistant-delivery'), { recursive: true, mode: 0o700 })
     await writeFile(
-      join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery', 'package.json'),
-      JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: expectedVersion }),
+      join(profileDir, 'node_modules', '@dsh-ray', 'assistant-delivery', 'package.json'),
+      JSON.stringify({ name: '@dsh-ray/assistant-delivery', version: expectedVersion }),
       'utf8',
     )
     await writeFile(
-      join(ws.dshHome, '.dsh-rsi-host.json'),
+      join(ws.dshHome, '.dsh-ray-host.json'),
       JSON.stringify({ schemaVersion: 1, version: '0.2.2-rc.5', cacheRoot: ws.root, receiptDigest: sha256Hex('host-s12') }),
       { mode: 0o600 },
     )
-    await mkdir(join(ws.dshHome, '.dsh-enhanced'), { recursive: true, mode: 0o700 })
+    await mkdir(join(ws.dshHome, '.dsh-ray'), { recursive: true, mode: 0o700 })
     await writeFile(
-      join(ws.dshHome, '.dsh-enhanced', 'upgrade-history.jsonl'),
+      join(ws.dshHome, '.dsh-ray', 'upgrade-history.jsonl'),
       `${JSON.stringify({ at: 100, toVersion: expectedVersion })}\n`,
       'utf8',
     )
-    await mkdir(join(ws.dshHome, '.dsh-rsi-upgrade-backups', 'snap-s12'), { recursive: true, mode: 0o700 })
+    await mkdir(join(ws.dshHome, '.dsh-ray-upgrade-backups', 'snap-s12'), { recursive: true, mode: 0o700 })
 
     const execSql = async (rel: string, sql: string) => {
       const full = join(ws.dshHome, rel)
@@ -1228,18 +1228,18 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
     await execSql('assistant-dreaming/state.sqlite', "CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT) STRICT; INSERT INTO dream_runs VALUES ('d1', 'completed');")
     await execSql('assistant-evaluation/evaluation.sqlite', "CREATE TABLE evaluation_attention_tuning_events (kind TEXT) STRICT; CREATE TABLE evaluation_attention_loosening_decisions (proposal_id TEXT PRIMARY KEY, decision TEXT) STRICT; INSERT INTO evaluation_attention_tuning_events VALUES ('adopted'); INSERT INTO evaluation_attention_loosening_decisions VALUES ('lp1', 'adopted');")
     await execSql('assistant-association/association.sqlite', "CREATE TABLE assoc_param_profile_heads (scope_key TEXT PRIMARY KEY, active_version INTEGER) STRICT; CREATE TABLE assoc_param_profile_events (kind TEXT) STRICT; INSERT INTO assoc_param_profile_heads VALUES ('owner', 3); INSERT INTO assoc_param_profile_events VALUES ('adopted');")
-    await execSql('plugin-control-plane/control.sqlite', "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('sp-c', '@dsh-enhanced/evolved-s12', 'create', 'release-complete'), ('sp-r', '@dsh-enhanced/evolved-s12', 'modify', 'release-complete'); INSERT INTO activation_plans VALUES ('sp-c', 'lark', 'activated');")
-    await execSql('plugin-control-plane/creation-adoptions.sqlite', `CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, certificate_json TEXT, receipt_json TEXT) STRICT; INSERT INTO adoptions VALUES ('sp-c', 'active', '{"plan":{"name":"@dsh-enhanced/evolved-s12"}}', '{"version":"0.1.0"}');`)
-    await execSql('plugin-control-plane/revision-adoptions.sqlite', "CREATE TABLE entries (entry_id TEXT PRIMARY KEY, name TEXT, current_plan_id TEXT, revision INTEGER) STRICT; CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, entry_id TEXT) STRICT; CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT) STRICT; INSERT INTO entries VALUES ('e1', '@dsh-enhanced/evolved-s12', 'sp-r', 2); INSERT INTO adoptions VALUES ('sp-r', 'active', 'e1');")
+    await execSql('plugin-control-plane/control.sqlite', "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('sp-c', '@dsh-ray/evolved-s12', 'create', 'release-complete'), ('sp-r', '@dsh-ray/evolved-s12', 'modify', 'release-complete'); INSERT INTO activation_plans VALUES ('sp-c', 'lark', 'activated');")
+    await execSql('plugin-control-plane/creation-adoptions.sqlite', `CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, certificate_json TEXT, receipt_json TEXT) STRICT; INSERT INTO adoptions VALUES ('sp-c', 'active', '{"plan":{"name":"@dsh-ray/evolved-s12"}}', '{"version":"0.1.0"}');`)
+    await execSql('plugin-control-plane/revision-adoptions.sqlite', "CREATE TABLE entries (entry_id TEXT PRIMARY KEY, name TEXT, current_plan_id TEXT, revision INTEGER) STRICT; CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, entry_id TEXT) STRICT; CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT) STRICT; INSERT INTO entries VALUES ('e1', '@dsh-ray/evolved-s12', 'sp-r', 2); INSERT INTO adoptions VALUES ('sp-r', 'active', 'e1');")
 
     const wiDir = join(ws.dshHome, 'assistant-work-items')
     const wiFilesBefore = (await readdir(wiDir)).sort()
     await chmod(wiDir, 0o555)
     try {
       // CLI checks
-      expect((await runDshRsiInProcess(['--version'])).stdout.trim()).toBe(expectedVersion)
-      expect((await runDshRsiInProcess(['version', '--short'])).stdout.trim()).toBe(expectedVersion)
-      const cliFull = await runDshRsiInProcess(['version', '--json', '--dsh-home', ws.dshHome])
+      expect((await runDshRayInProcess(['--version'])).stdout.trim()).toBe(expectedVersion)
+      expect((await runDshRayInProcess(['version', '--short'])).stdout.trim()).toBe(expectedVersion)
+      const cliFull = await runDshRayInProcess(['version', '--json', '--dsh-home', ws.dshHome])
       expect(cliFull.exitCode).toBe(0)
       const cliReport = JSON.parse(cliFull.stdout) as {
         assistant: { version: string }
@@ -1411,7 +1411,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
 
       expect(sends.at(-1)).toContain(expectedVersion)
       expect(sends.at(-1)).toContain(`累计自迭代次数：${ownerReport.selfIteration.totalIterations}`)
-      expect(sends.at(-1)).toContain('@dsh-enhanced/evolved-s12')
+      expect(sends.at(-1)).toContain('@dsh-ray/evolved-s12')
 
       // Remove ownerConsole service and verify standalone fallback via Delivery
       ctx.set('ownerConsole' as never, undefined as never)

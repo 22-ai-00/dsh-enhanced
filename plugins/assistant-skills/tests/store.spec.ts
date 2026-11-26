@@ -7,7 +7,7 @@ import { createDefinition, failureSummaryEvidenceDigest, type HostFailureEvidenc
 import { captureFailureCandidateProvenance } from '../src/capture-expansion.ts'
 import { SkillStore } from '../src/store.ts'
 import type { SkillCandidate, SkillDelegatedArmBinding, SkillDeploymentAdmission } from '../src/store.ts'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })

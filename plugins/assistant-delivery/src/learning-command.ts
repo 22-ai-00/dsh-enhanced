@@ -2,7 +2,7 @@ import type { DeliveryLearningExportDocument } from './types.js'
 import {
   assistantT1PreferenceKeys,
   assistantT1PreferenceValues,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 
 export type LearningCommand =
   | { readonly kind: 'help' }

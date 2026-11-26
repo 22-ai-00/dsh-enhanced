@@ -1,15 +1,15 @@
-# @dsh-enhanced/plugin-control-plane
+# @dsh-ray/plugin-control-plane
 
 记录能力缺口与 ROI、匹配 owner 固定的 catalog，并在权威审批后执行可恢复的隔离激活。Agent 只能发现候选、记录缺口和创建计划；签名审批、profile 变更和 Host attestation CLI 都不会注册成模型工具。
 
 可选 `runtimeObserver` 提供 owner-only、HMAC 认证的本地 Unix socket，读取实际 Loader/Fiber 与服务归属；socket、连接和密钥缓冲区由 Cordis 注入 Fiber 管理。该配置会读取私有认证 key 并创建本地 socket，不新增模型工具或签名权限；调用方与 Host 共享受信 owner 身份，不构成同 UID/同进程隔离。详见[配置、权限与证据](../../docs/runtime-observer.md)。
 
-运行在提供原生 `appReady` 服务的 Host 内时，插件在 launcher 完成 Loader 激活审计并发出就绪回调后，向 stderr 输出 `dsh-enhanced host ready: v1`；每个 peer 代次最多输出一次，避免污染 headless/ACP 的 stdout 协议流。监听器由 Control Plane 的 Cordis Fiber 管理；没有 `appReady` 的嵌入式 Host 仍可激活，但不会输出此标记。旧版 cohort 可能没有该通知。此标记只表示该 Host 的启动就绪，不证明用户任务或自迭代结果。
+运行在提供原生 `appReady` 服务的 Host 内时，插件在 launcher 完成 Loader 激活审计并发出就绪回调后，向 stderr 输出 `dsh-ray host ready: v1`；每个 peer 代次最多输出一次，避免污染 headless/ACP 的 stdout 协议流。监听器由 Control Plane 的 Cordis Fiber 管理；没有 `appReady` 的嵌入式 Host 仍可激活，但不会输出此标记。旧版 cohort 可能没有该通知。此标记只表示该 Host 的启动就绪，不证明用户任务或自迭代结果。
 
 ## 安装
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/plugin-control-plane
+dsh plugin --profile web add @dsh-ray/plugin-control-plane
 dsh --profile web --dump-config
 ```
 
@@ -417,7 +417,7 @@ Host-only `inspectPreparedRevisionRegression` 提供精确父/候选不可变制
 
 `sourceJobs.revision.benefit` 可选携带一个 `assistant-growth/revision-benefit-contract/v1` 合同的 64 位 digest；合同冻结同供应商、同预算与最小任务修订数，并为失败率、返工率、纠正率、延迟与成本五条指标各设非劣阈值。未配置该字段且 grant 未携带 benefit pin 时，修订采用维持上述 review-only 历史行为；配置删除而 grant 仍有 pin 时采用 fail closed。配置后（grant 同步 pin 合同 digest）默认采用严格语义：已验证修订还必须在主账本 `source_revision_benefit_outcomes`（schema 36，外键锁定 `source_revision_verifications`，只按记录时间单调更新）存在一条针对**同一合同 digest** 的 `non-inferior` 结果，否则 `revisionAdoptionReady` 为 false，候选保持 `pending-approval`。唯一例外是显式打开 `sourceJobs.allowReviewOnlyFirstAdoption`（默认 false）：只允许一次 review-only 首次采用，并由下面的观察窗口终端回退兜底；配置删除 `revisionBenefit` 而 grant 保留 pin 时采用 fail closed。未配置合同且 grant 未携带 pin 时维持既有 review-only 行为。
 
-非劣评估（`@dsh-enhanced/assistant-growth-contract` 的 `evaluateRevisionBenefit`）只接受 Host 派生的窗口统计：按 canonical 任务修订去重，corrections/withdrawals 排除并单列；任一样本窗口低于最小修订数、合同过期，或任一窗口的成本/延迟不可测，结果只能是 `insufficient`，不产生收益结论；越过任一阈值返回带指标名的 `inferior`。部署关联与工具成功都不是收益证据，评估不能由成长模型自评。schema 2 的修订调用账本为每个 entry 调用保存 Host-only foreground 见证（task/inbox/session/binding/call 与参数摘要，不含任务文本）；参数摘要与 Delivery 一样按原生 `JSON.parse`→`JSON.stringify` 归一化，不按 key 排序，保证多键乱序参数仍能归属。窗口固定为等长相邻的父 [adoptedAt-W, adoptedAt] 与候选 [adoptedAt, adoptedAt+W]，W 受候选签名期限、已观测服务时间、父采用历史和一天上限约束；评估入口拒绝不等长/不相邻或统计窗口不匹配的数据。父窗口证据 = 父创建采用的已认证任务关联（切换前）∪ 修订账本中父版本调用（回滚后或链式修订父版本，两者按 entry 生命周期天然不相交）；候选窗口只取修订账本中采用后的 foreground 调用。owner-instruction 修订没有 growth run，故不参与收益门。
+非劣评估（`@dsh-ray/assistant-growth-contract` 的 `evaluateRevisionBenefit`）只接受 Host 派生的窗口统计：按 canonical 任务修订去重，corrections/withdrawals 排除并单列；任一样本窗口低于最小修订数、合同过期，或任一窗口的成本/延迟不可测，结果只能是 `insufficient`，不产生收益结论；越过任一阈值返回带指标名的 `inferior`。部署关联与工具成功都不是收益证据，评估不能由成长模型自评。schema 2 的修订调用账本为每个 entry 调用保存 Host-only foreground 见证（task/inbox/session/binding/call 与参数摘要，不含任务文本）；参数摘要与 Delivery 一样按原生 `JSON.parse`→`JSON.stringify` 归一化，不按 key 排序，保证多键乱序参数仍能归属。窗口固定为等长相邻的父 [adoptedAt-W, adoptedAt] 与候选 [adoptedAt, adoptedAt+W]，W 受候选签名期限、已观测服务时间、父采用历史和一天上限约束；评估入口拒绝不等长/不相邻或统计窗口不匹配的数据。父窗口证据 = 父创建采用的已认证任务关联（切换前）∪ 修订账本中父版本调用（回滚后或链式修订父版本，两者按 entry 生命周期天然不相交）；候选窗口只取修订账本中采用后的 foreground 调用。owner-instruction 修订没有 growth run，故不参与收益门。
 修订采用运行时此前在 `assertParent` 中把父 creation 证书的 `source` 与修订证书的 `source` 做 JSON 相等比较。父子证书的 `source` 语义不同、不可比：v1/v2 键集相同但值描述不同 run（创建 run vs 修订 source），v3 键集不同（`{instructionDigest, ownerDigest}`）；精确父绑定由签名的 `certificate.parent.certificateDigest` 以及 artifact/plan/owner/schemaDigest 检查覆盖。该比较会错误拒绝真实创建父证书的采用，本次已删除该连词；shipped profile 不配置 `revisionCapabilities`，因此该缺陷此前是休眠代码。
 采用模式有两种，由 `sourceJobs.allowReviewOnlyFirstAdoption`（默认 false）显式选择：默认合同语义要求采用前已有同一合同 digest 的 `non-inferior` 结果；打开后仅允许**一次** review-only 首次采用，并在有界观察窗口到期仍无 `non-inferior`（无证据、`insufficient`、父窗口不可读）时由 `reconcileRevisionBenefits` 记录 `observation-expired-unverified` 的 owner 可读结果并用独立回滚授权 CAS 回退到精确父版本，不把候选静默挂到期限。观察窗口 deadline 与评估窗口使用**同一个 W**：`revisionBenefitObservationDeadline` 复用等长配对窗口，deadline = 候选窗口 end = adoptedAt + W；终态回退还要求 outcome 的 contractDigest 等于 pinned digest，异合同结果不触发回退。配置删除 `revisionBenefit` 而修订 grant 仍保留 benefit pin 时采用 fail closed。任何已记录的 `inferior`/`insufficient`/异合同结果都阻止后续（重新）采用。
 
@@ -575,7 +575,7 @@ sourceApprovals:
     "id": "tool-repair-1",
     "expiresAt": 1800000000000,
     "maxApprovals": 5,
-    "repository": "/work/dsh-enhanced",
+    "repository": "/work/dsh-ray",
     "worktreeRoot": "/private/dsh/control/source-worktrees",
     "owner": {
       "authorityId": "<delivery-route>",
@@ -624,7 +624,7 @@ sourceReleases:
 {
   "targetBranch": "rsi/repairs",
   "candidateId": "personal-memory",
-  "packageName": "@dsh-enhanced/personal-memory",
+  "packageName": "@dsh-ray/personal-memory",
   "packagePath": "plugins/personal-memory",
   "dshBaseline": "0.2.2-rc.5",
   "capabilities": ["memory"],
@@ -716,7 +716,7 @@ adoptionCoordinator:
 
 协调器沿现有安装和签名检查路径推进，到 `commit-pending` 停止。目标恢复后由其原生源码 continuation 重验当前 owner、反馈和信任，再完成启用；已撤销或过期交接只能进入既有回退。目标卸载不会撤销已交出的任务；未知 Host 派发仍须精确签名对账，不能自动重派。目标离线期间无法即时获知反馈纠正，允许暴露的最长授权窗口由上述期限限制；回退完成时间仍取决于协调器可用性和签名服务。
 
-`dsh-rsi-setup` 已提供双 Host 合同编译与校验，实际部署验收尚未完成。现有 systemd attestor 只签发 reload/readiness/rollback；缺省严格合同的其余行为验收阶段仍需要真实独立观测，不能用进程就绪代替。可显式配置下述有限试用合同，由普通任务证据独立签发资格。组件接线不等于生产自动采用闭环，npm 发布仍须等待实际部署验收。
+`dsh-ray-setup` 已提供双 Host 合同编译与校验，实际部署验收尚未完成。现有 systemd attestor 只签发 reload/readiness/rollback；缺省严格合同的其余行为验收阶段仍需要真实独立观测，不能用进程就绪代替。可显式配置下述有限试用合同，由普通任务证据独立签发资格。组件接线不等于生产自动采用闭环，npm 发布仍须等待实际部署验收。
 
 这提供自动采用的执行链。目标 Host 可另配 `foregroundDeployments: { attestorJournalPath: /srv/dsh-owner/supervisor/reload.sqlite }`，同时启用 `runtimeObserver`，并挂载 Delivery。路径须指向 systemd attestor 实际的私有 SQLite journal；配置只授予读取已签名 readiness 记录的权限，不包含签名密钥。目标 Host 与外部部署协调器需使用同一精确控制面账本和 trust 绑定；当前实现要求同 UID 的私有文件读取，不能据此声称独立 UID 隔离。
 

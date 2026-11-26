@@ -1,10 +1,10 @@
-import { validateGoalArtifactAdmission, validateTaskAcceptanceContract, type GoalArtifactAdmission, type TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import { validateGoalArtifactAdmission, validateTaskAcceptanceContract, type GoalArtifactAdmission, type TaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import type {} from '@dsh-enhanced/assistant-delivery'
-import type {} from '@dsh-enhanced/assistant-policy'
+import type {} from '@dsh-ray/assistant-delivery'
+import type {} from '@dsh-ray/assistant-policy'
 import { fork, type ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
@@ -67,7 +67,7 @@ declare module '@deepseek-ai/cordis' { interface Context { assistantIsolation: A
 
 /** Trusted Host broker. Only bounded inline inputs cross into the isolated workspace. */
 export class AssistantIsolationService extends Service {
-  static { Object.defineProperty(this, 'name', { value: 'dsh-enhanced-assistant-isolation' }) }
+  static { Object.defineProperty(this, 'name', { value: 'dsh-ray-assistant-isolation' }) }
   static Config = Config
   readonly #config: ReturnType<typeof validateConfig>
   readonly #backend: IsolationBackend

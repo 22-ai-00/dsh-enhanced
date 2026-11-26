@@ -19,7 +19,7 @@ test('fresh autonomy installer executes a finite offline grant through native We
     const server = createServer(); server.once('error', reject)
     server.listen(0, '127.0.0.1', () => { const address = server.address(); server.close(error => error ? reject(error) : resolve(address.port)) })
   })
-  const env = { ...process.env, DSH_ENHANCED_WEB_PORT: String(port), CI: 'true', DSH_HOME: home, DSH_WEB_E2E_MODEL_LOG: modelLog }
+  const env = { ...process.env, DSH_RAY_WEB_PORT: String(port), CI: 'true', DSH_HOME: home, DSH_WEB_E2E_MODEL_LOG: modelLog }
   const http = []; const transport = []; const streams = new Map(); const frames = []
   observePage(page, http, transport, streams, frames)
   let host; let authenticated = false; let failed = false

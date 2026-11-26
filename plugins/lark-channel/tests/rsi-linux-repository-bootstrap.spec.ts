@@ -4,12 +4,12 @@ import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFil
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import type { LinuxRuntime, LinuxSystemSnapshot, LinuxUserNamespaceMapping } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRuntime, LinuxSystemSnapshot, LinuxUserNamespaceMapping } from '@dsh-ray/assistant-isolation'
 import type { LinuxRsiBootstrapInput } from '../src/rsi-linux-runtime-bootstrap.js'
 
 const mocks = vi.hoisted(() => ({ base: vi.fn(), readBase: vi.fn(), archive: vi.fn(), snapshot: vi.fn(), mapping: vi.fn(), verifyMapping: vi.fn(), abi: vi.fn() }))
-vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => ({
-  ...await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>(),
+vi.mock('@dsh-ray/assistant-isolation', async importOriginal => ({
+  ...await importOriginal<typeof import('@dsh-ray/assistant-isolation')>(),
   prepareLinuxSystemSnapshot: mocks.snapshot,
   readLinuxUserNamespaceMapping: mocks.mapping,
   verifyLinuxUserNamespaceMapping: mocks.verifyMapping,
@@ -19,7 +19,7 @@ vi.mock('../src/rsi-linux-runtime-bootstrap.js', async importOriginal => ({
   ...await importOriginal<typeof import('../src/rsi-linux-runtime-bootstrap.js')>(),
   prepareLinuxRsiRuntime: mocks.base, readLinuxRsiRuntime: mocks.readBase, officialArchive: mocks.archive,
 }))
-import { hashLinuxRuntimeTree, verifyLinuxRuntime, verifyLinuxSystemSnapshot } from '@dsh-enhanced/assistant-isolation'
+import { hashLinuxRuntimeTree, verifyLinuxRuntime, verifyLinuxSystemSnapshot } from '@dsh-ray/assistant-isolation'
 import { prepareLinuxRsiRepositoryRuntime, readLinuxRsiRepositoryRuntime } from '../src/rsi-linux-repository-bootstrap.js'
 
 const directories: string[] = []

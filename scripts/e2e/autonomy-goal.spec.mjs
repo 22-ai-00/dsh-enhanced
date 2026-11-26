@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseDocument, isMap } from 'yaml'
-import { createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
+import { createVerifierAuthorities } from '@dsh-ray/assistant-verifier'
 import { objective } from './autonomy-goal-model.mjs'
 import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
@@ -29,7 +29,7 @@ test('native goals correct an isolated artifact after private independent verifi
     const server = createServer(); server.once('error', reject)
     server.listen(0, '127.0.0.1', () => { const address = server.address(); server.close(error => error ? reject(error) : resolve(address.port)) })
   })
-  const env = { ...process.env, DSH_ENHANCED_WEB_PORT: String(port), CI: 'true', DSH_HOME: home, DSH_WEB_E2E_MODEL_LOG: modelLog, ...(metered ? { DEEPSEEK_API_KEY: 'test-only-not-a-credential' } : {}) }
+  const env = { ...process.env, DSH_RAY_WEB_PORT: String(port), CI: 'true', DSH_HOME: home, DSH_WEB_E2E_MODEL_LOG: modelLog, ...(metered ? { DEEPSEEK_API_KEY: 'test-only-not-a-credential' } : {}) }
   const http = []; const transport = []; const streams = new Map(); const frames = []
   observePage(page, http, transport, streams, frames)
   let host; let authenticated = false; let failed = false
@@ -46,7 +46,7 @@ test('native goals correct an isolated artifact after private independent verifi
     const before = await readFile(patchPath, 'utf8')
     await writeFile(testInfo.outputPath('installed-profile.yaml'), before, { mode: 0o600 })
     const patch = parseDocument(before)
-    const isolationRow = patch.toJS().find(row => row.id === 'dsh-enhanced-assistant-isolation')
+    const isolationRow = patch.toJS().find(row => row.id === 'dsh-ray-assistant-isolation')
     const grant = isolationRow.config.grants[0]
     const verifierPath = join(temp, 'verifier.sqlite')
     const verificationRoot = join(temp, 'verification')
@@ -61,11 +61,11 @@ test('native goals correct an isolated artifact after private independent verifi
       scope: { workspace, preset: 'standard' }, owner: { principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion },
       objective, taskKind, validityMs: 240000, bounds: { maxDurationMs: 60000, maxEvidenceBytes: 8192 },
       criteria: [{ id: 'sum-behavior', kind: 'isolated-process-behavior', authority: { id: compiled.id, digest: compiled.digest }, artifactPath: 'answer.sh', testSetId: 'sum-cases' }] }))
-    configure(patch, 'dsh-enhanced-assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 0, authorities: [authority], profiles })
-    configure(patch, 'dsh-enhanced-assistant-goals', { databasePath: join(home, 'assistant-goals/web.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 60000,
+    configure(patch, 'dsh-ray-assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 0, authorities: [authority], profiles })
+    configure(patch, 'dsh-ray-assistant-goals', { databasePath: join(home, 'assistant-goals/web.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 60000,
       preauthorizedCreateMaxRounds: 3, executionBudget: { modelCalls: 6, toolCalls: 3, inputTokens: metered ? 2_100_000 : 200, outputTokens: 6000,
         ...(metered ? {} : { costUsdMicros: 0 }), durationMs: 240000, maxOutputTokensPerCall: 1024 } })
-    if (metered) configure(patch, 'dsh-enhanced-assistant-deepseek-budget', { enabled: true, defaultMaxTokens: 1024 })
+    if (metered) configure(patch, 'dsh-ray-assistant-deepseek-budget', { enabled: true, defaultMaxTokens: 1024 })
     patch.add({ id: 'agent-default-model', config: metered ? { provider: 'deepseek-goal-metered', model: 'deepseek-v4-flash' } : { provider: 'browser-e2e', model: 'isolated-goal-proof' } })
     patch.add({ id: 'session-title-llm', disabled: true })
     patch.add({ insert: [{ id: 'autonomy-goal-e2e-model', name: resolve(root, metered ? 'scripts/e2e/autonomy-deepseek-transport.mjs' : 'scripts/e2e/autonomy-goal-model.mjs') }] })

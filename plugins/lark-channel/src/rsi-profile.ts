@@ -1,9 +1,9 @@
 import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
-import { normalizeConfig, type AssistantGrowthDriverConfig } from '@dsh-enhanced/assistant-growth-driver'
-import { controlPlaneDigest, normalizeControlPlaneConfig, type Config as ControlPlaneConfig } from '@dsh-enhanced/plugin-control-plane'
-import { validateSourceReviewConfig, type SourceReviewConfig } from '@dsh-enhanced/assistant-verifier'
+import { type ActiveLarkOwnerBinding } from '@dsh-ray/assistant-delivery'
+import { normalizeConfig, type AssistantGrowthDriverConfig } from '@dsh-ray/assistant-growth-driver'
+import { controlPlaneDigest, normalizeControlPlaneConfig, type Config as ControlPlaneConfig } from '@dsh-ray/plugin-control-plane'
+import { validateSourceReviewConfig, type SourceReviewConfig } from '@dsh-ray/assistant-verifier'
 import { isMap, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 
 import type { RsiServiceEnvironments } from './rsi-service-setup.js'
@@ -35,27 +35,27 @@ export interface RsiSetupManifest {
 
 type Rows = { document: Document; rows: YAMLSeq }
 const targetBundles = [
-  'dsh-enhanced-personal-assistant', 'dsh-enhanced-assistant-delivery', 'dsh-enhanced-lark-channel',
-  'dsh-enhanced-assistant-evaluation', 'dsh-enhanced-assistant-goals', 'dsh-enhanced-assistant-skills',
-  'dsh-enhanced-assistant-verifier', 'dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-plugin-control-plane',
+  'dsh-ray-personal-assistant', 'dsh-ray-assistant-delivery', 'dsh-ray-lark-channel',
+  'dsh-ray-assistant-evaluation', 'dsh-ray-assistant-goals', 'dsh-ray-assistant-skills',
+  'dsh-ray-assistant-verifier', 'dsh-ray-assistant-growth-driver', 'dsh-ray-plugin-control-plane',
 ] as const
-const coordinatorBundles = new Set(['dsh-enhanced-assistant-policy', 'dsh-enhanced-assistant-automations', 'dsh-enhanced-plugin-control-plane'])
+const coordinatorBundles = new Set(['dsh-ray-assistant-policy', 'dsh-ray-assistant-automations', 'dsh-ray-plugin-control-plane'])
 const coordinatorBundleNames = new Map([
-  ['dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy'],
-  ['dsh-enhanced-assistant-automations', '@dsh-enhanced/assistant-automations'],
-  ['dsh-enhanced-plugin-control-plane', '@dsh-enhanced/plugin-control-plane'],
+  ['dsh-ray-assistant-policy', '@dsh-ray/assistant-policy'],
+  ['dsh-ray-assistant-automations', '@dsh-ray/assistant-automations'],
+  ['dsh-ray-plugin-control-plane', '@dsh-ray/plugin-control-plane'],
 ])
 const rsiPrefix = 'rsi-setup-'
 export const SELF_ITERATION_MANAGED_ROW_IDS: ReadonlySet<string> = new Set([
-  'dsh-enhanced-assistant-work-items',
-  'dsh-enhanced-assistant-proactive',
-  'dsh-enhanced-assistant-growth-driver',
-  'dsh-enhanced-assistant-dreaming',
-  'dsh-enhanced-assistant-memory-learning',
-  'dsh-enhanced-assistant-association',
-  'dsh-enhanced-assistant-evaluation',
-  'dsh-enhanced-assistant-evolution',
-  'dsh-enhanced-preference-learning',
+  'dsh-ray-assistant-work-items',
+  'dsh-ray-assistant-proactive',
+  'dsh-ray-assistant-growth-driver',
+  'dsh-ray-assistant-dreaming',
+  'dsh-ray-assistant-memory-learning',
+  'dsh-ray-assistant-association',
+  'dsh-ray-assistant-evaluation',
+  'dsh-ray-assistant-evolution',
+  'dsh-ray-preference-learning',
 ])
 
 function fail(message: string): never { throw new Error(`rsi setup: ${message}`) }
@@ -330,11 +330,11 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   const target = parse(input.targetPatch, 'target patch'), effective = parse(input.targetEffective, 'target effective config')
   const coordinator = parse(input.coordinatorPatch, 'coordinator patch'), coordinatorEffective = parse(input.coordinatorEffective, 'coordinator effective config')
   for (const id of targetBundles) required(effective.rows, id, 'target effective profile', upgrading && SELF_ITERATION_MANAGED_ROW_IDS.has(id))
-  const standaloneAutomations = row(effective.rows, 'dsh-enhanced-assistant-automations')
+  const standaloneAutomations = row(effective.rows, 'dsh-ray-assistant-automations')
   if (standaloneAutomations && standaloneAutomations.get('disabled') !== true) fail('ambiguous standalone and embedded Automations providers')
   const jobs = input.manifest.controlPlane.sourceJobs
   if (!jobs || jobs.expiresAt <= Date.now()) fail('sourceJobs must be present and unexpired')
-  const delivery = config(required(effective.rows, 'dsh-enhanced-assistant-delivery'), 'assistant-delivery')
+  const delivery = config(required(effective.rows, 'dsh-ray-assistant-delivery'), 'assistant-delivery')
   const owner = resolveRsiOwnerRoute(json(delivery, 'assistant-delivery config'), input.owner, input.dshHome, jobs.ownerRouteId)
   if (jobs.ownerRouteId !== owner.route.id || jobs.principalId !== owner.principal || jobs.workspace !== owner.workspace || jobs.preset !== owner.preset) fail('sourceJobs does not match effective owner route')
   const growth = normalizeConfig(input.manifest.growthDriver)
@@ -373,7 +373,7 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
       ...(cp.liveQualification ? [cp.liveQualification.budgetId] : [])]
     if (memory.learning.budgetId === memory.learning.scanBudgetId
       || existing.includes(memory.learning.budgetId) || existing.includes(memory.learning.scanBudgetId)) fail('memory automation budget ids conflict with RSI')
-    const learnerRows = effective.rows.items.filter(item => isMap(item) && item.get('id') === 'dsh-enhanced-assistant-memory-learning')
+    const learnerRows = effective.rows.items.filter(item => isMap(item) && item.get('id') === 'dsh-ray-assistant-memory-learning')
     if (learnerRows.length !== 1) fail('memory learner row is missing or duplicate')
     const learner = learnerRows[0] as YAMLMap
     const currentLearnerConfig = learner.get('config', true) as Node | undefined
@@ -381,24 +381,24 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     const sameOwnerLearner = isMap(currentLearnerConfig) && learnerJson !== undefined
       && learnerJson.authorityId === memory.learning.authorityId
       && isDeepStrictEqual(learnerJson.owner, memory.learning.owner)
-    if (learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
+    if (learner.get('name') !== '@dsh-ray/assistant-memory-learning'
       || !((learner.get('disabled') === true || learner.get('disabled') === undefined) && !learner.has('config')
         || (upgrading
           ? (learner.get('disabled') === false || learner.get('disabled') === undefined || learner.get('disabled') === true) && sameOwnerLearner
           : (learner.get('disabled') === false || learner.get('disabled') === undefined) && isMap(currentLearnerConfig) && isDeepStrictEqual(learnerJson, memory.learning)))) {
       fail('memory learner must be the inactive installed bundle or exact current learning configuration')
     }
-    const standalone = row(effective.rows, 'dsh-enhanced-personal-memory')
+    const standalone = row(effective.rows, 'dsh-ray-personal-memory')
     if (standalone && standalone.get('disabled') !== true) fail('ambiguous standalone and embedded Memory providers')
   }
   if (owner.created) {
-    const deliveryOverride = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-delivery')
+    const deliveryOverride = cloneEffectiveConfig(target, effective, 'dsh-ray-assistant-delivery')
     seq(deliveryOverride.get('ownerRoutes', true) as Node | undefined, 'Delivery ownerRoutes').add(target.document.createNode(owner.authority))
   }
-  const personal = cloneEffectiveConfig(target, effective, 'dsh-enhanced-personal-assistant')
+  const personal = cloneEffectiveConfig(target, effective, 'dsh-ray-personal-assistant')
   configurePersonal(target.document, personal, input.manifest, owner,
     budgetIds as { reviews: string; discovery: string; source: string; observations: string }, memory, creation, input.upgradeExistingOwner === true)
-  const verifier = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-verifier')
+  const verifier = cloneEffectiveConfig(target, effective, 'dsh-ray-assistant-verifier')
   // Keep all existing verifier settings, replacing only the finite review grant.
   replaceNode(target.document, verifier, 'sourceReviews', input.manifest.sourceReviews)
   if (memory) {
@@ -420,30 +420,30 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     replaceNode(target.document, verifier, 'revisionRegressions', revision.regressions)
   }
   if (memory) {
-    let learner = row(target.rows, 'dsh-enhanced-assistant-memory-learning')
+    let learner = row(target.rows, 'dsh-ray-assistant-memory-learning')
     if (!learner) {
-      learner = map(target.document.createNode({ id: 'dsh-enhanced-assistant-memory-learning' }), 'memory learner override')
+      learner = map(target.document.createNode({ id: 'dsh-ray-assistant-memory-learning' }), 'memory learner override')
       target.rows.add(learner)
     }
     if (Object.keys(json(learner, 'memory learner override')).some(key => !['id', 'name', 'disabled', 'config'].includes(key))) fail('memory learner override has unsupported fields')
-    if (learner.has('name') && learner.get('name') !== '@dsh-enhanced/assistant-memory-learning') fail('memory learner override package differs')
-    learner.set('name', '@dsh-enhanced/assistant-memory-learning')
+    if (learner.has('name') && learner.get('name') !== '@dsh-ray/assistant-memory-learning') fail('memory learner override package differs')
+    learner.set('name', '@dsh-ray/assistant-memory-learning')
     learner.set('disabled', false)
     replaceNode(target.document, learner, 'config', memory.learning)
   }
   if (ordinary) {
-    const proactiveEntry = required(effective.rows, 'dsh-enhanced-assistant-proactive', 'target effective profile', upgrading)
-    if (proactiveEntry.get('name') !== '@dsh-enhanced/assistant-proactive') fail('assistant-proactive row has a different package')
-    const proactive = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-proactive', true, upgrading)
+    const proactiveEntry = required(effective.rows, 'dsh-ray-assistant-proactive', 'target effective profile', upgrading)
+    if (proactiveEntry.get('name') !== '@dsh-ray/assistant-proactive') fail('assistant-proactive row has a different package')
+    const proactive = cloneEffectiveConfig(target, effective, 'dsh-ray-assistant-proactive', true, upgrading)
     if (upgrading && proactive.get('enabled') === false) proactive.set('enabled', true)
     const currentEvaluation = proactive.get('intakeEvaluation', true) as Node | undefined
     if (!upgrading && currentEvaluation !== undefined && !isDeepStrictEqual(nodeJson(currentEvaluation), ordinary.intakeEvaluation)) {
       fail('existing assistant-proactive intake evaluation differs from the frozen fresh-install setup')
     }
     replaceNode(target.document, proactive, 'intakeEvaluation', ordinary.intakeEvaluation)
-    const workItemsEntry = required(effective.rows, 'dsh-enhanced-assistant-work-items', 'target effective profile', upgrading)
-    if (workItemsEntry.get('name') !== '@dsh-enhanced/assistant-work-items') fail('assistant-work-items row has a different package')
-    const workItems = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-work-items', true, upgrading)
+    const workItemsEntry = required(effective.rows, 'dsh-ray-assistant-work-items', 'target effective profile', upgrading)
+    if (workItemsEntry.get('name') !== '@dsh-ray/assistant-work-items') fail('assistant-work-items row has a different package')
+    const workItems = cloneEffectiveConfig(target, effective, 'dsh-ray-assistant-work-items', true, upgrading)
     if (upgrading && workItems.get('enabled') === false) workItems.set('enabled', true)
     if (workItems.get('enabled') !== true) fail('ordinary-use learning requires assistant-work-items.enabled: true')
     const ledgerNode = workItems.get('intakeLedger', true) as Node | undefined
@@ -460,13 +460,13 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     }
     evaluation.set('enabled', true)
   }
-  cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-growth-driver', true, upgrading)
-  replaceNode(target.document, required(target.rows, 'dsh-enhanced-assistant-growth-driver'), 'config', input.manifest.growthDriver)
-  cloneEffectiveConfig(target, effective, 'dsh-enhanced-plugin-control-plane')
+  cloneEffectiveConfig(target, effective, 'dsh-ray-assistant-growth-driver', true, upgrading)
+  replaceNode(target.document, required(target.rows, 'dsh-ray-assistant-growth-driver'), 'config', input.manifest.growthDriver)
+  cloneEffectiveConfig(target, effective, 'dsh-ray-plugin-control-plane')
   // Native review authorities share immutable runtime descriptors in memory.
   // Emit independent YAML values so a subsequent raw Loader digest has no aliases.
   const nativeCp = 'backend' in cp.sourceBuild && cp.sourceBuild.backend === 'linux-native'
-  required(target.rows, 'dsh-enhanced-plugin-control-plane').set('config', target.document.createNode(cp,
+  required(target.rows, 'dsh-ray-plugin-control-plane').set('config', target.document.createNode(cp,
     { aliasDuplicateObjects: !nativeCp }))
 
   // Coordinator is intentionally sparse. Base rows must match the installed
@@ -496,7 +496,7 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   const coordinatorCp: ControlPlaneConfig = { catalogPath: targetCp.catalogPath, trustPath: targetCp.trustPath, statePath: root,
     adoptionCoordinator: { coordinatorId: targetAdoptions.handoff?.coordinatorId ?? fail('sourceAdoptions.handoff coordinatorId is required'), scope: { workspace: owner.workspace, preset: owner.preset, principalId: owner.principal, ownerRouteId: owner.route.id }, timeoutMs: input.manifest.coordinator.timeoutMs, budgetId: input.manifest.coordinator.budgetId, budgetAmount: input.manifest.coordinator.budgetAmount } }
   normalizeControlPlaneConfig(coordinatorCp)
-  const policy = cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-enhanced-assistant-policy')
+  const policy = cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-ray-assistant-policy')
   replaceNode(coordinator.document, policy, 'databasePath', join(root, 'policy.sqlite'))
   const budgets = seq(policy.get('budgets', true) as Node | undefined, 'coordinator policy budgets')
   upsertById(coordinator.document, budgets, { id: input.manifest.coordinator.budgetId, metric: 'automation-runs', limit: input.manifest.limits.coordinator, periodMs: input.manifest.limits.periodMs, scope: 'subject' })
@@ -505,12 +505,12 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   const coordinatorAutomationSubject = { ...coordinatorSubject, id: 'adoption-coordinator-*' }
   upsertById(coordinator.document, rules, { id: `${rsiPrefix}coordinator-reconcile`, effect: 'allow', subject: coordinatorSubject, actions: ['reconcile'], resource: { kind: 'automation', id: 'adoption-coordinator-*' }, context: { initiators: ['background'] } })
   upsertById(coordinator.document, rules, { id: `${rsiPrefix}coordinator-execute`, effect: 'allow', subject: coordinatorAutomationSubject, actions: ['execute'], resource: { kind: 'automation', id: 'adoption-coordinator-*' }, context: { initiators: ['background'] } })
-  const automationConfig = cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-enhanced-assistant-automations')
+  const automationConfig = cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-ray-assistant-automations')
   if (automationConfig.get('allowUnbudgetedExecution') === true) fail('coordinator allowUnbudgetedExecution must be false')
   automationConfig.set('schedulerEnabled', true)
   replaceNode(coordinator.document, automationConfig, 'databasePath', rsiCoordinatorAutomationDatabasePath(input.dshHome, input.manifest.coordinatorProfile))
   replaceNode(coordinator.document, automationConfig, 'runsPath', join(root, 'runs'))
-  cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-enhanced-plugin-control-plane')
-  replaceNode(coordinator.document, required(coordinator.rows, 'dsh-enhanced-plugin-control-plane'), 'config', coordinatorCp)
+  cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-ray-plugin-control-plane')
+  replaceNode(coordinator.document, required(coordinator.rows, 'dsh-ray-plugin-control-plane'), 'config', coordinatorCp)
   return { targetPatch: target.document.toString({ lineWidth: 0 }), coordinatorPatch: coordinator.document.toString({ lineWidth: 0 }) }
 }

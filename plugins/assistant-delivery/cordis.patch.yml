@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-delivery
-      name: '@dsh-enhanced/assistant-delivery'
+    - id: dsh-ray-assistant-delivery
+      name: '@dsh-ray/assistant-delivery'
       inject:
         - assistantPolicy
       config:

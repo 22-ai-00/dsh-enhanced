@@ -12,9 +12,9 @@ import type {
   ProcessBehaviorCriterion,
   TargetReadbackCriterion,
   TaskAcceptanceContract,
-} from '@dsh-enhanced/task-acceptance-contract'
-import { validateLinuxRuntime, validateLinuxCgroupRoots, type LinuxRuntime, type LinuxCgroupRoots } from '@dsh-enhanced/assistant-isolation/native-resources'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/task-acceptance-contract'
+import { validateLinuxRuntime, validateLinuxCgroupRoots, type LinuxRuntime, type LinuxCgroupRoots } from '@dsh-ray/assistant-isolation/native-resources'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 
 const MAX_AUTHORITIES = 64
 const MAX_CONFIG_STRING = 16_384

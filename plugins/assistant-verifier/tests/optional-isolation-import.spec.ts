@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest'
 
-vi.mock('@dsh-enhanced/assistant-isolation', () => {
+vi.mock('@dsh-ray/assistant-isolation', () => {
   throw new Error('optional Isolation package is unavailable')
 })
 

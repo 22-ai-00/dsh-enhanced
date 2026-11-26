@@ -7,7 +7,7 @@ import { isAbsolute, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { readLinuxExecutionReceipt, LinuxVerifierRunner,
-  type IsolationResult, type LinuxExecutionContract, type LinuxExecutionIntent } from '@dsh-enhanced/assistant-isolation'
+  type IsolationResult, type LinuxExecutionContract, type LinuxExecutionIntent } from '@dsh-ray/assistant-isolation'
 import { afterEach, describe, expect, test } from 'vitest'
 import type { LinuxPluginBehaviorRuntime } from '../src/linux-behavior-runtime.js'
 

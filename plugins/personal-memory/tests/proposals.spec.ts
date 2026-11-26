@@ -8,7 +8,7 @@ import {
   AssistantPolicyService,
   type ApprovalProposalRecoveryInput,
   type ApprovalProposalSnapshot,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, test } from 'vitest'
 import { MemoryProposalManager } from '../src/proposals.ts'
 import { hashMemoryMutation, memoryPrincipalDigest, MemoryStore } from '../src/store.ts'
@@ -85,7 +85,7 @@ describe('approval-gated memory proposals', () => {
       yield { type: 'finish', reason: { kind: 'stop' } }
     } } as never)
     const route = {
-      routeVersion: 2 as const, sourceId: 'dsh-enhanced-personal-memory',
+      routeVersion: 2 as const, sourceId: 'dsh-ray-personal-memory',
       bindingId: 'binding-owner-dm', workspace: '/work/alpha',
       principal: 'owner:lark:123', bindingVersion: 1, bindingGeneration: 1,
       principalRecordId: 'principal-row-proposals', principalVersion: 1,
@@ -208,7 +208,7 @@ describe('approval-gated memory proposals', () => {
     const { manager, memory, policy, ctx } = await harness()
     const dispatch = {
       ...routeV2,
-      sourceId: 'dsh-enhanced-personal-memory',
+      sourceId: 'dsh-ray-personal-memory',
       bindingId: 'binding-owner-dm',
       workspace: '/work/alpha',
       principal: 'owner:lark:123',
@@ -251,7 +251,7 @@ describe('approval-gated memory proposals', () => {
       idempotencyKey: 'proposal:attached-policy-missing',
       dispatch: {
         ...routeV2,
-        sourceId: 'dsh-enhanced-personal-memory',
+        sourceId: 'dsh-ray-personal-memory',
         bindingId: 'binding-owner-dm',
         workspace: '/work/alpha',
         principal: 'owner:lark:123',
@@ -495,7 +495,7 @@ describe('approval-gated memory proposals', () => {
       idempotencyKey: 'proposal:cross-database-gap',
       dispatch: {
         ...routeV2,
-        sourceId: 'dsh-enhanced-personal-memory',
+        sourceId: 'dsh-ray-personal-memory',
         bindingId: 'binding-owner-dm',
         workspace: '/work/alpha',
         principal: 'owner:lark:123',
@@ -650,7 +650,7 @@ describe('approval-gated memory proposals', () => {
       ttlMs: 1_000,
       dispatch: {
         ...routeV2,
-        sourceId: 'dsh-enhanced-personal-memory',
+        sourceId: 'dsh-ray-personal-memory',
         bindingId: 'binding-owner-dm',
         workspace: '/work/alpha',
         principal: 'owner:lark:123',
@@ -718,7 +718,7 @@ describe('approval-gated memory proposals', () => {
       ttlMs: 1_000,
       dispatch: {
         ...routeV2,
-        sourceId: 'dsh-enhanced-personal-memory',
+        sourceId: 'dsh-ray-personal-memory',
         bindingId: 'binding-owner-dm',
         workspace: '/work/alpha',
         principal: 'owner:lark:123',
@@ -792,7 +792,7 @@ describe('approval-gated memory proposals', () => {
     const managerB = new MemoryProposalManager(secondMemory, secondPolicy)
     const dispatch = {
       ...routeV2,
-      sourceId: 'dsh-enhanced-personal-memory',
+      sourceId: 'dsh-ray-personal-memory',
       bindingId: 'binding-owner-dm',
       workspace: '/work/alpha',
       principal: 'owner:lark:123',
@@ -856,7 +856,7 @@ describe('approval-gated memory proposals', () => {
         idempotencyKey: `proposal:recovery-${mismatch}-mismatch`,
         dispatch: {
           ...routeV2,
-          sourceId: 'dsh-enhanced-personal-memory',
+          sourceId: 'dsh-ray-personal-memory',
           bindingId: 'expected-owner-binding',
           workspace: '/work/alpha',
           principal: 'owner:lark:123',

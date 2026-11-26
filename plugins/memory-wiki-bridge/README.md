@@ -1,4 +1,4 @@
-# @dsh-enhanced/memory-wiki-bridge
+# @dsh-ray/memory-wiki-bridge
 
 只提供两条显式、可审阅的知识晋升：
 
@@ -10,7 +10,7 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/memory-wiki-bridge
+dsh plugin --profile web add @dsh-ray/memory-wiki-bridge
 dsh --profile web --dump-config
 ```
 

@@ -19,7 +19,7 @@ interface DeepSeekRuntime {
   DEEPSEEK_PROVIDER: string
 }
 
-const packageName = '@dsh-enhanced/assistant-deepseek-budget'
+const packageName = '@dsh-ray/assistant-deepseek-budget'
 const provider = 'deepseek-goal-metered'
 const models = Object.freeze(['deepseek-v4-flash', 'deepseek-v4-pro'])
 

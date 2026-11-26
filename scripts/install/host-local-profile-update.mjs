@@ -14,7 +14,7 @@ import { nativeAuthority, inventory, readMetadata, writeMetadata, pnpmEnvironmen
   localCohortPins, sourceDigest, metadataNames, nativeName, snapshotName, assertPeerBindings,
   bindInstalledPnpmStore } from './host-profile-update.mjs'
 
-const enhancedName = /^@dsh-enhanced\/[a-z0-9][a-z0-9._-]*$/u
+const enhancedName = /^@dsh-ray\/[a-z0-9][a-z0-9._-]*$/u
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const inside = (root, path) => path === root || path.startsWith(root + sep)
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -133,7 +133,7 @@ async function assertEmptyInstalledGraph(profilePath, logicalProfilePath, profil
   }
 }
 function artifactLocator(home, name, artifact) {
-  const slug = name.slice('@dsh-enhanced/'.length)
+  const slug = name.slice('@dsh-ray/'.length)
   if (typeof artifact?.tarball !== 'string' || !/^rsi-local-cohorts\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/artifacts\/[a-z0-9][a-z0-9._-]*\.tgz$/u.test(relative(home, artifact.tarball).split(sep).join('/'))
     || !isAbsolute(artifact.tarball) || resolve(artifact.tarball) !== artifact.tarball
     || !inside(join(home, 'rsi-local-cohorts'), artifact.tarball)
@@ -279,8 +279,8 @@ function assertDelta(original, prepared, originalNative, native, candidateArtifa
   }
   const assertCandidatePeers = (reference, label) => {
     assertPeerBindings(reference, native)
-    for (const match of reference.matchAll(/@dsh-enhanced\/([a-z0-9._-]+)@([0-9][A-Za-z0-9._+-]*)/gu)) {
-      const name = `@dsh-enhanced/${match[1]}`
+    for (const match of reference.matchAll(/@dsh-ray\/([a-z0-9._-]+)@([0-9][A-Za-z0-9._+-]*)/gu)) {
+      const name = `@dsh-ray/${match[1]}`
       if (!eligible.has(name) || candidateArtifacts[name]?.version !== match[2]) fail(`enhanced peer context differs: ${label}`)
     }
   }
@@ -482,12 +482,12 @@ async function verifyInstalled(profilePath, candidateArtifacts, peerScope, yaml)
       fail(`unexpected pnpm store entry: ${folder}`)
     }
     if (folder === 'node_modules') continue
-    const scope = join(store, folder, 'node_modules', '@dsh-enhanced')
+    const scope = join(store, folder, 'node_modules', '@dsh-ray')
     const scopeEntry = await lstat(scope).catch(error => error?.code === 'ENOENT' ? undefined : Promise.reject(error))
     if (scopeEntry === undefined) continue
     if (!scopeEntry.isDirectory() || scopeEntry.isSymbolicLink() || await realpath(scope) !== scope) fail(`unsafe installed package scope: ${scope}`)
     for (const slug of await readdir(scope)) {
-      const name = `@dsh-enhanced/${slug}`, artifact = candidateArtifacts[name]
+      const name = `@dsh-ray/${slug}`, artifact = candidateArtifacts[name]
       if (!peerScope.names.includes(name)) fail(`installed enhanced package outside selected closure: ${name}`)
       if (!artifact) fail(`unapproved installed enhanced package: ${name}`)
       const root = join(scope, slug), entry = await lstat(root)
@@ -652,11 +652,11 @@ export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
   let repairPatches
   if (ownerSourceRepair !== undefined) {
     const proof = ownerSourceRepair.sourceProof
-    const programUpdate = proof?.protocol === 'dsh-enhanced/host-owner-program-update/v1'
+    const programUpdate = proof?.protocol === 'dsh-ray/host-owner-program-update/v1'
     const owner = programUpdate ? proof.ownerUpdate : proof?.ownerRepair
     const next = programUpdate ? proof.ownerUpdateNext : proof?.ownerRepairNext
     if (legacySettingsImport !== undefined || ownerSourceRepair.homePath !== preparation.originalHome
-      || !programUpdate && proof?.protocol !== 'dsh-enhanced/host-owner-source-repair/v1'
+      || !programUpdate && proof?.protocol !== 'dsh-ray/host-owner-source-repair/v1'
       || proof.homePath !== preparation.originalHome || !next) fail('owner profile update binding differs')
     const verification = { record: proof.record, homePath: preparation.originalHome, physicalHome: stage,
       installer: proof.installer, phase: 'after-finalize' }

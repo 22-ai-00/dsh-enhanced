@@ -136,7 +136,7 @@ describe('web-owner autonomy policy grant helpers', () => {
       budgets: merged.budgets,
     })
 
-    const dreamAutomationId = `dsh-enhanced-assistant-dreaming:${scope.principalId}:${scope.ownerRouteId}`
+    const dreamAutomationId = `dsh-ray-assistant-dreaming:${scope.principalId}:${scope.ownerRouteId}`
     const dreamBg = { kind: 'background' as const, id: dreamAutomationId, workspace: scope.workspace, principal: scope.principalId }
     expect(service.getBudgetConfig(ids.dreaming)).toMatchObject({ metric: 'automation-runs', limit: 2, scope: 'subject' })
 

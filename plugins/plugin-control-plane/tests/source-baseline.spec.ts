@@ -53,7 +53,7 @@ async function gitFixture() {
 function signedEdge(value: Awaited<ReturnType<typeof gitFixture>>, base: string, merged: string, ordinal: number):
   { plan: PluginSourcePlan; operation: SourceReleaseOperation } {
   const now = Date.now(), id = `source-${ordinal}`, planDigest = digest(id), releaseId = `release-${ordinal}`
-  const policy = { targetBranch: 'repairs', candidateId: 'health-helper', packageName: '@dsh-enhanced/health-helper',
+  const policy = { targetBranch: 'repairs', candidateId: 'health-helper', packageName: '@dsh-ray/health-helper',
     packageVersion: '0.1.1', packagePath: 'plugins/health-helper', dshBaseline: '0.1.5', capabilities: ['health'],
     authorities: ['filesystem'], requires: [], registryId: 'local', registryLocator: 'file:///private/registry',
     registryReference: 'file:///private/registry/package.tgz', catalogId: 'catalog', catalogPath: join(value.root, 'catalog.json'),

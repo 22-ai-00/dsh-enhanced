@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { prepareRsiReleaseBuildEnvironment, readRsiReleaseBuildEnvironment } from '../src/rsi-release-build.js'
 import type { LinuxRsiBuildEnvironment } from '../src/rsi-linux-runtime-bootstrap.js'
 

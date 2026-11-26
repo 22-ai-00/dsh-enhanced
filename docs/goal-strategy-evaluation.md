@@ -36,12 +36,12 @@ dsh-benchmark report --database ./private/strategy.sqlite --plan strategy-public
 
 ## DeepSeek 生产模型入口
 
-Evaluation 另外发布 `@dsh-enhanced/assistant-evaluation/benchmark/deepseek`，可直接作为 `--adapter` 的绝对文件路径。它复用 `assistant-deepseek-budget` 的固定官方请求、工具回放、完整 usage 校验与取消逻辑，不自动启用普通 profile 的任何插件。CLI 允许 pnpm 为这个受信 adapter 生成的硬链接，仍在导入前后核对内容摘要；配置文件继续要求单链接。先在评测安装目录显式安装同批 `@dsh-enhanced/assistant-deepseek-budget` 及其 Host peers；它是 Evaluation 的可选 peer，普通评测不必安装。
+Evaluation 另外发布 `@dsh-ray/assistant-evaluation/benchmark/deepseek`，可直接作为 `--adapter` 的绝对文件路径。它复用 `assistant-deepseek-budget` 的固定官方请求、工具回放、完整 usage 校验与取消逻辑，不自动启用普通 profile 的任何插件。CLI 允许 pnpm 为这个受信 adapter 生成的硬链接，仍在导入前后核对内容摘要；配置文件继续要求单链接。先在评测安装目录显式安装同批 `@dsh-ray/assistant-deepseek-budget` 及其 Host peers；它是 Evaluation 的可选 peer，普通评测不必安装。
 
 从 [DeepSeek 配置模板](examples/strategy-deepseek.config.json) 开始，在同一安装目录解析真实文件及摘要，然后填入模板的 `adapterDigest` / `tokenCounterDigest`：
 
 ```sh
-node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs"; import { fileURLToPath } from "node:url"; import { createHash } from "node:crypto"; const path = realpathSync(fileURLToPath(import.meta.resolve("@dsh-enhanced/assistant-evaluation/benchmark/deepseek"))); console.log(JSON.stringify({path, sha256:createHash("sha256").update(readFileSync(path)).digest("hex")}));'
+node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs"; import { fileURLToPath } from "node:url"; import { createHash } from "node:crypto"; const path = realpathSync(fileURLToPath(import.meta.resolve("@dsh-ray/assistant-evaluation/benchmark/deepseek"))); console.log(JSON.stringify({path, sha256:createHash("sha256").update(readFileSync(path)).digest("hex")}));'
 ```
 
 凭据由当前 Host `credentials` 服务解析 `DEEPSEEK_API_KEY` 引用；无该服务时读取同名环境变量。密钥不写入配置或报告。运行前由操作者在进程环境提供凭据，使用上文的 `doctor/plan/run/report` 命令并替换配置及 adapter 路径。doctor 检查所选模型包和隔离环境，不读取凭据、不调用模型；可运行的线路与模型效果需另外验证。
@@ -52,19 +52,19 @@ node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs
 
 ## TraeX 本地 call-count 入口
 
-Evaluation 还发布 `@dsh-enhanced/assistant-evaluation/benchmark/traex`，同样以绝对文件路径作为 `--adapter`，固定 `traex-agent` provider 与单一 `gpt-5.6-terra` 模型。它复用 WP14 验证过的本机 TraeX ACP 链：`traex` 可执行文件在 `PATH` 上（或经 `TRAEX_COMMAND` 覆盖），登录态来自操作者全局 `~/.trae`，不接 API key、endpoint 或任何凭据值，零外部账户花费。它不自动启用普通 profile 的任何插件。
+Evaluation 还发布 `@dsh-ray/assistant-evaluation/benchmark/traex`，同样以绝对文件路径作为 `--adapter`，固定 `traex-agent` provider 与单一 `gpt-5.6-terra` 模型。它复用 WP14 验证过的本机 TraeX ACP 链：`traex` 可执行文件在 `PATH` 上（或经 `TRAEX_COMMAND` 覆盖），登录态来自操作者全局 `~/.trae`，不接 API key、endpoint 或任何凭据值，零外部账户花费。它不自动启用普通 profile 的任何插件。
 
 TraeX 的 ACP 流从不返回 token usage，因此该入口只接受 `model.observationMode: "observed-call-count"` 计量模式，与 DeepSeek 的 token 强制模式平级：一次正常结束（finish reason ∈ `stop`/`tool-calls`/`max-tokens`）的模型请求计一次 `modelCalls`；reserved/聚合 input、output tokens 恒为 0，usage 与 `costUsdMicros` 恒为 `null`，**绝不估算**。若 provider 意外发出 usage chunk，meter 直接判该请求失败而不是静默丢弃可能计费的数据。协调成本只报告 strategy 臂的"额外 model calls"与独立 verifier 的行为结果；token/金钱字段保持 `null`。预算中的 `inputTokens: 0` 与等于单次输出上限的 `outputTokens` 只是满足结构约束的占位值，不代表任何实测 token。
 
 从 [TraeX 配置模板](examples/strategy-traex.config.json) 开始。calls 模式没有费率、金额预算、`inputLimitMode`/`outputLimitMode` 或 token-counter 上界；`adapterDigest` 与 `tokenCounterDigest` 仍必须同时等于 adapter 文件的实际 SHA-256。在同一安装目录解析真实文件及摘要：
 
 ```sh
-node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs"; import { fileURLToPath } from "node:url"; import { createHash } from "node:crypto"; const path = realpathSync(fileURLToPath(import.meta.resolve("@dsh-enhanced/assistant-evaluation/benchmark/traex"))); console.log(JSON.stringify({path, sha256:createHash("sha256").update(readFileSync(path)).digest("hex")}));'
+node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs"; import { fileURLToPath } from "node:url"; import { createHash } from "node:crypto"; const path = realpathSync(fileURLToPath(import.meta.resolve("@dsh-ray/assistant-evaluation/benchmark/traex"))); console.log(JSON.stringify({path, sha256:createHash("sha256").update(readFileSync(path)).digest("hex")}));'
 ```
 
 运行前确认 TraeX 登录态有效（`probeTraexReadiness`），再使用上文的 `doctor/plan/run/report` 命令并替换配置及 adapter 路径。`plan` 在该模式输出 `observationMode: "observed-call-count"`、`maximumModelCalls`、`maximumToolCalls`，并把所有 token/limit/cost 汇总字段置为 `null`。Goal 侧使用原生 calls 预算（按 `{provider, model}` 精确路由白名单），父 Goal 与两个 advice-only persona 子会话全部落在同一 TraeX 路由上，不重复注册 token meter。
 
-计划与每次父请求的源码核对会额外覆盖实际解析的 `@dsh-enhanced/traex-acp-provider` 生产 lib。计量模式在三处绑定：operator 只在 `model.observationMode` 写一次，executor 派生明文 `plan.execution.observationMode` 进入 plan digest，evidence 解析时交叉断言 meter 自报与冻结计划一致；事后篡改任一副本都会被 digest 或交叉断言捕获。该入口的注入式工程层测试（假 `runText`/`discoverModels`/`verifyAuth`，不触网）只验证请求契约与生命周期，不代表已驱动真实 TraeX 子进程，也不构成策略增益或生产供应商证据。
+计划与每次父请求的源码核对会额外覆盖实际解析的 `@dsh-ray/traex-acp-provider` 生产 lib。计量模式在三处绑定：operator 只在 `model.observationMode` 写一次，executor 派生明文 `plan.execution.observationMode` 进入 plan digest，evidence 解析时交叉断言 meter 自报与冻结计划一致；事后篡改任一副本都会被 digest 或交叉断言捕获。该入口的注入式工程层测试（假 `runText`/`discoverModels`/`verifyAuth`，不触网）只验证请求契约与生命周期，不代表已驱动真实 TraeX 子进程，也不构成策略增益或生产供应商证据。
 
 历史 TraeX 的 v1 配对实验未调用咨询工具，两臂结果持平，不构成策略增益证据；它只有调用次数预算，不能宣称 token 或金额预算相等。详细诊断保留在 Git 历史。后续比较需同时报告机制是否被实际调用及独立验收结果，不能靠调 prompt 制造增益。
 

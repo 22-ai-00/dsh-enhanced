@@ -9,14 +9,14 @@ import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { getExport, getExportFn, sha256Hex } from './helpers/assertions.ts'
-import { runBashCommand, runDshRsiInProcess, runNodeScript, runPluginSetupInProcess } from './helpers/cli-runner.ts'
+import { runBashCommand, runDshRayInProcess, runNodeScript, runPluginSetupInProcess } from './helpers/cli-runner.ts'
 import { createCordisHarness } from './helpers/cordis-harness.ts'
 import {
   loadAssistantDelivery,
   loadAssistantPolicy,
   loadAssistantWebOwnerSetup,
-  loadDshRsiCli,
-  loadDshRsiUpgrade,
+  loadDshRayCli,
+  loadDshRayUpgrade,
   loadOwnerConsole,
   loadPackageModule,
   loadUpgradeProgram,
@@ -40,14 +40,14 @@ async function seedUpgradeProfileFixture(
 ) {
   const profileDir = join(dshHome, 'profiles', profileName)
   const enhancedVersion = opts.enhancedVersion ?? '0.1.83'
-  const enhancedDir = join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery')
+  const enhancedDir = join(profileDir, 'node_modules', '@dsh-ray', 'assistant-delivery')
   const cacheRoot = join(dshHome, 'host-cache')
   await mkdir(profileDir, { recursive: true, mode: 0o700 })
   await mkdir(enhancedDir, { recursive: true, mode: 0o700 })
   await mkdir(cacheRoot, { recursive: true, mode: 0o700 })
 
   const hostVersion = opts.hostVersion ?? '0.1.9'
-  const hostBindingPath = join(dshHome, '.dsh-rsi-host.json')
+  const hostBindingPath = join(dshHome, '.dsh-ray-host.json')
   if (opts.corruptHost) {
     await writeFile(hostBindingPath, '{broken json', { mode: 0o600 })
   } else {
@@ -67,19 +67,19 @@ async function seedUpgradeProfileFixture(
     JSON.stringify({
       name: `dsh-profile-${profileName}`,
       private: true,
-      dependencies: { '@dsh-enhanced/assistant-delivery': enhancedVersion },
+      dependencies: { '@dsh-ray/assistant-delivery': enhancedVersion },
     }),
     { mode: 0o600 },
   )
   await writeFile(join(profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n', { mode: 0o600 })
   await writeFile(
     join(enhancedDir, 'package.json'),
-    JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: enhancedVersion }),
+    JSON.stringify({ name: '@dsh-ray/assistant-delivery', version: enhancedVersion }),
     { mode: 0o600 },
   )
   await writeFile(
     join(profileDir, 'cordis.patch.yml'),
-    '- id: dsh-enhanced-assistant-delivery\n  name: "@dsh-enhanced/assistant-delivery"\n  config:\n    ownerRoutes:\n      - id: owner-route-1\n',
+    '- id: dsh-ray-assistant-delivery\n  name: "@dsh-ray/assistant-delivery"\n  config:\n    ownerRoutes:\n      - id: owner-route-1\n',
     { mode: 0o600 },
   )
   await writeFile(join(profileDir, '.credentials.yaml'), 'openai: dummy-ref\n', { mode: 0o600 })
@@ -108,7 +108,7 @@ async function seedUpgradeProfileFixture(
 function mockUpgradeFetch(targetEnhanced = '0.1.84', targetDsh = '0.2.2-rc.5') {
   return async (url: string | URL) => {
     const str = String(url)
-    const latest = str.includes('@dsh-enhanced') || str.includes('dsh-rsi-cli') ? targetEnhanced : targetDsh
+    const latest = str.includes('@dsh-ray') || str.includes('dsh-ray') ? targetEnhanced : targetDsh
     return new Response(JSON.stringify({ 'dist-tags': { latest } }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -118,11 +118,11 @@ function mockUpgradeFetch(targetEnhanced = '0.1.84', targetDsh = '0.2.2-rc.5') {
 
 describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate & CI Boundaries', () => {
   describe('F19: WP17 corrupt state, running process, lock & history migration boundaries', () => {
-    test('T2-F19-01: runUpgrade rejects corrupt .dsh-rsi-host.json, symlinked host binding, missing profile & corrupt SQLite ledger', async () => {
+    test('T2-F19-01: runUpgrade rejects corrupt .dsh-ray-host.json, symlinked host binding, missing profile & corrupt SQLite ledger', async () => {
       const ws = await workspaces.create('f19-corrupt-')
-      const upg = await loadDshRsiUpgrade()
+      const upg = await loadDshRayUpgrade()
 
-      // 1) Corrupt .dsh-rsi-host.json
+      // 1) Corrupt .dsh-ray-host.json
       const f1 = await seedUpgradeProfileFixture(ws.dshHome, 'web', { corruptHost: true })
       const badHost = await upg.runUpgrade({
         dshHome: ws.dshHome,
@@ -169,7 +169,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       expect(corruptDbRes.exitCode).toBe(1)
       expect(corruptDbRes.report.readiness.ledgersOk).toBe(false)
 
-      // 4) Symlinked .dsh-rsi-host.json
+      // 4) Symlinked .dsh-ray-host.json
       const symlinkTarget = join(ws.root, 'real-host.json')
       await writeFile(symlinkTarget, '{}', 'utf8')
       await rm(f1.hostBindingPath)
@@ -191,7 +191,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
     test('T2-F19-02: runUpgrade blocks active DSH processes without confirmDshHomeStopped, invalid dshVersion & unsafe registry URL', async () => {
       const ws = await workspaces.create('f19-proc-block-')
       const { hostBindingPath } = await seedUpgradeProfileFixture(ws.dshHome, 'web', { hostVersion: '0.2.1-rc.2' })
-      const upg = await loadDshRsiUpgrade()
+      const upg = await loadDshRayUpgrade()
 
       expect(() => upg.validateRegistryUrl('http://user:pass@evil.example.com')).toThrow()
       expect(() => upg.validateRegistryUrl('http://remote-insecure.example.com')).toThrow()
@@ -231,7 +231,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
         hostVersion: '0.2.2-rc.5',
         enhancedVersion: '0.1.84',
       })
-      const upg = await loadDshRsiUpgrade()
+      const upg = await loadDshRayUpgrade()
 
       let pkgUpgrades = 0
       const res = await upg.runUpgrade({
@@ -258,7 +258,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
 
     test('T2-F19-04: withDshHomeLifecycleLock rejects concurrent lock acquisition and parseProgramUpgradeArgs rejects invalid flags', async () => {
       const ws = await workspaces.create('f19-lock-')
-      const lockMod = (await loadPackageModule('dsh-rsi-cli/home-lifecycle-lock')) as {
+      const lockMod = (await loadPackageModule('dsh-ray/home-lifecycle-lock')) as {
         withDshHomeLifecycleLock: <T>(dshHome: string, op: () => Promise<T>) => Promise<T>
         dshHomeLifecycleRendezvousPath: (dshHome: string) => string
       }
@@ -286,7 +286,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       const { profileDir, hostBindingPath } = await seedUpgradeProfileFixture(ws.dshHome, 'web', { hostVersion: '0.2.1-rc.2' })
       const patchBefore = await readFile(join(profileDir, 'cordis.patch.yml'), 'utf8')
       const credBefore = await readFile(join(profileDir, '.credentials.yaml'), 'utf8')
-      const upg = await loadDshRsiUpgrade()
+      const upg = await loadDshRayUpgrade()
 
       const res = await upg.runUpgrade({
         dshHome: ws.dshHome,
@@ -314,7 +314,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
     test('T2-F19-06: WP17 non-empty history migration fails closed without opt-in and fails closed on corrupt ledger even with opt-in', async () => {
       const ws = await workspaces.create('f19-hist-edge-')
       const { hostBindingPath } = await seedUpgradeProfileFixture(ws.dshHome, 'web', { hostVersion: '0.1.9', seedHistory: true })
-      const upg = await loadDshRsiUpgrade()
+      const upg = await loadDshRayUpgrade()
 
       const blockedNoFlag = await upg.runUpgrade({
         dshHome: ws.dshHome,
@@ -411,7 +411,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
         profile: 'web',
         workspace: ws.workspace,
         preset: 'primary',
-      }, '[]\n', '- id: only-other\n  name: "@dsh-enhanced/other"\n')).toThrow(/assistant-web-owner setup/)
+      }, '[]\n', '- id: only-other\n  name: "@dsh-ray/other"\n')).toThrow(/assistant-web-owner setup/)
     }, 15_000)
 
     test('T2-F20-04: configureWebOwner fails closed when .assistant-web-owner-setup.lock is held', async () => {
@@ -474,7 +474,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
   })
 
   describe('F21: R4 CLI invalid flags, degraded doctor & unauthorized NL control boundaries', () => {
-    test('T2-F21-01: dsh-rsi CLI returns exit code 2 on unknown commands, unknown flags, --check --yes conflict & unsafe --registry', async () => {
+    test('T2-F21-01: dsh-ray CLI returns exit code 2 on unknown commands, unknown flags, --check --yes conflict & unsafe --registry', async () => {
       const ws = await workspaces.create('f21-bad-cli-')
       const invalidInvocations: string[][] = [
         ['not-a-valid-command'],
@@ -484,7 +484,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
         ['logs', '--lines', '0', '--dsh-home', ws.dshHome],
       ]
       for (const args of invalidInvocations) {
-        const res = await runDshRsiInProcess(args, { DSH_HOME: ws.dshHome })
+        const res = await runDshRayInProcess(args, { DSH_HOME: ws.dshHome })
         expect(res.exitCode, `Expected exitCode 2 for ${args.join(' ')}`).toBe(2)
         expect(res.stderr.length).toBeGreaterThan(0)
       }
@@ -492,7 +492,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
 
     test('T2-F21-02: collectLiveDoctorReport reports ok=false & fail checks on missing host/profile and corrupt host binding', async () => {
       const ws = await workspaces.create('f21-doctor-bad-')
-      const cli = await loadDshRsiCli()
+      const cli = await loadDshRayCli()
       const collectDoctor = getExportFn<(opts: Record<string, unknown>) => Promise<{
         ok: boolean
         boundHost: { status: string }
@@ -522,22 +522,22 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       expect(missingProfileReport.ok).toBe(false)
       expect(missingProfileReport.checks.some(c => c.status === 'fail')).toBe(true)
 
-      await writeFile(join(ws.dshHome, '.dsh-rsi-host.json'), '{broken json', { mode: 0o600 })
+      await writeFile(join(ws.dshHome, '.dsh-ray-host.json'), '{broken json', { mode: 0o600 })
       const corruptReport = await collectDoctor({ dshHome: ws.dshHome, home: ws.root, platform: 'linux' })
       expect(corruptReport.ok).toBe(false)
       expect(corruptReport.boundHost.status).toBe('invalid')
     }, 15_000)
 
-    test('T2-F21-03: R4 dsh-rsi enable|disable|upgrade fails closed on nonexistent profile or relative --dsh-home', async () => {
+    test('T2-F21-03: R4 dsh-ray enable|disable|upgrade fails closed on nonexistent profile or relative --dsh-home', async () => {
       const ws = await workspaces.create('f21-r4-cli-err-')
-      const cli = await loadDshRsiCli()
+      const cli = await loadDshRayCli()
       const parseArgs = getExportFn<(argv: readonly string[]) => Record<string, unknown>>(cli, 'parseArgs')
       expect(parseArgs(['upgrade', '--profile', 'web']).command).toBe('upgrade')
       expect(parseArgs(['enable', '--profile', 'web']).command).toBe('enable')
       expect(parseArgs(['disable', '--profile', 'web']).command).toBe('disable')
 
       const offlineUpgradeDeps = { upgradeDeps: { fetch: async () => new Response('{}', { status: 404 }) } }
-      const upgMissingProf = await runDshRsiInProcess(
+      const upgMissingProf = await runDshRayInProcess(
         ['upgrade', '--profile', 'does-not-exist', '--dsh-home', ws.dshHome, '--json'],
         { DSH_HOME: ws.dshHome },
         offlineUpgradeDeps,
@@ -548,7 +548,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       expect(upgMissingJson.ready).toBe(false)
       expect(upgMissingJson.readiness.blockedReasons.join('\n')).toContain('does-not-exist')
 
-      const upgRelativeHome = await runDshRsiInProcess(
+      const upgRelativeHome = await runDshRayInProcess(
         ['upgrade', '--profile', 'web', '--dsh-home', 'relative/dsh-home', '--check', '--json'],
         { DSH_HOME: ws.dshHome },
         offlineUpgradeDeps,
@@ -557,7 +557,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       expect((JSON.parse(upgRelativeHome.stdout) as { ok: boolean }).ok).toBe(false)
 
       for (const cmd of ['enable', 'disable'] as const) {
-        const missingProf = await runDshRsiInProcess([cmd, '--profile', 'does-not-exist', '--dsh-home', ws.dshHome, '--json'], { DSH_HOME: ws.dshHome })
+        const missingProf = await runDshRayInProcess([cmd, '--profile', 'does-not-exist', '--dsh-home', ws.dshHome, '--json'], { DSH_HOME: ws.dshHome })
         expect(missingProf.exitCode, `Expected exitCode 1 for ${cmd} on missing profile`).toBe(1)
         const combinedMissing = missingProf.stdout + missingProf.stderr
         expect(combinedMissing).toMatch(/does-not-exist|不存在|not found|profile/i)
@@ -565,7 +565,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
           expect((JSON.parse(missingProf.stdout) as { ok: boolean }).ok).toBe(false)
         }
 
-        const relHome = await runDshRsiInProcess([cmd, '--profile', 'web', '--dsh-home', 'relative/dsh-home', '--json'], { DSH_HOME: ws.dshHome })
+        const relHome = await runDshRayInProcess([cmd, '--profile', 'web', '--dsh-home', 'relative/dsh-home', '--json'], { DSH_HOME: ws.dshHome })
         expect([1, 2]).toContain(relHome.exitCode)
         const combinedRel = relHome.stdout + relHome.stderr
         expect(combinedRel).toMatch(/relative|absolute|dsh-home|web|不存在|not found|profile/i)
@@ -577,7 +577,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
 
     test('T2-F21-04: upgradeAssistantAndRecover fails closed when runUpgrade or doctor readiness fails', async () => {
       const ws = await workspaces.create('f21-recover-fail-')
-      const cli = await loadDshRsiCli()
+      const cli = await loadDshRayCli()
       const upgradeAndRecover = getExportFn<(opts: Record<string, unknown>, deps?: Record<string, unknown>) => Promise<{ ok: boolean; healthy?: boolean }>>(
         cli,
         'upgradeAssistantAndRecover',
@@ -691,7 +691,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
     test('T2-F22-03: verify-npm-release.mjs fails 39/40 when 1 package returns malformed JSON or null packument', async () => {
       const manifests = await readAllWorkspaceManifests()
       const targetVersion = manifests[0]!.version
-      const badPkg = '@dsh-enhanced/acp'
+      const badPkg = '@dsh-ray/acp'
       let mode: 'bad-json' | 'null-body' = 'bad-json'
 
       const server = createServer((req, res) => {
@@ -740,7 +740,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
     test('T2-F22-04: verify-npm-release.mjs fails 39/40 when 1 package has mismatched packument name or missing dist.tarball', async () => {
       const manifests = await readAllWorkspaceManifests()
       const targetVersion = manifests[0]!.version
-      const targetBad = '@dsh-enhanced/dsh-rsi-cli'
+      const targetBad = 'dsh-ray'
       let badMode: 'name-mismatch' | 'no-tarball' = 'name-mismatch'
 
       const server = createServer((req, res) => {
@@ -759,7 +759,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
         res.writeHead(200, { 'content-type': 'application/json' })
         if (pkgName === targetBad) {
           res.end(JSON.stringify({
-            name: badMode === 'name-mismatch' ? '@dsh-enhanced/wrong-pkg' : pkgName,
+            name: badMode === 'name-mismatch' ? '@dsh-ray/wrong-pkg' : pkgName,
             'dist-tags': { latest: targetVersion },
             versions: {
               [targetVersion]: {
@@ -916,7 +916,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
 
   describe('F26: Version command & read-only self-iteration stats error, security & delegation boundaries', () => {
     test('T2-F26-01: CLI flag conflicts fail with exitCode 2 / PurgeError while preserving start --json & update/upgrade --version', async () => {
-      const cli = await loadDshRsiCli()
+      const cli = await loadDshRayCli()
       const parseArgs = getExportFn<(argv: readonly string[]) => Record<string, unknown>>(cli, 'parseArgs')
 
       const badFlagCombos: string[][] = [
@@ -928,7 +928,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       ]
       for (const args of badFlagCombos) {
         expect(() => parseArgs(args), `Expected parseArgs to throw for ${args.join(' ')}`).toThrow()
-        const res = await runDshRsiInProcess(args)
+        const res = await runDshRayInProcess(args)
         expect(res.exitCode, `Expected exitCode 2 for ${args.join(' ')}`).toBe(2)
       }
 
@@ -945,7 +945,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
 
     test('T2-F26-02: Read-only SQLite safety enforces symlink & hardlink boundaries, writable/0555 zero sidecars, fail-closed uncheckpointed 0555 WAL, corrupt DB isolation & dataState=zero', async () => {
       const ws = await workspaces.create('f26-sqlite-sec-')
-      const cli = await loadDshRsiCli()
+      const cli = await loadDshRayCli()
       const ownerMod = await loadOwnerConsole()
       const deliveryVerMod = await loadPackageModule('assistant-delivery/version-query')
       const collectCli = getExportFn<(opts: Record<string, unknown>) => Promise<{
@@ -1125,7 +1125,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
 
       // Oversized diagnostics, plugin names, host version, and negative now must satisfy strict Typert bounds
       await writeFile(
-        join(ws.dshHome, '.dsh-rsi-host.json'),
+        join(ws.dshHome, '.dsh-ray-host.json'),
         JSON.stringify({ schemaVersion: 1, version: `0.2.2-${'v'.repeat(200)}`, cacheRoot: ws.root, receiptDigest: 'a'.repeat(64) }),
         { mode: 0o600 },
       )
@@ -1133,7 +1133,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       harness.provideMockService(ctxBounds, 'profileContext', { home: ws.dshHome, dir: profileDir, name: 'web' })
       harness.provideMockService(ctxBounds, 'pluginManager', {
         listBundles: async () => [{
-          name: `@dsh-enhanced/${'long-plugin-'.repeat(25)}`,
+          name: `@dsh-ray/${'long-plugin-'.repeat(25)}`,
           version: `1.0.0-${'b'.repeat(200)}`,
           enabled: true,
           installed: true,
@@ -1151,7 +1151,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
         ownerMod,
         'collectOwnerConsoleVersionInfo',
       )
-      const cliMod = await loadDshRsiCli()
+      const cliMod = await loadDshRayCli()
       const collectCli = getExportFn<(opts?: Record<string, unknown>) => Promise<Record<string, unknown>>>(
         cliMod,
         'collectVersionReport',
@@ -1164,16 +1164,16 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
 
       // Seed >256 plugins & >128 diagnostics on disk so CLI & Delivery also exercise wire-contract bounding
       for (let i = 0; i < 260; i += 1) {
-        const pDir = join(profileDir, 'node_modules', '@dsh-enhanced', `bound-plug-${String(i).padStart(3, '0')}`)
+        const pDir = join(profileDir, 'node_modules', '@dsh-ray', `bound-plug-${String(i).padStart(3, '0')}`)
         await mkdir(pDir, { recursive: true, mode: 0o700 })
         await writeFile(
           join(pDir, 'package.json'),
-          JSON.stringify({ name: `@dsh-enhanced/bound-plug-${String(i).padStart(3, '0')}`, version: `0.1.${i}` }),
+          JSON.stringify({ name: `@dsh-ray/bound-plug-${String(i).padStart(3, '0')}`, version: `0.1.${i}` }),
           'utf8',
         )
       }
       await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true }), 'utf8')
-      const longEvolvedName = `@dsh-enhanced/${'evolved-long-'.repeat(20)}`
+      const longEvolvedName = `@dsh-ray/${'evolved-long-'.repeat(20)}`
       await mkdir(join(ws.dshHome, 'plugin-control-plane'), { recursive: true, mode: 0o700 })
       const cpDb = new DatabaseSync(join(ws.dshHome, 'plugin-control-plane', 'control.sqlite'))
       cpDb.exec(`CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('sp-long', '${longEvolvedName}', 'create', 'release-complete');`)
@@ -1517,7 +1517,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
 
       // 1. Absent ownerConsole
       const noConsoleReport = await delivery.dispatchVersionQuery()
-      expect(noConsoleReport.protocol).toBe('dsh-rsi/version/v1')
+      expect(noConsoleReport.protocol).toBe('dsh-ray/version/v1')
       expect(noConsoleReport.selfIteration.dataState).toBe('no-data')
 
       // 2. Throwing ownerConsole.versionInfo()
@@ -1528,13 +1528,13 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
         versionInfo: () => currentVersionInfo(),
       })
       const throwReport = await delivery.dispatchVersionQuery()
-      expect(throwReport.protocol).toBe('dsh-rsi/version/v1')
+      expect(throwReport.protocol).toBe('dsh-ray/version/v1')
       expect(throwReport.diagnostics?.some(d => d.includes('ownerConsole.versionInfo failed'))).toBe(true)
 
       // 3. Malformed ownerConsole.versionInfo() matching protocol string but missing required objects
-      currentVersionInfo = async () => ({ schemaVersion: 1, protocol: 'dsh-rsi/version/v1' })
+      currentVersionInfo = async () => ({ schemaVersion: 1, protocol: 'dsh-ray/version/v1' })
       const malformedReport = await delivery.dispatchVersionQuery()
-      expect(malformedReport.protocol).toBe('dsh-rsi/version/v1')
+      expect(malformedReport.protocol).toBe('dsh-ray/version/v1')
       expect(malformedReport.selfIteration.dataState).toBe('no-data')
       expect(malformedReport.diagnostics?.some(d => d.includes('ownerConsole.versionInfo returned unexpected payload'))).toBe(true)
 
@@ -1553,7 +1553,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       await delivery.tick()
       await delivery.whenIdle()
 
-      expect(sends.at(-1)).toContain('助手版本：dsh-enhanced v')
+      expect(sends.at(-1)).toContain('助手版本：dsh-ray v')
       expect(sends.at(-1)).not.toContain('自迭代控制服务尚未启用')
     })
   })

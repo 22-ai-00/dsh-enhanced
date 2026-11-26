@@ -1,6 +1,6 @@
 /** Host-only strategy benchmark building blocks; no model-visible tools are registered. */
 import type { Context } from '@deepseek-ai/cordis'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { NativeAdapterBinding, NativeModelConfig } from './native.js'
 import type { BenchmarkExecutionRequest } from './runner.js'
 import { installStrategyBenchmarkMeter } from './strategy-meter.js'

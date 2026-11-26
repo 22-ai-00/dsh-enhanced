@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
 import { ControlPlaneStore, controlPlaneDigest, hostMaintenanceDigest, parseSourceMaintenanceRecord,
   signSourceMaintenanceRecord, sourceMaintenanceDigest, verifySourceMaintenanceRecords,
-  type HostAttestationReceipt, type PluginActivationPlan, type PluginControlTrustConfig } from '@dsh-enhanced/plugin-control-plane'
+  type HostAttestationReceipt, type PluginActivationPlan, type PluginControlTrustConfig } from '@dsh-ray/plugin-control-plane'
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.js'
 import { assertRsiPreOwnerInstallation, produceRsiLocalSourceMaintenance } from '../src/rsi-local-activation.js'
 import { prepareRsiLocalCohort, type RsiLocalCohort } from '../src/rsi-local-cohort.js'
@@ -257,7 +257,7 @@ linuxTest.each(['missing-readiness', 'forged-signature', 'foreign-issuer', 'unwa
 linuxTest('explicit pre-owner maintenance signs real Host evidence without creating a ledger and imports through first-owner contract', async () => {
   const f = await fixture(false, true)
   for (const home of [f.home, f.stage]) await writeFile(join(home, 'profiles', f.profile, 'cordis.patch.yml'),
-    '- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config:\n    sourceAdoptions: null\n- id: unrelated-default\n  name: !!js import("unrelated")\n', { mode: 0o600 })
+    '- id: dsh-ray-plugin-control-plane\n  name: "@dsh-ray/plugin-control-plane"\n  config:\n    sourceAdoptions: null\n- id: unrelated-default\n  name: !!js import("unrelated")\n', { mode: 0o600 })
   const originalLive = await snapshot(f.home), originalStage = await snapshot(f.stage)
   const proof = await assertRsiPreOwnerInstallation({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile })
   expect(proof).toMatchObject({ mode: 'pre-owner', anchor: f.live.anchor, records: [], sourceChainTip: f.source.sourceCommit,
@@ -300,9 +300,9 @@ async function preparedCoordinatorFixture() {
       ['assistant-policy', 'assistant-automations', 'plugin-control-plane'], `${relative}/profiles/${coordinator}`)
     const targetRoot = join(home, 'profiles', f.profile)
     const manifest = (bundles: string[]) => ({ name: 'prepared-profile', private: true,
-      dependencies: Object.fromEntries(bundles.map(slug => [`@dsh-enhanced/${slug}`,
+      dependencies: Object.fromEntries(bundles.map(slug => [`@dsh-ray/${slug}`,
         `file:${join(f.original.root, 'artifacts', `${slug}.tgz`)}`])),
-      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', ...bundles.map(slug => `@dsh-enhanced/${slug}`)] } } })
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', ...bundles.map(slug => `@dsh-ray/${slug}`)] } } })
     await writeFile(join(targetRoot, 'package.json'), JSON.stringify(manifest(['target'])))
     await writeFile(join(coordinatorRoot, 'package.json'), JSON.stringify(manifest(['assistant-automations', 'assistant-policy', 'plugin-control-plane'])))
     for (const name of ['cordis.yml', 'cordis.patch.yml']) await writeFile(join(coordinatorRoot, name), '[]\n')
@@ -355,12 +355,12 @@ linuxTest.each(['marker-version', 'marker-extra', 'stage-marker', 'marker-symlin
     else if (kind === 'coordinator-config') await writeFile(join(f.stage, 'profiles', f.coordinator, 'cordis.patch.yml'),
       '- id: owner\n  config:\n    schedulerEnabled: true\n')
     else if (kind === 'coordinator-root') await writeFile(join(f.stage, 'profiles', f.coordinator, 'cordis.yml'),
-      '- id: owner\n  name: "@dsh-enhanced/plugin-control-plane"\n')
+      '- id: owner\n  name: "@dsh-ray/plugin-control-plane"\n')
     else if (kind === 'coordinator-file') await writeFile(join(f.stage, 'profiles', f.coordinator, 'unexpected.json'), '{}')
     else if (kind === 'coordinator-package') await writeFile(join(f.stage, 'profiles', f.coordinator,
-      'node_modules', '@dsh-enhanced', 'assistant-policy', 'lib', 'index.js'), 'tampered')
+      'node_modules', '@dsh-ray', 'assistant-policy', 'lib', 'index.js'), 'tampered')
     else if (kind === 'target-package') await writeFile(join(f.stage, 'profiles', f.profile,
-      'node_modules', '@dsh-enhanced', 'target', 'lib', 'index.js'), 'tampered')
+      'node_modules', '@dsh-ray', 'target', 'lib', 'index.js'), 'tampered')
     else if (kind === 'target-manifest') await writeFile(join(f.stage, 'profiles', f.profile, 'package.json'),
       JSON.stringify({ name: 'owner', dependencies: {}, dsh: { profile: { bundles: [] } } }))
     else if (kind === 'state-file') await writeFile(join(f.stage, 'rsi-authorities', f.profile, 'state', 'creation-review-runner', 'run.json'), '{}')
@@ -392,7 +392,7 @@ for (const side of ['live', 'stage'] as const) linuxTest.each(residues)('rejects
                     : join(home, 'profiles', f.profile, 'cordis.patch.yml')
   await mkdir(join(path, '..'), { recursive: true, mode: 0o700 })
   const bytes = kind === 'catalog' ? '{"schemaVersion":1,"entries":[{}]}'
-    : kind === 'target-control-plane' ? '- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  disabled: true\n  config:\n    sourceAdoptions: {}\n'
+    : kind === 'target-control-plane' ? '- id: dsh-ray-plugin-control-plane\n  name: "@dsh-ray/plugin-control-plane"\n  disabled: true\n  config:\n    sourceAdoptions: {}\n'
       : kind === 'target-authority-reference' ? `- id: owner-tools\n  config:\n    authorityPath: ${join(f.home, 'rsi-authorities', f.profile, 'config', 'host-authority.json')}\n` : '{}'
   await writeFile(path, bytes, { mode: 0o600 })
   const beforeLive = await snapshot(f.home), beforeStage = await snapshot(f.stage)
@@ -455,13 +455,13 @@ linuxTest.each(['home-patch', 'home-root', 'profile-root', 'dynamic-row', 'dynam
         : kind === 'profile-root' ? join(f.stage, 'profiles', f.profile, 'cordis.yml')
           : kind === 'alternate-format' ? join(f.stage, 'cordis.patch.yaml')
             : join(f.stage, 'profiles', f.profile, 'cordis.patch.yml')
-    const source = kind === 'dynamic-row' ? '- !!js ({name: "@dsh-enhanced/plugin-control-plane", config: {sourceAdoptions: {}}})\n'
-      : kind === 'dynamic-config' ? '- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config: !!js import("owner-config")\n'
+    const source = kind === 'dynamic-row' ? '- !!js ({name: "@dsh-ray/plugin-control-plane", config: {sourceAdoptions: {}}})\n'
+      : kind === 'dynamic-config' ? '- id: dsh-ray-plugin-control-plane\n  name: "@dsh-ray/plugin-control-plane"\n  config: !!js import("owner-config")\n'
         : kind === 'include' ? '- id: extra-layer\n  name: "@deepseek-ai/cordis-plugin-include"\n  config:\n    url: /outside/owner.yml\n'
           : kind === 'memory-review' ? '- id: verifier\n  config:\n    memoryReviews: {}\n'
             : kind === 'automatic-memory' ? '- id: assistant\n  config:\n    personalMemory:\n      automaticLearning: {}\n'
-              : kind === 'active-learner' ? '- id: dsh-enhanced-assistant-memory-learning\n  name: "@dsh-enhanced/assistant-memory-learning"\n'
-                : kind === 'configured-learner' ? '- id: dsh-enhanced-assistant-memory-learning\n  disabled: true\n  config: {}\n'
+              : kind === 'active-learner' ? '- id: dsh-ray-assistant-memory-learning\n  name: "@dsh-ray/assistant-memory-learning"\n'
+                : kind === 'configured-learner' ? '- id: dsh-ray-assistant-memory-learning\n  disabled: true\n  config: {}\n'
           : '- id: ordinary-control-plane\n  config:\n    sourceAdoptions: {}\n'
     if (kind !== 'external-overlay') await writeFile(path, source, { mode: 0o600 })
     const beforeLive = await snapshot(f.home), beforeStage = await snapshot(f.stage)
@@ -476,7 +476,7 @@ linuxTest('supports empty native root layers and ordinary defaults while never e
     await writeFile(join(home, 'cordis.patch.yml'), '[]\n', { mode: 0o644 })
     await writeFile(join(home, 'profiles', f.profile, 'cordis.yml'), '# launcher-owned empty root\n[]\n', { mode: 0o644 })
     await writeFile(join(home, 'profiles', f.profile, 'cordis.patch.yml'),
-      '- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config:\n    sourceJobs: null\n- id: harmless-loader-reference\n  name: !!js import("does-not-exist")\n', { mode: 0o644 })
+      '- id: dsh-ray-plugin-control-plane\n  name: "@dsh-ray/plugin-control-plane"\n  config:\n    sourceJobs: null\n- id: harmless-loader-reference\n  name: !!js import("does-not-exist")\n', { mode: 0o644 })
   }
   const beforeLive = await snapshot(f.home), beforeStage = await snapshot(f.stage)
   const record = await produceRsiLocalSourceMaintenance(f.input)

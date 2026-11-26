@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto'
 import { lstatSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { externalPrincipalId, ownerRouteAuthorityHash, type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
-import { listAutomationsLocally } from '@dsh-enhanced/assistant-automations'
+import { externalPrincipalId, ownerRouteAuthorityHash, type ActiveLarkOwnerBinding } from '@dsh-ray/assistant-delivery'
+import { listAutomationsLocally } from '@dsh-ray/assistant-automations'
 import { isMap, isSeq, parseDocument, stringify, type YAMLMap } from 'yaml'
 
 function fail(message: string): never { throw new Error(`rsi owner profile: ${message}`) }
@@ -80,24 +80,24 @@ export function resolveRsiOwnerRoute(delivery: Record<string, any>, owner: Activ
 
 /** Resolve owner lookup independently of Recovery/Health/Heartbeat deployment. */
 export function rsiOwnerBindingQuery(effective: string, home: string) {
-  const entries = rows(effective), delivery = config(entries, 'dsh-enhanced-assistant-delivery'), lark = config(entries, 'dsh-enhanced-lark-channel')
+  const entries = rows(effective), delivery = config(entries, 'dsh-ray-assistant-delivery'), lark = config(entries, 'dsh-ray-lark-channel')
   return { account: text(lark.get('account'), 'Lark account'), tenant: text(lark.get('tenant'), 'Lark tenant'),
     workspace: path(delivery.get('defaultWorkspace'), home, 'Delivery workspace'),
     agentPreset: text(delivery.get('defaultAgentPreset'), 'Delivery preset') }
 }
 function automations(effective: string): YAMLMap {
   const entries = rows(effective)
-  const standalone = entries.get('dsh-enhanced-assistant-automations'), personal = entries.get('dsh-enhanced-personal-assistant')
+  const standalone = entries.get('dsh-ray-assistant-automations'), personal = entries.get('dsh-ray-personal-assistant')
   if (standalone && standalone.get('disabled') !== true) {
     if (personal && personal.get('disabled') !== true) fail('ambiguous standalone and embedded Automations providers')
-    return config(entries, 'dsh-enhanced-assistant-automations')
+    return config(entries, 'dsh-ray-assistant-automations')
   }
-  const value = config(entries, 'dsh-enhanced-personal-assistant').get('assistantAutomations', true)
+  const value = config(entries, 'dsh-ray-personal-assistant').get('assistantAutomations', true)
   if (!isMap(value)) fail('assistantAutomations config is required')
   return value
 }
 export function rsiDatabasePaths(effective: string, home: string) {
-  return { deliveryDatabasePath: path(config(rows(effective), 'dsh-enhanced-assistant-delivery').get('databasePath'), home, 'Delivery database'),
+  return { deliveryDatabasePath: path(config(rows(effective), 'dsh-ray-assistant-delivery').get('databasePath'), home, 'Delivery database'),
     automationsDatabasePath: path(automations(effective).get('databasePath'), home, 'Automations database') }
 }
 export interface RsiAutomationInventory {
@@ -140,7 +140,7 @@ export type RsiAutomationInventories = [RsiAutomationInventory, RsiAutomationInv
 export async function captureRsiAutomationInventories(inspect: (effective: string, home: string) => Promise<RsiAutomationInventory>,
   target: string, coordinator: string, home: string, profile: string): Promise<RsiAutomationInventories> {
   const current = await Promise.all([inspect(target, home), inspect(coordinator, home)])
-  const planned = current.map((value, index) => stringify([{ id: 'dsh-enhanced-assistant-automations', config: {
+  const planned = current.map((value, index) => stringify([{ id: 'dsh-ray-assistant-automations', config: {
     databasePath: index === 0 ? value.databasePath : rsiCoordinatorAutomationDatabasePath(home, profile), schedulerEnabled: true,
   } }]))
   const next = await Promise.all(planned.map(value => inspect(value, home)))

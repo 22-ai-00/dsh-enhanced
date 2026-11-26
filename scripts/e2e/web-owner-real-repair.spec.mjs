@@ -63,7 +63,7 @@ function row(doc, id) {
 }
 
 function appendPolicy(doc, rules) {
-  const config = row(doc, 'dsh-enhanced-personal-assistant').get('config', true)
+  const config = row(doc, 'dsh-ray-personal-assistant').get('config', true)
   if (!isMap(config) || !isMap(config.get('assistantPolicy', true))) throw new Error('missing personal-assistant policy config')
   const policy = config.get('assistantPolicy', true); let list = policy.get('rules', true)
   if (list === undefined) { list = doc.createNode([]); policy.set('rules', list) }
@@ -268,31 +268,31 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
     await writeFile(testInfo.outputPath('install.log'), sanitize(installed), { mode: 0o600 })
     await run(join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup'), ['--profile', 'web', '--workspace', workspace], env)
     owner = query(deliveryPath, "SELECT id,version FROM delivery_principals WHERE role='owner' AND status='active'")[0]
-    const { createVerifierAuthorities, compileAcceptanceProfiles } = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-verifier/lib/index.js')).href)
+    const { createVerifierAuthorities, compileAcceptanceProfiles } = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-ray/assistant-verifier/lib/index.js')).href)
     const authority = { kind: 'runner', id: 'node', executable: process.execPath, fixedArgs: [], timeoutMs: 5000, maxOutputBytes: 16384 }
     const [runner] = createVerifierAuthorities({ authorities: [authority] })
     const profile = (kind, objective, criteria) => ({ id: `${task.id}-${kind}-${acceptanceDigest({ objective }).slice(0, 12)}`, version: 1, scope: { workspace, preset: 'standard' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: kind, objective, validityMs: 600000, bounds: { maxDurationMs: 15000, maxEvidenceBytes: 16384 }, criteria: (kind === 'goal-step' ? criteria.slice(0, 1) : criteria).map(entry => ({ id: entry.id, kind: 'process-behavior', authority: { id: runner.id, digest: runner.digest }, artifactPath: task.artifactPath, stdin: entry.stdin, expectedStdout: entry.expectedStdout, expectedExitCode: 0 })) })
     const futureProfile = nextTask && profile('goal-outcome', nextTask.strictObjective, nextTask.strictCriteria)
     const compiledFuture = futureProfile && compileAcceptanceProfiles({ databasePath: verifierPath, authorities: [authority], profiles: [futureProfile] }).profiles[0]
     patchPath = join(home, 'profiles/web/cordis.patch.yml'); patch = parseDocument(await readFile(patchPath, 'utf8'))
-    setConfig(patch, 'dsh-enhanced-assistant-goals', '@dsh-enhanced/assistant-goals', { databasePath: goalsPath, preauthorizedCreateMaxRounds: 3, verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 300000, executionBudget: { mode: 'calls', modelCalls: 16, toolCalls: 64, durationMs: 300000, maxOutputTokensPerCall: 4096, routes: [{ provider: route.provider, model: route.model }] } })
-    setConfig(patch, 'dsh-enhanced-assistant-skills', '@dsh-enhanced/assistant-skills', { databasePath: skillsPath, allowedTools: ['read', 'write', 'edit'], maxDurationMs: 60000 })
-    setConfig(patch, 'dsh-enhanced-assistant-isolation', '@dsh-enhanced/assistant-isolation', { stateRoot: join(home, 'assistant-isolation') })
+    setConfig(patch, 'dsh-ray-assistant-goals', '@dsh-ray/assistant-goals', { databasePath: goalsPath, preauthorizedCreateMaxRounds: 3, verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 300000, executionBudget: { mode: 'calls', modelCalls: 16, toolCalls: 64, durationMs: 300000, maxOutputTokensPerCall: 4096, routes: [{ provider: route.provider, model: route.model }] } })
+    setConfig(patch, 'dsh-ray-assistant-skills', '@dsh-ray/assistant-skills', { databasePath: skillsPath, allowedTools: ['read', 'write', 'edit'], maxDurationMs: 60000 })
+    setConfig(patch, 'dsh-ray-assistant-isolation', '@dsh-ray/assistant-isolation', { stateRoot: join(home, 'assistant-isolation') })
     const legacyAcceptanceProfiles = [profile('goal-step', task.legacyObjective, task.legacyCriteria), profile('goal-outcome', task.legacyObjective, task.legacyCriteria)]
     const strictAcceptanceProfiles = [profile('goal-step', task.strictObjective, task.strictCriteria), profile('goal-outcome', task.strictObjective, task.strictCriteria)]
     const acceptanceProfiles = [...legacyAcceptanceProfiles, ...strictAcceptanceProfiles]
     if (nextTask && futureProfile) acceptanceProfiles.push(profile('goal-step', nextTask.strictObjective, nextTask.strictCriteria), futureProfile)
-    const configureAcceptanceProfiles = profiles => setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 500, requireAcceptance: false, authorities: [authority], profiles })
+    const configureAcceptanceProfiles = profiles => setConfig(patch, 'dsh-ray-assistant-verifier', '@dsh-ray/assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 500, requireAcceptance: false, authorities: [authority], profiles })
     // Topology's legacy and strict objectives deliberately disagree.  Do not
     // expose the later strict objective while creating the ordinary baseline.
     // The default template path retains its already-proven two-round setup.
     configureAcceptanceProfiles(selectedFamily === 'topology' ? legacyAcceptanceProfiles : acceptanceProfiles)
-    setConfig(patch, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner', { maxExecutionMs: 300000 })
+    setConfig(patch, 'dsh-ray-assistant-web-owner', '@dsh-ray/assistant-web-owner', { maxExecutionMs: 300000 })
     appendPolicy(patch, [
       { id: 'repair-workflow-owner', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['inspect', 'save', 'draft', 'run'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: { initiators: ['external'] } },
       ...['skill_save', 'skill_repair_arm'].map(name => ({ id: `repair-owner-setup-${name}`, effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['execute'], resource: { kind: 'tool', id: name }, context: { initiators: ['external'] } })),
       ...repairPolicy(workspace),
-      { id: 'repair-owner-feedback', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace, principal: 'web/web/local/operator' }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } },
+      { id: 'repair-owner-feedback', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-assistant-skills', workspace, principal: 'web/web/local/operator' }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } },
       { id: 'repair-background-goal', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['create', 'observe', 'execute', 'snapshot'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
       ...['read', 'write', 'edit'].map(name => ({ id: `repair-background-${name}`, effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['execute'], resource: { kind: 'tool', id: name }, context: { initiators: ['background'] } })),
     ])
@@ -312,7 +312,7 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
     await wait(() => idle(baselineSession), 'baseline session bootstrap', baselineSession)
     const binding = query(deliveryPath, 'SELECT * FROM conversation_bindings WHERE session_id=?', baselineSession)[0]
     await stop()
-    setConfig(patch, 'dsh-enhanced-assistant-delivery', '@dsh-enhanced/assistant-delivery', { ownerRoutes: [{ id: 'capture-owner', conversation: JSON.parse(binding.conversation_json), principal: JSON.parse(binding.principal_json), workspace, agentPreset: 'standard', policyRef: binding.policy_ref, minimumGeneration: binding.generation }] })
+    setConfig(patch, 'dsh-ray-assistant-delivery', '@dsh-ray/assistant-delivery', { ownerRoutes: [{ id: 'capture-owner', conversation: JSON.parse(binding.conversation_json), principal: JSON.parse(binding.principal_json), workspace, agentPreset: 'standard', policyRef: binding.policy_ref, minimumGeneration: binding.generation }] })
     await writeFile(patchPath, String(patch), { mode: 0o600 }); await open(true)
     await selectRestoredSession(activePage, /Confirm this session is ready/u)
     activeSession = baselineSession
@@ -361,7 +361,7 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
       maxIterations: repairIterations, followupProfileIds: nextTask ? ['real-template-jsonl-repair'] : [],
       maxOutputTokens: 4096, maxDurationMs: 300000, canaryRuns: 1, maxCanaryRuns: 2 }
     const nextRepairProfile = nextTask && nextHoldoutProfile && { ...repairProfile, id: 'real-template-jsonl-repair', taskFamilyId: nextTask.id, description: 'Extend literal template rendering to independent JSON Lines records and Unicode values.', externalHoldoutProfileId: nextHoldoutProfile.id, maxIterations: 1, followupProfileIds: [] }
-    setConfig(patch, 'dsh-enhanced-assistant-skills', '@dsh-enhanced/assistant-skills', {
+    setConfig(patch, 'dsh-ray-assistant-skills', '@dsh-ray/assistant-skills', {
       databasePath: skillsPath, allowedTools: ['read', 'write', 'edit'], maxDurationMs: 60000,
     })
     const repairAdmissionPath = join(temp, 'repair-admission.json')

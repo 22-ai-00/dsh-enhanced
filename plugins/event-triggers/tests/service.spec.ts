@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { EventTriggersError, EventTriggersService } from '../src/service.ts'
 import { EventTriggerStore } from '../src/store.ts'
-import { parseExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
+import { parseExternalEventEnvelope } from '@dsh-ray/assistant-automations/external-event'
 
 const roots: string[] = []
 const eventTriggersVersion = (JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version

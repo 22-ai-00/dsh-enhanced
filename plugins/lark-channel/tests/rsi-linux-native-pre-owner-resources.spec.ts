@@ -44,7 +44,7 @@ async function write(path: string, value: string) { await writeFile(path, value,
 async function cohort(path: string, logical: string, repository: string, commit: string, content: string) {
   await directory(join(path, 'artifacts')); await write(join(path, 'artifacts', 'demo.tgz'), content)
   const body = { schemaVersion: 1, root: logical, sourceRepository: repository, sourceCommit: commit, version: '0.1.65',
-    bundles: ['demo'], allowBuilds: {}, packages: [{ name: '@dsh-enhanced/demo', tarball: join(logical, 'artifacts/demo.tgz'), sha256: sha(content) }] }
+    bundles: ['demo'], allowBuilds: {}, packages: [{ name: '@dsh-ray/demo', tarball: join(logical, 'artifacts/demo.tgz'), sha256: sha(content) }] }
   const result = { ...body, receiptDigest: sha(JSON.stringify(body)) }; await write(join(path, 'receipt.json'), JSON.stringify(result)); return result
 }
 beforeEach(() => { for (const port of Object.values(ports)) port.mockReset(); faults.cleanup = false; faults.replaceLink = undefined })

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import { externalEventDigest, parseExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
+import { externalEventDigest, parseExternalEventEnvelope } from '@dsh-ray/assistant-automations/external-event'
 import { EventTriggerDatabaseError, openEventTriggerDatabase } from './sqlite.js'
 import type { FireWhen } from './config.js'
 

@@ -1,4 +1,4 @@
-import type { HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-enhanced/assistant-automations'
+import type { HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-ray/assistant-automations'
 import { afterEach, expect, test, vi } from 'vitest'
 
 vi.mock('../src/cli.ts', () => ({ activatePluginPlan: vi.fn(), probePluginPlan: vi.fn() }))

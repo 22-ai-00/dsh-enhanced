@@ -105,7 +105,7 @@ test('installs the exact official release in DSH_HOME when PATH CLI lacks the co
   const registry = await registryFixture(f.root)
   const result = await ensureLarkBusinessCli({ dshHome: f.home })
   expect(result.version).toBe(version)
-  expect(result.command).toBe(join(f.home, '.dsh-enhanced', 'tools', 'lark-cli', version,
+  expect(result.command).toBe(join(f.home, '.dsh-ray', 'tools', 'lark-cli', version,
     `${process.platform}-${process.arch}`, 'lark-cli'))
   expect(registry.requests).toEqual([registryUrl, tarballUrl, releaseUrl])
   const provenance = JSON.parse(await readFile(join(result.command, '..', 'provenance.json'), 'utf8')) as Record<string, string>
@@ -119,7 +119,7 @@ test('installs the exact official release in DSH_HOME when PATH CLI lacks the co
 
 test('rejects an invalid npm archive without replacing an older managed CLI', async () => {
   const f = await fixture()
-  const oldCommand = join(f.home, '.dsh-enhanced', 'tools', 'lark-cli', '1.0.95',
+  const oldCommand = join(f.home, '.dsh-ray', 'tools', 'lark-cli', '1.0.95',
     `${process.platform}-${process.arch}`, 'lark-cli')
   await mkdir(join(oldCommand, '..'), { recursive: true })
   await writeCli(oldCommand, '1.0.95')
@@ -127,7 +127,7 @@ test('rejects an invalid npm archive without replacing an older managed CLI', as
   registry.metadata.dist.integrity = `sha512-${'A'.repeat(86)}==`
   await expect(ensureLarkBusinessCli({ dshHome: f.home })).rejects.toThrow('integrity mismatch')
   expect(await readFile(oldCommand, 'utf8')).toContain('1.0.95')
-  expect(existsSync(join(f.home, '.dsh-enhanced', 'tools', 'lark-cli', version))).toBe(false)
+  expect(existsSync(join(f.home, '.dsh-ray', 'tools', 'lark-cli', version))).toBe(false)
   expect(registry.requests).toEqual([registryUrl, tarballUrl])
 })
 
@@ -142,7 +142,7 @@ test('rejects a release binary whose SHA-256 differs from the official package c
     return new Response('', { status: 404 })
   })
   await expect(ensureLarkBusinessCli({ dshHome: f.home })).rejects.toThrow('checksum mismatch')
-  expect(existsSync(join(f.home, '.dsh-enhanced', 'tools', 'lark-cli', version))).toBe(false)
+  expect(existsSync(join(f.home, '.dsh-ray', 'tools', 'lark-cli', version))).toBe(false)
 })
 
 test('falls back to the official installer mirror when GitHub is unavailable', async () => {
@@ -167,7 +167,7 @@ test('rejects a checksummed binary that does not report the exact selected versi
   const f = await fixture()
   await registryFixture(f.root, '1.0.95')
   await expect(ensureLarkBusinessCli({ dshHome: f.home })).rejects.toThrow('contract verification')
-  expect(existsSync(join(f.home, '.dsh-enhanced', 'tools', 'lark-cli', version))).toBe(false)
+  expect(existsSync(join(f.home, '.dsh-ray', 'tools', 'lark-cli', version))).toBe(false)
 })
 
 test('an explicit unusable command fails without any registry or managed writes', async () => {
@@ -180,7 +180,7 @@ test('an explicit unusable command fails without any registry or managed writes'
 
 test('ignores symlinked managed version candidates instead of reading or running outside files', async () => {
   const f = await fixture()
-  const toolsRoot = join(f.home, '.dsh-enhanced', 'tools', 'lark-cli')
+  const toolsRoot = join(f.home, '.dsh-ray', 'tools', 'lark-cli')
   const external = join(f.root, 'external-version')
   await mkdir(external)
   await mkdir(toolsRoot, { recursive: true })

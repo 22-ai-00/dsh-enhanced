@@ -11,7 +11,7 @@ import type {
   InboundEnvelope,
   ModelPickerState,
   OutboundIntent,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import type {
   LarkCardAction,
   LarkMessage,

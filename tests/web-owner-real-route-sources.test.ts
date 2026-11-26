@@ -24,7 +24,7 @@ const env = (source: string, extra: Record<string, string> = {}) => ({ DSH_WEB_R
   DSH_WEB_REAL_PROVIDER: 'benchmark-gateway', DSH_WEB_REAL_MODEL: 'benchmark-chat-model', BENCHMARK_API_KEY: 'child-only', ...extra }) as Record<string, string | undefined>
 const settingsWith = (providers: Record<string, unknown>) => JSON.stringify({ 'llm-pi-ai': { providers } })
 // Mirrors the real web profile: other rows use !!js, the gateway row is plain YAML.
-const profilePatch = (rows: string) => `- id: dsh-enhanced-personal-assistant
+const profilePatch = (rows: string) => `- id: dsh-ray-personal-assistant
   config:
     databasePath: !!js "process.env.HOME + '/assistant.sqlite'"
 ${rows}`

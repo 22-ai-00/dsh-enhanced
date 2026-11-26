@@ -6,7 +6,7 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 
 describe('lark-channel bundle contract', () => {
   test('has stable package identity', () => {
-    expect(name).toBe('dsh-enhanced-lark-channel')
+    expect(name).toBe('dsh-ray-lark-channel')
     expect(version).toBe(manifest.version)
   })
 

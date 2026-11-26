@@ -1036,7 +1036,7 @@ describe('Tier 1 — F08–F11: Isolation, Broker, S4 Web Learning & Sandbox Rep
         credential: {
           id: 'live-gh-handle',
           provider: 'linux-protected-file',
-          consumers: ['dsh-enhanced-assistant-actions', 'dsh-enhanced-event-triggers'],
+          consumers: ['dsh-ray-assistant-actions', 'dsh-ray-event-triggers'],
           purposes: ['github.commit', 'github.observe'],
           maxLeaseMs: 60_000,
           reference: { path: secretFile },
@@ -1074,7 +1074,7 @@ describe('Tier 1 — F08–F11: Isolation, Broker, S4 Web Learning & Sandbox Rep
         credential: {
           id: 'live-gh-handle',
           provider: 'linux-protected-file',
-          consumers: ['dsh-enhanced-assistant-actions', 'dsh-enhanced-event-triggers'],
+          consumers: ['dsh-ray-assistant-actions', 'dsh-ray-event-triggers'],
           purposes: ['github.commit', 'github.observe'],
           maxLeaseMs: 60_000,
           reference: { path: secretFile },
@@ -1099,8 +1099,8 @@ describe('Tier 1 — F08–F11: Isolation, Broker, S4 Web Learning & Sandbox Rep
       await mkdir(dirname(patchPath), { recursive: true, mode: 0o700 })
       const expiresAt = Date.now() + 600_000
       await writeFile(patchPath, [
-        '- id: dsh-enhanced-assistant-isolation',
-        '  name: "@dsh-enhanced/assistant-isolation"',
+        '- id: dsh-ray-assistant-isolation',
+        '  name: "@dsh-ray/assistant-isolation"',
         '  config:',
         '    grants:',
         '      - id: repo',
@@ -1127,7 +1127,7 @@ describe('Tier 1 — F08–F11: Isolation, Broker, S4 Web Learning & Sandbox Rep
         expect(secretStat.mode & 0o077).toBe(0)
         const updatedPatch = await readFile(patchPath, 'utf8')
         expect(updatedPatch).toContain('repo-fixture')
-        expect(updatedPatch).toContain('dsh-enhanced-credentials-keychain')
+        expect(updatedPatch).toContain('dsh-ray-credentials-keychain')
       } finally {
         if (prevEventSource === undefined) delete process.env.DSH_REPO_EVENT_SOURCE
         else process.env.DSH_REPO_EVENT_SOURCE = prevEventSource

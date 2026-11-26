@@ -7,7 +7,7 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 
 describe('credentials-keychain configuration', () => {
   test('exposes stable package identity and conservative defaults', () => {
-    expect(name).toBe('dsh-enhanced-credentials-keychain')
+    expect(name).toBe('dsh-ray-credentials-keychain')
     expect(version).toBe(manifest.version)
     expect(Config({ databasePath: '/private/credentials.sqlite', handles: [] })).toMatchObject({
       defaultLeaseMs: 300_000, maxSecretBytes: 65_536, providerTimeoutMs: 5_000,
@@ -17,28 +17,28 @@ describe('credentials-keychain configuration', () => {
   test('normalizes exact provider handles without accepting values or executable paths', () => {
     expect(normalizeHandles([{
       id: 'lark-app-secret', provider: 'macos-keychain', service: 'dsh/lark', account: 'personal',
-      consumers: ['dsh-enhanced-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
+      consumers: ['dsh-ray-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
     }])).toEqual([{
       id: 'lark-app-secret', provider: 'macos-keychain', service: 'dsh/lark', account: 'personal',
-      consumers: ['dsh-enhanced-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
+      consumers: ['dsh-ray-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
     }])
     expect(normalizeHandles([{
       id: 'windows-secret', provider: 'windows-dpapi',
       path: 'C:\\Users\\test\\.dsh\\credentials-keychain\\lark-primary.clixml',
-      consumers: ['dsh-enhanced-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
+      consumers: ['dsh-ray-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
     }])).toEqual([{
       id: 'windows-secret', provider: 'windows-dpapi',
       path: 'C:\\Users\\test\\.dsh\\credentials-keychain\\lark-primary.clixml',
-      consumers: ['dsh-enhanced-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
+      consumers: ['dsh-ray-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
     }])
     expect(normalizeHandles([{
       id: 'linux-file', provider: 'linux-protected-file',
       path: '/home/test/.dsh/credentials-keychain/lark-web-primary.secret',
-      consumers: ['dsh-enhanced-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
+      consumers: ['dsh-ray-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
     }])).toEqual([{
       id: 'linux-file', provider: 'linux-protected-file',
       path: '/home/test/.dsh/credentials-keychain/lark-web-primary.secret',
-      consumers: ['dsh-enhanced-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
+      consumers: ['dsh-ray-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
     }])
     for (const value of [
       { id: 'x', provider: 'environment', environmentName: 'LARK_SECRET', consumers: ['p'], purposes: ['use'],

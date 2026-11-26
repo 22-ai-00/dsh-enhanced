@@ -1,6 +1,6 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { MemoryRecord } from '@dsh-enhanced/personal-memory'
+import type { MemoryRecord } from '@dsh-ray/personal-memory'
 import { afterEach, describe, expect, test } from 'vitest'
 import { MemoryWikiBridgeError, MemoryWikiBridgeService } from '../src/service.ts'
 

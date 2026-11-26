@@ -79,7 +79,7 @@ async function fixtureInterpreter(): Promise<{ path: string; sha256: string }> {
 const releasePolicy: SourceReleasePolicy = Object.freeze({
   targetBranch: 'main',
   candidateId: 'health-helper',
-  packageName: '@dsh-enhanced/health-helper',
+  packageName: '@dsh-ray/health-helper',
   packageVersion: '1.2.3',
   packagePath: 'plugins/health-helper',
   dshBaseline: '0.1.0',
@@ -88,7 +88,7 @@ const releasePolicy: SourceReleasePolicy = Object.freeze({
   requires: [],
   registryId: 'npm',
   registryLocator: 'https://registry.example.test',
-  registryReference: '@dsh-enhanced/health-helper@1.2.3',
+  registryReference: '@dsh-ray/health-helper@1.2.3',
   catalogId: 'owner-catalog',
   catalogPath: '/private/catalog.json',
   minimumReproducibleBuilds: 2,
@@ -401,7 +401,7 @@ function matchingNpmReconciliationEvidence(request: SourcePublishReconciliationR
     observedTarballSha256: request.artifact.tarballSha256, observedTarballIntegrity: request.artifact.tarballIntegrity,
     ambiguousPublishOperationId: request.ambiguousPublish.operationId,
     ambiguousPublishReceiptDigest: request.ambiguousPublish.receiptDigest, detailDigest: digest('a'),
-    metadataReference: 'https://registry.example.test/%40dsh-enhanced%2Fhealth-helper/1.2.3',
+    metadataReference: 'https://registry.example.test/%40dsh-ray%2Fhealth-helper/1.2.3',
     metadataIntegrity: request.artifact.tarballIntegrity, downloadedBytes: 123,
     ...overrides,
   }
@@ -1096,7 +1096,7 @@ describe('signed publish reconciliation protocol', () => {
     for (const evidence of [
       matchingNpmReconciliationEvidence(npm.request, { metadataIntegrity: `sha512-${Buffer.alloc(64, 4).toString('base64')}` }),
       matchingNpmReconciliationEvidence(npm.request, { registryReference: 'https://registry.example.test/tarballs/other.tgz' }),
-      matchingNpmReconciliationEvidence(npm.request, { metadataReference: 'https://registry.example.test/%40dsh-enhanced%2Fhealth-helper/9.9.9' }),
+      matchingNpmReconciliationEvidence(npm.request, { metadataReference: 'https://registry.example.test/%40dsh-ray%2Fhealth-helper/9.9.9' }),
     ]) {
       await expect(authority.verify(signedNpmReconciliationReceipt(npm.request, evidence, keys.privateKey), npm.plan, npm.request))
         .rejects.toThrow(/(npm exists-match reconciliation does not prove|(?:publish|npm) reconciliation receipt is not bound)/)
@@ -1143,7 +1143,7 @@ describe('signed publish reconciliation protocol', () => {
     const cases: readonly SourcePublishReconciliationEvidenceV1[] = [
       matchingReconciliationEvidence(request, { expectedTarballSha256: digest('b'), observedTarballSha256: digest('b') }),
       matchingReconciliationEvidence(request, { expectedTarballIntegrity: changedIntegrity, observedTarballIntegrity: changedIntegrity }),
-      matchingReconciliationEvidence(request, { registryReference: '@dsh-enhanced/health-helper@9.9.9' }),
+      matchingReconciliationEvidence(request, { registryReference: '@dsh-ray/health-helper@9.9.9' }),
     ]
 
     for (const evidence of cases) {

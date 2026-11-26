@@ -62,9 +62,9 @@ async function fixture(names = ['assistant', 'acp']) {
     const sourcePath = join(candidateHome, relative(originalHome, tarball))
     await mkdir(dirname(sourcePath), { recursive: true, mode: 0o700 })
     await writeFile(sourcePath, content)
-    candidateArtifacts[`@dsh-enhanced/${name}`] = { version: '0.1.48', tarball, sourcePath, sha256: digest(content),
+    candidateArtifacts[`@dsh-ray/${name}`] = { version: '0.1.48', tarball, sourcePath, sha256: digest(content),
       runtimeDependencies: [], files: [{ path: 'index.js', sha256: digest(content), mode: 0o644 },
-        { path: 'package.json', sha256: digest(JSON.stringify({ name: `@dsh-enhanced/${name}`, version: '0.1.48' })), mode: 0o644 }] }
+        { path: 'package.json', sha256: digest(JSON.stringify({ name: `@dsh-ray/${name}`, version: '0.1.48' })), mode: 0o644 }] }
   }
   for (const cohort of ['assistant', 'acp']) {
     const logicalRoot = join(originalHome, 'rsi-local-cohorts', cohort)
@@ -76,7 +76,7 @@ async function fixture(names = ['assistant', 'acp']) {
   for (const name of names) {
     const path = join(originalHome, 'profiles', name)
     await mkdir(path, { recursive: true, mode: 0o700 })
-    const enhanced = `@dsh-enhanced/${name === 'acp' ? 'acp' : 'demo'}`
+    const enhanced = `@dsh-ray/${name === 'acp' ? 'acp' : 'demo'}`
     const manifest = { name: `dsh-profile-${name}`, private: true,
       dependencies: { [enhanced]: '0.1.1', '@deepseek-ai/cordis': '4.0.2' }, dsh: { profile: name } }
     const lock = { lockfileVersion: '9.0', settings: { autoInstallPeers: false }, importers: { '.': { dependencies: {
@@ -101,7 +101,7 @@ async function fixture(names = ['assistant', 'acp']) {
       expect(options.env.PNPM_CONFIG_TRUST_LOCKFILE).toBe('false')
       const path = join(options.cwd, 'pnpm-lock.yaml'), lock = parse(await readFile(path, 'utf8'))
       const manifest = JSON.parse(await readFile(join(options.cwd, 'package.json'), 'utf8'))
-      const enhanced = Object.keys(manifest.dependencies).find(name => name.startsWith('@dsh-enhanced/'))!
+      const enhanced = Object.keys(manifest.dependencies).find(name => name.startsWith('@dsh-ray/'))!
       const tarball = (candidateArtifacts[enhanced] as { tarball: string }).tarball
       lock.importers['.'].dependencies[enhanced] = { specifier: `file:${tarball}`, version: `file:${relative(join(originalHome, 'profiles', '__profile__'), tarball)}` }
       lock.importers['.'].dependencies['@deepseek-ai/cordis'] = { specifier: '4.0.4', version: '4.0.4' }
@@ -115,7 +115,7 @@ async function fixture(names = ['assistant', 'acp']) {
     if (options.phase === 'materialize') {
       expect(options.env.PNPM_CONFIG_OFFLINE).toBe('true')
       const profileName = options.cwd.split('/').at(-1)!
-      const enhanced = `@dsh-enhanced/${profileName === 'acp' ? 'acp' : 'demo'}`
+      const enhanced = `@dsh-ray/${profileName === 'acp' ? 'acp' : 'demo'}`
       const physical = join(stagedHome, 'profiles', profileName, 'node_modules/.pnpm', `${enhanced.replace('/', '+')}@file`, 'node_modules', enhanced)
       await mkdir(physical, { recursive: true })
       await writeFile(join(stagedHome, 'profiles', profileName, 'node_modules', '.pnpm', 'lock.yaml'),
@@ -207,7 +207,7 @@ test('keeps custom and enhanced-parent overrides fail closed', async () => {
   await nativeOverrides(custom, { '@custom/driver@1.0.0>@deepseek-ai/cordis': '4.0.2' })
   await expect(prepareHostLocalProfileUpdate(custom)).rejects.toThrow('unapproved override parent')
   const enhanced = await fixture(['assistant'])
-  await nativeOverrides(enhanced, { '@dsh-enhanced/demo@0.1.1>@deepseek-ai/dsh-retired-tool': '0.1.5-rc.3' })
+  await nativeOverrides(enhanced, { '@dsh-ray/demo@0.1.1>@deepseek-ai/dsh-retired-tool': '0.1.5-rc.3' })
   await expect(prepareHostLocalProfileUpdate(enhanced)).rejects.toThrow('candidate Host lacks override')
 })
 
@@ -298,19 +298,19 @@ test('binds local cohort install metadata to a persistent pnpm store and detects
 
 test('derives internal peer overrides only inside the selected runtime closure', async () => {
   const input = await fixture(['assistant'])
-  reviewed.peers['@dsh-enhanced/demo'] = { '@dsh-enhanced/acp': '^0.1.0' }
+  reviewed.peers['@dsh-ray/demo'] = { '@dsh-ray/acp': '^0.1.0' }
   const withoutProvider = await prepareHostLocalProfileUpdate(input)
   expect(withoutProvider.profiles[0].peerScope.overrides).toEqual({})
   const withProvider = await fixture(['assistant'])
-  const demo = withProvider.candidateArtifacts['@dsh-enhanced/demo'] as { runtimeDependencies: string[] }
-  demo.runtimeDependencies = ['@dsh-enhanced/acp']
+  const demo = withProvider.candidateArtifacts['@dsh-ray/demo'] as { runtimeDependencies: string[] }
+  demo.runtimeDependencies = ['@dsh-ray/acp']
   const preparation = await prepareHostLocalProfileUpdate(withProvider)
-  const acp = withProvider.candidateArtifacts['@dsh-enhanced/acp'] as { tarball: string }
+  const acp = withProvider.candidateArtifacts['@dsh-ray/acp'] as { tarball: string }
   expect(preparation.profiles[0].peerScope.overrides).toEqual({
-    '@dsh-enhanced/demo@0.1.48>@dsh-enhanced/acp': `file:${acp.tarball}`,
+    '@dsh-ray/demo@0.1.48>@dsh-ray/acp': `file:${acp.tarball}`,
   })
   const workspace = parse(await readFile(join(withProvider.preparationRoot, 'assistant', 'pnpm-workspace.yaml'), 'utf8'))
-  expect(workspace.overrides['@dsh-enhanced/demo@0.1.48>@dsh-enhanced/acp']).toBe(`file:${acp.tarball}`)
+  expect(workspace.overrides['@dsh-ray/demo@0.1.48>@dsh-ray/acp']).toBe(`file:${acp.tarball}`)
 })
 
 test.each([
@@ -328,7 +328,7 @@ test.each([
     await input.runPnpm(...args)
     const options = args[1]
     if (options.phase !== 'resolve') return
-    const name = basename(options.cwd) === 'assistant' ? '@dsh-enhanced/demo' : '@dsh-enhanced/acp'
+    const name = basename(options.cwd) === 'assistant' ? '@dsh-ray/demo' : '@dsh-ray/acp'
     const path = join(options.cwd, 'pnpm-workspace.yaml')
     const workspace = parse(await readFile(path, 'utf8'))
     workspace.minimumReleaseAgeExclude = [...(workspace.minimumReleaseAgeExclude ?? []), `${name}@0.1.48`]
@@ -338,7 +338,7 @@ test.each([
   for (const name of ['assistant', 'acp']) {
     const workspace = parse(await readFile(join(input.preparationRoot, name, 'pnpm-workspace.yaml'), 'utf8'))
     expect(workspace.minimumReleaseAgeExclude).toEqual([
-      ...(originalExcludes ?? []), `@dsh-enhanced/${name === 'assistant' ? 'demo' : 'acp'}@0.1.48`,
+      ...(originalExcludes ?? []), `@dsh-ray/${name === 'assistant' ? 'demo' : 'acp'}@0.1.48`,
     ])
   }
   await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
@@ -346,21 +346,21 @@ test.each([
   await validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome })
   const stagedPath = join(input.stagedHome, 'profiles', 'assistant', 'pnpm-workspace.yaml')
   const staged = parse(await readFile(stagedPath, 'utf8'))
-  staged.minimumReleaseAgeExclude.push('@dsh-enhanced/acp@0.1.48')
+  staged.minimumReleaseAgeExclude.push('@dsh-ray/acp@0.1.48')
   await writeFile(stagedPath, stringify(staged))
   await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome }))
     .rejects.toThrow('staged metadata drift: assistant/pnpm-workspace.yaml')
 })
 
 test.each([
-  ['outside selected closure', ['@dsh-enhanced/acp@0.1.48'], 'unauthorized prepared minimumReleaseAgeExclude'],
-  ['wrong version', ['@dsh-enhanced/demo@0.1.49'], 'unauthorized prepared minimumReleaseAgeExclude'],
-  ['version range', ['@dsh-enhanced/demo@^0.1.48'], 'unauthorized prepared minimumReleaseAgeExclude'],
-  ['wildcard', ['@dsh-enhanced/demo@*'], 'unauthorized prepared minimumReleaseAgeExclude'],
+  ['outside selected closure', ['@dsh-ray/acp@0.1.48'], 'unauthorized prepared minimumReleaseAgeExclude'],
+  ['wrong version', ['@dsh-ray/demo@0.1.49'], 'unauthorized prepared minimumReleaseAgeExclude'],
+  ['version range', ['@dsh-ray/demo@^0.1.48'], 'unauthorized prepared minimumReleaseAgeExclude'],
+  ['wildcard', ['@dsh-ray/demo@*'], 'unauthorized prepared minimumReleaseAgeExclude'],
   ['third-party package', ['left-pad@1.0.0'], 'unauthorized prepared minimumReleaseAgeExclude'],
-  ['duplicate addition', ['@dsh-enhanced/demo@0.1.48', '@dsh-enhanced/demo@0.1.48'],
+  ['duplicate addition', ['@dsh-ray/demo@0.1.48', '@dsh-ray/demo@0.1.48'],
     'duplicate prepared minimumReleaseAgeExclude'],
-  ['non-array policy', '@dsh-enhanced/demo@0.1.48', 'workspace minimumReleaseAgeExclude must be a string list'],
+  ['non-array policy', '@dsh-ray/demo@0.1.48', 'workspace minimumReleaseAgeExclude must be a string list'],
 ] as const)('rejects pnpm release-age exclusion for %s', async (_label, exclusions, message) => {
   const input = await fixture(['assistant'])
   const runPnpm = async (...args: Parameters<typeof input.runPnpm>) => {
@@ -388,8 +388,8 @@ test('preserves original age rules as an ordered prefix and rejects strict or un
       const path = join(args[1].cwd, 'pnpm-workspace.yaml')
       const workspace = parse(await readFile(path, 'utf8'))
       workspace.minimumReleaseAgeExclude = kind === 'reordered'
-        ? ['@dsh-enhanced/demo@0.1.48', 'left-pad@1.0.0']
-        : ['left-pad@1.0.0', '@dsh-enhanced/demo@0.1.48']
+        ? ['@dsh-ray/demo@0.1.48', 'left-pad@1.0.0']
+        : ['left-pad@1.0.0', '@dsh-ray/demo@0.1.48']
       if (kind === 'unrelated') workspace.allowBuilds = { arbitrary: true }
       await writeFile(path, stringify(workspace))
     }
@@ -402,29 +402,29 @@ test('preserves original age rules as an ordered prefix and rejects strict or un
 
 test('requires one installed physical provider and resolves a selected peer to it', async () => {
   const input = await fixture(['assistant'])
-  reviewed.peers['@dsh-enhanced/demo'] = { '@dsh-enhanced/acp': '^0.1.0' }
-  const demo = input.candidateArtifacts['@dsh-enhanced/demo'] as { runtimeDependencies: string[] }
-  demo.runtimeDependencies = ['@dsh-enhanced/acp']
+  reviewed.peers['@dsh-ray/demo'] = { '@dsh-ray/acp': '^0.1.0' }
+  const demo = input.candidateArtifacts['@dsh-ray/demo'] as { runtimeDependencies: string[] }
+  demo.runtimeDependencies = ['@dsh-ray/acp']
   const preparation = await prepareHostLocalProfileUpdate(input)
   const runPnpm = async (...args: Parameters<typeof input.runPnpm>) => {
     await input.runPnpm(...args)
     if (args[1].phase !== 'materialize') return
     const modules = join(input.stagedHome, 'profiles', 'assistant', 'node_modules')
-    const provider = join(modules, '.pnpm', '@dsh-enhanced+acp@file', 'node_modules', '@dsh-enhanced', 'acp')
+    const provider = join(modules, '.pnpm', '@dsh-ray+acp@file', 'node_modules', '@dsh-ray', 'acp')
     await mkdir(provider, { recursive: true })
-    await writeFile(join(provider, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/acp', version: '0.1.48' }))
+    await writeFile(join(provider, 'package.json'), JSON.stringify({ name: '@dsh-ray/acp', version: '0.1.48' }))
     await writeFile(join(provider, 'index.js'), 'candidate package bytes')
-    const selected = join(modules, '.pnpm', '@dsh-enhanced+demo@file', 'node_modules', '@dsh-enhanced', 'demo',
-      'node_modules', '@dsh-enhanced', 'acp')
+    const selected = join(modules, '.pnpm', '@dsh-ray+demo@file', 'node_modules', '@dsh-ray', 'demo',
+      'node_modules', '@dsh-ray', 'acp')
     await mkdir(dirname(selected), { recursive: true })
     await symlink(relative(dirname(selected), provider), selected)
   }
   await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
     logicalHome: input.originalHome, runPnpm, runCandidateDsh: async () => {} })
   const modules = join(input.stagedHome, 'profiles', 'assistant', 'node_modules')
-  const duplicate = join(modules, '.pnpm', '@dsh-enhanced+acp@duplicate', 'node_modules', '@dsh-enhanced', 'acp')
+  const duplicate = join(modules, '.pnpm', '@dsh-ray+acp@duplicate', 'node_modules', '@dsh-ray', 'acp')
   await mkdir(duplicate, { recursive: true })
-  await writeFile(join(duplicate, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/acp', version: '0.1.48' }))
+  await writeFile(join(duplicate, 'package.json'), JSON.stringify({ name: '@dsh-ray/acp', version: '0.1.48' }))
   await writeFile(join(duplicate, 'index.js'), 'candidate package bytes')
   await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome }))
     .rejects.toThrow('installed package identity split or absent')
@@ -432,27 +432,27 @@ test('requires one installed physical provider and resolves a selected peer to i
 
 test('resolves providers fresh after a previously resolved module tree is replaced', async () => {
   const input = await fixture(['assistant'])
-  const demo = input.candidateArtifacts['@dsh-enhanced/demo'] as { runtimeDependencies: string[] }
-  demo.runtimeDependencies = ['@dsh-enhanced/acp']
+  const demo = input.candidateArtifacts['@dsh-ray/demo'] as { runtimeDependencies: string[] }
+  demo.runtimeDependencies = ['@dsh-ray/acp']
   const preparation = await prepareHostLocalProfileUpdate(input)
   const store = join(input.stagedHome, 'profiles', 'assistant', 'node_modules', '.pnpm')
-  const originalProvider = join(store, '@dsh-enhanced+acp@file', 'node_modules', '@dsh-enhanced', 'acp')
-  const providerLink = join(store, '@dsh-enhanced+demo@file', 'node_modules', '@dsh-enhanced', 'demo',
-    'node_modules', '@dsh-enhanced', 'acp')
+  const originalProvider = join(store, '@dsh-ray+acp@file', 'node_modules', '@dsh-ray', 'acp')
+  const providerLink = join(store, '@dsh-ray+demo@file', 'node_modules', '@dsh-ray', 'demo',
+    'node_modules', '@dsh-ray', 'acp')
   const runPnpm = async (...args: Parameters<typeof input.runPnpm>) => {
     await input.runPnpm(...args)
     if (args[1].phase !== 'materialize') return
     await mkdir(originalProvider, { recursive: true })
-    await writeFile(join(originalProvider, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/acp', version: '0.1.48' }))
+    await writeFile(join(originalProvider, 'package.json'), JSON.stringify({ name: '@dsh-ray/acp', version: '0.1.48' }))
     await writeFile(join(originalProvider, 'index.js'), 'candidate package bytes')
     await mkdir(dirname(providerLink), { recursive: true })
     await symlink(relative(dirname(providerLink), originalProvider), providerLink)
   }
   await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
     logicalHome: input.originalHome, runPnpm, runCandidateDsh: async () => {} })
-  const parentManifest = join(store, '@dsh-enhanced+demo@file', 'node_modules', '@dsh-enhanced', 'demo', 'package.json')
-  expect(createRequire(parentManifest).resolve('@dsh-enhanced/acp/package.json')).toBe(join(originalProvider, 'package.json'))
-  const replacement = join(store, '@dsh-enhanced+acp@fresh', 'node_modules', '@dsh-enhanced', 'acp')
+  const parentManifest = join(store, '@dsh-ray+demo@file', 'node_modules', '@dsh-ray', 'demo', 'package.json')
+  expect(createRequire(parentManifest).resolve('@dsh-ray/acp/package.json')).toBe(join(originalProvider, 'package.json'))
+  const replacement = join(store, '@dsh-ray+acp@fresh', 'node_modules', '@dsh-ray', 'acp')
   await mkdir(dirname(replacement), { recursive: true })
   await rename(originalProvider, replacement)
   await rm(providerLink)
@@ -462,7 +462,7 @@ test('resolves providers fresh after a previously resolved module tree is replac
 
 test('compares installed file inventory in signed bytewise path order', async () => {
   const input = await fixture(['assistant'])
-  const artifact = input.candidateArtifacts['@dsh-enhanced/demo'] as {
+  const artifact = input.candidateArtifacts['@dsh-ray/demo'] as {
     files: { path: string; sha256: string; mode: number }[]
   }
   artifact.files.unshift({ path: 'LICENSE', sha256: digest('license bytes'), mode: 0o644 })
@@ -471,7 +471,7 @@ test('compares installed file inventory in signed bytewise path order', async ()
     await input.runPnpm(...args)
     if (args[1].phase !== 'materialize') return
     const root = join(input.stagedHome, 'profiles', 'assistant', 'node_modules', '.pnpm',
-      '@dsh-enhanced+demo@file', 'node_modules', '@dsh-enhanced', 'demo')
+      '@dsh-ray+demo@file', 'node_modules', '@dsh-ray', 'demo')
     await writeFile(join(root, 'LICENSE'), 'license bytes')
   }
   await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
@@ -515,9 +515,9 @@ test('rejects a candidate package outside the selected closure in the resolved l
     await input.runPnpm(...args)
     if (args[1].phase !== 'resolve') return
     const path = join(args[1].cwd, 'pnpm-lock.yaml'), lock = parse(await readFile(path, 'utf8'))
-    const acp = input.candidateArtifacts['@dsh-enhanced/acp'] as { tarball: string }
+    const acp = input.candidateArtifacts['@dsh-ray/acp'] as { tarball: string }
     const locator = relative(join(input.originalHome, 'profiles', '__profile__'), acp.tarball)
-    lock.packages[`@dsh-enhanced/acp@file:${locator}`] = {}
+    lock.packages[`@dsh-ray/acp@file:${locator}`] = {}
     await writeFile(path, stringify(lock))
   }
   await expect(prepareHostLocalProfileUpdate({ ...input, runPnpm }))
@@ -531,9 +531,9 @@ test('rejects an installed candidate package outside the selected closure', asyn
     await input.runPnpm(...args)
     if (args[1].phase !== 'materialize') return
     const packageRoot = join(input.stagedHome, 'profiles', 'assistant', 'node_modules', '.pnpm',
-      '@dsh-enhanced+acp@file', 'node_modules', '@dsh-enhanced', 'acp')
+      '@dsh-ray+acp@file', 'node_modules', '@dsh-ray', 'acp')
     await mkdir(packageRoot, { recursive: true })
-    await writeFile(join(packageRoot, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/acp', version: '0.1.48' }))
+    await writeFile(join(packageRoot, 'package.json'), JSON.stringify({ name: '@dsh-ray/acp', version: '0.1.48' }))
     await writeFile(join(packageRoot, 'index.js'), 'candidate package bytes')
   }
   await expect(materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
@@ -547,7 +547,7 @@ test('prepares all profiles and materializes a copied Home using pinned candidat
   expect(preparation.profiles.map(profile => profile.name)).toEqual(['acp', 'assistant'])
   const prepared = JSON.parse(await readFile(join(input.preparationRoot, 'assistant', 'package.json'), 'utf8'))
   expect(prepared.dependencies['@deepseek-ai/cordis']).toBe('4.0.4')
-  expect(prepared.dependencies['@dsh-enhanced/demo']).toBe(`file:${(input.candidateArtifacts['@dsh-enhanced/demo'] as { tarball: string }).tarball}`)
+  expect(prepared.dependencies['@dsh-ray/demo']).toBe(`file:${(input.candidateArtifacts['@dsh-ray/demo'] as { tarball: string }).tarball}`)
   const proof = await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
     logicalHome: input.originalHome, runPnpm: input.runPnpm, runCandidateDsh: async () => {} })
   expect(proof.profileNames).toEqual(['acp', 'assistant'])
@@ -582,16 +582,16 @@ test('retires authenticated old shared fallback only in stage and checks its bac
   await writeFile(join(globalDshRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.0-rc.2' }))
   const target = join(globalDshRoot, 'node_modules', '@deepseek-ai', 'dsh-client-runtime')
   const projectionTarget = join(input.originalHome, 'profiles', 'assistant', 'node_modules', '.pnpm',
-    'node_modules', '@dsh-enhanced', 'personal-memory')
+    'node_modules', '@dsh-ray', 'personal-memory')
   const projection = join(input.originalHome, 'profiles', 'assistant', '.dsh-module-fallback',
-    'node_modules', '@dsh-enhanced', 'personal-memory')
+    'node_modules', '@dsh-ray', 'personal-memory')
   for (const home of [input.originalHome, input.stagedHome]) {
     const directory = join(home, 'profiles', 'node_modules', '@deepseek-ai')
     await mkdir(directory, { recursive: true })
     await symlink(target, join(directory, 'dsh-client-runtime'))
     const wrapperLink = join(home, 'profiles', 'assistant', '.dsh-module-fallback',
-      'node_modules', '@dsh-enhanced', 'personal-memory')
-    const activeLink = join(home, 'profiles', 'assistant', 'node_modules', '@dsh-enhanced', 'personal-memory')
+      'node_modules', '@dsh-ray', 'personal-memory')
+    const activeLink = join(home, 'profiles', 'assistant', 'node_modules', '@dsh-ray', 'personal-memory')
     await mkdir(dirname(wrapperLink), { recursive: true })
     await mkdir(dirname(activeLink), { recursive: true })
     await symlink(projectionTarget, wrapperLink)
@@ -603,7 +603,7 @@ test('retires authenticated old shared fallback only in stage and checks its bac
   expect(await readlink(join(input.originalHome, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-client-runtime')))
     .toBe(target)
   expect(await readlink(join(input.originalHome, 'profiles', 'assistant', '.dsh-module-fallback',
-    'node_modules', '@dsh-enhanced', 'personal-memory'))).toBe(projectionTarget)
+    'node_modules', '@dsh-ray', 'personal-memory'))).toBe(projectionTarget)
   const backup = join(input.root, 'backup')
   await rename(input.originalHome, backup)
   await rename(input.stagedHome, input.originalHome)
@@ -681,9 +681,9 @@ test.each([
 
 test('rejects an incomplete artifact scope and candidate bytes that change before preparation', async () => {
   const input = await fixture()
-  delete input.candidateArtifacts['@dsh-enhanced/acp']
+  delete input.candidateArtifacts['@dsh-ray/acp']
   await expect(prepareHostLocalProfileUpdate(input)).rejects.toThrow('candidate artifact missing for root')
-  const artifact = input.candidateArtifacts['@dsh-enhanced/demo'] as { sourcePath: string }
+  const artifact = input.candidateArtifacts['@dsh-ray/demo'] as { sourcePath: string }
   await writeFile(artifact.sourcePath, 'tampered candidate bytes')
   await expect(prepareHostLocalProfileUpdate(input)).rejects.toThrow('candidate artifact bytes differ')
 })
@@ -691,7 +691,7 @@ test('rejects an incomplete artifact scope and candidate bytes that change befor
 test('detects original profile drift and staged artifact tampering', async () => {
   const input = await fixture(['assistant'])
   const preparation = await prepareHostLocalProfileUpdate(input)
-  const artifact = input.candidateArtifacts['@dsh-enhanced/demo'] as { tarball: string }
+  const artifact = input.candidateArtifacts['@dsh-ray/demo'] as { tarball: string }
   await writeFile(join(input.stagedHome, relative(input.originalHome, artifact.tarball)), 'stage tamper')
   await expect(materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
     logicalHome: input.originalHome, runPnpm: input.runPnpm, runCandidateDsh: async () => {} })).rejects.toThrow('candidate cohort resources changed')
@@ -717,7 +717,7 @@ test('rejects a staged enhanced root linked outside the profile', async () => {
   const preparation = await prepareHostLocalProfileUpdate(input)
   await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
     logicalHome: input.originalHome, runPnpm: input.runPnpm, runCandidateDsh: async () => {} })
-  const root = join(input.stagedHome, 'profiles', 'assistant', 'node_modules/@dsh-enhanced/demo')
+  const root = join(input.stagedHome, 'profiles', 'assistant', 'node_modules/@dsh-ray/demo')
   await rm(root)
   await symlink(input.root, root)
   await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome })).rejects.toThrow('enhanced root binding is outside profile')
@@ -778,8 +778,8 @@ test('preserves a locked dependency-free profile without creating a pnpm store',
 
 test.each([
   ['native package', (lock: Record<string, any>) => { lock.packages = { '@deepseek-ai/cordis@4.0.2': { resolution: { integrity } } } }],
-  ['enhanced snapshot', (lock: Record<string, any>) => { lock.snapshots = { '@dsh-enhanced/demo@0.1.1': {} } }],
-  ['secondary importer dependency', (lock: Record<string, any>) => { lock.importers.extra = { dependencies: { '@dsh-enhanced/demo': { version: '0.1.1' } } } }],
+  ['enhanced snapshot', (lock: Record<string, any>) => { lock.snapshots = { '@dsh-ray/demo@0.1.1': {} } }],
+  ['secondary importer dependency', (lock: Record<string, any>) => { lock.importers.extra = { dependencies: { '@dsh-ray/demo': { version: '0.1.1' } } } }],
 ])('rejects stale %s in a dependency-free lockfile', async (_label, mutate) => {
   const input = await fixture(['assistant'])
   await addHeadlessProfile(input)
@@ -806,7 +806,7 @@ test('rejects a workspace-state project outside a dependency-free profile', asyn
 
 test.each([
   ['native', '@deepseek-ai+cordis@4.0.2'],
-  ['enhanced', '@dsh-enhanced+demo@0.1.1'],
+  ['enhanced', '@dsh-ray+demo@0.1.1'],
 ])('rejects a stale %s pnpm package in a dependency-free profile', async (_label, folder) => {
   const input = await fixture(['assistant'])
   await addHeadlessProfile(input)
@@ -821,7 +821,7 @@ test('rejects a stale package added to a dependency-free stage after preparation
   const preparation = await prepareHostLocalProfileUpdate(input)
   await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
     logicalHome: input.originalHome, runPnpm: input.runPnpm, runCandidateDsh: async () => {} })
-  await mkdir(join(input.stagedHome, 'profiles', 'headless', 'node_modules', '@dsh-enhanced', 'demo'),
+  await mkdir(join(input.stagedHome, 'profiles', 'headless', 'node_modules', '@dsh-ray', 'demo'),
     { recursive: true })
   await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome }))
     .rejects.toThrow('dependency-free profile has an installed graph')
@@ -845,7 +845,7 @@ test('validates the promoted Home against its renamed original without rebasing 
     originalPhysicalHome: backup })).rejects.toThrow('staged metadata drift')
   await writeFile(manifest, original)
   const installed = join(input.originalHome, 'profiles', 'assistant', 'node_modules', '.pnpm',
-    '@dsh-enhanced+demo@file', 'node_modules', '@dsh-enhanced', 'demo', 'index.js')
+    '@dsh-ray+demo@file', 'node_modules', '@dsh-ray', 'demo', 'index.js')
   const installedOriginal = await readFile(installed)
   await writeFile(installed, 'tampered package')
   await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.originalHome,
@@ -863,7 +863,7 @@ test('normalizes pnpm file locators from the private preparation path to the log
     const options = args[1]
     if (options.phase !== 'resolve') return
     const path = join(options.cwd, 'pnpm-lock.yaml'), lock = parse(await readFile(path, 'utf8'))
-    const logical = (input.candidateArtifacts['@dsh-enhanced/demo'] as { tarball: string }).tarball
+    const logical = (input.candidateArtifacts['@dsh-ray/demo'] as { tarball: string }).tarball
     const fromLogical = `file:${relative(join(input.originalHome, 'profiles', '__profile__'), logical)}`
     const fromPreparation = `file:${relative(options.cwd, logical)}`
     const rewrite = (value: unknown): unknown => {
@@ -877,27 +877,27 @@ test('normalizes pnpm file locators from the private preparation path to the log
   const preparation = await prepareHostLocalProfileUpdate({ ...input, runPnpm })
   const resolved = await readFile(join(input.preparationRoot, 'assistant', 'pnpm-lock.yaml'), 'utf8')
   expect(resolved).toContain(`file:${relative(join(input.originalHome, 'profiles', '__profile__'),
-    (input.candidateArtifacts['@dsh-enhanced/demo'] as { tarball: string }).tarball)}`)
+    (input.candidateArtifacts['@dsh-ray/demo'] as { tarball: string }).tarball)}`)
   expect(resolved).not.toContain(`file:${relative(join(input.preparationRoot, 'assistant'),
-    (input.candidateArtifacts['@dsh-enhanced/demo'] as { tarball: string }).tarball)}`)
+    (input.candidateArtifacts['@dsh-ray/demo'] as { tarball: string }).tarball)}`)
   expect(preparation.profiles).toHaveLength(1)
 })
 
 test('accepts pnpm runtime dependency symlinks bound to another verified package in the same profile', async () => {
   const input = await fixture(['acp'])
-  const acp = input.candidateArtifacts['@dsh-enhanced/acp'] as { runtimeDependencies: string[] }
-  acp.runtimeDependencies = ['@dsh-enhanced/demo']
+  const acp = input.candidateArtifacts['@dsh-ray/acp'] as { runtimeDependencies: string[] }
+  acp.runtimeDependencies = ['@dsh-ray/demo']
   const preparation = await prepareHostLocalProfileUpdate(input)
   const runPnpm = async (...args: Parameters<typeof input.runPnpm>) => {
     await input.runPnpm(...args)
     if (args[1].phase !== 'materialize') return
     const store = join(input.stagedHome, 'profiles', 'acp', 'node_modules', '.pnpm')
-    const target = join(store, '@dsh-enhanced+demo@file', 'node_modules', '@dsh-enhanced', 'demo')
+    const target = join(store, '@dsh-ray+demo@file', 'node_modules', '@dsh-ray', 'demo')
     await mkdir(target, { recursive: true })
-    await writeFile(join(target, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/demo', version: '0.1.48' }))
+    await writeFile(join(target, 'package.json'), JSON.stringify({ name: '@dsh-ray/demo', version: '0.1.48' }))
     await writeFile(join(target, 'index.js'), 'candidate package bytes')
     await chmod(join(target, 'index.js'), 0o600)
-    const peer = join(store, '@dsh-enhanced+acp@file', 'node_modules', '@dsh-enhanced', 'demo')
+    const peer = join(store, '@dsh-ray+acp@file', 'node_modules', '@dsh-ray', 'demo')
     await symlink(target, peer)
   }
   const proof = await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
@@ -907,14 +907,14 @@ test('accepts pnpm runtime dependency symlinks bound to another verified package
 
 test('rejects a pnpm runtime dependency link that escapes the profile store', async () => {
   const input = await fixture(['acp'])
-  const acp = input.candidateArtifacts['@dsh-enhanced/acp'] as { runtimeDependencies: string[] }
-  acp.runtimeDependencies = ['@dsh-enhanced/demo']
+  const acp = input.candidateArtifacts['@dsh-ray/acp'] as { runtimeDependencies: string[] }
+  acp.runtimeDependencies = ['@dsh-ray/demo']
   const preparation = await prepareHostLocalProfileUpdate(input)
   const runPnpm = async (...args: Parameters<typeof input.runPnpm>) => {
     await input.runPnpm(...args)
     if (args[1].phase !== 'materialize') return
     const peer = join(input.stagedHome, 'profiles', 'acp', 'node_modules', '.pnpm',
-      '@dsh-enhanced+acp@file', 'node_modules', '@dsh-enhanced', 'demo')
+      '@dsh-ray+acp@file', 'node_modules', '@dsh-ray', 'demo')
     await symlink(input.root, peer)
   }
   await expect(materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,

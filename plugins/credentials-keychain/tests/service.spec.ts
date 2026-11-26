@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,7 +22,7 @@ async function harness(options: {
   let now = 1_000
   const ctx = new Context()
   new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'), rules: options.allow === false ? [] : [
-    { id: 'consumer-use', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-test-consumer' },
+    { id: 'consumer-use', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-test-consumer' },
       actions: ['credential.use'], resource: { kind: 'credential', id: 'lark-secret' },
       context: { initiators: ['background'] } },
     { id: 'operator-revoke', effect: 'allow', subject: { kind: 'external', id: 'local:owner' },
@@ -31,9 +31,9 @@ async function harness(options: {
   ] })
   const handle: CredentialHandle = options.provider === 'macos-keychain'
     ? { id: 'lark-secret', provider: 'macos-keychain', service: 'dsh/lark', account: 'personal',
-        consumers: ['dsh-enhanced-test-consumer'], purposes: ['connect'], maxLeaseMs: options.maxLeaseMs ?? 5_000 }
+        consumers: ['dsh-ray-test-consumer'], purposes: ['connect'], maxLeaseMs: options.maxLeaseMs ?? 5_000 }
     : { id: 'lark-secret', provider: 'environment', environmentName: 'LARK_SECRET',
-        consumers: ['dsh-enhanced-test-consumer'], purposes: ['connect'], maxLeaseMs: options.maxLeaseMs ?? 5_000 }
+        consumers: ['dsh-ray-test-consumer'], purposes: ['connect'], maxLeaseMs: options.maxLeaseMs ?? 5_000 }
   const databasePath = join(root, 'credentials.sqlite')
   const service = new CredentialsKeychainService(ctx, {
     databasePath, defaultLeaseMs: 1_000,
@@ -45,7 +45,7 @@ async function harness(options: {
 
 function consumer(task: (ctx: Context) => Promise<void>) {
   return {
-    name: 'dsh-enhanced-test-consumer',
+    name: 'dsh-ray-test-consumer',
     inject: ['credentialsKeychain'],
     async apply(ctx: Context) { await task(ctx) },
   }
@@ -84,7 +84,7 @@ describe('credentials-keychain Cordis service', () => {
     expect(JSON.stringify(f.service.listLeases({ limit: 10 }))).not.toContain('super-secret')
     expect(JSON.stringify(f.service.listLeases({ limit: 10 }))).not.toContain('startup:1')
     expect(f.service.listLeases({ limit: 10 })[0]).toMatchObject({
-      consumer: 'dsh-enhanced-test-consumer', purpose: 'connect', status: 'completed',
+      consumer: 'dsh-ray-test-consumer', purpose: 'connect', status: 'completed',
     })
     await f.ctx.fiber.restart()
   })

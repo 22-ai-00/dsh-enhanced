@@ -1,9 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
-import { AssistantAutomationsService, type Config as AutomationsConfig } from '@dsh-enhanced/assistant-automations'
-import { AssistantPolicyService, type Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
-import { PersonalMemoryService, type Config as MemoryConfig } from '@dsh-enhanced/personal-memory'
-import { PersonalWikiService, type Config as WikiConfig } from '@dsh-enhanced/personal-wiki'
+import { AssistantAutomationsService, type Config as AutomationsConfig } from '@dsh-ray/assistant-automations'
+import { AssistantPolicyService, type Config as PolicyConfig } from '@dsh-ray/assistant-policy'
+import { PersonalMemoryService, type Config as MemoryConfig } from '@dsh-ray/personal-memory'
+import { PersonalWikiService, type Config as WikiConfig } from '@dsh-ray/personal-wiki'
 import { version } from './version.js'
 
 export interface Config {
@@ -20,7 +20,7 @@ export const Config = Schema.object({
   assistantAutomations: AssistantAutomationsService.Config.required(),
 }) as Schema<Config>
 
-export const name = 'dsh-enhanced-personal-assistant'
+export const name = 'dsh-ray-personal-assistant'
 export { version }
 
 export async function apply(ctx: Context, input: Config): Promise<void> {

@@ -5,7 +5,7 @@ import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import {
   AssistantPolicyService,
   AUTO_REVIEW_APPROVAL_REASON,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

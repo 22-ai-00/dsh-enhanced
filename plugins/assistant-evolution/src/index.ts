@@ -3,7 +3,7 @@ import { AssistantEvolutionService } from './service.js'
 import type { Config } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-evolution'
+export const name = 'dsh-ray-assistant-evolution'
 export const inject = ['assistantPolicy', 'assistantEvaluation']
 export { AssistantEvolutionService, version }
 export type { Config }

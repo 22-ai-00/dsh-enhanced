@@ -16,7 +16,7 @@ import {
   setApprovalReviewer,
   type ApprovalDispatchRoute,
   type ApprovalProposalSnapshot,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantEvolutionService } from '../src/service.ts'
 import {
@@ -24,13 +24,13 @@ import {
   projectTrustedOutcome,
   type FakeAutomationQualityResolver,
 } from './quality-fixture.ts'
-import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import type { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
 import type {
   DeliveryPresentationUpdate,
   TrustedDeliveryPresentationRegistration,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 
-const APPROVAL_SOURCE = 'dsh-enhanced-assistant-evolution'
+const APPROVAL_SOURCE = 'dsh-ray-assistant-evolution'
 const OWNER = 'lark/bot-1/tenant-a/ou_owner'
 const WORKSPACE = '/work/alpha'
 const PRESET = 'primary'

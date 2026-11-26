@@ -10,8 +10,8 @@ import {
   type DeliveryAdapterContext,
   type OutboundIntent,
   type OutboundTextAttachment,
-} from '@dsh-enhanced/assistant-delivery'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-delivery'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { LarkDeliveryAdapter, type LarkAdapterOptions } from '../src/adapter.ts'
 import {

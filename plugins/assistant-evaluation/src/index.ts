@@ -8,7 +8,7 @@ import {
 import type { Config as ConfigType } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-evaluation'
+export const name = 'dsh-ray-assistant-evaluation'
 export {
   ASSISTANT_EVALUATION_SKILL,
   AssistantEvaluationService,

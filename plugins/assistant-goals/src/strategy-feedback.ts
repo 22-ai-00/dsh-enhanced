@@ -1,4 +1,4 @@
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import { buildGoalFeedback, type GoalStepFeedback } from './feedback.js'
 import type { GoalBudgetRunUsage } from './budget-store.js'
 import type { StrategyRoutingDecision } from './strategy-router.js'

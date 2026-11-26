@@ -12,9 +12,9 @@ const exact = value => typeof value === 'string' && isAbsolute(value) && resolve
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const fail = message => { throw new Error(`Host local source update: ${message}`) }
 const same = (left, right) => isDeepStrictEqual(left, right)
-const repairProtocol = 'dsh-enhanced/host-owner-source-repair/v1'
+const repairProtocol = 'dsh-ray/host-owner-source-repair/v1'
 const repairMode = proof => proof?.protocol === repairProtocol
-const programProtocol = 'dsh-enhanced/host-owner-program-update/v1'
+const programProtocol = 'dsh-ray/host-owner-program-update/v1'
 const programMode = proof => proof?.protocol === programProtocol
 const ownerMode = proof => repairMode(proof) || programMode(proof)
 async function verifyOwner(proof, options) {
@@ -28,7 +28,7 @@ async function verifyOwner(proof, options) {
     ownerRepairNext: proof.ownerRepairNext, ...options })
 }
 function assertProtocol(proof) {
-  if (!ownerMode(proof) && proof?.protocol !== 'dsh-enhanced/host-local-source-update/v1') fail('invalid source proof protocol')
+  if (!ownerMode(proof) && proof?.protocol !== 'dsh-ray/host-local-source-update/v1') fail('invalid source proof protocol')
   if (repairMode(proof) !== (proof.ownerRepair !== undefined)) fail('source owner repair scope differs')
   if (programMode(proof) !== (proof.ownerUpdate !== undefined)) fail('source owner program update scope differs')
 }
@@ -128,8 +128,8 @@ async function allProfileRoots(homePath, candidateCohort) {
       if (roots === undefined) continue
       if (!roots || typeof roots !== 'object' || Array.isArray(roots)) fail(`invalid Home profile roots: ${name}`)
       for (const dependency of Object.keys(roots)) {
-        if (dependency.startsWith('@dsh-enhanced/') && !available.has(dependency)) {
-          const slug = dependency.slice('@dsh-enhanced/'.length)
+        if (dependency.startsWith('@dsh-ray/') && !available.has(dependency)) {
+          const slug = dependency.slice('@dsh-ray/'.length)
           if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(slug)) fail(`invalid enhanced root: ${dependency}`)
           missing.add(slug)
         }
@@ -159,7 +159,7 @@ function artifactMap(cohort, homePath, profile, sourceHome) {
   if (!cohort || !Array.isArray(cohort.packages) || !/^[a-f0-9]{64}$/u.test(cohort.receiptDigest)) fail('prepared cohort is invalid')
   const result = {}
   for (const item of cohort.packages) {
-    if (typeof item.name !== 'string' || !item.name.startsWith('@dsh-enhanced/') || !exact(item.tarball)
+    if (typeof item.name !== 'string' || !item.name.startsWith('@dsh-ray/') || !exact(item.tarball)
       || !item.tarball.startsWith(`${cohort.root}${sep}`) || !/^[a-f0-9]{64}$/u.test(item.sha256)) fail('prepared artifact is invalid')
     const tarball = join(homePath, 'rsi-local-cohorts', profile, 'artifacts', basename(item.tarball))
     if (Object.hasOwn(result, item.name)) fail('duplicate prepared artifact')
@@ -329,7 +329,7 @@ export async function prepareHostLocalSourceUpdate({ homePath, profile, preparat
     sourcePreparationRoot: preparationRoot, installerRoot, root: auxiliaryRoot, bundles: profileRoots.missing }) : null
   const authorityRuntime = await api.readRsiAuthorityRuntimeReceipt({ logicalHome: homePath,
     physicalHome: homePath, profile })
-  const proof = { protocol: ownerUpdate ? programProtocol : ownerRepair ? repairProtocol : 'dsh-enhanced/host-local-source-update/v1', homePath, profile, preparationRoot,
+  const proof = { protocol: ownerUpdate ? programProtocol : ownerRepair ? repairProtocol : 'dsh-ray/host-local-source-update/v1', homePath, profile, preparationRoot,
     preparationDigest: preparation.receiptDigest, installer, profileRoots, auxiliary,
     ...(ownerRepair ? { ownerRepair, candidateCreation } : {}),
     ...(ownerUpdate ? { ownerUpdate, candidateCreation } : {}),
@@ -424,7 +424,7 @@ export async function finalizeHostLocalSourceUpdate({ proof, homePath, stageHome
   await verifyHostLocalSourceUpdate({ proof, homePath, physicalHome: stageHome, selection: 'candidate' })
   const api = await loadLocalSourceInstaller(proof.installer, { ownerRepair: ownerMode(proof) })
   const packageRoot = await realpath(join(stageHome, 'profiles', proof.profile,
-    'node_modules', '@dsh-enhanced', 'plugin-control-plane'))
+    'node_modules', '@dsh-ray', 'plugin-control-plane'))
   if (!packageRoot.startsWith(`${stageHome}${sep}`)) fail('candidate control-plane package escaped the stage')
   const runtime = await api.replaceRsiAuthorityRuntimeInStage({ logicalHome: homePath,
     physicalHome: stageHome, profile: proof.profile }, { packageRoot, nodePath: await realpath(process.execPath) })

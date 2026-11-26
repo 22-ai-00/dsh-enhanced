@@ -1,13 +1,13 @@
 import { ScannerOwnerGuard, ScannerOwnerUnavailable, drainScannerFlights } from './scanner-owner-runtime.js'
-import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
-import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import type { AssistantDeliveryService, OwnerForegroundLearningTask, OwnerWorkItemEngineeringContextExpectation, OwnerWorkItemEngineeringContextSource } from '@dsh-enhanced/assistant-delivery'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-ray/assistant-automations'
+import type { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import type { AssistantDeliveryService, OwnerForegroundLearningTask, OwnerWorkItemEngineeringContextExpectation, OwnerWorkItemEngineeringContextSource } from '@dsh-ray/assistant-delivery'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { SourceGrowthRunUnavailableError, isSourceOwnerContinuation, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateSourceGrowthRunBinding,
   type CreationAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef,
   type AnySourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding,
   type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins,
-  validateAnySourceGrowthRunBinding, anySourceGrowthRunDigest, type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
+  validateAnySourceGrowthRunBinding, anySourceGrowthRunDigest, type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-ray/assistant-growth-contract'
 import type { NormalizedGrowthDriverConfig } from './config.js'
 import { UsageStore, isWorkItemUsageIntent, type WorkItemUsageIntent, type ForegroundUsageIntent, type UsageJob, type UsageModel } from './usage-store.js'
 

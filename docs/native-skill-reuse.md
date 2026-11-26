@@ -34,7 +34,7 @@ Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的
 
 ## Evaluation Host 入口
 
-从 `@dsh-enhanced/assistant-evaluation/benchmark/skills` 导入：
+从 `@dsh-ray/assistant-evaluation/benchmark/skills` 导入：
 
 - `createNativeSkillGoalRuntime(options)`：创建一个真实 DSH Goal 单元。`execute()` 返回独立 Goal 观察、Host usage、工具调用和技能执行记录。来源单元配置 `source: { name, description, validityMs }`；达成后调用 `captureVerifiedSkill()`，通过真实 SessionQuery/Goals 重新验证，沉淀 pending 候选。来源服务必须持续存活。
 - `runNativeSkillBenchmark(config, captured, factory, signal)`：使用同一个可信模型工厂运行 baseline/candidate。`config` 固定 persona、model、budget、execution、公开 task、固定 linux-native runtime 与 cgroup roots、步骤时限、repeats（2–4）、seed、expiresAt、独立 authority 和 verification。供应、预算、任务与 persona 必须匹配 captured.origin；训练用量单独返回，不混入复用单元。
@@ -72,7 +72,7 @@ Goals 经原生 SystemPrompt 与 `goal_context` 提供 `roundTiming`：首次上
 
 ```sh
 DSH_ISOLATION_TEST_NATIVE_RUNTIME=/absolute/path/to/prepared-runtime.json \
-pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run \
+pnpm --filter @dsh-ray/assistant-evaluation exec vitest run \
   tests/benchmark/native-skills-runtime.spec.ts tests/benchmark/native-skills.spec.ts
 ```
 

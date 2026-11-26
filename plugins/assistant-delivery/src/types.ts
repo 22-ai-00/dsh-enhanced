@@ -2,7 +2,7 @@ import type { ForegroundTerminationObservation } from './foreground-termination.
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
-import type { ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalDispatchRouteV2 } from '@dsh-ray/assistant-policy'
 import type { OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from './goal-wake-types.js'
 import type { ForegroundExecution } from './acceptance.js'
 

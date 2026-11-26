@@ -1,5 +1,5 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { GoalScope } from '@dsh-enhanced/assistant-goals'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import type { GoalScope } from '@dsh-ray/assistant-goals'
 import type { FailureCaptureProvenance, HostFailureEvidenceSummary, VerifiedWorkflowSource } from './definition.js'
 import { fileObservationSteps, instantiate, validateFailureCaptureProvenance, validateHostFailureEvidenceSummary, type SkillDefinition, type SkillRunExpansion } from './definition.js'
 import type { SkillRun, SkillRunStep, SkillStore, StoredSkillDefinition } from './store.js'

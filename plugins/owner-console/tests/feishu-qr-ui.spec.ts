@@ -25,7 +25,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
   function makeStatus(overrides: Partial<OwnerConsoleStatus['feishu']> = {}): OwnerConsoleStatus {
     return {
       feishu: {
-        entry: 'dsh-enhanced-lark-channel',
+        entry: 'dsh-ray-lark-channel',
         mode: 'handle',
         installed: true,
         enabled: false,
@@ -34,8 +34,8 @@ describe('FeishuCard one-click QR onboarding UI', () => {
         connection: 'disabled',
         ...overrides,
       },
-      traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: 'traex' },
-      agy: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: 'agy' },
+      traex: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: 'traex' },
+      agy: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: 'agy' },
       defaultModel: { entry: 'agent-default-model', available: true, provider: 'deepseek-official', model: 'deepseek-v4-flash' },
       llmProviders: [{ id: 'deepseek-official', name: 'DeepSeek' }],
       host: { settings: true, pluginManager: true, bundles: 'ok', plugins: 'ok' },
@@ -161,7 +161,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
       setPluginEnabled: vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'r', note: 'ok' } })),
       installProjectBundle: vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'r', note: 'ok' } })),
       removeProjectBundle: vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'r', note: 'ok' } })),
-      configureFeishuEasy: vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'dsh-enhanced-lark-channel', note: 'ok' } })),
+      configureFeishuEasy: vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'dsh-ray-lark-channel', note: 'ok' } })),
       startFeishuQrOnboarding,
       feishuQrOnboardingStatus,
       cancelFeishuQrOnboarding,
@@ -186,7 +186,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
 
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote,
         navigation,
@@ -243,7 +243,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
 
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote,
         navigation,
@@ -288,7 +288,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
 
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote,
         navigation,
@@ -314,7 +314,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
 
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote,
         navigation,
@@ -400,7 +400,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: phishRemote,
         navigation,
@@ -453,7 +453,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'race-remount',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: raceRemote,
         navigation,
@@ -522,7 +522,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
       await act(async () => {
         root.render(createElement(BundleConfigSlotView, {
           key: `binding-${c.binding}`,
-          packageName: '@dsh-enhanced/lark-channel',
+          packageName: '@dsh-ray/lark-channel',
           view: 'page',
           remote,
           navigation,
@@ -572,7 +572,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'install-missing',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: missingRemote,
         navigation,
@@ -585,12 +585,12 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     await act(async () => { installBtn!.click() })
     await act(async () => { await Promise.resolve() })
     expect(installMissing.mock.calls).toEqual([
-      ['@dsh-enhanced/assistant-delivery', []],
-      ['@dsh-enhanced/credentials-keychain', []],
-      ['@dsh-enhanced/lark-channel', []],
+      ['@dsh-ray/assistant-delivery', []],
+      ['@dsh-ray/credentials-keychain', []],
+      ['@dsh-ray/lark-channel', []],
     ])
 
-    // When both companions are already available/enabled, only @dsh-enhanced/lark-channel is installed.
+    // When both companions are already available/enabled, only @dsh-ray/lark-channel is installed.
     const installPresent = vi.fn(async (spec: string) => ({ ok: true as const, value: { applied: true, entry: spec, note: 'ok' } }))
     const { remote: presentRemote } = makeQrRemote()
     ;(presentRemote as { status: ConsoleRemote['status'] }).status = vi.fn(async () => ({
@@ -599,7 +599,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
         ...makeStatus({ entry: undefined, installed: false, enabled: false, connection: 'absent' }),
         dependencies: [{ name: 'assistantDelivery', available: true }],
         bundles: [
-          { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
+          { name: '@dsh-ray/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
         ],
       },
     }))
@@ -608,7 +608,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'install-present',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: presentRemote,
         navigation,
@@ -621,7 +621,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     await act(async () => { installBtn2!.click() })
     await act(async () => { await Promise.resolve() })
     expect(installPresent.mock.calls).toEqual([
-      ['@dsh-enhanced/lark-channel', []],
+      ['@dsh-ray/lark-channel', []],
     ])
   })
 
@@ -656,7 +656,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'guided-all',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote,
         navigation,
@@ -733,7 +733,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'guided-fail-promo',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: failPromoRemote,
         navigation,
@@ -774,7 +774,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'guided-manual',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: manualRemote,
         navigation,
@@ -815,7 +815,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'guided-partial-fail',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: partialFailRemote,
         navigation,
@@ -863,7 +863,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'guided-mismatch',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: mismatchRemote,
         navigation,
@@ -880,7 +880,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
   it('shows guided onboarding, accurate persisted config, enable-not-install dependency recovery, and QR/manual setup when lark-channel is pending', async () => {
     const applyDoctorRepair = vi.fn(async () => ({
       ok: true as const,
-      value: { applied: true, entry: 'setup-doctor', note: '已恢复启用核心策略组件 @dsh-enhanced/personal-assistant。请重启 profile 后生效' },
+      value: { applied: true, entry: 'setup-doctor', note: '已恢复启用核心策略组件 @dsh-ray/personal-assistant。请重启 profile 后生效' },
     }))
     const restartProfile = vi.fn(async () => ({
       ok: true as const,
@@ -897,8 +897,8 @@ describe('FeishuCard one-click QR onboarding UI', () => {
         connected: false,
         connection: 'absent',
       },
-      traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: 'traex' },
-      agy: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: 'agy' },
+      traex: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: true, command: 'traex' },
+      agy: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: true, command: 'agy' },
       defaultModel: { entry: 'agent-default-model', available: true, provider: 'super-relay', model: 'auto_model/alwaysday1' },
       llmProviders: [{ id: 'super-relay', name: 'Super Relay' }],
       host: { settings: true, pluginManager: true, bundles: 'ok', plugins: 'ok' },
@@ -909,13 +909,13 @@ describe('FeishuCard one-click QR onboarding UI', () => {
       ],
       evaluation: { intakeAgreement: 'absent' },
       bundles: [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
-        { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-credentials-keychain', moduleName: '@dsh-enhanced/credentials-keychain' }] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-ray-personal-assistant', moduleName: '@dsh-ray/personal-assistant' }] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] },
+        { name: '@dsh-ray/credentials-keychain', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-credentials-keychain', moduleName: '@dsh-ray/credentials-keychain' }] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-lark-channel', moduleName: '@dsh-ray/lark-channel' }] },
       ],
       plugins: [
-        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'pending' },
+        { entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'pending' },
       ],
     }
     const remote: ConsoleRemote = {
@@ -928,7 +928,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
 
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote,
         navigation,
@@ -945,24 +945,24 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     const guide = container.querySelector('[data-feishu-guide]')
     expect(guide).not.toBeNull()
     expect(guide!.textContent).toContain('飞书接入引导')
-    expect(guide!.textContent).toContain('@dsh-enhanced/personal-assistant')
+    expect(guide!.textContent).toContain('@dsh-ray/personal-assistant')
     const guidePlatformLink = container.querySelector('a[data-feishu-guide-open-platform]') as HTMLAnchorElement | null
     expect(guidePlatformLink?.getAttribute('href')).toBe('https://open.feishu.cn/app/cli_aabbccddeeff0011')
 
-    // Must offer "启用 @dsh-enhanced/personal-assistant", NEVER bogus "安装 @dsh-enhanced/assistant-policy" or "安装 @dsh-enhanced/assistant-delivery"
+    // Must offer "启用 @dsh-ray/personal-assistant", NEVER bogus "安装 @dsh-ray/assistant-policy" or "安装 @dsh-ray/assistant-delivery"
     const allButtons = [...container.querySelectorAll('button')].map(b => b.textContent)
-    expect(allButtons).toContain('启用 @dsh-enhanced/personal-assistant')
-    expect(allButtons).not.toContain('安装 @dsh-enhanced/assistant-policy')
-    expect(allButtons).not.toContain('安装 @dsh-enhanced/assistant-delivery')
+    expect(allButtons).toContain('启用 @dsh-ray/personal-assistant')
+    expect(allButtons).not.toContain('安装 @dsh-ray/assistant-policy')
+    expect(allButtons).not.toContain('安装 @dsh-ray/assistant-delivery')
 
     // QR onboarding form remains visible while pending, AND honestly gates the start button until Step 1 bundles are enabled
     const qrStartBtn = container.querySelector('button[data-feishu-qr-start]') as HTMLButtonElement | null
     expect(qrStartBtn).not.toBeNull()
     expect(qrStartBtn!.disabled).toBe(true)
-    expect(container.querySelector('[data-feishu-qr-blocked-hint]')?.textContent).toContain('@dsh-enhanced/personal-assistant')
+    expect(container.querySelector('[data-feishu-qr-blocked-hint]')?.textContent).toContain('@dsh-ray/personal-assistant')
 
     // Clicking enable invokes targeted doctor recovery for disabled-core-policy-provider
-    const enablePaBtn = container.querySelector('button[data-repair-enable-dep="@dsh-enhanced/personal-assistant"]') as HTMLButtonElement
+    const enablePaBtn = container.querySelector('button[data-repair-enable-dep="@dsh-ray/personal-assistant"]') as HTMLButtonElement
     await act(async () => { enablePaBtn.click() })
     await act(async () => { await Promise.resolve() })
     expect(applyDoctorRepair).toHaveBeenCalledWith(['disabled-core-policy-provider'])
@@ -990,19 +990,19 @@ describe('FeishuCard one-click QR onboarding UI', () => {
         { name: 'assistantDelivery', available: false },
       ],
       bundles: [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
       ],
       plugins: [
-        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'pending' },
+        { entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'pending' },
       ],
     }
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'qr-unlocked-pending',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: { ...base.remote, status: vi.fn(async () => ({ ok: true as const, value: readyForQrStatus })) },
         navigation,
@@ -1014,26 +1014,26 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     expect(unlockedQrBtn!.disabled).toBe(false)
     expect(container.querySelector('[data-feishu-qr-blocked-hint]')).toBeNull()
 
-    // 2) Missing @dsh-enhanced/credentials-keychain shows install button in Step 1
+    // 2) Missing @dsh-ray/credentials-keychain shows install button in Step 1
     const missingKeychainStatus: OwnerConsoleStatus = {
-      ...makeStatus({ entry: 'dsh-enhanced-lark-channel', installed: true, enabled: true, appIdConfigured: false, connected: false, connection: 'disabled' }),
+      ...makeStatus({ entry: 'dsh-ray-lark-channel', installed: true, enabled: true, appIdConfigured: false, connected: false, connection: 'disabled' }),
       dependencies: [
         { name: 'assistantPolicy', available: true },
         { name: 'assistantDelivery', available: true },
       ],
       bundles: [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
       ],
       plugins: [
-        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' },
+        { entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'active' },
       ],
     }
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'missing-keychain',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: { ...base.remote, status: vi.fn(async () => ({ ok: true as const, value: missingKeychainStatus })) },
         navigation,
@@ -1046,7 +1046,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     // 3) Loaded + configured + post-restart disconnected error -> Step 3 is ✓ (not 待重启), Step 4 is 连接异常
     const errorStatus: OwnerConsoleStatus = {
       ...makeStatus({
-        entry: 'dsh-enhanced-lark-channel',
+        entry: 'dsh-ray-lark-channel',
         installed: true,
         enabled: true,
         appIdConfigured: true,
@@ -1060,19 +1060,19 @@ describe('FeishuCard one-click QR onboarding UI', () => {
         { name: 'assistantDelivery', available: true },
       ],
       bundles: [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
       ],
       plugins: [
-        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' },
+        { entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'active' },
       ],
     }
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
         key: 'post-restart-error',
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote: { ...base.remote, status: vi.fn(async () => ({ ok: true as const, value: errorStatus })) },
         navigation,
@@ -1090,7 +1090,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     const base = makeQrRemote()
     const connectedStatus: OwnerConsoleStatus = {
       ...makeStatus({
-        entry: 'dsh-enhanced-lark-channel',
+        entry: 'dsh-ray-lark-channel',
         installed: true,
         enabled: true,
         appIdConfigured: true,
@@ -1103,13 +1103,13 @@ describe('FeishuCard one-click QR onboarding UI', () => {
         { name: 'assistantDelivery', available: true },
       ],
       bundles: [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
       ],
       plugins: [
-        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' },
+        { entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'active' },
       ],
     }
 
@@ -1157,7 +1157,7 @@ describe('FeishuCard one-click QR onboarding UI', () => {
 
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote,
         navigation,

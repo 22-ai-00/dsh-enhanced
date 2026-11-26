@@ -11,7 +11,7 @@
  * Every private expected byte below was produced by a POSIX-sh reference implementation and
  * byte-compared inside the frozen linux-native verifier runtime (dash + busybox awk); it is not hand-computed.
  */
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { BenchmarkCase, BenchmarkPlan } from './types.js'
 import { strategyGoalTaskDigests, type StrategyGoalTask } from './strategy-goal-runtime.js'
 import {

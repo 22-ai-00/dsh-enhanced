@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { canonicalExternalEventEnvelope, externalEventDigest, parseExternalEventEnvelope, type ExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import { canonicalExternalEventEnvelope, externalEventDigest, parseExternalEventEnvelope, type ExternalEventEnvelope } from '@dsh-ray/assistant-automations/external-event'
 import { GoalStoreError, type GoalScope } from './types.js'
 import { prepareGoalStoreDatabaseFile } from './store.js'
 import { validateGoalWakeIntent, type GoalWakeIntent } from './wake-store.js'

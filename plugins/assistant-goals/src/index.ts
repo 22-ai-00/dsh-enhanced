@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { AssistantGoalsService, Config } from './service.js'
 import { version } from './version.js'
-export const name = 'dsh-enhanced-assistant-goals'
+export const name = 'dsh-ray-assistant-goals'
 export { AssistantGoalsService, Config, version }
 export { OwnerVerifiedWorkflowSourceError } from './verified-workflow.js'
 export type { VerifiedWorkflowSource, VerifiedWorkflowSegment } from './verified-workflow.js'

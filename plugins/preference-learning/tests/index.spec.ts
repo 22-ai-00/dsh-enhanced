@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -19,9 +19,9 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-describe('dsh-enhanced-preference-learning', () => {
+describe('dsh-ray-preference-learning', () => {
   test('exposes stable plugin identity and a fixed four-tier catalog', () => {
-    expect(name).toBe('dsh-enhanced-preference-learning')
+    expect(name).toBe('dsh-ray-preference-learning')
     expect(version).toBe(manifest.version)
     expect(new Set(Object.values(preferenceCatalog).map(entry => entry.riskTier)))
       .toEqual(new Set(['T0', 'T1', 'T2', 'T3']))

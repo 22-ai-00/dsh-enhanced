@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { MemoryDevelopmentTask } from './memory-corpus.js'
 
 export const memoryRuntimeConfig = Object.freeze({
@@ -31,8 +31,8 @@ interface MemoryService {
 
 /** Optional Host peers load only for the Memory suite, without an Evaluation/Memory build cycle. */
 export async function installBenchmarkMemory(ctx: Context, workspace: string, snapshotLimit: number, enabled: boolean): Promise<MemoryService> {
-  const policyPackage = '@dsh-enhanced/assistant-policy'
-  const memoryPackage = '@dsh-enhanced/personal-memory'
+  const policyPackage = '@dsh-ray/assistant-policy'
+  const memoryPackage = '@dsh-ray/personal-memory'
   const [policyModule, memoryModule] = await Promise.all([import(policyPackage), import(memoryPackage)])
   if (typeof policyModule.AssistantPolicyService !== 'function' || typeof memoryModule.PersonalMemoryService !== 'function') throw new Error('native Memory peers lack required public services')
   const Policy = policyModule.AssistantPolicyService as new (ctx: Context, config: unknown) => unknown

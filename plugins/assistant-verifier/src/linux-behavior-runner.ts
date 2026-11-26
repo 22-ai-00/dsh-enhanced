@@ -1,4 +1,4 @@
-import { LinuxVerifierRunner, type IsolationResult } from '@dsh-enhanced/assistant-isolation'
+import { LinuxVerifierRunner, type IsolationResult } from '@dsh-ray/assistant-isolation'
 import type { LinuxPluginBehaviorRunnerConfig } from './plugin-behavior-config.js'
 import { LINUX_BEHAVIOR_COMMAND, verifyLinuxPluginBehaviorRuntime } from './linux-behavior-runtime.js'
 

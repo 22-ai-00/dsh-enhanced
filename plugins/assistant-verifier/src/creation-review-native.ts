@@ -4,8 +4,8 @@ import { createUserMessage, ReasoningEffortId, type GenerateOptions, type Stream
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { growthObjectDigest, matchesIsolatedModelMessages } from '@dsh-enhanced/assistant-growth-contract'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { growthObjectDigest, matchesIsolatedModelMessages } from '@dsh-ray/assistant-growth-contract'
 
 export interface CreationModel { provider: string; model: string; reasoningEffort?: string }
 interface NativeInput {

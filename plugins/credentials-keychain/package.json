@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/credentials-keychain",
+  "name": "@dsh-ray/credentials-keychain",
   "version": "0.1.88",
   "description": "An audited OS-keychain credential-handle service for trusted DeepSeek Harness plugins.",
   "license": "MIT",
@@ -39,7 +39,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/credentials-keychain"
   },
   "keywords": [
@@ -60,19 +60,19 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
+    "@dsh-ray/assistant-policy": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-policy": {
+    "@dsh-ray/assistant-policy": {
       "optional": true
     }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

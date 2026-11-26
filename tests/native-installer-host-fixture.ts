@@ -44,13 +44,13 @@ export async function nativeInstallerSetupPackage(
   moduleName: string,
   setupSource: string,
 ): Promise<string> {
-  const packageRoot = join(profile, 'node_modules', '@dsh-enhanced', packageSuffix)
+  const packageRoot = join(profile, 'node_modules', '@dsh-ray', packageSuffix)
   await mkdir(join(packageRoot, 'lib'), { recursive: true })
   await mkdir(join(packageRoot, 'bin'), { recursive: true })
   let previous: { bin?: Record<string, string> } = {}
   try { previous = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) } catch {}
   await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
-    name: `@dsh-enhanced/${packageSuffix}`, version: '0.0.0', type: 'module',
+    name: `@dsh-ray/${packageSuffix}`, version: '0.0.0', type: 'module',
     bin: { ...previous.bin, [executableName]: `./bin/${executableName}.js` },
     dsh: { bundle: { patch: './cordis.patch.yml' } },
   }))

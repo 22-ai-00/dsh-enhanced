@@ -12,7 +12,7 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { developmentCases, developmentDataset, developmentPrompt, judgeDevelopmentResponse } from './corpus.js'
 import { familiesDevelopmentCases, familiesDevelopmentDataset, judgeFamiliesDevelopmentResponse } from './families-corpus.js'
 import { familiesProtocol, familiesToolsDigest, installFamiliesRuntime, type FamiliesRuntimeHandle } from './families-runtime.js'
@@ -245,7 +245,7 @@ function validate(input: NativeBenchmarkConfig): NativeBenchmarkConfig {
 }
 function packageVersions(memory: boolean): Record<string, string> {
   const names = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop']
-  if (memory) names.push('@dsh-enhanced/personal-memory', '@dsh-enhanced/assistant-policy')
+  if (memory) names.push('@dsh-ray/personal-memory', '@dsh-ray/assistant-policy')
   return Object.fromEntries(names.map(name => {
     const pkg = require(`${name}/package.json`) as { version?: unknown }
     if (typeof pkg.version !== 'string') throw new Error(`unresolved runtime package ${name}`)

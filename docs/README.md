@@ -10,7 +10,7 @@
 | 添加 API 模型、使用 TraeX / Antigravity (`agy`)、切换模型 | [模型配置](models.md) |
 | 连接飞书、绑定机器人、排查没有回复 | [飞书接入](../plugins/lark-channel/docs/setup.md) |
 | 接入另一个 bot（peer agent）、配置白名单与排障 | [Peer agent 白名单与真实渠道验收](peer-agent-verification.md) |
-| 查状态、看日志、升级、重装或卸载 | [dsh-rsi 命令参考](../packages/dsh-rsi-cli/README.md) |
+| 查状态、看日志、升级、重装或卸载 | [dsh-ray 命令参考](../packages/dsh-ray/README.md) |
 | 了解当前能力与平台限制 | [当前状态](rsi-status.md) |
 | 安装更多功能 | [插件目录](../plugins/README.md) |
 
@@ -23,7 +23,7 @@
 - [Linux 原生运行时](dockerless-runtime.md)：无 Docker 安装、委派 cgroup v1 / 统一 cgroup v2 要求，以及 pre-owner 维护与已有 owner 迁移的不同边界。
 - [持久后台任务](../plugins/assistant-work-items/README.md)：默认关闭；显式授权后支持诊断、断点召回、报告回复续办与主人结果反馈。
 - [自动记忆学习](../plugins/assistant-memory-learning/README.md)：前台事实/经验，以及另行授权的后台结果经验；独立审查、有限采用与来源撤回。后台工程 Growth 和后续真实任务收益仍待验收。
-- [联想记忆层](../plugins/assistant-association/README.md)：进程内存双缓冲关联图与 ≤5ms 联想召回（Slice S1–S4，Schema v4）；由 `--plugin-preset dogfood` 安装并启用本地联想与 Hebbian/WP22 参数自调参（S3 做梦建边/observe 信号与 S4 隔离子进程只读 Web 学习均默认关闭），配合[macOS Dogfood 预设](examples/dogfood-macos.profile.json)与 `dsh-rsi growth-report` 第 6 节开展日常记忆通道验收。
+- [联想记忆层](../plugins/assistant-association/README.md)：进程内存双缓冲关联图与 ≤5ms 联想召回（Slice S1–S4，Schema v4）；由 `--plugin-preset dogfood` 安装并启用本地联想与 Hebbian/WP22 参数自调参（S3 做梦建边/observe 信号与 S4 隔离子进程只读 Web 学习均默认关闭），配合[macOS Dogfood 预设](examples/dogfood-macos.profile.json)与 `dsh-ray growth-report` 第 6 节开展日常记忆通道验收。
 - [完整验收合同](rsi-acceptance.md)：涉及具体能力或发布审查时查阅，保留完整成功条件与限定验收边界。
 - [持续成长设计](continuous-personal-assistant-growth.md)：产品目标、反馈信任和自治边界；偏好学习不替代工具/插件自迭代。
 

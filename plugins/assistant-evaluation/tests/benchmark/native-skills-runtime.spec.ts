@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, ToolCallId, type ContextFormed, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -11,8 +11,8 @@ import { nativeExecution } from './helpers/native-runtime.ts'
 // Non-live cases cancel or inspect setup before any isolated process starts.
 // Mount the plugin shape without a real runtime-tree verification; gated live
 // cases keep the real module.
-vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
-  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+vi.mock('@dsh-ray/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-ray/assistant-isolation')>()
   if (process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME !== undefined) return actual
   const { syntheticIsolationModule } = await import('./helpers/synthetic-isolation.ts')
   return syntheticIsolationModule(actual)

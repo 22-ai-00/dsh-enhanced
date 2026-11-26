@@ -38,7 +38,7 @@ async function harness(profiles: OpportunityProfile[] = [profile]) {
 describe('assistant-proactive bundle and owner access', () => {
   it('loads and disposes independently without optional execution services', async () => {
     const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
-    expect(name).toBe('dsh-enhanced-assistant-proactive'); expect(version).toBe(manifest.version)
+    expect(name).toBe('dsh-ray-assistant-proactive'); expect(version).toBe(manifest.version)
     const ctx = new Context(); contexts.push(ctx)
     await ctx.plugin(AssistantProactiveService, { databasePath: ':memory:' })
     const service = ctx.assistantProactive
@@ -69,7 +69,7 @@ describe('assistant-proactive bundle and owner access', () => {
     expect(JSON.stringify(f.service.availableProfiles(f.agent))).not.toMatch(/private-provider|private-model|private-budget/u)
     const valid = { agent: f.agent, arguments: {}, signal: new AbortController().signal }
     await vi.waitFor(() => expect(f.preauthorized.name).toBe('proactive_status'))
-    expect(f.preauthorized.callerFiberName).toBe('dsh-enhanced-assistant-proactive')
+    expect(f.preauthorized.callerFiberName).toBe('dsh-ray-assistant-proactive')
     expect(f.preauthorized.authorize?.(valid as never)).toBe(true)
     expect(f.service.preauthorizeStatus(valid as never)).toBe(true)
     expect(f.service.preauthorizeStatus({ ...valid, arguments: { goal_id: 'goal' } } as never)).toBe(true)

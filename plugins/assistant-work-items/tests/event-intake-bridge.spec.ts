@@ -1,8 +1,8 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -280,7 +280,7 @@ describe('event-triggers -> assistant-work-items Cordis intake bridge', () => {
     const owner = { ...scope, ownerRouteId: 'route-1', expiresAt: Date.now() + 120_000, budgetId: 'event-observations' }
     let eventService!: InstanceType<typeof eventTriggersMod.EventTriggersService>
     await ctx.plugin({
-      name: 'dsh-enhanced-event-triggers',
+      name: 'dsh-ray-event-triggers',
       apply(runtime) {
         eventService = new eventTriggersMod.EventTriggersService(runtime, {
           databasePath: join(root, 'events.sqlite'),

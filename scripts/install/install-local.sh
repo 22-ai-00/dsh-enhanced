@@ -6,4 +6,4 @@ REPOSITORY_ROOT="$(cd "$SCRIPT_DIRECTORY/../.." && pwd -P)"
 
 # shellcheck source=./common.sh
 source "$SCRIPT_DIRECTORY/common.sh"
-dsh_enhanced_install local "$REPOSITORY_ROOT" "$@"
+dsh_ray_install local "$REPOSITORY_ROOT" "$@"

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { resolve } from 'node:path'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { assertStrategyCapabilityRuntime, createFixedStrategyCapabilityExpectation, resolveStrategyCapabilitySource, StrategyCapabilityRuntimeHost, strategyBenchmarkMinimalRecipe, type StrategyCapabilityToolDefinition } from '../../src/benchmark/strategy-capabilities.js'
 
 const root = resolve(process.cwd(), 'plugins/assistant-evaluation')
@@ -19,7 +19,7 @@ const policyConfiguration = (enabled = true) => ({ toolDefaultEffect: 'deny', bu
   { id: 'benchmark-goal', effect: 'allow', subject: { kind: 'agent', id: 'benchmark', workspace: '/work' }, actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'execute', ...(enabled ? ['delegate'] : [])], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
   ...['goal_create', 'goal_context', 'goal_checkpoint', 'isolation_run', ...(enabled ? ['goal_strategy'] : []), 'isolation:benchmark-work'].map(id => ({ id: `allow-${id.replace(':', '-')}`, effect: 'allow', subject: { kind: 'agent', id: 'benchmark', workspace: '/work' }, actions: ['execute'], resource: { kind: 'tool', id }, context: { initiators: ['external'] } })),
 ] })
-const goalToolsSource = { packageName: '@dsh-enhanced/assistant-goals', files: ['lib/tools.js'] } as const
+const goalToolsSource = { packageName: '@dsh-ray/assistant-goals', files: ['lib/tools.js'] } as const
 const expected = () => createFixedStrategyCapabilityExpectation({ resolverDirectory: root, persona: 'benchmark persona', recipe: strategyBenchmarkMinimalRecipe })
 
 describe('strategy capability attestation', () => {
@@ -35,7 +35,7 @@ describe('strategy capability attestation', () => {
 
   test('changes the expected capability when the actual selected source or recipe-bound definition changes', () => {
     const tool = resolveStrategyCapabilitySource({ resolverDirectory: root, module: goalToolsSource })
-    const service = resolveStrategyCapabilitySource({ resolverDirectory: root, module: { packageName: '@dsh-enhanced/assistant-goals', files: ['lib/service.js'] } })
+    const service = resolveStrategyCapabilitySource({ resolverDirectory: root, module: { packageName: '@dsh-ray/assistant-goals', files: ['lib/service.js'] } })
     expect(tool.digest).not.toBe(service.digest)
     expect(expected().capabilities.strategy.tool).toMatch(/^[a-f0-9]{64}$/)
   })
@@ -45,9 +45,9 @@ describe('strategy capability attestation', () => {
     const deepseek = createFixedStrategyCapabilityExpectation({ resolverDirectory: root, persona: 'benchmark persona', modelProvider: 'deepseek-goal-metered' })
     for (const group of ['common.runtime', 'strategy.runtime'] as const) {
       const modules = deepseek.sourceIdentity[group]
-      expect(modules.find(item => item.packageName === '@dsh-enhanced/assistant-deepseek-budget')?.files.map(item => item.path)).toContain('lib/adapter.js')
+      expect(modules.find(item => item.packageName === '@dsh-ray/assistant-deepseek-budget')?.files.map(item => item.path)).toContain('lib/adapter.js')
       expect(modules.some(item => item.packageName === '@deepseek-ai/dsh-credentials')).toBe(true)
-      expect(ordinary.sourceIdentity[group].some(item => item.packageName === '@dsh-enhanced/assistant-deepseek-budget')).toBe(false)
+      expect(ordinary.sourceIdentity[group].some(item => item.packageName === '@dsh-ray/assistant-deepseek-budget')).toBe(false)
     }
     expect(deepseek.capabilities.common.runtime).not.toBe(ordinary.capabilities.common.runtime)
     expect(deepseek.capabilities.common.tools).toBe(ordinary.capabilities.common.tools)

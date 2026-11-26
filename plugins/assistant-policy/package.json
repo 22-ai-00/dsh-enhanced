@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-policy",
+  "name": "@dsh-ray/assistant-policy",
   "version": "0.1.88",
   "description": "A DeepSeek Harness plugin for Assistant Policy.",
   "license": "MIT",
@@ -53,7 +53,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-policy"
   },
   "keywords": [

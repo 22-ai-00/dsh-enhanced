@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'vitest'
-import type { TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
+import type { TrustedTaskLearningProjectionReceipt } from '@dsh-ray/assistant-evaluation'
 import {
   buildMemoryIndex,
   buildSharedEntityEdges,
@@ -34,7 +34,7 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 
 describe('assistant-association config & core indexing', () => {
   test('exports expected plugin identity and aligns version', () => {
-    expect(name).toBe('dsh-enhanced-assistant-association')
+    expect(name).toBe('dsh-ray-assistant-association')
     expect(version).toBe(manifest.version)
   })
 

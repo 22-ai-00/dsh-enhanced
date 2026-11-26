@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-goals
+# @dsh-ray/assistant-goals
 
 为 DSH 原生目标保存有 owner 身份的业务上下文：原始目标、当前目标、下一步、阻塞、到期假设、证据引用和依赖。新会话可以找回同一 owner 的目标笔记。原生 `complete` 只显示为 `awaiting-verification`，不代表独立验收通过。
 
@@ -9,7 +9,7 @@
 本包目前是开发中的独立 bundle，已接入显式 `web` 安装场景的目标上下文组合；步骤验收、整体结果与累计预算仍需配置。正式发布后也可安装到已有 profile：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-goals
+dsh plugin --profile web add @dsh-ray/assistant-goals
 dsh --profile web --dump-config
 ```
 
@@ -20,8 +20,8 @@ Host 须提供兼容基线版本（见[兼容性基线](../../docs/compatibility
 可覆盖 bundle 配置：
 
 ```yaml
-- id: dsh-enhanced-assistant-goals
-  name: '@dsh-enhanced/assistant-goals'
+- id: dsh-ray-assistant-goals
+  name: '@dsh-ray/assistant-goals'
   config:
     databasePath: !!js dshHomePath('assistant-goals.sqlite')
     maxContextChars: 12000

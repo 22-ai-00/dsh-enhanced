@@ -2,7 +2,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import type {
   EvaluationEvidenceRef,
   TrustedTaskLearningProjectionReceipt,
-} from '@dsh-enhanced/assistant-evaluation'
+} from '@dsh-ray/assistant-evaluation'
 import { extractEntities } from './entities.js'
 import { DEFAULT_HOLDOUT_RATE_BPS, evaluateHoldout } from './holdout.js'
 

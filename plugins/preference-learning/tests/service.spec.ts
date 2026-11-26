@@ -13,13 +13,13 @@ import type {
   DeliveryPreferenceObservation,
   DeliveryPreferenceRegistration,
   DeliveryPreferenceTurnAttestation,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import {
   AssistantDeliveryService,
   DELIVERY_PREFERENCE_PROJECTION_PROTOCOL,
-} from '@dsh-enhanced/assistant-delivery'
-import { AssistantPolicyService, setApprovalReviewer } from '@dsh-enhanced/assistant-policy'
-import { PersonalMemoryService } from '@dsh-enhanced/personal-memory'
+} from '@dsh-ray/assistant-delivery'
+import { AssistantPolicyService, setApprovalReviewer } from '@dsh-ray/assistant-policy'
+import { PersonalMemoryService } from '@dsh-ray/personal-memory'
 import {
   PREFERENCE_MEMORY_PROMOTION_PROTOCOL,
   isTrustedPreferenceMemoryPromotionProducer,
@@ -30,7 +30,7 @@ import {
   type PreferenceMemoryPromotionResultAck,
   type PreferenceMemoryPromotionRequest,
   type PreferenceMemoryPromotionResult,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

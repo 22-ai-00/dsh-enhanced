@@ -5,7 +5,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import PermissionPresets from '@deepseek-ai/dsh-permission-presets'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
-import { getApprovalReviewer } from '@dsh-enhanced/assistant-policy'
+import { getApprovalReviewer } from '@dsh-ray/assistant-policy'
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse } from 'yaml'

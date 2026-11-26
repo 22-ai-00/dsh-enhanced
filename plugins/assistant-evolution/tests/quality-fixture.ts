@@ -1,11 +1,11 @@
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
 import {
   TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
   type StoredOutcome,
   type TrustedAutomationEvaluationClaims,
   type TrustedAutomationEvaluationRegistration,
-} from '@dsh-enhanced/assistant-evaluation'
+} from '@dsh-ray/assistant-evaluation'
 import {
   AssistantEvolutionService,
   canonicalEvolutionHostScope,

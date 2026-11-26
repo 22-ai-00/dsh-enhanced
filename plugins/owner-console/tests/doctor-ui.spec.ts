@@ -25,9 +25,9 @@ describe('doctor repair card, models provider card and easy feishu UI', () => {
 
   function makeStatus(): OwnerConsoleStatus {
     return {
-      feishu: { entry: 'dsh-enhanced-lark-channel', mode: 'handle', installed: true, enabled: true, appIdConfigured: false, connected: false, connection: 'disconnected' },
-      traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: 'traex' },
-      agy: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: 'agy' },
+      feishu: { entry: 'dsh-ray-lark-channel', mode: 'handle', installed: true, enabled: true, appIdConfigured: false, connected: false, connection: 'disconnected' },
+      traex: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: 'traex' },
+      agy: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: 'agy' },
       defaultModel: { entry: 'agent-default-model', available: true, provider: 'deepseek-official', model: 'deepseek-v4-flash' },
       llmProviders: [{ id: 'deepseek-official', name: 'DeepSeek' }],
       host: { settings: true, pluginManager: true, bundles: 'ok', plugins: 'ok' },
@@ -54,10 +54,10 @@ describe('doctor repair card, models provider card and easy feishu UI', () => {
           id: 'gui-stdio-acp-conflict',
           severity: 'error',
           category: 'plugins',
-          title: '@dsh-enhanced/acp 与桌面/Web 端内置 Host 冲突',
+          title: '@dsh-ray/acp 与桌面/Web 端内置 Host 冲突',
           detail: '停用重复的 acp 插件即可恢复正常。',
           autoFixable: true,
-          fixLabel: '停用冲突的 @dsh-enhanced/acp',
+          fixLabel: '停用冲突的 @dsh-ray/acp',
         },
         {
           id: 'agy-auth-required',
@@ -72,10 +72,10 @@ describe('doctor repair card, models provider card and easy feishu UI', () => {
       ],
     }
     const applyDoctorRepair = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'setup-doctor', note: '修复完成' } }))
-    const configureTraex = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'dsh-enhanced-traex-acp-provider', note: 'ok' } }))
-    const configureAgy = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'dsh-enhanced-traex-acp-provider', note: 'ok' } }))
+    const configureTraex = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'dsh-ray-traex-acp-provider', note: 'ok' } }))
+    const configureAgy = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'dsh-ray-traex-acp-provider', note: 'ok' } }))
     const setDefaultModelRoute = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'agent-default-model', note: 'ok' } }))
-    const configureFeishuEasy = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'dsh-enhanced-lark-channel', note: '已安全存入钥匙串' } }))
+    const configureFeishuEasy = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'dsh-ray-lark-channel', note: '已安全存入钥匙串' } }))
     const probeCodingTool = vi.fn(async (tool: 'traex' | 'agy'): Promise<{ ok: true; value: CodingToolProbe }> => ({
       ok: true,
       value: {
@@ -132,7 +132,7 @@ describe('doctor repair card, models provider card and easy feishu UI', () => {
     await act(async () => { await Promise.resolve() })
 
     expect(container.textContent).toContain('系统体检与一键自动修复')
-    expect(container.textContent).toContain('@dsh-enhanced/acp 与桌面/Web 端内置 Host 冲突')
+    expect(container.textContent).toContain('@dsh-ray/acp 与桌面/Web 端内置 Host 冲突')
     expect(container.textContent).toContain('/Users/owner/.local/bin/agy acp --login')
     expect(container.querySelector('button[data-doctor-restart]')).toBeNull()
 
@@ -158,7 +158,7 @@ describe('doctor repair card, models provider card and easy feishu UI', () => {
     const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
     await act(async () => {
       root.render(createElement(ModelsProviderSetupCard, {
-        provider: { id: 'traex-agent', name: 'TraeX Agent', settingsNs: 'dsh-enhanced-traex-acp-provider' },
+        provider: { id: 'traex-agent', name: 'TraeX Agent', settingsNs: 'dsh-ray-traex-acp-provider' },
         configured: false,
         keyConfigured: true,
         remote,
@@ -188,7 +188,7 @@ describe('doctor repair card, models provider card and easy feishu UI', () => {
     const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
     await act(async () => {
       root.render(createElement(BundleConfigSlotView, {
-        packageName: '@dsh-enhanced/lark-channel',
+        packageName: '@dsh-ray/lark-channel',
         view: 'page',
         remote,
         navigation,
@@ -217,8 +217,8 @@ describe('doctor repair card, models provider card and easy feishu UI', () => {
     const base = makeRemote()
     const status: OwnerConsoleStatus = {
       ...makeStatus(),
-      traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: '/Users/owner/.local/bin/traex' },
-      agy: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: '/Users/owner/.local/bin/agy' },
+      traex: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: true, command: '/Users/owner/.local/bin/traex' },
+      agy: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: true, command: '/Users/owner/.local/bin/agy' },
       defaultModel: { entry: 'agent-default-model', available: true, provider: 'traex-agent', model: 'default', reasoningEffort: '' },
     }
     const remote: ConsoleRemote = {

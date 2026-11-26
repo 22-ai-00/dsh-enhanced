@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { Include } from '@deepseek-ai/cordis-plugin-include'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, test } from 'vitest'
 import * as assistantDeliveryPlugin from '../src/index.js'
 import {
@@ -279,7 +279,7 @@ async function artifactFixture(options: { throwDisposer?: boolean } = {}) {
   globalHooks[hookKey] = { demoEvents, siblingEvents, handlesClosed: 0 }
 
   await writeBundlePackage(siblingDir, {
-    name: '@dsh-enhanced/sibling-stable',
+    name: '@dsh-ray/sibling-stable',
     version: '0.1.0',
     body: `
 export const name = 'sibling-stable'
@@ -293,7 +293,7 @@ export function apply(ctx, config) {
   })
 
   const v1Digest = await writeBundlePackage(v1Dir, {
-    name: '@dsh-enhanced/demo-hot',
+    name: '@dsh-ray/demo-hot',
     version: '0.1.0',
     body: `
 export const name = 'demo-hot'
@@ -343,7 +343,7 @@ export function apply(ctx, config) {
   const runtime = createInProcessReloadRuntime(ctx, {
     profilePath: profileDir,
     entryId: 'candidate',
-    package: '@dsh-enhanced/demo-hot',
+    package: '@dsh-ray/demo-hot',
     stagingDir,
     hostGeneration: () => hostGeneration,
   })
@@ -381,7 +381,7 @@ describe('immutable digest-verified artifact replacement and auto-rollback', () 
 
       const v2Dir = join(f.root, 'bundles', 'demo-v2')
       const v2Digest = await writeBundlePackage(v2Dir, {
-        name: '@dsh-enhanced/demo-hot',
+        name: '@dsh-ray/demo-hot',
         version: '0.2.0',
         body: `
 export const name = 'demo-hot'
@@ -404,7 +404,7 @@ export function apply(ctx, config) {
         previousHostGeneration: 3,
         previousInProcessGeneration: 1,
         target: {
-          package: '@dsh-enhanced/demo-hot',
+          package: '@dsh-ray/demo-hot',
           version: '0.2.0',
           artifactDigest: v2Digest,
           patchDigest: v2PatchDigest,
@@ -449,7 +449,7 @@ export function apply(ctx, config) {
       // immutable `<version>-<artifactDigest>` staging prevents any ESM cache collision.
       const v2bDir = join(f.root, 'bundles', 'demo-v2b')
       const v2bDigest = await writeBundlePackage(v2bDir, {
-        name: '@dsh-enhanced/demo-hot',
+        name: '@dsh-ray/demo-hot',
         version: '0.2.0',
         body: `
 export const name = 'demo-hot'
@@ -469,7 +469,7 @@ export function apply(ctx, config) {
         previousHostGeneration: 3,
         previousInProcessGeneration: 2,
         target: {
-          package: '@dsh-enhanced/demo-hot',
+          package: '@dsh-ray/demo-hot',
           version: '0.2.0',
           artifactDigest: v2bDigest,
           patchDigest: computeInProcessPatchDigest(patchText),
@@ -493,7 +493,7 @@ export function apply(ctx, config) {
       const beforeFiber = f.resolve('include:candidate').fiber!
       const v2Dir = join(f.root, 'bundles', 'demo-bad')
       const validDigest = await writeBundlePackage(v2Dir, {
-        name: '@dsh-enhanced/demo-hot',
+        name: '@dsh-ray/demo-hot',
         version: '0.2.0',
         body: 'export function apply() {}\n',
       })
@@ -504,7 +504,7 @@ export function apply(ctx, config) {
         previousHostGeneration: 3,
         previousInProcessGeneration: 1,
         target: {
-          package: '@dsh-enhanced/demo-hot',
+          package: '@dsh-ray/demo-hot',
           version: '0.2.0',
           artifactDigest: digest('e'),
           patchDigest: computeInProcessPatchDigest({ config: { greeting: 'x' } }),
@@ -520,7 +520,7 @@ export function apply(ctx, config) {
         previousHostGeneration: 3,
         previousInProcessGeneration: 1,
         target: {
-          package: '@dsh-enhanced/demo-hot',
+          package: '@dsh-ray/demo-hot',
           version: '0.2.0',
           artifactDigest: validDigest,
           patchDigest: digest('9'),
@@ -534,7 +534,7 @@ export function apply(ctx, config) {
       const nmDir = join(f.root, 'bundles', 'demo-nm')
       await mkdir(join(nmDir, 'lib'), { recursive: true })
       await mkdir(join(nmDir, 'node_modules', 'evil'), { recursive: true })
-      await writeFile(join(nmDir, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/demo-hot', version: '0.2.0', exports: { '.': './lib/index.js' } }))
+      await writeFile(join(nmDir, 'package.json'), JSON.stringify({ name: '@dsh-ray/demo-hot', version: '0.2.0', exports: { '.': './lib/index.js' } }))
       await writeFile(join(nmDir, 'lib', 'index.js'), 'export function apply() {}\n', 'utf8')
       await writeFile(join(nmDir, 'node_modules', 'evil', 'index.js'), 'export default 1\n', 'utf8')
       expect(() => computeInProcessArtifactDigest({ sourceDir: nmDir })).toThrow('node_modules')
@@ -543,7 +543,7 @@ export function apply(ctx, config) {
         previousHostGeneration: 3,
         previousInProcessGeneration: 1,
         target: {
-          package: '@dsh-enhanced/demo-hot',
+          package: '@dsh-ray/demo-hot',
           version: '0.2.0',
           artifactDigest: digest('1'),
           patchDigest: digest('2'),
@@ -556,7 +556,7 @@ export function apply(ctx, config) {
       // Symlink inside artifact source rejected
       const symDir = join(f.root, 'bundles', 'demo-sym')
       await writeBundlePackage(symDir, {
-        name: '@dsh-enhanced/demo-hot',
+        name: '@dsh-ray/demo-hot',
         version: '0.2.0',
         body: 'export function apply() {}\n',
       })
@@ -567,7 +567,7 @@ export function apply(ctx, config) {
         previousHostGeneration: 3,
         previousInProcessGeneration: 1,
         target: {
-          package: '@dsh-enhanced/demo-hot',
+          package: '@dsh-ray/demo-hot',
           version: '0.2.0',
           artifactDigest: digest('1'),
           patchDigest: digest('2'),
@@ -617,7 +617,7 @@ export function apply(ctx, config) {
 
       const v2MissingInjectDir = join(f.root, 'bundles', 'demo-v2-missing-inject')
       const v2Digest = await writeBundlePackage(v2MissingInjectDir, {
-        name: '@dsh-enhanced/demo-hot',
+        name: '@dsh-ray/demo-hot',
         version: '0.2.0',
         body: `
 export const inject = ['nonExistentHostCapability']
@@ -632,7 +632,7 @@ export function apply() {
         previousHostGeneration: 3,
         previousInProcessGeneration: 1,
         target: {
-          package: '@dsh-enhanced/demo-hot',
+          package: '@dsh-ray/demo-hot',
           version: '0.2.0',
           artifactDigest: v2Digest,
           patchDigest: computeInProcessPatchDigest(patchContent),
@@ -664,7 +664,7 @@ export function apply() {
         warrantDigest: digest('c'),
         reloadedInProcessGeneration: activation.currentInProcessGeneration,
         target: {
-          package: '@dsh-enhanced/demo-hot',
+          package: '@dsh-ray/demo-hot',
           version: '0.2.0',
           artifactDigest: v2Digest,
           patchDigest: computeInProcessPatchDigest(patchContent),
@@ -690,7 +690,7 @@ export function apply() {
       const siblingFiber = f1.resolve('include:sibling').fiber!
       const crashDir = join(f1.root, 'bundles', 'demo-v2-crash')
       const crashDigest = await writeBundlePackage(crashDir, {
-        name: '@dsh-enhanced/demo-hot',
+        name: '@dsh-ray/demo-hot',
         version: '0.2.0',
         body: `
 export function apply() {
@@ -704,7 +704,7 @@ export function apply() {
         previousHostGeneration: 3,
         previousInProcessGeneration: 1,
         target: {
-          package: '@dsh-enhanced/demo-hot',
+          package: '@dsh-ray/demo-hot',
           version: '0.2.0',
           artifactDigest: crashDigest,
           patchDigest: computeInProcessPatchDigest(patchContent),
@@ -730,7 +730,7 @@ export function apply() {
       const beforeNs = f2.resolve('include:candidate').moduleNamespace
       const okDir = join(f2.root, 'bundles', 'demo-v2-ok')
       const okDigest = await writeBundlePackage(okDir, {
-        name: '@dsh-enhanced/demo-hot',
+        name: '@dsh-ray/demo-hot',
         version: '0.2.0',
         body: 'export function apply() {}\n',
       })
@@ -740,7 +740,7 @@ export function apply() {
         previousHostGeneration: 3,
         previousInProcessGeneration: 1,
         target: {
-          package: '@dsh-enhanced/demo-hot',
+          package: '@dsh-ray/demo-hot',
           version: '0.2.0',
           artifactDigest: okDigest,
           patchDigest: computeInProcessPatchDigest(patchContent),
@@ -780,7 +780,7 @@ export function apply() {
     await mkdir(join(v1Dir, 'lib'), { recursive: true })
     await mkdir(join(v2Dir, 'lib'), { recursive: true })
     await writeFile(join(v1Dir, 'package.json'), JSON.stringify({
-      name: '@dsh-enhanced/dyn-hot',
+      name: '@dsh-ray/dyn-hot',
       version: '0.1.0',
       type: 'module',
       exports: { '.': './lib/index.js' },
@@ -792,7 +792,7 @@ export function apply(ctx) {
 }
 `, 'utf8')
     await writeFile(join(v2Dir, 'package.json'), JSON.stringify({
-      name: '@dsh-enhanced/dyn-hot',
+      name: '@dsh-ray/dyn-hot',
       version: '0.2.0',
       type: 'module',
       exports: { '.': './lib/index.js' },
@@ -830,7 +830,7 @@ export function apply(ctx) {
       previousHostGeneration: 1,
       previousInProcessGeneration: 1,
       target: {
-        package: '@dsh-enhanced/dyn-hot',
+        package: '@dsh-ray/dyn-hot',
         version: '0.2.0',
         artifactDigest: v2Digest,
         patchDigest: computeInProcessPatchDigest(patchContent),
@@ -850,7 +850,7 @@ export function apply(ctx) {
       previousHostGeneration: 1,
       previousInProcessGeneration: 2,
       target: {
-        package: '@dsh-enhanced/dyn-hot',
+        package: '@dsh-ray/dyn-hot',
         version: '0.2.0',
         artifactDigest: v2Digest,
         patchDigest: computeInProcessPatchDigest(patchContent),
@@ -891,11 +891,11 @@ export function apply(ctx) {
 
   test('allows lark-channel, assistant-isolation, and changesProcessSubtree in artifact-replace mode with rollback fallback', async () => {
     expect(IN_PROCESS_RELOAD_DENYLIST).toEqual([
-      '@dsh-enhanced/plugin-control-plane',
-      '@dsh-enhanced/assistant-delivery',
+      '@dsh-ray/plugin-control-plane',
+      '@dsh-ray/assistant-delivery',
     ])
 
-    for (const pkg of ['@dsh-enhanced/lark-channel', '@dsh-enhanced/assistant-isolation']) {
+    for (const pkg of ['@dsh-ray/lark-channel', '@dsh-ray/assistant-isolation']) {
       const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ipr-relaxed-')))
       const profileDir = join(root, 'profile')
       const v1Dir = join(root, 'bundles', 'pkg-v1')

@@ -2,8 +2,8 @@ import { closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, openSy
 import { isAbsolute, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { OwnerForegroundLearningTask } from '@dsh-ray/assistant-delivery'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { assertSourceReviewHead, inspectSourceReviewGit } from './source-review-git.js'
 import { SourceReviewStore } from './source-review-store.js'
 

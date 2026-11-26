@@ -4,7 +4,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { setApprovalReviewer } from '@dsh-enhanced/assistant-policy'
+import { setApprovalReviewer } from '@dsh-ray/assistant-policy'
 import { afterEach, expect, test } from 'vitest'
 import { normalizeConfig } from '../src/config.ts'
 import { runDreamAgent } from '../src/dream-agent.ts'

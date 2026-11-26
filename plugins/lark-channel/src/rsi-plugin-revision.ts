@@ -5,10 +5,10 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { validateRevisionAcceptanceAuthorityRef, validateRevisionRegressionAcceptanceAuthorityRef,
-  type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
-import type { RevisionReviewConfig, RevisionRegressionReviewConfig } from '@dsh-enhanced/assistant-verifier'
-import type { LinuxRunnerStateSeal } from '@dsh-enhanced/assistant-isolation'
-import type { Config as ControlPlaneConfig, CreationCapabilityOwner } from '@dsh-enhanced/plugin-control-plane'
+  type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-ray/assistant-growth-contract'
+import type { RevisionReviewConfig, RevisionRegressionReviewConfig } from '@dsh-ray/assistant-verifier'
+import type { LinuxRunnerStateSeal } from '@dsh-ray/assistant-isolation'
+import type { Config as ControlPlaneConfig, CreationCapabilityOwner } from '@dsh-ray/plugin-control-plane'
 import { rsiAuthorityRoles, type RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
 import type { NativeRsiCreationBuildEnvironment } from './rsi-native-runtime-bootstrap.js'
@@ -56,10 +56,10 @@ function publicKeyAt(path: string): string {
 }
 const requirePeer = createRequire(import.meta.url)
 function validators(): {
-  compileRevisionReviewConfig: typeof import('@dsh-enhanced/assistant-verifier').compileRevisionReviewConfig
-  compileRevisionRegressionReviewConfig: typeof import('@dsh-enhanced/assistant-verifier').compileRevisionRegressionReviewConfig
+  compileRevisionReviewConfig: typeof import('@dsh-ray/assistant-verifier').compileRevisionReviewConfig
+  compileRevisionRegressionReviewConfig: typeof import('@dsh-ray/assistant-verifier').compileRevisionRegressionReviewConfig
 } {
-  const name = '@dsh-enhanced/assistant-verifier'
+  const name = '@dsh-ray/assistant-verifier'
   try { requirePeer.resolve(name) }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'MODULE_NOT_FOUND' || (error as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND') {
@@ -67,7 +67,7 @@ function validators(): {
     }
     throw error
   }
-  const peer = requirePeer(name) as typeof import('@dsh-enhanced/assistant-verifier')
+  const peer = requirePeer(name) as typeof import('@dsh-ray/assistant-verifier')
   if (typeof peer.compileRevisionReviewConfig !== 'function' || typeof peer.compileRevisionRegressionReviewConfig !== 'function') {
     fail('installed revision validators are unavailable; update the verifier peer')
   }

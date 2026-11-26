@@ -16,11 +16,11 @@ export interface AssistantVersionPluginEntry {
 
 export interface AssistantVersionReport {
   readonly schemaVersion: 1
-  readonly protocol: 'dsh-rsi/version/v1'
+  readonly protocol: 'dsh-ray/version/v1'
   readonly generatedAt: number
   readonly dshHome?: string | null
   readonly assistant: {
-    readonly name: 'dsh-enhanced'
+    readonly name: 'dsh-ray'
     readonly version: string
     readonly cliVersion?: string
   }
@@ -155,7 +155,7 @@ interface PatchPluginState {
 
 function normalizePluginKey(name: string): string {
   const trimmed = name.trim()
-  return trimmed.startsWith('@dsh-enhanced/') ? trimmed.slice('@dsh-enhanced/'.length) : trimmed
+  return trimmed.startsWith('@dsh-ray/') ? trimmed.slice('@dsh-ray/'.length) : trimmed
 }
 
 function rec(value: unknown): Record<string, unknown> {
@@ -418,7 +418,7 @@ function readBoundHostMetadata(
   if (!boundary.dshHome || !boundary.canonicalDshHome || boundary.homeUnsafe) {
     return { boundVersion: null, boundStatus: boundary.homeUnsafe ? 'unreadable' : 'missing' }
   }
-  const filePath = join(boundary.canonicalDshHome, '.dsh-rsi-host.json')
+  const filePath = join(boundary.canonicalDshHome, '.dsh-ray-host.json')
   if (!existsSync(filePath)) return { boundVersion: null, boundStatus: 'missing' }
   try {
     const st = lstatSync(filePath)
@@ -771,8 +771,8 @@ function addVerifierVariants(set: Set<string>, basePath: string): void {
 }
 
 function normalizePluginPackageName(id: string, name: string): string | undefined {
-  if (name.startsWith('@dsh-enhanced/')) return name
-  if (id.startsWith('dsh-enhanced-')) return `@dsh-enhanced/${id.slice('dsh-enhanced-'.length)}`
+  if (name.startsWith('@dsh-ray/')) return name
+  if (id.startsWith('dsh-ray-')) return `@dsh-ray/${id.slice('dsh-ray-'.length)}`
   return undefined
 }
 
@@ -1120,7 +1120,7 @@ function readNodeModulesPackages(
 ): Map<string, { version: string | null; installKind: 'npm' | 'local' }> {
   const found = new Map<string, { version: string | null; installKind: 'npm' | 'local' }>()
   if (!boundary.dshHome || !boundary.canonicalDshHome || boundary.homeUnsafe) return found
-  const scopeDir = join(dir, '@dsh-enhanced')
+  const scopeDir = join(dir, '@dsh-ray')
   if (!existsSync(scopeDir)) return found
   const pnpmStoreRoot = resolve(dir, '.pnpm')
   try {
@@ -1153,7 +1153,7 @@ function readNodeModulesPackages(
         if (pkgStat.size < 0 || pkgStat.size > MAX_PACKAGE_JSON_BYTES) continue
         const parsed = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as { name?: unknown; version?: unknown }
         const pkgName = textOrNull(parsed.name)
-        if (pkgName !== null && pkgName.startsWith('@dsh-enhanced/')) {
+        if (pkgName !== null && pkgName.startsWith('@dsh-ray/')) {
           found.set(pkgName, { version: textOrNull(parsed.version), installKind })
         }
       } catch {
@@ -1272,7 +1272,7 @@ export async function collectDeliveryVersionReport(
     const nextTier: 0 | 1 | 2 | 3 | 4 = boundedVersion !== null ? (patch.versionTier ?? 1) : 0
     const existing = evolvedMap.get(key)
     if (existing) {
-      if (trimmed.startsWith('@dsh-enhanced/') && !existing.name.startsWith('@dsh-enhanced/')) {
+      if (trimmed.startsWith('@dsh-ray/') && !existing.name.startsWith('@dsh-ray/')) {
         existing.name = boundedName
       }
       if (patch.fromAdoptionJournal) existing.fromAdoptionJournal = true
@@ -1987,7 +1987,7 @@ export async function collectDeliveryVersionReport(
 
   // Upgrade history & backup snapshots
   if (boundary.dshHome && boundary.canonicalDshHome && !boundary.homeUnsafe) {
-    const upgradeHistoryPath = join(boundary.dshHome, '.dsh-enhanced', 'upgrade-history.jsonl')
+    const upgradeHistoryPath = join(boundary.dshHome, '.dsh-ray', 'upgrade-history.jsonl')
     const historyText = readBoundedRegularFile(upgradeHistoryPath, boundary, MAX_UPGRADE_HISTORY_BYTES)
     if (historyText !== undefined) {
       let upgradeCount = 0
@@ -2004,7 +2004,7 @@ export async function collectDeliveryVersionReport(
       selfUpgrades = upgradeCount
     }
 
-    const backupDir = join(boundary.dshHome, '.dsh-rsi-upgrade-backups')
+    const backupDir = join(boundary.dshHome, '.dsh-ray-upgrade-backups')
     if (existsSync(backupDir)) {
       try {
         const st = lstatSync(backupDir)
@@ -2138,7 +2138,7 @@ export async function collectDeliveryVersionReport(
       runtimePluginSourceUsed = true
       for (const bundle of bundles) {
         const pkgName = textOrNull(bundle.name)
-        if (!pkgName || !pkgName.startsWith('@dsh-enhanced/')) continue
+        if (!pkgName || !pkgName.startsWith('@dsh-ray/')) continue
         if (bundle.error?.code === 'not-bundle') continue
         const boundedName = boundNonEmptyString(pkgName, 200)
         if (!boundedName) continue
@@ -2174,7 +2174,7 @@ export async function collectDeliveryVersionReport(
       runtimePluginSourceUsed = true
       for (const entry of loader.entries()) {
         const pkgName = textOrNull(entry.options?.name)
-        if (!pkgName || !pkgName.startsWith('@dsh-enhanced/')) continue
+        if (!pkgName || !pkgName.startsWith('@dsh-ray/')) continue
         const boundedName = boundNonEmptyString(pkgName, 200)
         if (!boundedName) continue
         const key = normalizePluginKey(boundedName)
@@ -2381,11 +2381,11 @@ export async function collectDeliveryVersionReport(
 
   return {
     schemaVersion: 1,
-    protocol: 'dsh-rsi/version/v1',
+    protocol: 'dsh-ray/version/v1',
     generatedAt,
     ...(boundedDshHome === undefined ? {} : { dshHome: boundedDshHome }),
     assistant: {
-      name: 'dsh-enhanced',
+      name: 'dsh-ray',
       version: boundedAssistantVersion,
     },
     host: {

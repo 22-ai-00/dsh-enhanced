@@ -122,7 +122,7 @@ export async function planRsiLocalProfilePackages(input: {
     originalPeers: await rsiLocalPeerOverrides({ cohort: original, bundles, profilePath: input.originalProfilePath }),
     candidatePeers: await rsiLocalPeerOverrides({ cohort: candidate, bundles: nextBundles }) })
   const tarballs = nextBundles.map(slug => {
-    const item = candidate.packages.find(value => value.name === `@dsh-enhanced/${slug}` && value.bundle)
+    const item = candidate.packages.find(value => value.name === `@dsh-ray/${slug}` && value.bundle)
     if (!item) fail(`bundle ${slug} is absent from the frozen cohort`)
     return item.tarball
   })

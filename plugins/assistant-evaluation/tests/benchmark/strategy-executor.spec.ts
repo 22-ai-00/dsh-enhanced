@@ -18,8 +18,8 @@ import { nativeExecution } from './helpers/native-runtime.ts'
 // Setup and cancellation cases never start an isolated process. Mount the
 // plugin shape without a real runtime-tree verification; the gated live case
 // keeps the real module.
-vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
-  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+vi.mock('@dsh-ray/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-ray/assistant-isolation')>()
   if (process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME !== undefined) return actual
   const { syntheticIsolationModule } = await import('./helpers/synthetic-isolation.ts')
   return syntheticIsolationModule(actual)

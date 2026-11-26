@@ -3,7 +3,7 @@ import type { Config } from './config.js'
 import { AssistantWorkItemsService } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-work-items'
+export const name = 'dsh-ray-assistant-work-items'
 export { AssistantWorkItemsService, version }
 export * from './authority.js'
 export { decisionExternalId } from './mandate.js'

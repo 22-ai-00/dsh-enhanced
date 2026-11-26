@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { JsonSchemaNode, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { canonicalGrowthJson, isPluginRevisionTaskSource } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, isPluginRevisionTaskSource } from '@dsh-ray/assistant-growth-contract'
 import type { CreationCapabilityObservation, CreationCapabilityTool } from './creation-capability-types.js'
 import { revisionCallArgumentsDigest } from './revision-capability-journal.js'
 import type { RevisionCapabilityAdoptionReceipt, RevisionCapabilityAdoptionRecord, RevisionCapabilityBenefitSample,

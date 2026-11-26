@@ -1,4 +1,4 @@
-import type { TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
+import type { TrustedTaskLearningProjectionReceipt } from '@dsh-ray/assistant-evaluation'
 import type { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
 import {
@@ -9,7 +9,7 @@ import {
   type GrowthAutomationArtifactRequest,
   type GrowthAutomationProposalRequest,
   type ResolvedWorkflowAutomationTemplate,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import { openAutomationDatabase } from './sqlite.js'
 import { AutomationStoreError, stableOccurrenceId } from './store.js'
 import type { AutomationRecord, AutomationRun } from './types.js'

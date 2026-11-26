@@ -3,7 +3,7 @@ import type {
   DeliveryAdapterContext,
   DeliveryToolApprovalRequest,
   InboundEnvelope,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import { LarkDeliveryAdapter } from '../src/adapter.ts'
 import { renderLarkMessage } from '../src/sdk.ts'
 import {

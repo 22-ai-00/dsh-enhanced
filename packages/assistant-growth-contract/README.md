@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-growth-contract
+# @dsh-ray/assistant-growth-contract
 
 这是一个普通、非激活型共享库，固定 Delivery、Growth Experiments 与 Automations
 之间的工作流学习协议。它不声明 `dsh.bundle`，不会自行注册服务、工具或定时任务。

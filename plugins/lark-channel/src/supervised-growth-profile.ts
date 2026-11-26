@@ -49,7 +49,7 @@ const heartbeatAutomationId = `heartbeat:${supervisedGrowthId}`
 const analystHeartbeatId = 'supervised-growth-analyst'
 const analystAutomationId = `heartbeat:${analystHeartbeatId}`
 const recoveryAutomationId = `recovery:${supervisedGrowthId}`
-const recoveryOwnerId = 'dsh-enhanced-assistant-recovery'
+const recoveryOwnerId = 'dsh-ray-assistant-recovery'
 const recoveryOwnerRouteId = 'supervised-growth-owner'
 const recoveryCron = '0 8,10,12,14,16,18,20 * * *'
 const dailyBudgetId = 'supervised-growth-daily-runs'
@@ -546,7 +546,7 @@ function managedRules(input: {
     {
       id: 'supervised-growth-evolution-approval-delivery', effect: 'allow',
       subject: {
-        kind: 'background', id: 'dsh-enhanced-assistant-evolution',
+        kind: 'background', id: 'dsh-ray-assistant-evolution',
         workspace: input.workspace, principal: input.principal,
       },
       actions: ['approval.send'], resource: { kind: 'message', id: input.bindingId }, context: background,
@@ -631,24 +631,24 @@ export function configureSupervisedGrowthProfilePatch(input: SupervisedGrowthPro
   const { document, rows } = parseRows(input.profilePatch, 'profile patch')
   const { rows: effectiveRows } = parseRows(input.effectiveConfig, 'effective profile')
   const personal = overlayConfigFromEffective({ overlayDocument: document, overlayRows: rows, effectiveRows,
-    id: 'dsh-enhanced-personal-assistant' })
+    id: 'dsh-ray-personal-assistant' })
   const delivery = overlayConfigFromEffective({ overlayDocument: document, overlayRows: rows, effectiveRows,
-    id: 'dsh-enhanced-assistant-delivery' })
+    id: 'dsh-ray-assistant-delivery' })
   const lark = overlayConfigFromEffective({ overlayDocument: document, overlayRows: rows, effectiveRows,
-    id: 'dsh-enhanced-lark-channel' })
+    id: 'dsh-ray-lark-channel' })
   const evolution = overlayConfigFromEffective({ overlayDocument: document, overlayRows: rows, effectiveRows,
-    id: 'dsh-enhanced-assistant-evolution' })
-  requireEnabledRow(effectiveRows, 'dsh-enhanced-assistant-growth-experiments')
+    id: 'dsh-ray-assistant-evolution' })
+  requireEnabledRow(effectiveRows, 'dsh-ray-assistant-growth-experiments')
   const health = overlayConfigFromEffective({ overlayDocument: document, overlayRows: rows, effectiveRows,
-    id: 'dsh-enhanced-assistant-health' })
+    id: 'dsh-ray-assistant-health' })
   const heartbeat = overlayConfigFromEffective({ overlayDocument: document, overlayRows: rows, effectiveRows,
-    id: 'dsh-enhanced-assistant-heartbeat' })
+    id: 'dsh-ray-assistant-heartbeat' })
   const recovery = overlayConfigFromEffective({ overlayDocument: document, overlayRows: rows, effectiveRows,
-    id: 'dsh-enhanced-assistant-recovery' })
-  requireEnabledRow(effectiveRows, 'dsh-enhanced-assistant-evaluation')
+    id: 'dsh-ray-assistant-recovery' })
+  requireEnabledRow(effectiveRows, 'dsh-ray-assistant-evaluation')
   const preference = rowConfig(
-    requireEnabledRow(effectiveRows, 'dsh-enhanced-preference-learning'),
-    'dsh-enhanced-preference-learning',
+    requireEnabledRow(effectiveRows, 'dsh-ray-preference-learning'),
+    'dsh-ray-preference-learning',
   )
   if (preference.get('enabled') !== true) {
     throw new Error('supervised-growth setup: effective preference-learning.enabled must be true')
@@ -663,9 +663,9 @@ export function configureSupervisedGrowthProfilePatch(input: SupervisedGrowthPro
   const principal = principalId(input.binding.principal)
   const provider = exactString(delivery.get('agentProvider'), 'assistant-delivery agentProvider')
   const model = exactString(delivery.get('agentModel'), 'assistant-delivery agentModel')
-  const effectiveHeartbeatRow = requiredRow(effectiveRows, 'dsh-enhanced-assistant-heartbeat')
+  const effectiveHeartbeatRow = requiredRow(effectiveRows, 'dsh-ray-assistant-heartbeat')
   let legacyHeartbeat = false
-  const effectiveHeartbeat = rowConfig(effectiveHeartbeatRow, 'dsh-enhanced-assistant-heartbeat')
+  const effectiveHeartbeat = rowConfig(effectiveHeartbeatRow, 'dsh-ray-assistant-heartbeat')
   const effectiveHeartbeats = asSeq(
     effectiveHeartbeat.get('heartbeats', true) as Node,
     'assistant-heartbeat.heartbeats',
@@ -750,8 +750,8 @@ export function configureSupervisedGrowthProfilePatch(input: SupervisedGrowthPro
   return document.toString({ lineWidth: 0 })
 }
 
-const supervisedGrowthLarkRowId = 'dsh-enhanced-lark-channel'
-const supervisedGrowthHealthRowId = 'dsh-enhanced-assistant-health'
+const supervisedGrowthLarkRowId = 'dsh-ray-lark-channel'
+const supervisedGrowthHealthRowId = 'dsh-ray-assistant-health'
 
 function rowIdentityList(rows: YAMLSeq, label: string): string[] {
   const ids = rows.items.map(item => {
@@ -884,8 +884,8 @@ export function assertSupervisedGrowthPreviewDerivation(input: {
 /** Reads the exact Delivery route that an owner DM must match, without I/O. */
 export function supervisedGrowthBindingQuery(effectiveConfig: string, dshHome: string): SupervisedGrowthBindingQuery {
   const { rows } = parseRows(effectiveConfig, 'effective profile')
-  const delivery = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-assistant-delivery'), 'dsh-enhanced-assistant-delivery')
-  const lark = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-lark-channel'), 'dsh-enhanced-lark-channel')
+  const delivery = rowConfig(requireEnabledRow(rows, 'dsh-ray-assistant-delivery'), 'dsh-ray-assistant-delivery')
+  const lark = rowConfig(requireEnabledRow(rows, 'dsh-ray-lark-channel'), 'dsh-ray-lark-channel')
   return {
     account: exactString(lark.get('account'), 'Lark account'),
     tenant: exactString(lark.get('tenant'), 'Lark tenant'),
@@ -901,9 +901,9 @@ export function supervisedGrowthDatabasePaths(effectiveConfig: string, dshHome: 
   recoveryDatabasePath: string
 } {
   const { rows } = parseRows(effectiveConfig, 'effective profile')
-  const delivery = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-assistant-delivery'), 'dsh-enhanced-assistant-delivery')
-  const personal = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-personal-assistant'), 'dsh-enhanced-personal-assistant')
-  const recovery = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-assistant-recovery'), 'dsh-enhanced-assistant-recovery')
+  const delivery = rowConfig(requireEnabledRow(rows, 'dsh-ray-assistant-delivery'), 'dsh-ray-assistant-delivery')
+  const personal = rowConfig(requireEnabledRow(rows, 'dsh-ray-personal-assistant'), 'dsh-ray-personal-assistant')
+  const recovery = rowConfig(requireEnabledRow(rows, 'dsh-ray-assistant-recovery'), 'dsh-ray-assistant-recovery')
   const automations = asMap(personal.get('assistantAutomations', true) as Node, 'assistantAutomations config')
   return {
     deliveryDatabasePath: dshDataPath(delivery.get('databasePath'), dshHome, 'assistant-delivery databasePath'),
@@ -916,8 +916,8 @@ export function supervisedGrowthDatabasePaths(effectiveConfig: string, dshHome: 
 export function supervisedGrowthRecoveryRuntimeConfig(effectiveConfig: string): Record<string, unknown> {
   const { rows } = parseRows(effectiveConfig, 'effective profile')
   const recovery = rowConfig(
-    requireEnabledRow(rows, 'dsh-enhanced-assistant-recovery'),
-    'dsh-enhanced-assistant-recovery',
+    requireEnabledRow(rows, 'dsh-ray-assistant-recovery'),
+    'dsh-ray-assistant-recovery',
   )
   return mapJson(recovery, 'assistant-recovery config')
 }
@@ -929,8 +929,8 @@ export function supervisedGrowthAnalystRuntimeConfig(effectiveConfig: string): {
 } {
   const { rows } = parseRows(effectiveConfig, 'effective profile')
   const heartbeat = rowConfig(
-    requireEnabledRow(rows, 'dsh-enhanced-assistant-heartbeat'),
-    'dsh-enhanced-assistant-heartbeat',
+    requireEnabledRow(rows, 'dsh-ray-assistant-heartbeat'),
+    'dsh-ray-assistant-heartbeat',
   )
   const profiles = asSeq(heartbeat.get('heartbeats', true) as Node, 'assistant-heartbeat.heartbeats')
   const rawLimit = heartbeat.get('maxScratchBytes')
@@ -964,21 +964,21 @@ export function assertEffectiveSupervisedGrowthConfig(input: {
 }): { workspace: string; agentPreset: string; activationState: SupervisedGrowthActivationState; automationId: string } {
   validateActivationInput(input)
   const { rows } = parseRows(input.effectiveConfig, 'effective profile')
-  const personal = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-personal-assistant'), 'dsh-enhanced-personal-assistant')
-  const delivery = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-assistant-delivery'), 'dsh-enhanced-assistant-delivery')
-  const lark = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-lark-channel'), 'dsh-enhanced-lark-channel')
-  const evolution = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-assistant-evolution'), 'dsh-enhanced-assistant-evolution')
-  requireEnabledRow(rows, 'dsh-enhanced-assistant-growth-experiments')
-  const health = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-assistant-health'), 'dsh-enhanced-assistant-health')
+  const personal = rowConfig(requireEnabledRow(rows, 'dsh-ray-personal-assistant'), 'dsh-ray-personal-assistant')
+  const delivery = rowConfig(requireEnabledRow(rows, 'dsh-ray-assistant-delivery'), 'dsh-ray-assistant-delivery')
+  const lark = rowConfig(requireEnabledRow(rows, 'dsh-ray-lark-channel'), 'dsh-ray-lark-channel')
+  const evolution = rowConfig(requireEnabledRow(rows, 'dsh-ray-assistant-evolution'), 'dsh-ray-assistant-evolution')
+  requireEnabledRow(rows, 'dsh-ray-assistant-growth-experiments')
+  const health = rowConfig(requireEnabledRow(rows, 'dsh-ray-assistant-health'), 'dsh-ray-assistant-health')
   const heartbeat = rowConfig(
-    requireEnabledRow(rows, 'dsh-enhanced-assistant-heartbeat'),
-    'dsh-enhanced-assistant-heartbeat',
+    requireEnabledRow(rows, 'dsh-ray-assistant-heartbeat'),
+    'dsh-ray-assistant-heartbeat',
   )
-  const recovery = rowConfig(requireEnabledRow(rows, 'dsh-enhanced-assistant-recovery'), 'dsh-enhanced-assistant-recovery')
-  requireEnabledRow(rows, 'dsh-enhanced-assistant-evaluation')
+  const recovery = rowConfig(requireEnabledRow(rows, 'dsh-ray-assistant-recovery'), 'dsh-ray-assistant-recovery')
+  requireEnabledRow(rows, 'dsh-ray-assistant-evaluation')
   const preference = rowConfig(
-    requireEnabledRow(rows, 'dsh-enhanced-preference-learning'),
-    'dsh-enhanced-preference-learning',
+    requireEnabledRow(rows, 'dsh-ray-preference-learning'),
+    'dsh-ray-preference-learning',
   )
   if (preference.get('enabled') !== true) {
     throw new Error('supervised-growth setup: effective preference-learning.enabled must be true')
@@ -1075,7 +1075,7 @@ export function assertEffectiveSupervisedGrowthConfig(input: {
     'supervised growth analyst heartbeat',
   )
 
-  const heartbeatRow = requiredRow(rows, 'dsh-enhanced-assistant-heartbeat')
+  const heartbeatRow = requiredRow(rows, 'dsh-ray-assistant-heartbeat')
   let legacyHeartbeat = false
   const heartbeatProfile = optionalUniqueMapById(
     heartbeatProfiles,

@@ -2,13 +2,13 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, readFileSync, statSyn
 import { dirname, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 
-export const name = 'dsh-enhanced-web-owner-real-repair-guard'
+export const name = 'dsh-ray-web-owner-real-repair-guard'
 export const inject = ['llm', 'agents', 'goals', 'systemPrompt']
 
 export const Config = {
   '~standard': {
     version: 1,
-    vendor: 'dsh-enhanced-real-repair-guard',
+    vendor: 'dsh-ray-real-repair-guard',
     validate(value) {
       const keys = ['controlPath', 'logPath', 'workspace', 'provider', 'model']
       if (!exactKeys(value, keys) || keys.some(key => !nonempty(value[key]))) {

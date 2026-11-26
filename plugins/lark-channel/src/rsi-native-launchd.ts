@@ -1,4 +1,4 @@
-import { queryRuntimeObserver, runtimeConfigDigest, type RuntimeObserverConfig, type RuntimeObservation } from '@dsh-enhanced/plugin-control-plane'
+import { queryRuntimeObserver, runtimeConfigDigest, type RuntimeObserverConfig, type RuntimeObservation } from '@dsh-ray/plugin-control-plane'
 import { setTimeout as delay } from 'node:timers/promises'
 import { inspectNativeLaunchd } from './launchd-identity.js'
 export { assertNativeLaunchdPlist, inspectNativeLaunchd, startNativeLaunchd, stopNativeLaunchd } from './launchd-identity.js'

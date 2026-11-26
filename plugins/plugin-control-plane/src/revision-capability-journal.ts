@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFi
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { canonicalGrowthJson, validatePluginCreationVerificationCertificate,
-  validatePluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+  validatePluginRevisionVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import type { CreationCapabilityForegroundCallWitness, CreationCapabilityTool } from './creation-capability-types.js'
 import type { RevisionCapabilityAdoptionReceipt, RevisionCapabilityAdoptionRecord, RevisionCapabilityCall,
   RevisionCapabilityCallEvidence, RevisionCapabilityConfig, RevisionCapabilityEntry, RevisionCapabilityJournalPort,

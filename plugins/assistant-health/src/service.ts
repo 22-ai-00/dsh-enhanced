@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import Schema from '@deepseek-ai/schemastery'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { registerAssistantHealthTool } from './tools.js'
 
 export const providerIds = [
@@ -123,7 +123,7 @@ type HealthMetricSpecification =
   | readonly string[]
 
 /** Fixed Policy subject used by the non-model supervised-growth runbook. */
-export const HOST_RECOVERY_BACKGROUND_ID = 'dsh-enhanced-assistant-recovery'
+export const HOST_RECOVERY_BACKGROUND_ID = 'dsh-ray-assistant-recovery'
 
 export interface HealthHostGlobalOperation {
   /** Authenticated owner identity supplied by the Host route, never a model. */

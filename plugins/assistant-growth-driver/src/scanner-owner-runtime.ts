@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import type { AssistantDeliveryService, OwnerRouteValidationReceipt } from '@dsh-enhanced/assistant-delivery'
+import type { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import type { AssistantDeliveryService, OwnerRouteValidationReceipt } from '@dsh-ray/assistant-delivery'
 
 type Automations = Pick<AssistantAutomationsService, 'inspectSystemOwnedRetirement' | 'retireSystemOwned' | 'inspectSystemOwned'>
 type Delivery = Pick<AssistantDeliveryService, 'inspectOwnerRouteState'>

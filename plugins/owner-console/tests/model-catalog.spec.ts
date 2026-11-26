@@ -43,9 +43,9 @@ function fakeSettings(entries: Array<{ ns: string; value: Record<string, unknown
 
 function sampleStatus(): OwnerConsoleStatus {
   return {
-    feishu: { mode: 'env', installed: true, entry: 'dsh-enhanced-lark-channel', enabled: true, appIdConfigured: true, connected: true, connection: 'connected' },
-    traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: 'traex' },
-    agy: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: '/Users/owner/.local/bin/agy' },
+    feishu: { mode: 'env', installed: true, entry: 'dsh-ray-lark-channel', enabled: true, appIdConfigured: true, connected: true, connection: 'connected' },
+    traex: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: 'traex' },
+    agy: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: true, command: '/Users/owner/.local/bin/agy' },
     defaultModel: { entry: 'agent-default-model', available: true, provider: 'agy-agent', model: 'gemini-4-hydrogen', reasoningEffort: 'high' },
     llmProviders: [
       { id: 'agy-agent', name: 'Antigravity' },
@@ -114,13 +114,13 @@ describe('Host modelCatalog & scoped assistant chat registration', () => {
     const ctx = new Context()
     await ctx.plugin(TypertRegistry)
     const settings = fakeSettings([
-      { ns: 'dsh-enhanced-traex-acp-provider', value: { enabled: false, command: 'traex', agyEnabled: true, agyCommand: 'agy' } },
+      { ns: 'dsh-ray-traex-acp-provider', value: { enabled: false, command: 'traex', agyEnabled: true, agyCommand: 'agy' } },
       { ns: 'agent-default-model', value: { provider: 'llmgw', model: 'seed-2.0-pro', reasoningEffort: 'medium' } },
     ])
     ctx.provide('settings' as never, settings.service as never)
     ctx.provide('pluginManager' as never, {
       listBundles: async () => [
-        { name: '@dsh-enhanced/traex-acp-provider', version: '0.1.78', enabled: true, installed: true, removable: true, optional: true, rows: [] },
+        { name: '@dsh-ray/traex-acp-provider', version: '0.1.78', enabled: true, installed: true, removable: true, optional: true, rows: [] },
       ],
       listPlugins: async () => [],
     } as never)
@@ -376,8 +376,8 @@ describe('Host modelCatalog & scoped assistant chat registration', () => {
     await ctx.plugin(TypertRegistry)
     const status: OwnerConsoleStatus = {
       ...sampleStatus(),
-      traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: 'traex' },
-      agy: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: 'agy' },
+      traex: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: true, command: 'traex' },
+      agy: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: 'agy' },
       defaultModel: { entry: 'agent-default-model', available: true, provider: 'dormant-api', model: 'deepseek-r1' },
     }
     ctx.provide('llm' as never, {
@@ -809,7 +809,7 @@ describe('/model cascading dropdowns and settings category filter UI', () => {
     const configureTraex = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'traex', note: 'ok' } }))
     const statusWithCustomPath: OwnerConsoleStatus = {
       ...sampleStatus(),
-      traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: '/opt/custom/bin/traex' },
+      traex: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: '/opt/custom/bin/traex' },
     }
     const ctrl: ConsoleController = {
       remote: baseRemote({ configureTraex }),

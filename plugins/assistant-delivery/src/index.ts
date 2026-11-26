@@ -3,7 +3,7 @@ import { DeliveryAdapterRegistryStoppedError } from './coordinator.js'
 import { AssistantDeliveryService, Config, isTrustedDeliveryPreferenceProducer, normalizeForegroundToolArguments, ownerNotificationReplyProtocol, ownerNotificationWithdrawalProtocol } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-delivery'
+export const name = 'dsh-ray-assistant-delivery'
 export { AssistantDeliveryService, Config, DeliveryAdapterRegistryStoppedError, isTrustedDeliveryPreferenceProducer, normalizeForegroundToolArguments, ownerNotificationReplyProtocol, ownerNotificationWithdrawalProtocol, version }
 export type {
   CommitOwnerAnchoredWorkflowTraceServiceResult,

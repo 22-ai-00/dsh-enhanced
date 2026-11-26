@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-delivery",
+  "name": "@dsh-ray/assistant-delivery",
   "version": "0.1.88",
   "description": "A durable, policy-gated inbound/outbound message core for DeepSeek Harness.",
   "license": "MIT",
@@ -41,7 +41,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-delivery"
   },
   "keywords": [
@@ -59,9 +59,9 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/assistant-growth-contract": "workspace:*",
-    "@dsh-enhanced/llm-route-capabilities": "workspace:*",
-    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
+    "@dsh-ray/assistant-growth-contract": "workspace:*",
+    "@dsh-ray/llm-route-capabilities": "workspace:*",
+    "@dsh-ray/task-acceptance-contract": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
@@ -78,11 +78,11 @@
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-user-approval": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-user-questions": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-evaluation": ">0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-evolution": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-goals": ">0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.43 <0.2.0",
+    "@dsh-ray/assistant-automations": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-evaluation": ">0.1.24 <0.2.0",
+    "@dsh-ray/assistant-evolution": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-goals": ">0.1.24 <0.2.0",
+    "@dsh-ray/assistant-policy": ">=0.1.43 <0.2.0",
     "@deepseek-ai/dsh-session-persistence": ">=0.2.2-rc.5 <0.3.0"
   },
   "peerDependenciesMeta": {
@@ -119,7 +119,7 @@
     "@deepseek-ai/dsh-tools": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-automations": {
+    "@dsh-ray/assistant-automations": {
       "optional": true
     },
     "@deepseek-ai/dsh-user-approval": {
@@ -128,16 +128,16 @@
     "@deepseek-ai/dsh-user-questions": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-evaluation": {
+    "@dsh-ray/assistant-evaluation": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-evolution": {
+    "@dsh-ray/assistant-evolution": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-goals": {
+    "@dsh-ray/assistant-goals": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-policy": {
+    "@dsh-ray/assistant-policy": {
       "optional": true
     },
     "@deepseek-ai/dsh-goal": {
@@ -171,12 +171,12 @@
     "@deepseek-ai/dsh-tools": "catalog:",
     "@deepseek-ai/dsh-user-approval": "catalog:",
     "@deepseek-ai/dsh-user-questions": "catalog:",
-    "@dsh-enhanced/assistant-automations": "workspace:*",
-    "@dsh-enhanced/assistant-evaluation": "workspace:*",
-    "@dsh-enhanced/assistant-evolution": "workspace:*",
-    "@dsh-enhanced/assistant-goals": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
-    "@dsh-enhanced/assistant-verifier": "workspace:*",
+    "@dsh-ray/assistant-automations": "workspace:*",
+    "@dsh-ray/assistant-evaluation": "workspace:*",
+    "@dsh-ray/assistant-evolution": "workspace:*",
+    "@dsh-ray/assistant-goals": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
+    "@dsh-ray/assistant-verifier": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",

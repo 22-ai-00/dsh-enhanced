@@ -1533,7 +1533,7 @@ describe('Tier 2 — F02–F07: Boundary, Corner & Negative Cases', () => {
       const profileDir = join(ws.dshHome, 'profiles', 'web')
       mkdirSync(profileDir, { recursive: true })
       const patchPath = join(profileDir, 'cordis.patch.yml')
-      const original = '- id: dsh-enhanced-assistant-work-items\n  config:\n    enabled: false\n'
+      const original = '- id: dsh-ray-assistant-work-items\n  config:\n    enabled: false\n'
       await writeFile(patchPath, original, 'utf8')
 
       const res = await runPluginSetupInProcess(

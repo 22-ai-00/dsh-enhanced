@@ -32,7 +32,7 @@ afterEach(async () => {
 
 function candidate(overrides: Partial<CatalogEntry> = {}): CatalogEntry {
   const identity = {
-    id: 'released-plugin', package: '@dsh-enhanced/released-plugin', version: '1.2.3',
+    id: 'released-plugin', package: '@dsh-ray/released-plugin', version: '1.2.3',
     integrity: integrity('released'), requires: [], capabilities: ['catalog admission', 'new capability'],
     authorities: ['network: verified registry'], dshBaseline: '0.1.0-rc.8', ...overrides,
   }
@@ -302,7 +302,7 @@ describe('owner-private catalog CAS admission', () => {
   test('rejects before/after digest drift and unrelated changes without writing', async () => {
     const value = await fixture(); const request = input(value.path, value.catalog, candidate())
     const unrelated = parseCatalog({ schemaVersion: 1, entries: [candidate({
-      id: 'unrelated', package: '@dsh-enhanced/unrelated', version: '9.0.0',
+      id: 'unrelated', package: '@dsh-ray/unrelated', version: '9.0.0',
     })] })
     await writeFile(value.path, JSON.stringify(unrelated), { mode: 0o600 })
     await expect(admitCatalogCandidate(request)).rejects.toThrow('catalog digest changed before admission')
@@ -314,7 +314,7 @@ describe('owner-private catalog CAS admission', () => {
   })
 
   test.each([
-    ['duplicate id', [candidate({ package: '@dsh-enhanced/existing', version: '2.0.0' })], candidate({ version: '3.0.0' }), 'catalog identity'],
+    ['duplicate id', [candidate({ package: '@dsh-ray/existing', version: '2.0.0' })], candidate({ version: '3.0.0' }), 'catalog identity'],
     ['duplicate package', [candidate({ id: 'existing', version: '2.0.0' })], candidate({ id: 'different', version: '3.0.0' }), 'catalog identity'],
     ['same version conflict', [candidate({ integrity: integrity('old') })], candidate({ integrity: integrity('new') }), 'existing version'],
     ['downgrade', [candidate({ version: '2.0.0', integrity: integrity('old') })], candidate({ version: '1.9.9' }), 'would downgrade'],
@@ -326,7 +326,7 @@ describe('owner-private catalog CAS admission', () => {
 
   test('rejects catalogs that already contain duplicate package identities', async () => {
     const duplicated = parseCatalog({ schemaVersion: 1, entries: [candidate({ id: 'one' }), candidate({ id: 'two' })] })
-    expect(() => previewCatalogAdmission(duplicated, candidate({ id: 'three', package: '@dsh-enhanced/three' })))
+    expect(() => previewCatalogAdmission(duplicated, candidate({ id: 'three', package: '@dsh-ray/three' })))
       .toThrow('duplicate package identity')
   })
 
@@ -397,7 +397,7 @@ describe('owner-private catalog CAS admission', () => {
     const first = admitCatalogCandidate(firstRequest, { afterTemporaryFileSync: async () => { entered(); await held } })
     await waiting
     await expect(admitCatalogCandidate(input(value.path, value.catalog, candidate({
-      id: 'second', package: '@dsh-enhanced/second', version: '1.0.0',
+      id: 'second', package: '@dsh-ray/second', version: '1.0.0',
     })))).rejects.toThrow('kernel lock')
     release(); await expect(first).resolves.toMatchObject({ replayed: false })
   })
@@ -423,7 +423,7 @@ describe('owner-private catalog CAS admission', () => {
   test('detects a competing replacement at the final pre-rename seam', async () => {
     const value = await fixture(); const request = input(value.path, value.catalog, candidate())
     const competing = parseCatalog({ schemaVersion: 1, entries: [candidate({
-      id: 'competing', package: '@dsh-enhanced/competing', version: '8.0.0',
+      id: 'competing', package: '@dsh-ray/competing', version: '8.0.0',
     })] })
     await expect(admitCatalogCandidate(request, { beforeAtomicRename: async () => {
       const replacement = join(value.root, 'replacement.json')
@@ -438,7 +438,7 @@ describe('owner-private catalog CAS admission', () => {
     const value = await fixture(); const request = input(value.path, value.catalog, candidate())
     const before = await readFile(value.path, 'utf8')
     const competing = parseCatalog({ schemaVersion: 1, entries: [candidate({
-      id: 'last-window', package: '@dsh-enhanced/last-window', version: '8.0.0',
+      id: 'last-window', package: '@dsh-ray/last-window', version: '8.0.0',
     })] })
     await expect(admitCatalogCandidate(request, { beforeAtomicRename: async (_path, temporaryPath) => {
       await unlink(temporaryPath)
@@ -452,7 +452,7 @@ describe('owner-private catalog CAS admission', () => {
   test('restores the exact competing catalog when the target pathname is replaced before exchange', async () => {
     const value = await fixture(); const request = input(value.path, value.catalog, candidate())
     const competing = parseCatalog({ schemaVersion: 1, entries: [candidate({
-      id: 'target-race', package: '@dsh-enhanced/target-race', version: '8.0.0',
+      id: 'target-race', package: '@dsh-ray/target-race', version: '8.0.0',
     })] })
     await expect(admitCatalogCandidate(request, { beforeAtomicRename: async catalogPath => {
       const replacement = join(value.root, 'target-race.json')
@@ -468,7 +468,7 @@ describe('owner-private catalog CAS admission', () => {
     const value = await fixture(); const request = input(value.path, value.catalog, candidate())
     const before = await readFile(value.path, 'utf8')
     const competing = parseCatalog({ schemaVersion: 1, entries: [candidate({
-      id: 'continuous-race', package: '@dsh-enhanced/continuous-race', version: '8.0.0',
+      id: 'continuous-race', package: '@dsh-ray/continuous-race', version: '8.0.0',
     })] })
     const replacement = join(value.root, 'continuous-race.json')
     await writeFile(replacement, JSON.stringify(competing), { mode: 0o600 })
@@ -499,10 +499,10 @@ describe('owner-private catalog CAS admission', () => {
   test('preserves a writer raced into stage during reverse exchange for manual reconciliation', async () => {
     const value = await fixture(); const request = input(value.path, value.catalog, candidate())
     const firstCompeting = parseCatalog({ schemaVersion: 1, entries: [candidate({
-      id: 'first-race', package: '@dsh-enhanced/first-race', version: '8.0.0',
+      id: 'first-race', package: '@dsh-ray/first-race', version: '8.0.0',
     })] })
     const laterCompeting = parseCatalog({ schemaVersion: 1, entries: [candidate({
-      id: 'reverse-race', package: '@dsh-enhanced/reverse-race', version: '9.0.0',
+      id: 'reverse-race', package: '@dsh-ray/reverse-race', version: '9.0.0',
     })] })
     const laterBytes = JSON.stringify(laterCompeting)
     const laterPath = join(value.root, 'reverse-race.json')

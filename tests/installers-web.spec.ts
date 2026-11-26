@@ -14,7 +14,7 @@ const pathWithoutTraex = (process.env.PATH ?? '').split(':').filter(directory =>
   && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli')) && !existsSync(join(directory, 'agy'))).join(':')
 
 async function temporaryHome(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-enhanced-web-installer-'))
+  const root = await mkdtemp(join(tmpdir(), 'dsh-ray-web-installer-'))
   roots.push(root)
   return root
 }
@@ -43,7 +43,7 @@ async function actualFixture(setupExit: number | 'missing') {
   const profile = join(dshHome, 'profiles', 'web')
   await writeFile(join(profile, 'package.json'), JSON.stringify({
     name: 'dsh-profile-web', type: 'module',
-    dependencies: { '@dsh-enhanced/assistant-web-owner': '0.0.0' },
+    dependencies: { '@dsh-ray/assistant-web-owner': '0.0.0' },
     dsh: { profile: { bundles: [] } },
   }))
   await nativeWebSetupPackage(profile, `import { writeFile } from 'node:fs/promises'
@@ -57,7 +57,7 @@ if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; fi
 exit 0
 `)
   await writeExecutable(join(fakeBin, 'npm'), '#!/bin/bash\nexit 0\n')
-  await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
+  await writeExecutable(join(fakeBin, 'dsh-ray'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
   const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
 set -euo pipefail
 if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
@@ -79,7 +79,7 @@ exit 0
 `)
   await symlink(hostExecutable, join(fakeBin, 'dsh'))
   if (setupExit !== 'missing') {
-    await symlink(join(profile, 'node_modules', '@dsh-enhanced', 'assistant-web-owner', 'bin', 'dsh-web-owner-setup.js'),
+    await symlink(join(profile, 'node_modules', '@dsh-ray', 'assistant-web-owner', 'bin', 'dsh-web-owner-setup.js'),
       join(profileBin, 'dsh-web-owner-setup'))
   }
   const result = spawnSync('/bin/bash', [installer,
@@ -148,7 +148,7 @@ describe('experimental Web owner installer scenario', () => {
     const dshHome = await temporaryHome()
     const profile = join(dshHome, 'profiles', 'web')
     await mkdir(profile, { recursive: true })
-    await writeFile(join(profile, 'cordis.patch.yml'), `- id: dsh-enhanced-lark-channel
+    await writeFile(join(profile, 'cordis.patch.yml'), `- id: dsh-ray-lark-channel
   config:
     enabled: true
     appId: cli_0123456789abcdef
@@ -182,13 +182,13 @@ describe('experimental Web owner installer scenario', () => {
     expect(installed).not.toContain('probe')
   }, 30_000)
 
-  test('web scenario includes owner-console and prints dsh-rsi open + 文鳐 hint', async () => {
+  test('web scenario includes owner-console and prints dsh-ray open + 文鳐 hint', async () => {
     const dshHome = await temporaryHome()
     const result = run(['--dry-run', '--scenario', 'web'], dshHome)
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'owner-console'))
-    expect(result.stdout).toContain('控制台 UI：已安装 @dsh-enhanced/owner-console')
-    expect(result.stdout).toContain('dsh-rsi open --profile web')
+    expect(result.stdout).toContain('控制台 UI：已安装 @dsh-ray/owner-console')
+    expect(result.stdout).toContain('dsh-ray open --profile web')
   })
 
   test('doctor.sh --json inspects live credentials (no secret leakage), traex/agy and host setup', async () => {
@@ -197,13 +197,13 @@ describe('experimental Web owner installer scenario', () => {
     const fakeBin = join(root, 'fake-bin')
     const profileDir = join(dshHome, 'profiles', 'web')
     await mkdir(fakeBin, { recursive: true })
-    await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced', 'owner-console'), { recursive: true })
+    await mkdir(join(profileDir, 'node_modules', '@dsh-ray', 'owner-console'), { recursive: true })
     await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web' }))
     await writeFile(join(dshHome, '.credentials.yaml'), 'DEEPSEEK_API_KEY: top-secret-doctor-key\n', { mode: 0o600 })
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 if [[ " $* " == *' --dump-config '* ]]; then
-  printf '%s\\n' '- id: dsh-enhanced-owner-console' '  name: "@dsh-enhanced/owner-console"'
+  printf '%s\\n' '- id: dsh-ray-owner-console' '  name: "@dsh-ray/owner-console"'
   exit 0
 fi
 exit 0

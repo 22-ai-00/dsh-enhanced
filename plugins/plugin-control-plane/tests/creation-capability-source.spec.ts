@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import type { PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { afterEach, expect, test } from 'vitest'
 import { captureCreationCapabilitySource, creationCapabilitySourceDigest, validateCreationCapabilitySource,
   type CreationCapabilitySourceSnapshot } from '../src/creation-capability-source.js'

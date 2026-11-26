@@ -35,7 +35,7 @@ function fixture() {
   const manifest = { sourceReviews: { authorityId: 'source-review' }, pluginCreation: { reviews: reviewConfig, capabilities: config },
     controlPlane: { statePath, creationCapabilities: config } }
   const verifier = { databasePath: join(home, 'assistant-verifier', 'verification.sqlite'), sourceReviews: manifest.sourceReviews, creationReviews: reviewConfig }
-  const rows = [{ id: 'dsh-enhanced-assistant-verifier', config: verifier }, { id: 'dsh-enhanced-plugin-control-plane', config: manifest.controlPlane }]
+  const rows = [{ id: 'dsh-ray-assistant-verifier', config: verifier }, { id: 'dsh-ray-plugin-control-plane', config: manifest.controlPlane }]
   const ownerUpdate = { homePath: home, profile: 'owner', original: { resources: { installationId: 'install-1', stateRoot }, manifest,
     effective: { targetEffective: yaml.stringify(rows) } } }
   const api = { yaml, control: { creationCapabilityAuthorityDigest, creationCapabilityPublicKey } }

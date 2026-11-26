@@ -71,7 +71,7 @@ try {
     'ACP initialize',
   )
 
-  if (initialized.agentInfo?.name !== 'dsh-enhanced-acp') {
+  if (initialized.agentInfo?.name !== 'dsh-ray-acp') {
     throw new Error(`unexpected ACP agent name: ${initialized.agentInfo?.name ?? '<missing>'}`)
   }
   if (expectedVersion !== undefined && initialized.agentInfo.version !== expectedVersion) {

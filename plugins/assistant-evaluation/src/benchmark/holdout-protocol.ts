@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, verify } from 'node:crypto'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { BenchmarkError } from './schema.js'
 import { benchmarkDomains } from './types.js'
 import type { BenchmarkCase, BenchmarkCell, BenchmarkPlan, BenchmarkVerdict } from './types.js'

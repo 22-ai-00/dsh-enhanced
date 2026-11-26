@@ -7,8 +7,8 @@ import {
   type StoredOutcome,
   type TrustedAutomationEvaluationRegistration,
   type TrustedEvaluationRegistrationOwner,
-} from '@dsh-enhanced/assistant-evaluation'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-evaluation'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

@@ -10,12 +10,12 @@ import { runGrowthAgent } from '../src/growth-agent.ts'
 import { mintGrowthAuthority } from '../src/deposit.ts'
 import type { GrowthSourcePlanePort } from '../src/source-port.ts'
 import { anySourceGrowthRunDigest, SourceGrowthRunUnavailableError, type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins,
-  type CreationAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
-import { AssistantPolicyService, setApprovalReviewer, getApprovalReviewer } from '@dsh-enhanced/assistant-policy'
-import type { OwnerForegroundLearningTask, OwnerWorkItemEngineeringContextSource } from '@dsh-enhanced/assistant-delivery'
+  type CreationAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-ray/assistant-growth-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantEvaluationService, EvaluationStore } from '@dsh-ray/assistant-evaluation'
+import { AssistantPolicyService, setApprovalReviewer, getApprovalReviewer } from '@dsh-ray/assistant-policy'
+import type { OwnerForegroundLearningTask, OwnerWorkItemEngineeringContextSource } from '@dsh-ray/assistant-delivery'
 import { afterEach, expect, test, vi } from 'vitest'
 import GrowthPlugin from '../src/index.ts'
 import { normalizeConfig } from '../src/config.ts'
@@ -672,7 +672,7 @@ async function workItemFixture(options: { missing?: boolean; ready?: boolean; ma
   revision?: { targets?: RevisionTargetCandidate[]; ready?: boolean } } = {}) {
   const f = await fixture({ ...(options.maxPending === undefined ? {} : { maxPending: options.maxPending }), ...(options.toolPolicy ? { toolPolicy: options.toolPolicy } : {}) })
   let growthCtx!: Context
-  const growthFork = f.ctx.plugin({ name: 'dsh-enhanced-assistant-growth-driver', apply(ctx: Context) { growthCtx = ctx } }); await growthFork
+  const growthFork = f.ctx.plugin({ name: 'dsh-ray-assistant-growth-driver', apply(ctx: Context) { growthCtx = ctx } }); await growthFork
   const until = Date.now() + 100_000, sourceOccurredAt = Date.now() - 100, workerCompletedAt = Date.now() - 200
   const acceptance: CreationAcceptanceAuthorityRef = { protocol: 'assistant-growth/creation-acceptance-authority/v1', authorityId: 'wi-review',
     authorityDigest: 'c'.repeat(64), keyId: 'wi-key', namePrefix: 'created-', expiresAt: until }
@@ -1198,7 +1198,7 @@ test('published default Growth plugin preauthorizes its real native WorkItem too
     usageLearning: { enabled: true, databasePath: join(f.root, 'usage.sqlite'), scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, workItemFailures: true, workItemAuthorities: f.pins },
     pluginSourceProposals: { enabled: true, allowCreation: true, preparationMode: 'durable', repository: f.root } })
   cleanup.push(async () => { await fork.dispose() }); await fork; await fork.await()
-  expect(fork.name).toBe('dsh-enhanced-assistant-growth-driver')
+  expect(fork.name).toBe('dsh-ray-assistant-growth-driver')
   await f.tick()
   expect(requests).toBe(2); expect(successfulTools).toBe(1)
   const ledger = new UsageStore(join(f.root, 'usage.sqlite'))

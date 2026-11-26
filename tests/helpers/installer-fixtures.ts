@@ -290,14 +290,14 @@ export function createInstallerFixtures() {
       env: {
         PATH: pathWithoutTraex,
         DSH_HOME: dshHome,
-        ...(platform === undefined ? {} : { DSH_ENHANCED_PLATFORM_OVERRIDE: platform }),
+        ...(platform === undefined ? {} : { DSH_RAY_PLATFORM_OVERRIDE: platform }),
         ...extraEnvironment,
       },
     })
   }
 
   async function temporaryDshHome(parent = tmpdir()): Promise<string> {
-    const root = await realpath(await mkdtemp(join(parent, 'dsh-enhanced-installer-')))
+    const root = await realpath(await mkdtemp(join(parent, 'dsh-ray-installer-')))
     temporaryRoots.push(root)
     return root
   }
@@ -369,7 +369,7 @@ async function testSupervisedHost(context) {
   try { fixtureInventory = JSON.parse(await readFile(join(home, '.scanner-retirement-fixture.json'), 'utf8')) } catch {}
   if (fixtureInventory && fixtureInventory.mode !== 'no-op') {
     const retired = await lstat(join(home, '.scanner-retired')).then(() => true, () => false)
-    const manifest = JSON.parse(await readFile(join(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-enhanced-transaction', 'manifest.json'), 'utf8'))
+    const manifest = JSON.parse(await readFile(join(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-ray-transaction', 'manifest.json'), 'utf8'))
     const phase = manifest.supervisedLifecycle.scannerRetirement.phase
     await writeFile(process.env.LIFECYCLE_OPERATION_LOG, 'scanner-host retirement=' + phase + ' retired=' + retired + '\\n', { flag: 'a' })
     if (!retired || phase !== 'completed') throw new Error('fixture Host entered before retirement completion')
@@ -382,8 +382,8 @@ async function testSupervisedOperator(action, nonce, direct, context) {
     if (candidate !== undefined
       && await lstat(join(candidate, 'uninstalled-profiles')).then(() => true, () => false)) archivePresent = true
   }
-  if (process.env.DSH_ENHANCED_TEST_SUPERVISED_OPERATOR_LOG) {
-    await writeFile(process.env.DSH_ENHANCED_TEST_SUPERVISED_OPERATOR_LOG,
+  if (process.env.DSH_RAY_TEST_SUPERVISED_OPERATOR_LOG) {
+    await writeFile(process.env.DSH_RAY_TEST_SUPERVISED_OPERATOR_LOG,
       'supervised-operator\\t' + action + '\\t' + (direct ? 'direct' : 'sandbox')
         + '\\tarchive=' + String(archivePresent) + '\\n', { flag: 'a' })
   }
@@ -445,8 +445,8 @@ async function testSupervisedOperator(action, nonce, direct, context) {
       snapshotDigest: digest, inventoryDigest: digest, storageDigest: digest, inFlightCount: raw ? 1 : 0,
       records: fixtureInventory ? (fixtureRetired ? fixtureInventory.after : fixtureInventory.before) : [{ id: 'owner:user-job', owner: 'owner', definitionHash: unmanagedDefinition, status: 'paused',
         createdAt: 1, updatedAt: 1, version: 1, runningTaskCount: 0 }], sidecars: { wal: null, shm: null } },
-    managedProjection: { protocol: 'dsh-enhanced/supervised-growth-managed-automations/v1', records: [], digest },
-    ...(raw ? {} : { attestation: { protocol: 'dsh-enhanced/supervised-growth-lifecycle-attestation/v1',
+    managedProjection: { protocol: 'dsh-ray/supervised-growth-managed-automations/v1', records: [], digest },
+    ...(raw ? {} : { attestation: { protocol: 'dsh-ray/supervised-growth-lifecycle-attestation/v1',
       stage, externalProviderExemptions: stage === 'preview' ? ['larkChannel'] : [], effectiveConfigDigest: configDigest,
       attestationDigest: digest, recovery: { activationNonceDigest: sha256(effectiveNonce), catalogDigest: digest,
         bootstrapAttestationSetDigest: digest } } }),
@@ -455,69 +455,69 @@ async function testSupervisedOperator(action, nonce, direct, context) {
 `
     await writeFile(join(fixtureInstallDirectory, 'lifecycle-profile.mjs'), lifecycleSource.replace(
       trustCheck,
-      trustCheck + `  if (process.env.DSH_ENHANCED_TEST_SERVICE_TOOLS === '1'\n`
+      trustCheck + `  if (process.env.DSH_RAY_TEST_SERVICE_TOOLS === '1'\n`
         + `    && dirname(canonical) === ${JSON.stringify(fakeBin)}) return canonical\n`,
     ).replace(
       systemTrustFunction,
-      systemTrustFunction + `  if (process.env.DSH_ENHANCED_TEST_SERVICE_TOOLS === '1') return await realpath(path)\n`,
+      systemTrustFunction + `  if (process.env.DSH_RAY_TEST_SERVICE_TOOLS === '1') return await realpath(path)\n`,
     ).replace(
       procLoop,
-      "  const procNames = (process.env.DSH_ENHANCED_TEST_PROC_PIDS ?? '').split(',').filter(Boolean)\n"
-        + "  if (process.env.DSH_ENHANCED_TEST_INCLUDE_ANCESTORS === '1') procNames.push(...await processAncestorIds())\n"
+      "  const procNames = (process.env.DSH_RAY_TEST_PROC_PIDS ?? '').split(',').filter(Boolean)\n"
+        + "  if (process.env.DSH_RAY_TEST_INCLUDE_ANCESTORS === '1') procNames.push(...await processAncestorIds())\n"
         + "  const proc = [...new Set(procNames.map(String))].map(name => ({ name }))\n  for (const entry of proc) {",
     ).replace(
       sshdProofAnchor,
       sshdProofAnchor
-        + "  if ((process.env.DSH_ENHANCED_TEST_SSHD_PROOF_PIDS ?? '').split(',').filter(Boolean).map(Number).includes(pid)) return true\n",
+        + "  if ((process.env.DSH_RAY_TEST_SSHD_PROOF_PIDS ?? '').split(',').filter(Boolean).map(Number).includes(pid)) return true\n",
     ).replace(
       sdPamProofAnchor,
       sdPamProofAnchor
-        + "  if ((process.env.DSH_ENHANCED_TEST_SDPAM_PROOF_PIDS ?? '').split(',').filter(Boolean).map(Number).includes(pid)) return true\n",
+        + "  if ((process.env.DSH_RAY_TEST_SDPAM_PROOF_PIDS ?? '').split(',').filter(Boolean).map(Number).includes(pid)) return true\n",
     ).replace(
       guardianCompletion,
-      "  if (process.env.DSH_ENHANCED_TEST_GUARDIAN_PID_FILE) await writeFile(process.env.DSH_ENHANCED_TEST_GUARDIAN_PID_FILE, String(guardian.pid))\n"
+      "  if (process.env.DSH_RAY_TEST_GUARDIAN_PID_FILE) await writeFile(process.env.DSH_RAY_TEST_GUARDIAN_PID_FILE, String(guardian.pid))\n"
         + guardianCompletion,
     ).replace(
       guardianReady,
-      "  if (process.env.DSH_ENHANCED_TEST_KILL_PARENT_AFTER_GUARDIAN_START === '1') process.kill(process.pid, 'SIGKILL')\n"
-        + "  if (process.env.DSH_ENHANCED_TEST_DISCONNECT_GUARDIAN_AFTER_START === '1') { guardian.stdin.end(); await completion }\n"
+      "  if (process.env.DSH_RAY_TEST_KILL_PARENT_AFTER_GUARDIAN_START === '1') process.kill(process.pid, 'SIGKILL')\n"
+        + "  if (process.env.DSH_RAY_TEST_DISCONNECT_GUARDIAN_AFTER_START === '1') { guardian.stdin.end(); await completion }\n"
         + guardianReady,
     ).replace(
       originalRenamed,
       originalRenamed
-        + "    if (process.env.DSH_ENHANCED_TEST_KILL_AFTER_ORIGINAL_RENAME === '1') process.kill(process.pid, 'SIGKILL')\n",
+        + "    if (process.env.DSH_RAY_TEST_KILL_AFTER_ORIGINAL_RENAME === '1') process.kill(process.pid, 'SIGKILL')\n",
     ).replace(
       serviceStopped,
       serviceStopped
-        + "      if (process.env.DSH_ENHANCED_TEST_KILL_AFTER_STOPPED === '1') process.kill(process.pid, 'SIGKILL')\n",
+        + "      if (process.env.DSH_RAY_TEST_KILL_AFTER_STOPPED === '1') process.kill(process.pid, 'SIGKILL')\n",
     ).replace(
       canonicalCleanup,
       canonicalCleanup
-        + "  if (process.env.DSH_ENHANCED_TEST_FAIL_CANONICAL_CLEANUP === '1') fail('injected canonical cleanup failure')\n",
+        + "  if (process.env.DSH_RAY_TEST_FAIL_CANONICAL_CLEANUP === '1') fail('injected canonical cleanup failure')\n",
     ).replace(
       cleanupPrepared,
       cleanupPrepared
-        + "        if (process.env.DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_PREPARED === '1') process.kill(process.pid, 'SIGKILL')\n",
+        + "        if (process.env.DSH_RAY_TEST_CRASH_AFTER_CLEANUP_PREPARED === '1') process.kill(process.pid, 'SIGKILL')\n",
     ).replace(
       cleanupDeleting,
       cleanupDeleting
-        + "      if (process.env.DSH_ENHANCED_TEST_CRASH_DURING_CLEANUP === '1') {\n"
+        + "      if (process.env.DSH_RAY_TEST_CRASH_DURING_CLEANUP === '1') {\n"
         + "        await rm(join(anchoredTombstone, 'profiles'), { recursive: true, force: true })\n"
         + "        process.kill(process.pid, 'SIGKILL')\n"
         + "      }\n",
     ).replace(
       cleanupMetadata,
       cleanupMetadata
-        + "      if (process.env.DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_METADATA === '1') process.kill(process.pid, 'SIGKILL')\n",
+        + "      if (process.env.DSH_RAY_TEST_CRASH_AFTER_CLEANUP_METADATA === '1') process.kill(process.pid, 'SIGKILL')\n",
     ).replace(
       cleanupReacceptPending,
       cleanupReacceptPending.replace('    let accepted\n',
-        "    if (process.env.DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_REACCEPT_PENDING === '1') process.kill(process.pid, 'SIGKILL')\n"
+        "    if (process.env.DSH_RAY_TEST_CRASH_AFTER_CLEANUP_REACCEPT_PENDING === '1') process.kill(process.pid, 'SIGKILL')\n"
           + '    let accepted\n'),
     ).replace(
       cleanupReacceptGuardian,
       cleanupReacceptGuardian.replace('    } catch (error) {\n',
-        "      if (process.env.DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_REACCEPT_GUARDIAN === '1') process.kill(process.pid, 'SIGKILL')\n"
+        "      if (process.env.DSH_RAY_TEST_CRASH_AFTER_CLEANUP_REACCEPT_GUARDIAN === '1') process.kill(process.pid, 'SIGKILL')\n"
           + '    } catch (error) {\n'),
     ).replace(
       supervisedOperator,
@@ -535,14 +535,14 @@ async function testSupervisedOperator(action, nonce, direct, context) {
       supervisedCapability + "  if (process.env.LIFECYCLE_SUPERVISED_MOCK === '1') return\n",
     ))
     await writeFile(join(fixtureInstallDirectory, 'install-local.sh'),
-      `#!/bin/bash\nset -euo pipefail\nsource ${JSON.stringify(fixtureInstallerLibrary)}\ndsh_enhanced_install local ${JSON.stringify(repoRoot)} "$@"\n`)
+      `#!/bin/bash\nset -euo pipefail\nsource ${JSON.stringify(fixtureInstallerLibrary)}\ndsh_ray_install local ${JSON.stringify(repoRoot)} "$@"\n`)
     await writeFile(join(fixtureInstallDirectory, 'install-npm.sh'),
-      `#!/bin/bash\nset -euo pipefail\nsource ${JSON.stringify(fixtureInstallerLibrary)}\ndsh_enhanced_install npm '' "$@"\n`)
+      `#!/bin/bash\nset -euo pipefail\nsource ${JSON.stringify(fixtureInstallerLibrary)}\ndsh_ray_install npm '' "$@"\n`)
     await symlink(join(repoRoot, 'node_modules'), join(root, 'node_modules'), 'dir')
     const thirdParty = options.thirdParty ?? false
     const managedDependencies = options.managedDependencies ?? ['personal-assistant']
-    const dependencies = Object.fromEntries(managedDependencies.map(name => [`@dsh-enhanced/${name}`, '0.1.0']))
-    const managedBundles = managedDependencies.map(name => `@dsh-enhanced/${name}`)
+    const dependencies = Object.fromEntries(managedDependencies.map(name => [`@dsh-ray/${name}`, '0.1.0']))
+    const managedBundles = managedDependencies.map(name => `@dsh-ray/${name}`)
     await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
       name: 'dsh-profile-web', private: true,
       dependencies: {
@@ -562,23 +562,23 @@ async function testSupervisedOperator(action, nonce, direct, context) {
     const effectiveScenario = options.effectiveScenario ?? (options.systemd === undefined ? 'web' : 'lark')
     const effectiveRows = effectiveScenario === 'lark'
       ? [{
-          id: 'dsh-enhanced-lark-channel',
-          name: '@dsh-enhanced/lark-channel',
+          id: 'dsh-ray-lark-channel',
+          name: '@dsh-ray/lark-channel',
           config: { enabled: true },
         }]
       : effectiveScenario === 'supervised'
         ? [
             {
-              id: 'dsh-enhanced-lark-channel',
-              name: '@dsh-enhanced/lark-channel',
+              id: 'dsh-ray-lark-channel',
+              name: '@dsh-ray/lark-channel',
               config: { enabled: true },
             },
-            { id: 'dsh-enhanced-assistant-recovery', name: '@dsh-enhanced/assistant-recovery' },
+            { id: 'dsh-ray-assistant-recovery', name: '@dsh-ray/assistant-recovery' },
           ]
         : [
-            { id: 'dsh-enhanced-assistant-web-owner', name: '@dsh-enhanced/assistant-web-owner' },
+            { id: 'dsh-ray-assistant-web-owner', name: '@dsh-ray/assistant-web-owner' },
             ...(effectiveScenario === 'autonomy'
-              ? [{ id: 'dsh-enhanced-assistant-isolation', name: '@dsh-enhanced/assistant-isolation' }]
+              ? [{ id: 'dsh-ray-assistant-isolation', name: '@dsh-ray/assistant-isolation' }]
               : []),
           ]
     await writeFile(join(dshHome, '.lifecycle-dump-config'), stringify(effectiveRows))
@@ -599,11 +599,11 @@ async function testSupervisedOperator(action, nonce, direct, context) {
     const lifecycleTarget = join(root, 'managed-target')
     await mkdir(lifecycleTarget)
     await writeFile(join(lifecycleTarget, 'package.json'), JSON.stringify({
-      name: `@dsh-enhanced/${managedDependencies[0] ?? 'personal-assistant'}`,
+      name: `@dsh-ray/${managedDependencies[0] ?? 'personal-assistant'}`,
       version: '0.1.0',
     }))
-    const readinessLine = options.readiness === 'host' ? 'dsh-enhanced host ready: v1'
-      : options.readiness === 'invalid-host' ? 'dsh-enhanced host ready: v10'
+    const readinessLine = options.readiness === 'host' ? 'dsh-ray host ready: v1'
+      : options.readiness === 'invalid-host' ? 'dsh-ray host ready: v10'
         : 'dsh web: http://127.0.0.1:43210'
     const activation = `"${process.execPath}" --input-type=module - "$DSH_HOME/assistant-goals/web.sqlite" <<'NODE'
 import { DatabaseSync } from 'node:sqlite'
@@ -621,7 +621,7 @@ set -euo pipefail
 if [[ " ${'$'}{1:-} " == ' --version ' ]]; then printf '0.2.2-rc.5\n'; exit 0; fi
 if [[ " $* " == *' plugin '* && " $* " == *' add '* ]]; then
   transaction_state='absent'
-  [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
+  [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-ray-transaction" ]] && transaction_state='present'
   printf 'dsh-add\t%s\toffline=%s\timport=%s\t%s\n' "$transaction_state" "${'$'}{pnpm_config_offline:-}" "${'$'}{pnpm_config_package_import_method:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
   ${options.requirePnpmStore ? `if [[ "${'$'}{pnpm_config_store_dir:-}" != "${pnpmStorePath}" ]]; then printf 'sandbox store mismatch\n' >&2; exit 96; fi` : ''}
   ${options.requirePnpmFrozenStore ? `if [[ "${'$'}{pnpm_config_frozen_store:-}" != 'true' || "${'$'}{pnpm_config_ignore_scripts:-}" != 'true' ]]; then printf 'sandbox store must be frozen with scripts disabled\n' >&2; exit 95; fi` : ''}
@@ -670,14 +670,14 @@ if [[ " $* " == *' --dump-config '* ]]; then
     if [[ "${'$'}{!index}" == '--profile' ]]; then next=$((index + 1)); requested_profile="${'$'}{!next}"; break; fi
   done
   if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE" && "$requested_profile" == "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE" ]]; then
-    printf '%s\n' "- id: dsh-enhanced-assistant-recovery" "  name: '@dsh-enhanced/assistant-recovery'"
+    printf '%s\n' "- id: dsh-ray-assistant-recovery" "  name: '@dsh-ray/assistant-recovery'"
   elif [[ ",$LIFECYCLE_SYSTEMD_LARK_PROFILES," == *",$requested_profile,"* ]]; then
-    printf '%s\n' "- id: dsh-enhanced-lark-channel" "  name: '@dsh-enhanced/lark-channel'" "  config:" "    enabled: true"
+    printf '%s\n' "- id: dsh-ray-lark-channel" "  name: '@dsh-ray/lark-channel'" "  config:" "    enabled: true"
   elif [[ -n "$LIFECYCLE_SYSTEMD_UNSUPPORTED_PROFILE" && "$requested_profile" == "$LIFECYCLE_SYSTEMD_UNSUPPORTED_PROFILE" ]]; then
     printf '[]\n'
   elif [[ -d "$DSH_HOME/uninstalled-profiles" ]] \
     && [[ -f "$DSH_HOME/profiles/$requested_profile/package.json" ]] \
-    && ! grep -q '"@dsh-enhanced/' "$DSH_HOME/profiles/$requested_profile/package.json"; then
+    && ! grep -q '"@dsh-ray/' "$DSH_HOME/profiles/$requested_profile/package.json"; then
     printf '[]\n'
   elif [[ -f "$DSH_HOME/.lifecycle-dump-config" ]]; then cat "$DSH_HOME/.lifecycle-dump-config"; else printf '[]\n'; fi
   exit 0
@@ -693,7 +693,7 @@ exit 2
 set -euo pipefail
 if [[ " \${1:-} " == ' view ' && " \${3:-} " == ' version ' && " \${4:-} " == ' --json ' ]]; then
   transaction_state='absent'
-  [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
+  [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-ray-transaction" ]] && transaction_state='present'
   printf 'npm-view\t%s\t%s\n' "$transaction_state" "$*" >> "$LIFECYCLE_OPERATION_LOG"
   if [[ "$LIFECYCLE_NPM_BLOCK" == '1' ]]; then
     : > "$LIFECYCLE_NPM_BLOCK_STARTED"
@@ -730,7 +730,7 @@ if [[ "\${1:-}" == '--store-dir' && "\${2:-}" == '${pnpmStorePath}' && "\${3:-}"
   if [[ "${'$'}{LIFECYCLE_REQUIRE_PNPM_PROFILE_CWD:-0}" == '1' && "$PWD" != "${'$'}{LIFECYCLE_PROFILE_DIRECTORY:-}" ]]; then printf 'pnpm profile cwd mismatch\n' >&2; exit 97; fi
   if [[ "${'$'}{LIFECYCLE_PNPMFILE_MUST_NOT_RUN:-0}" == '1' && "${'$'}{pnpm_config_ignore_pnpmfile:-}" != 'true' ]]; then printf 'pnpmfile execution was not disabled\n' >&2; exit 98; fi
   transaction_state='absent'
-  [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
+  [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-ray-transaction" ]] && transaction_state='present'
   printf 'pnpm-store-add\t%s\tignore=%s\t%s\n' "$transaction_state" "${'$'}{pnpm_config_ignore_scripts:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
   if [[ "$LIFECYCLE_STORE_FAILS" == '1' ]]; then printf 'store prefetch failed\n' >&2; exit 93; fi
   exit 0
@@ -740,7 +740,7 @@ used_directory='0'
 arguments=("$@")
 if [[ "\${1:-}" == '--dir' ]]; then directory="$2"; used_directory='1'; arguments=("\${@:3}"); fi
 transaction_state='absent'
-[[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
+[[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-ray-transaction" ]] && transaction_state='present'
 if [[ " \${arguments[0]:-} \${arguments[1]:-} \${arguments[2]:-} " == ' config list --json ' ]]; then
   if [[ ! -f "$directory/pnpm-workspace.yaml" ]]; then printf 'pnpm config workspace missing\n' >&2; exit 96; fi
   registry='https://registry.npmjs.org/'
@@ -798,7 +798,7 @@ if [[ "\${arguments[0]:-}" == 'add' && " \${arguments[*]} " == *' --lockfile-onl
 const { readFileSync, writeFileSync } = require('node:fs')
 const { join } = require('node:path')
 const directory = process.argv[2]
-const targets = process.argv.slice(3).filter(value => value.startsWith('@dsh-enhanced/'))
+const targets = process.argv.slice(3).filter(value => value.startsWith('@dsh-ray/'))
 const manifestPath = join(directory, 'package.json')
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
 manifest.dependencies ??= {}
@@ -848,7 +848,7 @@ fi
 if [[ "\${arguments[0]:-}" == 'install' && " \${arguments[*]} " == *' --offline '* && " \${arguments[*]} " == *' --frozen-lockfile '* ]]; then
   if [[ "\${LIFECYCLE_LOCAL_INSTALL_FAIL:-0}" == '1' && "$used_directory" == '1' && "$directory" == "$LIFECYCLE_REPO_ROOT" ]]; then printf 'local fixture pnpm install failed\n' >&2; exit 71; fi
   printf 'pnpm-offline-install\t%s\tcwd=%s\tignore=%s\tstore=%s\tcache=%s\t%s\n' "$transaction_state" "$directory" "\${pnpm_config_ignore_scripts:-}" "\${pnpm_config_store_dir:-}" "\${pnpm_config_cache_dir:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
-  if [[ -n "\${LIFECYCLE_NPM_PEER_EXTERNAL_BIN:-}" && -e "$directory/node_modules/@dsh-enhanced/lark-channel/package.json" ]]; then
+  if [[ -n "\${LIFECYCLE_NPM_PEER_EXTERNAL_BIN:-}" && -e "$directory/node_modules/@dsh-ray/lark-channel/package.json" ]]; then
     mkdir -p "$(dirname "$LIFECYCLE_NPM_PEER_EXTERNAL_BIN")"
     printf 'unexpected external bin\n' > "$LIFECYCLE_NPM_PEER_EXTERNAL_BIN"
   fi
@@ -985,13 +985,13 @@ const persist = () => {
 }
 if (state.firstCommandHomeExists === undefined) {
   state.firstCommandHomeExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME)
-  state.firstCommandBackupExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-enhanced-transaction/original-home')
-  state.firstCommandTransactionExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-enhanced-transaction')
+  state.firstCommandBackupExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-ray-transaction/original-home')
+  state.firstCommandTransactionExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-ray-transaction')
   persist()
 }
 if (state.firstCommandHomeExists === undefined) {
   state.firstCommandHomeExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME)
-  state.firstCommandBackupExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-enhanced-transaction/original-home')
+  state.firstCommandBackupExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-ray-transaction/original-home')
   persist()
 }
 if (args[0] !== '--user') process.exit(90)
@@ -1060,7 +1060,7 @@ if (args[1] === 'show') {
     process.exit(7)
   }
   const controlMaskPath = controlRoot + '/' + args[2]
-  const lifecycleGuardPath = controlRoot + '/' + args[2] + '.d/dsh-enhanced-lifecycle.conf'
+  const lifecycleGuardPath = controlRoot + '/' + args[2] + '.d/dsh-ray-lifecycle.conf'
   let controlMasked = false
   try { controlMasked = lstatSync(controlMaskPath).isSymbolicLink() } catch {}
   const dropIns = [...unit.dropIns]
@@ -1124,7 +1124,7 @@ if (args[1] === 'unmask' && args[2] === '--runtime') {
         && readlinkSync(maskPath) === '/dev/null'
     } catch { unit.boundMaskPresentWhenRuntimeUnmasked = false }
     try {
-      const manifest = JSON.parse(readFileSync(originalHome + '.dsh-enhanced-transaction/manifest.json', 'utf8'))
+      const manifest = JSON.parse(readFileSync(originalHome + '.dsh-ray-transaction/manifest.json', 'utf8'))
       unit.boundMaskPersistedWhenRuntimeUnmasked = manifest.containmentMasks.some(mask => (
         mask.unit === name && mask.guardianRuntimeMask === true
       ))
@@ -1152,7 +1152,7 @@ if (args[1] === 'disable' || args[1] === 'enable') {
 if (args[1] === 'stop') {
   if (state.stopLegacyMarkerExists === undefined) {
     state.stopLegacyMarkerExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME
-      + '.dsh-enhanced-transaction/legacy-v1-marker')
+      + '.dsh-ray-transaction/legacy-v1-marker')
   }
   for (const name of args.slice(2)) {
     const unit = state.units[name]
@@ -1315,14 +1315,14 @@ for (let index = 0; index < separator; index += 1) {
 }
 if (controls.LIFECYCLE_BWRAP_LOG) appendFileSync(controls.LIFECYCLE_BWRAP_LOG, JSON.stringify(args) + '\\n')
 if (separator < 0 || !args.includes('--unshare-all') || args.includes('--share-net') || !stageHome || !logicalHome
-  || validatorMode !== '0400' || validatorFd !== '4' || validatorPath !== '/run/dsh-enhanced-lifecycle-config.mjs') {
+  || validatorMode !== '0400' || validatorFd !== '4' || validatorPath !== '/run/dsh-ray-lifecycle-config.mjs') {
   process.stderr.write('fake bwrap rejected unsafe or incomplete sandbox arguments: ' + JSON.stringify({ separator, stageHome, logicalHome, validatorMode, validatorFd, validatorPath }) + '\\n')
   process.exit(97)
 }
 if (controls.LIFECYCLE_REQUIRE_PNPM_STORE_FD === '1' && (args.slice(separator + 1).includes('install') || args.slice(separator + 1).includes('config'))
   && (readonlyBindings[${JSON.stringify(pnpmStorePath)}] !== '5'
     || realpathSync('/proc/self/fd/' + readonlyBindings[${JSON.stringify(pnpmStorePath)}]) !== ${JSON.stringify(pnpmStorePath)}
-    || readonlyBindings['/run/dsh-enhanced-pnpm-cache'] !== '6')) {
+    || readonlyBindings['/run/dsh-ray-pnpm-cache'] !== '6')) {
   process.stderr.write('fake bwrap missing exact read-only pnpm store/cache fds ' + JSON.stringify(readonlyBindings) + '\\n')
   process.exit(96)
 }
@@ -1381,10 +1381,10 @@ export async function createRuntimeResolution({ installAnchor, profile, home }) 
 }
 `)
     if (baseServices || memoryExtension) await writeFile(join(f.dshHome, '.lifecycle-dump-config'), stringify([
-      { id: 'dsh-enhanced-lark-channel', name: '@dsh-enhanced/lark-channel', config: { enabled: true } },
-      { id: 'dsh-enhanced-assistant-recovery', name: '@dsh-enhanced/assistant-recovery', config: { jobs: [] } },
-      { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {} },
-      ...(memoryExtension ? [{ id: 'dsh-enhanced-personal-assistant', name: '@dsh-enhanced/personal-assistant',
+      { id: 'dsh-ray-lark-channel', name: '@dsh-ray/lark-channel', config: { enabled: true } },
+      { id: 'dsh-ray-assistant-recovery', name: '@dsh-ray/assistant-recovery', config: { jobs: [] } },
+      { id: 'dsh-ray-plugin-control-plane', name: '@dsh-ray/plugin-control-plane', config: {} },
+      ...(memoryExtension ? [{ id: 'dsh-ray-personal-assistant', name: '@dsh-ray/personal-assistant',
         config: { assistantAutomations: { schedulerEnabled: false } } }] : []),
     ]))
     const cachePath = join(f.root, 'pnpm-cache'), storeAlias = join(f.root, 'pnpm-store-alias')
@@ -1485,7 +1485,7 @@ export async function assertRsiPreOwnerInstallation(input) {
  try { await lstat(join(input.physicalHome,'owner-residue')); throw new Error('owner/coordinator rejected') }
  catch(error) { if(error.code !== 'ENOENT') throw error }
 }
-export async function readRsiLocalCohort(input) { return { sourceRepository:${JSON.stringify(join(f.root, 'upstream'))}, bundles:['personal-assistant'], receiptDigest:'c'.repeat(64),allowBuilds:{}, packages:[{name:'@dsh-enhanced/personal-assistant',bundle:true,tarball:join(input.dshHome,'rsi-local-cohorts',input.profile,'personal-assistant.tgz')}] } }
+export async function readRsiLocalCohort(input) { return { sourceRepository:${JSON.stringify(join(f.root, 'upstream'))}, bundles:['personal-assistant'], receiptDigest:'c'.repeat(64),allowBuilds:{}, packages:[{name:'@dsh-ray/personal-assistant',bundle:true,tarball:join(input.dshHome,'rsi-local-cohorts',input.profile,'personal-assistant.tgz')}] } }
 export function rsiLocalDependencyOverrides() { return {} }
 export async function rsiLocalPeerOverrides() { return {} }
 export function mergeRsiLocalOverrides(source) { return source }
@@ -1498,7 +1498,7 @@ export async function installRsiLocalProfile(input) {
  await mkdir(join(profile,'node_modules'));
 }
 export async function verifyRsiLocalInstalledPackages(input) {
- const value = await readFile(join(input.profilePath,'node_modules/@dsh-enhanced/plugin-control-plane/lib/entry.js'),'utf8')
+ const value = await readFile(join(input.profilePath,'node_modules/@dsh-ray/plugin-control-plane/lib/entry.js'),'utf8')
  if(value !== 'approved-package-bytes') throw new Error('installed package file differs')
 }
 export async function readRsiLocalUpdateLocked(input) { return {receiptDigest:createHash('sha256').update(await readFile(join(input.root,'receipt.json'))).digest('hex'),source:{root:${JSON.stringify(join(preparationRoot, 'source'))}},build:{sourceBuild:{schemaVersion:1}},
@@ -1550,12 +1550,12 @@ if (!validatorFd && args.includes('--clearenv')) {
  const fs=require('node:fs'),path=require('node:path');
  if(controls.LIFECYCLE_BWRAP_LOG)fs.appendFileSync(controls.LIFECYCLE_BWRAP_LOG,JSON.stringify(args)+'\\n');
  if(separator<0||!args.includes('--unshare-all')||!stageHome||Object.keys(writableBindings).length!==2)throw new Error('candidate namespace mounts missing');
- const cache=writableBindings['/run/dsh-enhanced-local-pnpm-cache'],storeEntry=Object.entries(writableBindings).find(([target])=>target==='/run/dsh-enhanced-local-pnpm-store'||target.startsWith('/run/dsh-enhanced-local-pnpm-store/'));
+ const cache=writableBindings['/run/dsh-ray-local-pnpm-cache'],storeEntry=Object.entries(writableBindings).find(([target])=>target==='/run/dsh-ray-local-pnpm-store'||target.startsWith('/run/dsh-ray-local-pnpm-store/'));
  const store=storeEntry?.[1],storeTarget=storeEntry?.[0];
  if(!cache||!store)throw new Error('candidate private package caches missing');
- const remapString=v=>{for(const [from,to]of [[logicalHome,stageHome],['/run/dsh-enhanced-local-pnpm-cache',cache],[storeTarget,store]])if(v===from||v.startsWith(from+'/'))return to+v.slice(from.length);return v};
+ const remapString=v=>{for(const [from,to]of [[logicalHome,stageHome],['/run/dsh-ray-local-pnpm-cache',cache],[storeTarget,store]])if(v===from||v.startsWith(from+'/'))return to+v.slice(from.length);return v};
  for(const [k,v]of Object.entries(environment))environment[k]=remapString(v);
- if(storeTarget!=='/run/dsh-enhanced-local-pnpm-store'&&environment.pnpm_config_store_dir==='/run/dsh-enhanced-local-pnpm-store')environment.pnpm_config_store_dir=path.resolve(store,...path.relative('/run/dsh-enhanced-local-pnpm-store',storeTarget).split('/').map(()=>'..'));
+ if(storeTarget!=='/run/dsh-ray-local-pnpm-store'&&environment.pnpm_config_store_dir==='/run/dsh-ray-local-pnpm-store')environment.pnpm_config_store_dir=path.resolve(store,...path.relative('/run/dsh-ray-local-pnpm-store',storeTarget).split('/').map(()=>'..'));
  Object.assign(environment,controls);
  const command=args.slice(separator+1).map(remapString);
  const homeNames=fs.readdirSync(stageHome).sort();
@@ -1567,7 +1567,7 @@ if (!validatorFd && args.includes('--clearenv')) {
    const input=command.at(-1),remap=v=>typeof v==='string'?remapString(v):Array.isArray(v)?v.map(remap):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,remap(x)])):v;
    fs.writeFileSync(input,JSON.stringify(remap(JSON.parse(fs.readFileSync(input,'utf8')))));
  } else if(!command.includes('config')&&!command.includes('--offline')&&!args.includes('--share-net'))throw new Error('candidate online phase has no network flag');
- const transactionState=fs.existsSync(controls.LIFECYCLE_ORIGINAL_HOME+'.dsh-enhanced-transaction')?'present':'absent';
+ const transactionState=fs.existsSync(controls.LIFECYCLE_ORIGINAL_HOME+'.dsh-ray-transaction')?'present':'absent';
  fs.appendFileSync(controls.LIFECYCLE_OPERATION_LOG,'candidate-sandbox\\t'+transactionState+'\\toffline='+environment.pnpm_config_offline+'\\t'+command.join(' ')+'\\n');
  const result=spawnSync(command[0],command.slice(1),{cwd:profile,env:environment,encoding:'buffer',stdio:['ignore','pipe','pipe',3,4,5,6,7]});
  if(result.stdout)process.stdout.write(result.stdout);if(result.stderr)process.stderr.write(result.stderr);if(result.error)throw result.error;process.exit(result.status??99);
@@ -1640,9 +1640,9 @@ process.stdout.write(yaml.stringify(rows))
 fi
 ` + dumpSource.slice(dumpEnd))
     // Runtime replacement uses a package locator but no fixture Control Plane code.
-    const controlPackage = join(f.profileDirectory, 'node_modules/@dsh-enhanced/plugin-control-plane')
+    const controlPackage = join(f.profileDirectory, 'node_modules/@dsh-ray/plugin-control-plane')
     await mkdir(controlPackage, { recursive: true })
-    await writeFile(join(controlPackage, 'package.json'), '{"name":"@dsh-enhanced/plugin-control-plane","version":"0.1.0"}')
+    await writeFile(join(controlPackage, 'package.json'), '{"name":"@dsh-ray/plugin-control-plane","version":"0.1.0"}')
     await mkdir(join(controlPackage, 'lib'))
     await writeFile(join(controlPackage, 'lib/entry.js'), 'approved-package-bytes')
     const pnpmPackageRoot = join(f.fakeBin, 'node_modules', 'pnpm')
@@ -1726,10 +1726,10 @@ if(result.error)throw result.error;process.exitCode=result.status??1;
     const lib = join(f.moduleRoot, 'plugins/lark-channel/lib')
     await cp(join(repoRoot, 'plugins/lark-channel/lib/rsi-linux-native-relocation.js'), join(lib, 'rsi-linux-native-relocation.js'))
     // Closed, narrow facade over unchanged published primitive implementations.
-    const isolation = join(f.moduleRoot, 'node_modules/@dsh-enhanced/assistant-isolation')
+    const isolation = join(f.moduleRoot, 'node_modules/@dsh-ray/assistant-isolation')
     await mkdir(join(isolation, 'lib'), { recursive: true })
     for (const name of ['linux-runtime.js', 'linux-user-namespace.js']) await cp(join(repoRoot, 'plugins/assistant-isolation/lib', name), join(isolation, 'lib', name))
-    await writeFile(join(isolation, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/assistant-isolation', type: 'module', exports: './lib/index.js' }))
+    await writeFile(join(isolation, 'package.json'), JSON.stringify({ name: '@dsh-ray/assistant-isolation', type: 'module', exports: './lib/index.js' }))
     await writeFile(join(isolation, 'lib/index.js'), "export * from './linux-runtime.js'; export { validateLinuxUserNamespaceMapping } from './linux-user-namespace.js'\n")
     const nativeLog = join(f.root, 'native-entry-resources.jsonl')
     await writeFile(nativeLog, '')
@@ -1751,7 +1751,7 @@ export async function readRsiSourceMaintenanceSnapshot(input){
  await appendFile(${JSON.stringify(nativeLog)},JSON.stringify({action:'source-snapshot',physicalHome:input.physicalHome,expectedStateDigest:input.expectedStateDigest,sourceDigest:digest})+'\\n');
  return state;
 }
-async function drift(home,phase){if(process.env.LIFECYCLE_NATIVE_RESOURCE_FAILURE!==phase||!home.includes('.dsh-enhanced-transaction/staged-home'))return;
+async function drift(home,phase){if(process.env.LIFECYCLE_NATIVE_RESOURCE_FAILURE!==phase||!home.includes('.dsh-ray-transaction/staged-home'))return;
  const path=join(home,'rsi-linux-runtimes/web/runtime/node_modules/index.js');await chmod(path,0o644);await writeFile(path,'tampered runtime bytes');await chmod(path,0o444);
  await appendFile(${JSON.stringify(nativeLog)},JSON.stringify({action:'drift',phase,home})+'\\n')}
 export async function produceRsiLocalSourceMaintenance(input){const result=await originalProduceRsiLocalSourceMaintenance(input);await drift(input.stagePhysicalHome,'after-stage');return result}
@@ -1768,13 +1768,13 @@ export async function freezeLinuxRuntimeSource(){return {manifests:[{path:'pnpm-
 export async function inspectLinuxRsiNativeBaseAt(input){await record({action:'inspect',...input});return inspect({...input,logicalHome:home})}
 export async function stageLinuxRsiPreOwnerNativeResources(input){
  const originalBackend=existsSync(join(home,'rsi-linux-runtimes',input.profile))?'linux-native':'docker';
- await record({action:'stage-request',physicalHome:input.stagePhysicalHome,transactionPresent:existsSync(home+'.dsh-enhanced-transaction')});
+ await record({action:'stage-request',physicalHome:input.stagePhysicalHome,transactionPresent:existsSync(home+'.dsh-ray-transaction')});
  if(process.env.LIFECYCLE_NATIVE_RESOURCE_FAILURE==='stage')throw new Error('fixture candidate native staging failed');
  for(const kind of ['rsi-builds','rsi-linux-runtimes','rsi-release-builds'])await rm(join(input.stagePhysicalHome,kind,input.profile),{recursive:true,force:true});
  const relocation=await relocateLinuxRsiNativeBase({sourceHome:join(input.preparationRoot,'home'),physicalHome:input.stagePhysicalHome,logicalHome:home,profile:input.profile,existingLogicalHome:home});
  const proof={schemaVersion:1,backend:'linux-native',purpose:'pre-owner-base',logicalHome:home,physicalHome:input.stagePhysicalHome,profile:input.profile,
   preparationDigest:createHash('sha256').update(await readFile(join(input.preparationRoot,'receipt.json'))).digest('hex'),cohortDigest:'c'.repeat(64),originalBackend,relocation};
- await record({action:'staged',proof,transactionPresent:existsSync(home+'.dsh-enhanced-transaction')});return {cohort:{},proof};
+ await record({action:'staged',proof,transactionPresent:existsSync(home+'.dsh-ray-transaction')});return {cohort:{},proof};
 }
 export async function verifyLinuxRsiPreOwnerNativeResources({proof,physicalHome}){
  // The fake namespace changes logical path spellings in its JSON transport.
@@ -1820,27 +1820,27 @@ export async function verifyLinuxRsiPreOwnerNativeResources({proof,physicalHome}
     const storage = join(f.dshHome, 'rsi-coordinators', coordinator)
     const shared = { catalogPath: join(f.dshHome, 'catalog.json'), trustPath: join(f.dshHome, 'trust.json') }
     const targetRows = parse(await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')) as object[]
-    targetRows.push({ id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {
+    targetRows.push({ id: 'dsh-ray-plugin-control-plane', name: '@dsh-ray/plugin-control-plane', config: {
       ...shared, sourceJobs: { ...scope, budgetAmount: 1 }, sourceAdoptions: { profile: 'web', handoff: { coordinatorId: 'pair-coordinator' } },
     } })
     await writeFile(join(f.dshHome, '.lifecycle-dump-config'), stringify(targetRows))
     const base = [{ id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop', config: { agents: [] } }]
     const rows = [...base,
-      { id: 'dsh-enhanced-assistant-policy', name: '@dsh-enhanced/assistant-policy', config: {
+      { id: 'dsh-ray-assistant-policy', name: '@dsh-ray/assistant-policy', config: {
         databasePath: join(storage, 'policy.sqlite'), budgets: [{ id: 'coord', metric: 'automation-runs', scope: 'subject', limit: 3, periodMs: 60_000 }],
       } },
-      { id: 'dsh-enhanced-assistant-automations', name: '@dsh-enhanced/assistant-automations', config: {
+      { id: 'dsh-ray-assistant-automations', name: '@dsh-ray/assistant-automations', config: {
         databasePath: join(storage, 'automations.sqlite'), runsPath: join(storage, 'runs'), schedulerEnabled: true,
       } },
-      { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {
+      { id: 'dsh-ray-plugin-control-plane', name: '@dsh-ray/plugin-control-plane', config: {
         ...shared, statePath: storage, adoptionCoordinator: { coordinatorId: 'pair-coordinator', scope, timeoutMs: 10_000, budgetId: 'coord', budgetAmount: 1 },
       } },
     ]
     await writeFile(join(coordinatorPath, '.lifecycle-dump-config'), stringify(rows))
     await writeFile(join(coordinatorPath, 'cordis.patch.yml'), stringify(rows))
     await writeFile(join(coordinatorPath, 'package.json'), JSON.stringify({ name: 'coordinator', private: true,
-      dependencies: Object.fromEntries(slugs.map(slug => [`@dsh-enhanced/${slug}`, '0.1.0'])),
-      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', ...slugs.map(slug => `@dsh-enhanced/${slug}`)] } },
+      dependencies: Object.fromEntries(slugs.map(slug => [`@dsh-ray/${slug}`, '0.1.0'])),
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', ...slugs.map(slug => `@dsh-ray/${slug}`)] } },
     }))
     await writeFile(join(coordinatorPath, 'pnpm-workspace.yaml'), 'packages:\n  - .\n')
     await writeFile(join(coordinatorPath, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
@@ -1848,9 +1848,9 @@ export async function verifyLinuxRsiPreOwnerNativeResources({proof,physicalHome}
     await mkdir(basePath, { recursive: true })
     await writeFile(join(basePath, 'cordis.patch.yml'), stringify([{ insert: base }]))
     for (const [profile, slug] of [['web', 'personal-assistant'], ['web', 'plugin-control-plane'], ...slugs.map(slug => [coordinator, slug])]) {
-      const root = join(f.dshHome, 'profiles', profile!, 'node_modules', '@dsh-enhanced', slug!)
+      const root = join(f.dshHome, 'profiles', profile!, 'node_modules', '@dsh-ray', slug!)
       await mkdir(root, { recursive: true })
-      await writeFile(join(root, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${slug}`, version: '0.1.0', type: 'module', exports: './index.js' }))
+      await writeFile(join(root, 'package.json'), JSON.stringify({ name: `@dsh-ray/${slug}`, version: '0.1.0', type: 'module', exports: './index.js' }))
       const source = slug === 'plugin-control-plane'
         ? "export const controlPlaneDigest = () => 'a'.repeat(64)\n"
         : `export const listActiveAutomationsLocally = () => [{ id: 'adoption-coordinator-' + 'a'.repeat(40), owner: 'plugin-control-plane-adoption-coordinator', updatedAt: Date.now(), definition: { execution: { kind: 'host', executorId: 'plugin-control-plane-adoption-coordinator-v1', ownerRouteId: 'owner-route' }, principal: 'owner', workspace: 'workspace', agentPreset: 'default' } }]\n`
@@ -1861,7 +1861,7 @@ export async function verifyLinuxRsiPreOwnerNativeResources({proof,physicalHome}
     const cohortPath = join(f.root, 'cohort')
     for (const slug of ['personal-assistant', ...slugs]) {
       await mkdir(join(cohortPath, slug), { recursive: true })
-      await writeFile(join(cohortPath, slug, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${slug}`, version: '0.1.1' }))
+      await writeFile(join(cohortPath, slug, 'package.json'), JSON.stringify({ name: `@dsh-ray/${slug}`, version: '0.1.1' }))
     }
     const updater = join(f.fakeBin, 'pair-update.mjs')
     await writeFile(updater, `import { readFileSync,writeFileSync,existsSync,mkdirSync,appendFileSync } from 'node:fs';
@@ -1896,7 +1896,7 @@ appendFileSync(process.env.LIFECYCLE_OPERATION_LOG,'pair-add '+profile+'\\n');
 import { join } from 'node:path';
 const root=process.argv[2], manifest=JSON.parse(readFileSync(join(root,'package.json')));
 for(const [name,version] of Object.entries(manifest.dependencies)) {
- if(!name.startsWith('@dsh-enhanced/')) continue;
+ if(!name.startsWith('@dsh-ray/')) continue;
  const dest=join(root,'node_modules',name); mkdirSync(dest,{recursive:true});
  let previous={};try{previous=JSON.parse(readFileSync(join(dest,'package.json')))}catch{}
  writeFileSync(join(dest,'package.json'),JSON.stringify({...previous,name,version}));
@@ -1930,9 +1930,9 @@ for(const [name,version] of Object.entries(manifest.dependencies)) {
     expect(sourceHelper).toContain(sourceEntry)
     await writeFile(sourceHelperPath, sourceHelper.replace(sourceEntry, sourceEntry
       + `  return ${JSON.stringify({ protocol: 'host-rsi/scanner-owner-source/v1', homePath: f.dshHome, profile: 'web', sourceDigest: digest64, owner: fixtureOwner })}\n`))
-    const larkModule = join(f.profileDirectory, 'node_modules', '@dsh-enhanced', 'lark-channel')
+    const larkModule = join(f.profileDirectory, 'node_modules', '@dsh-ray', 'lark-channel')
     await mkdir(larkModule, { recursive: true })
-    await writeFile(join(larkModule, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/lark-channel', version: '0.1.0', type: 'module', exports: './index.js' }))
+    await writeFile(join(larkModule, 'package.json'), JSON.stringify({ name: '@dsh-ray/lark-channel', version: '0.1.0', type: 'module', exports: './index.js' }))
     await writeFile(join(larkModule, 'index.js'), `import {createHash} from 'node:crypto';import {readFile,writeFile} from 'node:fs/promises';import {join} from 'node:path';
 const hash=x=>createHash('sha256').update(x).digest('hex'),home=process.env.DSH_HOME;
 const inventory=JSON.parse(await readFile(join(home,'.scanner-retirement-fixture.json'),'utf8'));
@@ -1967,8 +1967,8 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
       LIFECYCLE_CANDIDATE_FAILURE: options.candidateFailure ?? '',
       LIFECYCLE_PREPARED_RECEIPT_PATH: join(dirname(dshHome), 'prepared-update', 'receipt.json'),
       PATH: `${fakeBin}:${process.env.PATH ?? ''}`, DSH_HOME: dshHome, NODE_ENV: 'test',
-      DSH_ENHANCED_TEST_SERVICE_TOOLS: '1',
-      DSH_ENHANCED_TEST_SUPERVISED_OPERATOR_LOG: join(dirname(dshHome), 'supervised-operator.log'),
+      DSH_RAY_TEST_SERVICE_TOOLS: '1',
+      DSH_RAY_TEST_SUPERVISED_OPERATOR_LOG: join(dirname(dshHome), 'supervised-operator.log'),
       LIFECYCLE_ACTIVATION_MARKER: options.activationMarker ?? join(dshHome, '.activation-ran'),
       LIFECYCLE_BWRAP_LOG: join(dirname(dshHome), 'bwrap.log'),
       LIFECYCLE_CONFIG_AFTER_ACTIVATION: options.configAfterActivation ?? '',
@@ -2023,24 +2023,24 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
       LIFECYCLE_SYSTEMD_JOURNAL: options.systemdJournal ?? 'ready',
       LIFECYCLE_SYSTEMD_KILL_LIFECYCLE_DURING_START_PROFILE: options.systemdKillLifecycleDuringStartProfile ?? '',
       LIFECYCLE_SYSTEMD_OWNERSHIP_CHANGES_PROFILE: options.systemdOwnershipChangesProfile ?? '',
-      DSH_ENHANCED_TEST_DISCONNECT_GUARDIAN_AFTER_START: options.guardianDisconnectAfterStart ? '1' : '',
-      DSH_ENHANCED_TEST_GUARDIAN_PID_FILE: join(dirname(dshHome), 'guardian.pid'),
-      DSH_ENHANCED_TEST_FAIL_CANONICAL_CLEANUP: options.canonicalCleanupFails ? '1' : '',
-      DSH_ENHANCED_TEST_CRASH_DURING_CLEANUP: options.crashDuringCleanup ? '1' : '',
-      DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_METADATA: options.crashAfterCleanupMetadata ? '1' : '',
-      DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_PREPARED: options.crashAfterCleanupPrepared ? '1' : '',
-      DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_REACCEPT_GUARDIAN: options.crashAfterCleanupReacceptGuardian ? '1' : '',
-      DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_REACCEPT_PENDING: options.crashAfterCleanupReacceptPending ? '1' : '',
-      DSH_ENHANCED_TEST_KILL_PARENT_AFTER_GUARDIAN_START: options.systemdKillLifecycleDuringStartProfile === undefined ? '' : '1',
-      DSH_ENHANCED_TEST_KILL_AFTER_ORIGINAL_RENAME: options.killLifecycleAfterOriginalRename ? '1' : '',
-      DSH_ENHANCED_TEST_KILL_AFTER_STOPPED: options.killLifecycleAfterStopped ? '1' : '',
+      DSH_RAY_TEST_DISCONNECT_GUARDIAN_AFTER_START: options.guardianDisconnectAfterStart ? '1' : '',
+      DSH_RAY_TEST_GUARDIAN_PID_FILE: join(dirname(dshHome), 'guardian.pid'),
+      DSH_RAY_TEST_FAIL_CANONICAL_CLEANUP: options.canonicalCleanupFails ? '1' : '',
+      DSH_RAY_TEST_CRASH_DURING_CLEANUP: options.crashDuringCleanup ? '1' : '',
+      DSH_RAY_TEST_CRASH_AFTER_CLEANUP_METADATA: options.crashAfterCleanupMetadata ? '1' : '',
+      DSH_RAY_TEST_CRASH_AFTER_CLEANUP_PREPARED: options.crashAfterCleanupPrepared ? '1' : '',
+      DSH_RAY_TEST_CRASH_AFTER_CLEANUP_REACCEPT_GUARDIAN: options.crashAfterCleanupReacceptGuardian ? '1' : '',
+      DSH_RAY_TEST_CRASH_AFTER_CLEANUP_REACCEPT_PENDING: options.crashAfterCleanupReacceptPending ? '1' : '',
+      DSH_RAY_TEST_KILL_PARENT_AFTER_GUARDIAN_START: options.systemdKillLifecycleDuringStartProfile === undefined ? '' : '1',
+      DSH_RAY_TEST_KILL_AFTER_ORIGINAL_RENAME: options.killLifecycleAfterOriginalRename ? '1' : '',
+      DSH_RAY_TEST_KILL_AFTER_STOPPED: options.killLifecycleAfterStopped ? '1' : '',
       LIFECYCLE_SYSTEMD_LOG: join(dirname(dshHome), 'systemd.log'),
       LIFECYCLE_SYSTEMD_LARK_PROFILES: options.systemdLarkProfiles?.join(',') ?? '',
       LIFECYCLE_SYSTEMD_PID_STUCK_PROFILE: options.systemdPidStuckProfile ?? '',
-      DSH_ENHANCED_TEST_PROC_PIDS: options.systemdProcPids?.join(',') ?? '',
-      DSH_ENHANCED_TEST_SSHD_PROOF_PIDS: options.sshdProofPids?.join(',') ?? '',
-      DSH_ENHANCED_TEST_SDPAM_PROOF_PIDS: options.sdPamProofPids?.join(',') ?? '',
-      DSH_ENHANCED_TEST_INCLUDE_ANCESTORS: options.processAncestorReference === undefined ? '' : '1',
+      DSH_RAY_TEST_PROC_PIDS: options.systemdProcPids?.join(',') ?? '',
+      DSH_RAY_TEST_SSHD_PROOF_PIDS: options.sshdProofPids?.join(',') ?? '',
+      DSH_RAY_TEST_SDPAM_PROOF_PIDS: options.sdPamProofPids?.join(',') ?? '',
+      DSH_RAY_TEST_INCLUDE_ANCESTORS: options.processAncestorReference === undefined ? '' : '1',
       LIFECYCLE_SYSTEMD_QUIESCENCE_DRIFT_PROFILE: options.systemdQuiescenceDriftProfile ?? '',
       LIFECYCLE_SYSTEMD_READINESS_FAILS_PROFILE: options.systemdReadinessFailsProfile ?? '',
       LIFECYCLE_SYSTEMD_REPLACE_CONTROL_MASK_ON_UNMASK_PROFILE: options.systemdReplaceControlMaskOnUnmaskProfile ?? '',
@@ -2050,12 +2050,12 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
       LIFECYCLE_SYSTEMD_STOP_FAILS_PROFILE: options.systemdStopFailsProfile ?? '',
       LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE: options.systemdSupervisedProfile ?? '',
       LIFECYCLE_SYSTEMD_UNSUPPORTED_PROFILE: options.systemdUnsupportedProfile ?? '',
-      DSH_ENHANCED_SERVICE_READY_TIMEOUT_MS: '1000',
-      DSH_ENHANCED_SERVICE_STABILITY_MS: options.serviceStabilityMs ?? '0',
+      DSH_RAY_SERVICE_READY_TIMEOUT_MS: '1000',
+      DSH_RAY_SERVICE_STABILITY_MS: options.serviceStabilityMs ?? '0',
       ...(options.serviceStabilitySamples === undefined ? {} : {
-        DSH_ENHANCED_SERVICE_STABILITY_SAMPLES: String(options.serviceStabilitySamples),
+        DSH_RAY_SERVICE_STABILITY_SAMPLES: String(options.serviceStabilitySamples),
       }),
-      DSH_ENHANCED_SERVICE_STOP_TIMEOUT_MS: '1000',
+      DSH_RAY_SERVICE_STOP_TIMEOUT_MS: '1000',
       HOME: join(dirname(dshHome), 'systemd-home'),
     }
   }
@@ -2063,7 +2063,7 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
   function runLifecycle(args: readonly string[], dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
     const lifecycleInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
     const [operation, profile, homePath, dryRun, ...targets] = args
-    return spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_profile_lifecycle "$@"',
+    return spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_ray_profile_lifecycle "$@"',
       'lifecycle-test', lifecycleInstallerLibrary, operation!, profile!, homePath!, dryRun!,
       options.expectedScenario ?? 'web', ...targets], {
       cwd: repoRoot,
@@ -2084,7 +2084,7 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
     const serviceInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
     setLifecycleSystemdControls(statePath, options)
     return spawnSync('/bin/bash', [
-      '-c', `${options.processAncestorReference === 'fd' ? 'exec 9<"$DSH_HOME"; ' : ''}source "$1"; shift; dsh_enhanced_run_lifecycle_executor ${operation} "$@"`,
+      '-c', `${options.processAncestorReference === 'fd' ? 'exec 9<"$DSH_HOME"; ' : ''}source "$1"; shift; dsh_ray_run_lifecycle_executor ${operation} "$@"`,
       'service-lifecycle-test', serviceInstallerLibrary, profile!, homePath!, options.expectedScenario ?? 'lark', ...targets,
     ], {
       cwd: options.processAncestorReference === 'cwd' ? dshHome : repoRoot,
@@ -2105,7 +2105,7 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
     const serviceInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
     setLifecycleSystemdControls(statePath, options)
     const child = spawn('/bin/bash', [
-      '-c', `source "$1"; shift; dsh_enhanced_run_lifecycle_executor ${operation} "$@"`,
+      '-c', `source "$1"; shift; dsh_ray_run_lifecycle_executor ${operation} "$@"`,
       'service-lifecycle-test', serviceInstallerLibrary, profile!, homePath!, options.expectedScenario ?? 'lark', ...targets,
     ], {
       cwd: repoRoot, detached: true, env: lifecycleEnvironment(dshHome, fakeBin, options),
@@ -2217,7 +2217,7 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
   function startLifecycle(args: readonly string[], dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
     const lifecycleInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
     const [operation, profile, homePath, dryRun, ...targets] = args
-    const child = spawn('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_profile_lifecycle "$@"',
+    const child = spawn('/bin/bash', ['-c', 'source "$1"; shift; dsh_ray_profile_lifecycle "$@"',
       'lifecycle-test', lifecycleInstallerLibrary, operation!, profile!, homePath!, dryRun!,
       options.expectedScenario ?? 'web', ...targets], {
       cwd: repoRoot, env: lifecycleEnvironment(dshHome, fakeBin, options),
@@ -2235,7 +2235,7 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
 
   function runRecovery(profile: string, dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
     const lifecycleInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
-    return spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_recover_profile_lifecycle "$2" "$3" 0',
+    return spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_ray_recover_profile_lifecycle "$2" "$3" 0',
       'recovery-test', lifecycleInstallerLibrary, profile, dshHome], {
       cwd: repoRoot, encoding: 'utf8', env: lifecycleEnvironment(dshHome, fakeBin, options),
     })
@@ -2243,7 +2243,7 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
 
   function startRecovery(profile: string, dshHome: string, fakeBin: string) {
     const lifecycleInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
-    const child = spawn('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_recover_profile_lifecycle "$2" "$3" 0',
+    const child = spawn('/bin/bash', ['-c', 'source "$1"; dsh_ray_recover_profile_lifecycle "$2" "$3" 0',
       'recovery-test', lifecycleInstallerLibrary, profile, dshHome], {
       cwd: repoRoot, env: lifecycleEnvironment(dshHome, fakeBin),
     })
@@ -2320,7 +2320,7 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
 
   async function preservedLifecycleTransactions(dshHome: string): Promise<string[]> {
     const parent = dirname(dshHome)
-    const prefix = `${basename(dshHome)}.dsh-enhanced-transaction`
+    const prefix = `${basename(dshHome)}.dsh-ray-transaction`
     return (await readdir(parent))
       .filter(name => name === prefix || name.startsWith(`${prefix}.`))
       .map(name => join(parent, name))
@@ -2466,7 +2466,7 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
     stagedIdentity?: LifecycleIdentity
     stagedProfileDigest?: string
   }): Promise<BoundLifecycleManifest> {
-    const transactionPath = `${options.dshHome}.dsh-enhanced-transaction`
+    const transactionPath = `${options.dshHome}.dsh-ray-transaction`
     await mkdir(transactionPath, { recursive: true, mode: 0o700 })
     await chmod(transactionPath, 0o700)
     const createdAt = '2026-09-09T00:00:00.000Z'

@@ -9,8 +9,8 @@ import { isDeepStrictEqual } from 'node:util'
 import {
   hashLinuxRuntimeTree, linuxRuntimeDigest, validateLinuxRuntime, validateLinuxUserNamespaceMapping,
   type LinuxRuntime, type LinuxSystemSnapshot, type LinuxUserNamespaceMapping,
-} from '@dsh-enhanced/assistant-isolation'
-import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+} from '@dsh-ray/assistant-isolation'
+import type { LinuxPluginBehaviorRuntime } from '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 import type { LinuxCgroupRoots } from './rsi-linux-cgroup-roots.js'
 import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
 import type { LinuxRsiRepositoryBuildEnvironment } from './rsi-linux-repository-bootstrap.js'
@@ -88,7 +88,7 @@ interface SourceState {
   releaseReceipt: JsonObject
 }
 
-const PEER_SPECIFIER = '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+const PEER_SPECIFIER = '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const HEX = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u

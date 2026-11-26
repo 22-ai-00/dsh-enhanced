@@ -28,7 +28,7 @@ async function fixture(version = '0.1.48') {
   const home = join(root, 'home'), source = join(root, 'source')
   await mkdir(home, { mode: 0o700 }); await mkdir(source)
   git(source, 'init', '--object-format=sha1', '--initial-branch=main', '.')
-  await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version }))
+  await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-ray', version }))
   await writeFile(join(source, 'README.md'), 'initial\n')
   git(source, 'add', 'package.json', 'README.md'); git(source, 'commit', '-m', 'initial')
   const head = git(source, 'rev-parse', 'HEAD')
@@ -45,7 +45,7 @@ async function legacyMacFixture() {
   // digest envelope and a Git output adapter scoped to this test.
   const knownCommit = '172bc31ddf0c00a6f0b3252354f2170a14dd7fc2'
   const { receiptDigest: _digest, ...body } = receipt
-  body.origin = { kind: 'official-tag', locator: 'https://github.com/22-ai-00/dsh-enhanced.git', ref: 'refs/tags/v0.1.49' }
+  body.origin = { kind: 'official-tag', locator: 'https://github.com/22-ai-00/dsh-ray.git', ref: 'refs/tags/v0.1.49' }
   body.sourceCommit = knownCommit
   body.baseline.initialCommit = knownCommit
   await writeFile(receiptPath, JSON.stringify({ ...body, receiptDigest: createHash('sha256').update(JSON.stringify(body)).digest('hex') }))
@@ -86,7 +86,7 @@ describe('private RSI source workspace', () => {
     const f = await legacyMacFixture()
     const oldReceipt = await readFile(f.receiptPath)
     await mkdir(join(f.home, 'rsi-source-archives', 'owner'), { recursive: true, mode: 0o700 })
-    await writeFile(join(f.source, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version: '0.1.50' }))
+    await writeFile(join(f.source, 'package.json'), JSON.stringify({ name: 'dsh-ray', version: '0.1.50' }))
     git(f.source, 'add', 'package.json'); git(f.source, 'commit', '-m', 'next version')
     const next = git(f.source, 'rev-parse', 'HEAD')
     await withLegacyMacGit(f, async () => {
@@ -150,7 +150,7 @@ describe('private RSI source workspace', () => {
       expect(archives).toHaveLength(1)
       expect(await readFile(join(archiveRoot, archives[0]!, 'bootstrap.json'))).toBeTruthy()
       await expect(lstat(join(f.home, 'rsi-sources', 'owner'))).rejects.toMatchObject({ code: 'ENOENT' })
-      await writeFile(join(f.source, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version: '0.1.50' }))
+      await writeFile(join(f.source, 'package.json'), JSON.stringify({ name: 'dsh-ray', version: '0.1.50' }))
       git(f.source, 'add', 'package.json'); git(f.source, 'commit', '-m', 'next version')
       const prepared = await prepareRsiSourceWorkspace(request)
       expect(prepared.version).toBe('0.1.50')

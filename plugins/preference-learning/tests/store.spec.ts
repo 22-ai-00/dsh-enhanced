@@ -9,7 +9,7 @@ import {
   withPreferenceMemoryPromotionCancellationReceiptDigest,
   withPreferenceMemoryPromotionResultDigest,
   withPreferenceMemoryPromotionSubmissionDigest,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
   openPreferenceDatabase,

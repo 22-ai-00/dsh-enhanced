@@ -42,7 +42,7 @@ export async function readRsiLocalUpdateLocked(input: { dshHome: string; profile
     || !isAbsolute(input.root) || resolve(input.root) !== input.root
     || await realpath(input.dshHome) !== input.dshHome || await realpath(input.root) !== input.root) fail('invalid preparation identity')
   await io.directory(input.dshHome, false)
-  const parent = join(dirname(input.dshHome), `.dsh-rsi-local-updates-${hash(input.dshHome).slice(0, 16)}`)
+  const parent = join(dirname(input.dshHome), `.dsh-ray-local-updates-${hash(input.dshHome).slice(0, 16)}`)
   if (dirname(input.root) !== parent) fail('preparation is outside its bound parent')
   await io.directory(parent); await io.directory(input.root)
   const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(180_000)])
@@ -149,7 +149,7 @@ export async function prepareRsiLocalUpdate(input: RsiLocalUpdateInput,
     const identity = preparationIdentity({ ...input, original, upstreamCommit, repairCommit })
     // Outside Home so preparing/building never changes an active Agent's input
     // tree. Each exact upstream/repair pair has a distinct immutable directory.
-    const parent = join(dirname(input.dshHome), `.dsh-rsi-local-updates-${hash(input.dshHome).slice(0, 16)}`)
+    const parent = join(dirname(input.dshHome), `.dsh-ray-local-updates-${hash(input.dshHome).slice(0, 16)}`)
     if (parent === input.sourceRepository || parent.startsWith(input.sourceRepository + '/')) fail('preparation directory would modify the source repository')
     await privateDirectory(parent)
     const root = join(parent, identity)

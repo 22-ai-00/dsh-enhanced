@@ -155,7 +155,7 @@ export async function copyLocalSourcePackageCache({ storePath, cachePath, rootPa
   return Object.freeze({ storePath: store, cachePath: cache })
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+  const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
   if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
     const originalEmitWarning = process.emitWarning
     const filteredEmitWarning = function emitWarning(warning, ...rest) {

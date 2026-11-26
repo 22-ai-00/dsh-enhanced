@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { assertDefinitionProtocol, compensationDirective, createDefinition, evaluatePreconditions, fileObservationSteps, instantiate, validateStepGraph, type CreateDefinitionOptions, type SkillRunExpansion, type SkillStep, type VerifiedWorkflowSource } from '../src/definition.ts'
 
 function source(steps: VerifiedWorkflowSource['steps'] = [{ id: 'call-1', toolName: 'files_read', arguments: { path: '/tmp/report.txt', retry: false, limit: 10 } }]): VerifiedWorkflowSource {

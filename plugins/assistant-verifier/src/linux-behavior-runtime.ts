@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { constants, createReadStream, type Stats } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, readlink, realpath, rename, rm, rmdir, symlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { hashLinuxRuntimeTree, linuxRuntimeDigest, validateLinuxRuntime, verifyLinuxRuntime, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { hashLinuxRuntimeTree, linuxRuntimeDigest, validateLinuxRuntime, verifyLinuxRuntime, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { behaviorSha256 as sha, LINUX_BEHAVIOR_COMPILE_FLAGS, loadLinuxBehaviorAssets, readBehaviorFile } from './linux-behavior-assets.js'
 export { LINUX_BEHAVIOR_COMMAND } from './linux-behavior-assets.js'
 

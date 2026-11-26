@@ -4,9 +4,9 @@ import type {
   AutomationRetirementReceipt,
   AutomationRetirementSchemaEntry,
   AutomationRetirementSnapshot,
-} from '@dsh-enhanced/assistant-automations'
-import { externalPrincipalId, ownerRouteAuthorityHash } from '@dsh-enhanced/assistant-delivery'
-import type { RevokedOwnerRouteSnapshot } from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-automations'
+import { externalPrincipalId, ownerRouteAuthorityHash } from '@dsh-ray/assistant-delivery'
+import type { RevokedOwnerRouteSnapshot } from '@dsh-ray/assistant-delivery'
 
 const scannerPrefixes = {
   'assistant-memory-learning': 'memory-scan-',

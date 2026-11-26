@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-event-triggers
-      name: '@dsh-enhanced/event-triggers'
+    - id: dsh-ray-event-triggers
+      name: '@dsh-ray/event-triggers'
       inject:
         - assistantPolicy
         - assistantAutomations

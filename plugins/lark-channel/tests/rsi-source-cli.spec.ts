@@ -52,11 +52,11 @@ describe('RSI source preparation CLI', () => {
       cwd: source, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
     }).trim()
     git('init', '--quiet')
-    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version }))
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-ray', version }))
     git('add', 'package.json')
     git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial')
     const initial = git('rev-parse', 'HEAD')
-    const dirty = JSON.stringify({ name: 'dsh-enhanced', version: '99.0.0' })
+    const dirty = JSON.stringify({ name: 'dsh-ray', version: '99.0.0' })
     await writeFile(join(source, 'package.json'), dirty)
     const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     const args = ['--prepare-source', '--profile', 'web', '--dsh-home', home, '--source-repository', source]
@@ -78,7 +78,7 @@ describe('RSI source preparation CLI', () => {
       cwd: source, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
     })
     git('init', '--quiet')
-    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version }))
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-ray', version }))
     git('add', 'package.json')
     git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial')
     const args = ['--prepare-build', '--optional-build', '--profile', 'web', '--dsh-home', home,
@@ -94,7 +94,7 @@ describe('RSI source preparation CLI', () => {
       cwd: source, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
     })
     git('init', '--quiet')
-    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version }))
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-ray', version }))
     git('add', 'package.json')
     git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial')
     vi.spyOn(authorityRuntime, 'prepareRsiAuthorityRuntime').mockResolvedValue({
@@ -115,7 +115,7 @@ describe('RSI source preparation CLI', () => {
       cwd: source, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
     })
     git('init', '--quiet')
-    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version }))
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-ray', version }))
     git('add', 'package.json')
     git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial')
     const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)

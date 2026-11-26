@@ -1,5 +1,5 @@
-import type { MemoryLearningOwner, MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
-import type { OwnerForegroundTaskSourceCursor } from '@dsh-enhanced/assistant-delivery'
+import type { MemoryLearningOwner, MemoryLearningReviewRequest } from '@dsh-ray/assistant-growth-contract'
+import type { OwnerForegroundTaskSourceCursor } from '@dsh-ray/assistant-delivery'
 
 export interface LearningModel { provider: string; model: string; reasoningEffort?: string }
 export interface LearningConfig {
@@ -61,7 +61,7 @@ export type LearningIntent = LearningIntentBase & (
 interface LearningSnapshotBase {
   model: LearningModel
   targets: readonly Readonly<{ id: string; version: number; kind: 'fact' | 'experience'; content: string;
-    knowledge?: import('@dsh-enhanced/assistant-growth-contract').MemoryLearningEntry['knowledge'] }>[]
+    knowledge?: import('@dsh-ray/assistant-growth-contract').MemoryLearningEntry['knowledge'] }>[]
 }
 export type WorkItemPresentationFlags = Readonly<Record<'brief' | 'report' | 'feedback', Readonly<{ truncated: boolean; redacted: boolean }>>>
 export type LearningSnapshot = LearningSnapshotBase & (

@@ -14,7 +14,7 @@ const CLI_DRY_RUN_TIMEOUT_MS = 30_000
 const REGISTRY_TIMEOUT_MS = 6_000
 const MAX_HOST_METADATA_BYTES = 16_384
 const MAX_REGISTRY_BYTES = 32_768
-const ENHANCED_NPM_LATEST_URL = 'https://registry.npmjs.org/@dsh-enhanced%2Fowner-console/latest'
+const ENHANCED_NPM_LATEST_URL = 'https://registry.npmjs.org/@dsh-ray%2Fowner-console/latest'
 const SEMVER_PATTERN = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u
 
 export interface BoundHostMetadata {
@@ -155,7 +155,7 @@ export function compareSemver(a: string | null | undefined, b: string | null | u
   return 0
 }
 
-/** Read `$DSH_HOME/.dsh-rsi-host.json` strictly without following symlinks or group/world-writable files. */
+/** Read `$DSH_HOME/.dsh-ray-host.json` strictly without following symlinks or group/world-writable files. */
 export function readBoundHostMetadata(dshHome: string | null): BoundHostMetadata {
   if (dshHome === null || dshHome.trim() === '') return { status: 'missing', version: null }
   let canonicalHome: string
@@ -164,7 +164,7 @@ export function readBoundHostMetadata(dshHome: string | null): BoundHostMetadata
   } catch {
     return { status: 'missing', version: null }
   }
-  const filePath = join(canonicalHome, '.dsh-rsi-host.json')
+  const filePath = join(canonicalHome, '.dsh-ray-host.json')
   let fd: number | undefined
   try {
     const flags = constants.O_RDONLY | (typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0)
@@ -181,12 +181,12 @@ export function readBoundHostMetadata(dshHome: string | null): BoundHostMetadata
     const raw = readFileSync(fd, 'utf8')
     const parsed = JSON.parse(raw) as unknown
     const obj = boundedConfig(parsed)
-    if (obj['schemaVersion'] !== 1) return { status: 'corrupt', version: null, error: 'unsupported .dsh-rsi-host.json schemaVersion' }
+    if (obj['schemaVersion'] !== 1) return { status: 'corrupt', version: null, error: 'unsupported .dsh-ray-host.json schemaVersion' }
     const version = textOrNull(obj['version'])
     const cacheRoot = textOrNull(obj['cacheRoot'])
     const receiptDigest = textOrNull(obj['receiptDigest'])
     if (version === null || cacheRoot === null || receiptDigest === null) {
-      return { status: 'corrupt', version: null, error: 'missing required fields in .dsh-rsi-host.json' }
+      return { status: 'corrupt', version: null, error: 'missing required fields in .dsh-ray-host.json' }
     }
     return { status: 'ready', version, cacheRoot, receiptDigest }
   } catch (error: unknown) {
@@ -194,7 +194,7 @@ export function readBoundHostMetadata(dshHome: string | null): BoundHostMetadata
       return { status: 'missing', version: null }
     }
     if (error instanceof SyntaxError) {
-      return { status: 'corrupt', version: null, error: 'corrupt .dsh-rsi-host.json JSON' }
+      return { status: 'corrupt', version: null, error: 'corrupt .dsh-ray-host.json JSON' }
     }
     return {
       status: 'unreadable',
@@ -269,9 +269,9 @@ function buildCliUpgradeCommand(dshHome: string | null, profileName: string, fro
   if (frozen) {
     const base = 'sudo -u <owner> node scripts/install/upgrade-program.mjs'
     const homeFlag = dshHome === null ? '' : ` --dsh-home "${dshHome}"`
-    return `先停止受控 systemd 服务后执行：dsh-rsi upgrade --yes${homeFlag} --profile ${profileName}（或 ${base}）`
+    return `先停止受控 systemd 服务后执行：dsh-ray upgrade --yes${homeFlag} --profile ${profileName}（或 ${base}）`
   }
-  const args = ['dsh-rsi', 'upgrade', '--yes']
+  const args = ['dsh-ray', 'upgrade', '--yes']
   if (dshHome !== null) args.push('--dsh-home', JSON.stringify(dshHome))
   if (profileName !== '' && profileName !== 'default') args.push('--profile', profileName)
   return args.join(' ')
@@ -338,11 +338,11 @@ function isExecutableBinary(candidatePath: string, platform: NodeJS.Platform): b
   }
 }
 
-function discoverDshRsiBinary(
+function discoverDshRayBinary(
   envSource: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
 ): string | undefined {
-  const names = platform === 'win32' ? ['dsh-rsi.cmd', 'dsh-rsi.exe'] : ['dsh-rsi']
+  const names = platform === 'win32' ? ['dsh-ray.cmd', 'dsh-ray.exe'] : ['dsh-ray']
   for (const dir of candidateUpgradeBinDirs(envSource, platform)) {
     for (const name of names) {
       const candidate = join(dir, name)
@@ -364,7 +364,7 @@ function upgradeCacheKey(ctx: ResolvedUpgradeContext): string {
   return `${ctx.dshHome ?? ''}::${ctx.profileName}`
 }
 
-function parseDshRsiUpgradeJson(stdout: string, fallbackCurrent: string): ParsedCliPayload | null {
+function parseDshRayUpgradeJson(stdout: string, fallbackCurrent: string): ParsedCliPayload | null {
   const trimmed = stdout.trim()
   if (trimmed === '') return null
   const jsonStart = trimmed.indexOf('{')
@@ -439,7 +439,7 @@ function parseDshRsiUpgradeJson(stdout: string, fallbackCurrent: string): Parsed
   }
 }
 
-function buildDshRsiArgs(
+function buildDshRayArgs(
   subcommandFlag: '--check' | '--dry-run' | '--yes',
   ctx: ResolvedUpgradeContext,
   confirmDshHomeStopped = false,
@@ -493,7 +493,7 @@ export class SelfUpgradeProber {
     this.currentVersion = options.currentVersion ?? PACKAGE_VERSION
     this.platform = options.platform ?? process.platform
     this.envSource = options.env ?? process.env
-    this.cliBin = options.cliBin ?? 'dsh-rsi'
+    this.cliBin = options.cliBin ?? 'dsh-ray'
   }
 
   invalidate(): void {
@@ -507,7 +507,7 @@ export class SelfUpgradeProber {
   ): Promise<ProbeExecResult> {
     const initialBin = this.resolvedCliBin ?? this.cliBin
     if (!isSingleLineCommand(initialBin)) {
-      return { stdout: '', stderr: 'invalid dsh-rsi binary', exitCode: 1, errorCode: 'EINVAL' }
+      return { stdout: '', stderr: 'invalid dsh-ray binary', exitCode: 1, errorCode: 'EINVAL' }
     }
     const firstResult = await this.execFn(initialBin, args, { timeoutMs, env })
     if (!isMissingBinaryError(firstResult)) {
@@ -516,10 +516,10 @@ export class SelfUpgradeProber {
     if (this.resolvedCliBin !== undefined) {
       this.resolvedCliBin = undefined
     }
-    if (this.cliBin !== 'dsh-rsi') {
+    if (this.cliBin !== 'dsh-ray') {
       return firstResult
     }
-    const discovered = discoverDshRsiBinary(this.envSource, this.platform)
+    const discovered = discoverDshRayBinary(this.envSource, this.platform)
     if (discovered === undefined || discovered === initialBin || !isSingleLineCommand(discovered)) {
       return firstResult
     }
@@ -588,8 +588,8 @@ export class SelfUpgradeProber {
     const baseFrozen = detectFrozenSystemdProfile(ctx.dshHome, ctx.profileName, this.platform, this.envSource)
     const safeEnv = buildUpgradeProbeEnv(this.envSource, this.platform, ctx.dshHome)
 
-    const cliResult = await this.execUpgradeCli(buildDshRsiArgs('--check', ctx), CLI_CHECK_TIMEOUT_MS, safeEnv)
-    const cliPayload = cliResult.errorCode !== 'ENOENT' ? parseDshRsiUpgradeJson(cliResult.stdout, this.currentVersion) : null
+    const cliResult = await this.execUpgradeCli(buildDshRayArgs('--check', ctx), CLI_CHECK_TIMEOUT_MS, safeEnv)
+    const cliPayload = cliResult.errorCode !== 'ENOENT' ? parseDshRayUpgradeJson(cliResult.stdout, this.currentVersion) : null
 
     if (cliPayload !== null) {
       this.resolvedModes.set(cacheKey, cliPayload.mode)
@@ -605,7 +605,7 @@ export class SelfUpgradeProber {
             : !cliPayload.canExecute || cliResult.exitCode !== 0
               ? '升级前置检查未通过，请查看升级预演诊断或在终端执行下方命令。'
               : cliPayload.enhancedUpdateAvailable || cliPayload.hostUpdateAvailable
-                ? `发现可升级版本（@dsh-enhanced ${cliPayload.latestEnhancedVersion ?? this.currentVersion}）`
+                ? `发现可升级版本（@dsh-ray ${cliPayload.latestEnhancedVersion ?? this.currentVersion}）`
                 : '当前已是最新已检查版本').slice(0, 500)
       return Object.freeze({
         currentEnhancedVersion: cliPayload.currentEnhancedVersion,
@@ -623,7 +623,7 @@ export class SelfUpgradeProber {
         checkedAt,
         cached: false,
         offline: cliPayload.offline,
-        checkSource: 'dsh-rsi',
+        checkSource: 'dsh-ray',
         note,
       })
     }
@@ -636,13 +636,13 @@ export class SelfUpgradeProber {
     const upgradeCommand = buildCliUpgradeCommand(ctx.dshHome, ctx.profileName, baseFrozen)
     const cliDetail = redactProbeDetail(cliResult.stderr) || redactProbeDetail(cliResult.stdout)
     const cliUnavailableNote = cliResult.errorCode === 'ENOENT'
-      ? '未检测到可执行 dsh-rsi CLI，请确认已全局安装 @dsh-enhanced/dsh-rsi-cli；'
+      ? '未检测到可执行 dsh-ray CLI，请确认已全局安装 dsh-ray；'
       : cliResult.errorCode === 'ETIMEDOUT'
-        ? '本地 dsh-rsi CLI 执行超时（私有 Host 收据校验或网络较慢），请稍后重试或在终端执行下方升级命令；'
+        ? '本地 dsh-ray CLI 执行超时（私有 Host 收据校验或网络较慢），请稍后重试或在终端执行下方升级命令；'
         : cliResult.exitCode !== 0 || cliResult.errorCode !== undefined
           ? (cliDetail !== ''
-            ? `本地 dsh-rsi CLI 异常（退出码 ${cliResult.exitCode}：${cliDetail}）；`
-            : `本地 dsh-rsi CLI 返回退出码 ${cliResult.exitCode}；`)
+            ? `本地 dsh-ray CLI 异常（退出码 ${cliResult.exitCode}：${cliDetail}）；`
+            : `本地 dsh-ray CLI 返回退出码 ${cliResult.exitCode}；`)
           : ''
     const note = (baseFrozen
       ? `${cliUnavailableNote}受控 Linux systemd profile 仅支持终端带外升级。`
@@ -686,8 +686,8 @@ export class SelfUpgradeProber {
     const status = await this.check(host, false)
     const safeEnv = buildUpgradeProbeEnv(this.envSource, this.platform, resolved.dshHome)
 
-    const cliResult = await this.execUpgradeCli(buildDshRsiArgs('--dry-run', resolved), CLI_DRY_RUN_TIMEOUT_MS, safeEnv)
-    const cliPayload = cliResult.errorCode !== 'ENOENT' ? parseDshRsiUpgradeJson(cliResult.stdout, this.currentVersion) : null
+    const cliResult = await this.execUpgradeCli(buildDshRayArgs('--dry-run', resolved), CLI_DRY_RUN_TIMEOUT_MS, safeEnv)
+    const cliPayload = cliResult.errorCode !== 'ENOENT' ? parseDshRayUpgradeJson(cliResult.stdout, this.currentVersion) : null
 
     if (cliPayload !== null) {
       if (cliPayload.mode !== null) {
@@ -702,7 +702,7 @@ export class SelfUpgradeProber {
         ...cliPayload.blockedReasons,
         ...(frozen ? ['受控 Linux systemd profile 禁止在 Host 内直接启动升级，请在停止服务后使用终端 CLI 升级。'] : []),
         ...(!frozen && !supported && cliPayload.blockedReasons.length === 0 && cliResult.exitCode !== 0
-          ? [`dsh-rsi upgrade --dry-run 返回退出码 ${cliResult.exitCode}。`]
+          ? [`dsh-ray upgrade --dry-run 返回退出码 ${cliResult.exitCode}。`]
           : []),
       ].map(item => item.slice(0, 500)).slice(0, 32)
       const summary = (cliPayload.steps.length > 0
@@ -710,7 +710,7 @@ export class SelfUpgradeProber {
         : frozen
           ? '预览完成：受控 Linux systemd profile 需在终端停止服务后执行带外升级'
           : supported
-            ? '升级预演通过：将先备份现有配置与绑定并在后台执行 dsh-rsi upgrade --yes'
+            ? '升级预演通过：将先备份现有配置与绑定并在后台执行 dsh-ray upgrade --yes'
             : cliPayload.blockedReasons[0]
               ? `升级预演发现阻塞项：${cliPayload.blockedReasons[0]}`
               : '升级预演发现阻塞项，请先修复后再升级').slice(0, 1_000)
@@ -735,17 +735,17 @@ export class SelfUpgradeProber {
     const warnings: string[] = []
     const cliDetail = redactProbeDetail(cliResult.stderr) || redactProbeDetail(cliResult.stdout)
     if (cliResult.errorCode === 'ENOENT') {
-      warnings.push('未检测到可执行 dsh-rsi CLI，请确认已全局安装 @dsh-enhanced/dsh-rsi-cli。')
+      warnings.push('未检测到可执行 dsh-ray CLI，请确认已全局安装 dsh-ray。')
     } else if (cliResult.errorCode === 'ETIMEDOUT') {
-      warnings.push('本地 dsh-rsi CLI 执行超时（私有 Host 收据校验或网络较慢），请稍后重试或在终端执行下方升级命令。')
+      warnings.push('本地 dsh-ray CLI 执行超时（私有 Host 收据校验或网络较慢），请稍后重试或在终端执行下方升级命令。')
     } else if (cliResult.exitCode !== 0 || cliResult.errorCode !== undefined) {
       warnings.push((cliDetail !== ''
-        ? `dsh-rsi upgrade --dry-run 返回退出码 ${cliResult.exitCode}：${cliDetail}`
-        : `dsh-rsi upgrade --dry-run 返回退出码 ${cliResult.exitCode}。`).slice(0, 500))
+        ? `dsh-ray upgrade --dry-run 返回退出码 ${cliResult.exitCode}：${cliDetail}`
+        : `dsh-ray upgrade --dry-run 返回退出码 ${cliResult.exitCode}。`).slice(0, 500))
     } else {
       warnings.push((cliDetail !== ''
-        ? `dsh-rsi upgrade --dry-run 输出无法解析：${cliDetail}`
-        : 'dsh-rsi upgrade --dry-run 未返回有效升级报告 JSON。').slice(0, 500))
+        ? `dsh-ray upgrade --dry-run 输出无法解析：${cliDetail}`
+        : 'dsh-ray upgrade --dry-run 未返回有效升级报告 JSON。').slice(0, 500))
     }
     if (status.frozenSystemdProfile) {
       warnings.push('受控 Linux systemd profile 仅支持终端带外升级。')
@@ -753,12 +753,12 @@ export class SelfUpgradeProber {
     const summary = (status.frozenSystemdProfile
       ? '当前为受控 Linux systemd profile，请先停止服务并在终端执行 CLI 升级。'
       : cliResult.errorCode === 'ENOENT'
-        ? '未检测到可执行 dsh-rsi CLI，请确认已全局安装 @dsh-enhanced/dsh-rsi-cli。'
+        ? '未检测到可执行 dsh-ray CLI，请确认已全局安装 dsh-ray。'
         : cliResult.errorCode === 'ETIMEDOUT'
-          ? '本地 dsh-rsi CLI 执行超时（私有 Host 收据校验或网络较慢），请稍后重试或在终端执行下方升级命令。'
+          ? '本地 dsh-ray CLI 执行超时（私有 Host 收据校验或网络较慢），请稍后重试或在终端执行下方升级命令。'
           : cliDetail !== ''
-            ? `未能完成本地 dsh-rsi CLI 预演（${cliDetail}）；请先在终端检查并运行 dsh-rsi upgrade。`
-            : '未能完成本地 dsh-rsi CLI 预演；请先在终端检查并运行 dsh-rsi upgrade。').slice(0, 1_000)
+            ? `未能完成本地 dsh-ray CLI 预演（${cliDetail}）；请先在终端检查并运行 dsh-ray upgrade。`
+            : '未能完成本地 dsh-ray CLI 预演；请先在终端检查并运行 dsh-ray upgrade。').slice(0, 1_000)
 
     return {
       mode: null,
@@ -782,7 +782,7 @@ export class SelfUpgradeProber {
     if (confirmed !== true) {
       return Object.freeze({
         applied: false,
-        entry: 'dsh-rsi-upgrade',
+        entry: 'dsh-ray-upgrade',
         note: '请先执行升级预演并明确确认后再触发自助升级',
       })
     }
@@ -790,7 +790,7 @@ export class SelfUpgradeProber {
     if (status.frozenSystemdProfile) {
       return Object.freeze({
         applied: false,
-        entry: 'dsh-rsi-upgrade',
+        entry: 'dsh-ray-upgrade',
         note: `当前为受控 Linux systemd profile，禁止在 Host 内直接升级；${status.upgradeCommand}`,
       })
     }
@@ -802,7 +802,7 @@ export class SelfUpgradeProber {
       const reason = preview.warnings[0] ?? preview.summary
       return Object.freeze({
         applied: false,
-        entry: 'dsh-rsi-upgrade',
+        entry: 'dsh-ray-upgrade',
         note: `升级前置检查未通过：${reason}；可执行命令：${preview.command}`,
       })
     }
@@ -814,13 +814,13 @@ export class SelfUpgradeProber {
     if (!isSingleLineCommand(cliCommand)) {
       return Object.freeze({
         applied: false,
-        entry: 'dsh-rsi-upgrade',
+        entry: 'dsh-ray-upgrade',
         note: '升级命令路径无效',
       })
     }
 
     const safeEnv = buildUpgradeProbeEnv(this.envSource, this.platform, resolved.dshHome)
-    const args = buildDshRsiArgs('--yes', resolved, confirmDshHomeStopped)
+    const args = buildDshRayArgs('--yes', resolved, confirmDshHomeStopped)
     const log = resolveLogFile(resolved.dshHome, this.now())
 
     let pid: number | undefined
@@ -838,7 +838,7 @@ export class SelfUpgradeProber {
       if (pid === undefined || pid <= 0) {
         return Object.freeze({
           applied: false,
-          entry: 'dsh-rsi-upgrade',
+          entry: 'dsh-ray-upgrade',
           note: `未能启动独立升级进程；请在终端执行：${preview.command}`,
         })
       }
@@ -846,13 +846,13 @@ export class SelfUpgradeProber {
       const logHint = log.path !== undefined ? `；日志：${log.path}` : ''
       return Object.freeze({
         applied: true,
-        entry: 'dsh-rsi-upgrade',
+        entry: 'dsh-ray-upgrade',
         note: `已启动独立后台升级（PID ${pid}）${logHint}。升级完成后请按日志提示重启 Host 以加载新代码`,
       })
     } catch (error: unknown) {
       return Object.freeze({
         applied: false,
-        entry: 'dsh-rsi-upgrade',
+        entry: 'dsh-ray-upgrade',
         note: `启动独立升级进程失败：${error instanceof Error ? error.message : String(error)}`,
       })
     } finally {

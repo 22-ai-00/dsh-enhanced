@@ -48,26 +48,26 @@ describe('ordinary-use owner authority and scheduler inventory', () => {
   })
   test('resolves real lookup scope and bounded !!js database paths without Recovery', () => {
     const effective = `
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config: { defaultWorkspace: !!js dshHomePath('assistant-workspace'), defaultAgentPreset: primary, databasePath: !!js dshHomePath('delivery/state.sqlite') }
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config: { account: account, tenant: tenant }
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   config: { assistantAutomations: { databasePath: !!js dshHomePath('automations/state.sqlite'), schedulerEnabled: false } }
 `
     expect(rsiOwnerBindingQuery(effective, '/private')).toEqual({ account: 'account', tenant: 'tenant', workspace: '/private/assistant-workspace', agentPreset: 'primary' })
     expect(rsiDatabasePaths(effective, '/private')).toEqual({ deliveryDatabasePath: '/private/delivery/state.sqlite', automationsDatabasePath: '/private/automations/state.sqlite' })
     expect(() => rsiDatabasePaths(effective.replace('automations/state.sqlite', '../escape'), '/private')).toThrow('bounded dshHomePath')
-    expect(() => rsiDatabasePaths(effective + '- id: dsh-enhanced-assistant-automations\n  config: { databasePath: /private/other.sqlite }\n', '/private')).toThrow('ambiguous')
+    expect(() => rsiDatabasePaths(effective + '- id: dsh-ray-assistant-automations\n  config: { databasePath: /private/other.sqlite }\n', '/private')).toThrow('ambiguous')
   })
   test.skipIf(process.platform !== 'linux')('reads actual active durable tasks without creating absent storage or changing existing data', async () => {
     const home = await realpath(await mkdtemp(join(tmpdir(), 'rsi-inventory-'))); roots.push(home)
     const databasePath = join(home, 'state', 'automations.sqlite')
-    const effective = stringify([{ id: 'dsh-enhanced-assistant-automations', config: { databasePath, schedulerEnabled: false } }])
+    const effective = stringify([{ id: 'dsh-ray-assistant-automations', config: { databasePath, schedulerEnabled: false } }])
     expect(rsiAutomationInventory(effective, home).records).toEqual([])
     await expect(readFile(databasePath)).rejects.toMatchObject({ code: 'ENOENT' })
     const require = createRequire(import.meta.url)
-    const { AutomationStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-enhanced/assistant-automations/package.json')), 'lib/store.js')).href) as {
+    const { AutomationStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-ray/assistant-automations/package.json')), 'lib/store.js')).href) as {
       AutomationStore: new (options: { path: string }) => { createApproved(input: Record<string, unknown>): {id:string;version:number};
         changeApproved(input: Record<string, unknown>): unknown; reconcileSystemOwned(input: Record<string, unknown>): unknown; close(): void }
     }

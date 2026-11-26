@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
 import { growthObjectDigest, memoryLearningRequestDigest,
-  type WorkItemMemoryLearningReviewRequest, type MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
+  type WorkItemMemoryLearningReviewRequest, type MemoryLearningReviewRequest } from '@dsh-ray/assistant-growth-contract'
 import { MemoryStore, MemoryStoreError, memoryPrincipalDigest } from '../src/store.ts'
 import type { MemoryLearningAdoptionGrant, MemoryLearningReviewReceipt } from '../src/learning-adoptions.ts'
 import { validateMemoryLearningAdoptionGrant, validateLearningReviewReceipt, learningGrantDigest } from '../src/learning-adoptions.ts'

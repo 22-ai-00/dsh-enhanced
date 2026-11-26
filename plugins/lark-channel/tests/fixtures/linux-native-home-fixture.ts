@@ -3,8 +3,8 @@ import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, readlink, re
   symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
-import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
+import type { LinuxPluginBehaviorRuntime } from '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 import { relocateLinuxRsiNativeFamily,
   type LinuxRsiNativeRelocationElement, type LinuxRsiNativeRelocationProof } from '../../src/rsi-linux-native-relocation.js'
 

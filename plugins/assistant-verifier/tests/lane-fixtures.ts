@@ -1,5 +1,5 @@
 import { generateKeyPairSync, sign } from 'node:crypto'
-import { pluginRevisionVerificationSigningPayload, pluginRevisionRegressionSigningPayload, type PluginRevisionVerificationCertificate, type PluginRevisionRegressionCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { pluginRevisionVerificationSigningPayload, pluginRevisionRegressionSigningPayload, type PluginRevisionVerificationCertificate, type PluginRevisionRegressionCertificate } from '@dsh-ray/assistant-growth-contract'
 const hash = 'a'.repeat(64), otherHash = 'b'.repeat(64), now = Date.now()
 const { privateKey, publicKey } = generateKeyPairSync('ed25519')
 export const lanePublicKey = publicKey.export({ type: 'spki', format: 'pem' }).toString()

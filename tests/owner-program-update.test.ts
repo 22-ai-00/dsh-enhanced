@@ -28,7 +28,7 @@ const old = {
     maxReleases: 10, policies: [{ candidateId: 'example', dshBaseline: 'old', capabilities: ['tool'] }] } }),
   '/private/owner/config/host-authority.json': JSON.stringify({ grant: { id: 'host-1',
     notBefore: 123, expiresAt: 456, maximumReloads: 1000, owner: { principalId: 'owner-1' },
-    packages: ['@dsh-enhanced/example'], hostDeploymentInputs: ['package.json'] } }),
+    packages: ['@dsh-ray/example'], hostDeploymentInputs: ['package.json'] } }),
   '/private/owner/config/adoption.json': JSON.stringify({ grant: { id: 'adoption-1', expiresAt: 456,
     maxAdoptions: 10, owner: { principalId: 'owner-1' }, ledger: { id: 'ledger-1' },
     target: { dshHome: '/private/owner', profile: 'web' }, handoff: { coordinatorId: 'coordinator' },
@@ -47,23 +47,23 @@ const authorityContext = { rebase: authorityRebase, rebaseValue: rebaseRsiHostVa
 test('owner program patch updates preserve inert Loader tags through repeated verifier and control-plane writes', () => {
   const api = { readRsiHostPatchConfig, replaceRsiHostPatchConfig }
   const patch = `[
-    { id: dsh-enhanced-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", creationReviews: [], sourceReviews: [] } },
-    { id: dsh-enhanced-plugin-control-plane, config: { runtimeObserver: { targets: [] } } },
+    { id: dsh-ray-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", creationReviews: [], sourceReviews: [] } },
+    { id: dsh-ray-plugin-control-plane, config: { runtimeObserver: { targets: [] } } },
     { id: personal-assistant, config: { paths: [!!js 'dshHomePath("personal/state.sqlite")'] } }
   ]`
-  const verifier = patchConfig(api, patch, 'dsh-enhanced-assistant-verifier')
+  const verifier = patchConfig(api, patch, 'dsh-ray-assistant-verifier')
   expect(verifier.databasePath).toEqual({ __jsExpr: "dshHomePath('verifier/state.sqlite')" })
-  const changed = replacePatchConfig(api, patch, 'dsh-enhanced-assistant-verifier', verifier,
+  const changed = replacePatchConfig(api, patch, 'dsh-ray-assistant-verifier', verifier,
     { ...verifier, creationReviews: [{ id: 'review-1' }] })
-  const control = patchConfig(api, changed, 'dsh-enhanced-plugin-control-plane')
-  const twice = replacePatchConfig(api, changed, 'dsh-enhanced-plugin-control-plane', control,
-    { ...control, runtimeObserver: { targets: [{ entryId: 'dsh-enhanced-assistant-verifier' }] } })
+  const control = patchConfig(api, changed, 'dsh-ray-plugin-control-plane')
+  const twice = replacePatchConfig(api, changed, 'dsh-ray-plugin-control-plane', control,
+    { ...control, runtimeObserver: { targets: [{ entryId: 'dsh-ray-assistant-verifier' }] } })
   expect(twice.match(/!!js/g)).toHaveLength(2)
-  expect(patchConfig(api, twice, 'dsh-enhanced-assistant-verifier')).toEqual({
+  expect(patchConfig(api, twice, 'dsh-ray-assistant-verifier')).toEqual({
     ...verifier, creationReviews: [{ id: 'review-1' }],
   })
-  expect(() => replacePatchConfig(api, twice, 'dsh-enhanced-assistant-verifier',
-    patchConfig(api, twice, 'dsh-enhanced-assistant-verifier'), { ...verifier, databasePath: '/tmp/escape.sqlite' }))
+  expect(() => replacePatchConfig(api, twice, 'dsh-ray-assistant-verifier',
+    patchConfig(api, twice, 'dsh-ray-assistant-verifier'), { ...verifier, databasePath: '/tmp/escape.sqlite' }))
     .toThrow('tagged Loader expression')
 })
 
@@ -84,7 +84,7 @@ test('updates both applied service receipts for the next upgrade and preserves o
 })
 
 test('carries an owner model-provider edit and rejects any other drift from the signed patch', () => {
-  const signed = `- id: dsh-enhanced-personal-assistant
+  const signed = `- id: dsh-ray-personal-assistant
   config: { databasePath: !!js "dshHomePath('personal/state.sqlite')" }
 - id: llm-pi-ai
   name: llm-pi-ai
@@ -92,7 +92,7 @@ test('carries an owner model-provider edit and rejects any other drift from the 
     defaultProvider: custom-gateway
     providers:
       custom-gateway: { api: openai-completions, baseURL: https://relay.example.invalid/v1, contextWindow: 200000 }
-- id: dsh-enhanced-plugin-control-plane
+- id: dsh-ray-plugin-control-plane
   config: { runtimeObserver: { targets: [] } }
 `
   const edited = signed.replace('{ api: openai-completions, baseURL: https://relay.example.invalid/v1, contextWindow: 200000 }',
@@ -338,7 +338,7 @@ test('manifest permits only program fields and retains owner, model, grant and b
       creationCapabilities: creation.capabilities,
       revisionVerifications: revision.verifications,
       revisionRegressions: revision.regressionVerifications,
-      runtimeObserver: { targets: [{ entryId: 'dsh-enhanced-assistant-verifier',
+      runtimeObserver: { targets: [{ entryId: 'dsh-ray-assistant-verifier',
         configDigest: 'a'.repeat(64) }] } }, pluginCreation: creation, pluginRevision: revision }
   const next = structuredClone(baseline)
   next.controlPlane.sourceBuild.image = 'new'
@@ -382,7 +382,7 @@ test('manifest binds the native launch digest to the recompiled program', () => 
     controlPlane: { sourceBuild: { image: 'old' },
       creationVerifications: { authority: { digest: 'a' }, publicKey: 'standing-key' },
       creationCapabilities: { runner: { image: 'old' } },
-      runtimeObserver: { targets: [{ entryId: 'dsh-enhanced-assistant-verifier', configDigest: 'a'.repeat(64) }] } },
+      runtimeObserver: { targets: [{ entryId: 'dsh-ray-assistant-verifier', configDigest: 'a'.repeat(64) }] } },
     pluginCreation: { reviews: { runner: { image: 'old' } }, capabilities: { runner: { image: 'old' } },
       verifications: { authority: { digest: 'a' }, publicKey: 'standing-key' },
       creation: { id: 'standing-grant', expiresAt: 100, maxCreates: 32 } } }
@@ -468,8 +468,8 @@ test('restart manifest permits only the derived Delivery observer digest', () =>
     actions: ['maintenance.restart'], resource: { kind: 'message', id: 'maintenance:owner-route' },
     context: { initiators: ['external'] } }] } }
   const targetPatch = `[
-    { id: dsh-enhanced-assistant-delivery, config: ${JSON.stringify({ ...originalDelivery, restart })} },
-    { id: dsh-enhanced-personal-assistant, config: ${JSON.stringify(personal)} }
+    { id: dsh-ray-assistant-delivery, config: ${JSON.stringify({ ...originalDelivery, restart })} },
+    { id: dsh-ray-personal-assistant, config: ${JSON.stringify(personal)} }
   ]`
   const digest = runtimeConfigDigest({ ...originalDelivery, restart })
   const creation = { reviews: { runner: { path: '/old' } },
@@ -478,9 +478,9 @@ test('restart manifest permits only the derived Delivery observer digest', () =>
   const before = { controlPlane: { sourceBuild: { image: 'old' },
     creationVerifications: creation.verifications, creationCapabilities: creation.capabilities,
     runtimeObserver: { targets: [
-      { entryId: 'dsh-enhanced-assistant-delivery', configDigest: 'a'.repeat(64) },
-      { entryId: 'dsh-enhanced-personal-assistant', configDigest: 'a'.repeat(64) },
-      { entryId: 'dsh-enhanced-assistant-verifier', configDigest: 'a'.repeat(64) },
+      { entryId: 'dsh-ray-assistant-delivery', configDigest: 'a'.repeat(64) },
+      { entryId: 'dsh-ray-personal-assistant', configDigest: 'a'.repeat(64) },
+      { entryId: 'dsh-ray-assistant-verifier', configDigest: 'a'.repeat(64) },
     ] } }, pluginCreation: creation }
   const after = structuredClone(before)
   after.controlPlane.runtimeObserver.targets[0]!.configDigest = digest
@@ -513,8 +513,8 @@ test('restart compiler changes only Delivery config and its Control Plane observ
   const restart = { databasePath: `${home}/assistant-delivery/restart.sqlite`, ownerRouteId: 'owner-route',
     maxModelRequests: 12, maxToolCalls: 24, taskTimeoutMs: 300_000, allowedTools: ['delivery_reply'] }
   const patch = `[
-    { id: dsh-enhanced-assistant-delivery, config: ${JSON.stringify(delivery)} },
-    { id: dsh-enhanced-personal-assistant, config: ${JSON.stringify(personal)} },
+    { id: dsh-ray-assistant-delivery, config: ${JSON.stringify(delivery)} },
+    { id: dsh-ray-personal-assistant, config: ${JSON.stringify(personal)} },
     { id: unrelated, config: { value: !!js "dshHomePath('unrelated/state.sqlite')" } }
   ]`
   const originalDigest = runtimeConfigDigest(delivery)
@@ -523,23 +523,23 @@ test('restart compiler changes only Delivery config and its Control Plane observ
     agentPreset: ownerRoute.agentPreset, policyRef: ownerRoute.policyRef, conversation, principal }] },
   manifest: { sourceReviews: { owner: { principalId: 'lark/primary/personal/user' } } } }
   const manifest = { controlPlane: { runtimeObserver: { targets: [
-    { entryId: 'dsh-enhanced-assistant-delivery', configDigest: originalDigest },
-    { entryId: 'dsh-enhanced-personal-assistant', configDigest: runtimeConfigDigest(personal) },
+    { entryId: 'dsh-ray-assistant-delivery', configDigest: originalDigest },
+    { entryId: 'dsh-ray-personal-assistant', configDigest: runtimeConfigDigest(personal) },
     { entryId: 'unrelated', configDigest: 'a'.repeat(64) },
   ] } } }
   const api = { readRsiHostPatchConfig, replaceRsiHostPatchConfig, control: { runtimeConfigDigest } }
   expect(compileOwnerProgramRestartConfig(api, patch, structuredClone(manifest), undefined, home, original)).toBe(patch)
   const next = structuredClone(manifest)
   const compiled = compileOwnerProgramRestartConfig(api, patch, next, restart, home, original)
-  expect(patchConfig(api, compiled, 'dsh-enhanced-assistant-delivery')).toEqual({ ...delivery, restart })
-  expect(patchConfig(api, compiled, 'dsh-enhanced-personal-assistant').assistantPolicy.rules).toEqual([
+  expect(patchConfig(api, compiled, 'dsh-ray-assistant-delivery')).toEqual({ ...delivery, restart })
+  expect(patchConfig(api, compiled, 'dsh-ray-personal-assistant').assistantPolicy.rules).toEqual([
     personal.assistantPolicy.rules[0],
     { id: 'rsi-owner-maintenance-restart', effect: 'allow',
       subject: { kind: 'agent', id: 'standard', workspace: '/private/work',
         principal: 'lark/primary/personal/user' }, actions: ['maintenance.restart'],
       resource: { kind: 'message', id: 'maintenance:owner-route' }, context: { initiators: ['external'] } },
   ])
-  const rule = patchConfig(api, compiled, 'dsh-enhanced-personal-assistant').assistantPolicy.rules[1]
+  const rule = patchConfig(api, compiled, 'dsh-ray-personal-assistant').assistantPolicy.rules[1]
   const policy = compilePolicy([rule])
   const request = { subject: { kind: 'agent', id: 'standard', workspace: '/private/work',
     principal: 'lark/primary/personal/user' }, action: 'maintenance.restart',
@@ -556,9 +556,9 @@ test('restart compiler changes only Delivery config and its Control Plane observ
   ]) expect(evaluatePolicy(policy, changed).effect).toBe('deny')
   expect(compiled).toContain('!!js')
   expect(next.controlPlane.runtimeObserver.targets).toEqual([
-    { entryId: 'dsh-enhanced-assistant-delivery', configDigest: runtimeConfigDigest({ ...delivery, restart }) },
-    { entryId: 'dsh-enhanced-personal-assistant',
-      configDigest: runtimeConfigDigest(patchConfig(api, compiled, 'dsh-enhanced-personal-assistant')) },
+    { entryId: 'dsh-ray-assistant-delivery', configDigest: runtimeConfigDigest({ ...delivery, restart }) },
+    { entryId: 'dsh-ray-personal-assistant',
+      configDigest: runtimeConfigDigest(patchConfig(api, compiled, 'dsh-ray-personal-assistant')) },
     manifest.controlPlane.runtimeObserver.targets[2],
   ])
   const drift = structuredClone(manifest)
@@ -577,7 +577,7 @@ test('frozen restart proof rejects resumed config content or digest drift', () =
   }, home, delivery)
   const proof = { homePath: home, profile: 'assistant', restartConfigSourcePath: '/private/restart.json',
     restartConfig: restart, restartConfigDigest: createHash('sha256').update(JSON.stringify(restart)).digest('hex'),
-    original: { patches: { assistant: `[{ id: dsh-enhanced-assistant-delivery, config: ${JSON.stringify(delivery)} }]` } } }
+    original: { patches: { assistant: `[{ id: dsh-ray-assistant-delivery, config: ${JSON.stringify(delivery)} }]` } } }
   const api = { readRsiHostPatchConfig }
   expect(frozenRestartConfig(proof, api)).toEqual(restart)
   expect(() => frozenRestartConfig({ ...proof, restartConfig: { ...restart, maxToolCalls: 25 } }, api))
@@ -610,14 +610,14 @@ test('offline stage resolves tagged Home databases and preserves all database an
     await writeFile(join(stageHome, wal), 'retained WAL', { mode: 0o600 })
     const tagged = (id: string, name: string, quote: string) => `- id: ${id}\n  config:\n    stores:\n      - databasePath: !!js dshHomePath(${quote}${name}${quote})\n`
     const absolute = (id: string, name: string) => `- id: ${id}\n  config:\n    databasePath: ${join(homePath, name)}\n`
-    const personal = `- id: dsh-enhanced-personal-assistant\n  config:\n    assistantPolicy:\n      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')\n    personalMemory:\n      databasePath: !!js dshHomePath('personal-memory/memory.sqlite')\n    personalWiki:\n      databasePath: !!js dshHomePath('personal-wiki/state.sqlite')\n    assistantAutomations: &automations\n      channels:\n        - databasePath: !!js dshHomePath('assistant-automations/state.sqlite')\n    mirroredAutomations: *automations\n`
+    const personal = `- id: dsh-ray-personal-assistant\n  config:\n    assistantPolicy:\n      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')\n    personalMemory:\n      databasePath: !!js dshHomePath('personal-memory/memory.sqlite')\n    personalWiki:\n      databasePath: !!js dshHomePath('personal-wiki/state.sqlite')\n    assistantAutomations: &automations\n      channels:\n        - databasePath: !!js dshHomePath('assistant-automations/state.sqlite')\n    mirroredAutomations: *automations\n`
     const owner = { homePath, original: { effective: {
-      targetEffective: tagged('dsh-enhanced-assistant-delivery', 'assistant-delivery/state.sqlite', "'")
-        + tagged('dsh-enhanced-assistant-verifier', 'assistant-verifier/state.sqlite', '"')
+      targetEffective: tagged('dsh-ray-assistant-delivery', 'assistant-delivery/state.sqlite', "'")
+        + tagged('dsh-ray-assistant-verifier', 'assistant-verifier/state.sqlite', '"')
         + personal
-        + absolute('dsh-enhanced-assistant-memory-learning', 'memory-learning/state.sqlite')
-        + absolute('dsh-enhanced-assistant-growth-driver', 'growth.sqlite'),
-      coordinatorEffective: absolute('dsh-enhanced-assistant-automations', 'coordinator-automations.sqlite') } } }
+        + absolute('dsh-ray-assistant-memory-learning', 'memory-learning/state.sqlite')
+        + absolute('dsh-ray-assistant-growth-driver', 'growth.sqlite'),
+      coordinatorEffective: absolute('dsh-ray-assistant-automations', 'coordinator-automations.sqlite') } } }
     await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, owner, stageHome))
       .resolves.toBeUndefined()
     await writeFile(join(stageHome, 'assistant-policy/policy.sqlite'), 'reset used-budget=0\n', { mode: 0o600 })
@@ -639,7 +639,7 @@ test('owner database paths reject untagged expressions, unsafe JS, traversal and
     const homePath = join(root, 'home'), stageHome = join(root, 'stage'), outside = join(root, 'outside')
     for (const path of [homePath, stageHome, outside]) await mkdir(path, { mode: 0o700 })
     const owner = (value: string) => ({ homePath, original: { effective: {
-      targetEffective: `- id: dsh-enhanced-assistant-delivery\n  config:\n    databasePath: ${value}\n`,
+      targetEffective: `- id: dsh-ray-assistant-delivery\n  config:\n    databasePath: ${value}\n`,
       coordinatorEffective: '[]\n' } } })
     const unsafe = [
       `"dshHomePath('state.sqlite')"`,
@@ -660,7 +660,7 @@ test('owner database paths reject untagged expressions, unsafe JS, traversal and
     }
     await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, {
       homePath, original: { effective: {
-        targetEffective: '- id: dsh-enhanced-assistant-delivery\n  config: &loop\n    nested: *loop\n',
+        targetEffective: '- id: dsh-ray-assistant-delivery\n  config: &loop\n    nested: *loop\n',
         coordinatorEffective: '[]\n' } } }, stageHome))
       .rejects.toThrow(/cyclic database alias/u)
     await mkdir(join(homePath, 'state'), { mode: 0o700 })
@@ -688,7 +688,7 @@ test('large owner databases preserve every byte and reject replacement, hard lin
       try { await file.truncate(size) } finally { await file.close() }
     }
     const owner = { homePath, original: { effective: {
-      targetEffective: `- id: dsh-enhanced-assistant-policy\n  config:\n    databasePath: ${original}\n`,
+      targetEffective: `- id: dsh-ray-assistant-policy\n  config:\n    databasePath: ${original}\n`,
       coordinatorEffective: '[]\n' } } }
     const verify = () => assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, owner, stageHome)
     await expect(verify()).resolves.toBeUndefined()
@@ -719,7 +719,7 @@ test('owner database digest rejects a file that changes while it is being read',
       try { await file.truncate(268_435_457) } finally { await file.close() }
     }
     const owner = { homePath, original: { effective: {
-      targetEffective: `- id: dsh-enhanced-assistant-policy\n  config:\n    databasePath: ${path}\n`,
+      targetEffective: `- id: dsh-ray-assistant-policy\n  config:\n    databasePath: ${path}\n`,
       coordinatorEffective: '[]\n' } } }
     const writer = await open(path, 'r+')
     let writing = true, next = 0
@@ -788,7 +788,7 @@ ${body}`
 async function ownerCreationInstaller(fixture: Record<string, unknown>) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-creation-')))
   const lib = join(root, 'plugins/lark-channel/lib')
-  const control = join(root, 'node_modules/@dsh-enhanced/plugin-control-plane')
+  const control = join(root, 'node_modules/@dsh-ray/plugin-control-plane')
   const yamlModule = join(root, 'node_modules/yaml')
   for (const directory of [lib, control, yamlModule, join(root, 'packages'),
     join(root, 'scripts/install')]) {
@@ -799,7 +799,7 @@ async function ownerCreationInstaller(fixture: Record<string, unknown>) {
   await writeFile(join(root, 'plugins/lark-channel/package.json'), '{"type":"module"}')
   await writeFile(join(yamlModule, 'package.json'), '{"name":"yaml","version":"2.0.0","main":"index.js"}')
   await writeFile(join(yamlModule, 'index.js'), 'module.exports = { parse: () => [], stringify: () => "" }\n')
-  await writeFile(join(control, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/plugin-control-plane',
+  await writeFile(join(control, 'package.json'), JSON.stringify({ name: '@dsh-ray/plugin-control-plane',
     type: 'module', main: 'index.js', exports: { '.': './index.js', './package.json': './package.json' } }))
   await writeFile(join(control, 'index.js'),
     "import { createHash } from 'node:crypto'\nexport const controlPlaneDigest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')\n")
@@ -825,7 +825,7 @@ async function ownerCreationInstaller(fixture: Record<string, unknown>) {
 
 function ownerProgramUpdate(installer: { root: string, binding: unknown }, originalBuild: unknown) {
   const hostPlan = {}
-  return { protocol: 'dsh-enhanced/host-owner-program-update/v1', homePath: join(installer.root, 'home'),
+  return { protocol: 'dsh-ray/host-owner-program-update/v1', homePath: join(installer.root, 'home'),
     installer: installer.binding, hostPlan,
     hostPlanDigest: createHash('sha256').update(JSON.stringify(hostPlan)).digest('hex'),
     profile: 'assistant',
@@ -854,7 +854,7 @@ async function emptyOwnerCreationEntry() {
   await mkdir(candidateHome, { mode: 0o700 })
   const real = await ownerFixture()
   const library = new URL('../plugins/plugin-control-plane/lib/', import.meta.url)
-  await writeFile(join(installer.root, 'node_modules/@dsh-enhanced/plugin-control-plane/index.js'),
+  await writeFile(join(installer.root, 'node_modules/@dsh-ray/plugin-control-plane/index.js'),
     `export * from ${JSON.stringify(new URL('index.js', library).href)};
 `
     + `export { creationCapabilityPublicKey } from ${JSON.stringify(new URL('creation-capability-journal.js', library).href)};

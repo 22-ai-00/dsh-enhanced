@@ -60,7 +60,7 @@ afterEach(async () => {
 describe('detached lifecycle YAML parser', () => {
   test('uses the exact DSH 0.2 Host declared parser closure without evaluating !!js', async () => {
     const input = await fixture()
-    const source = "- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n  config:\n    databasePath: !!js dshHomePath('state/policy.sqlite')\n"
+    const source = "- id: first-party\n  name: '@dsh-ray/assistant-web-owner'\n  config:\n    databasePath: !!js dshHomePath('state/policy.sqlite')\n"
     const accepted = run(input, source)
     expect(accepted.status, accepted.stderr).toBe(0)
     expect(accepted.stderr).toBe('')
@@ -83,13 +83,13 @@ describe('detached lifecycle YAML parser', () => {
       }
       await writeFile(file, JSON.stringify(manifest))
     }
-    const result = run(input, "- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n")
+    const result = run(input, "- id: first-party\n  name: '@dsh-ray/assistant-web-owner'\n")
     expect(result.status, result.stderr).toBe(0)
   })
 
   test('rejects a mismatched Host or parser dependency rather than using ambient YAML', async () => {
     const input = await fixture()
-    const source = "- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n"
+    const source = "- id: first-party\n  name: '@dsh-ray/assistant-web-owner'\n"
     await mkdir(join(input.root, 'remote', 'node_modules'), { recursive: true })
     await cp(parserPackage, join(input.root, 'remote', 'node_modules', 'yaml'), { recursive: true })
     const hostPath = join(input.host, 'package.json')
@@ -119,14 +119,14 @@ describe('detached lifecycle YAML parser', () => {
     await mkdir(contaminant, { recursive: true })
     await cp(parserPackage, join(contaminant, 'yaml'), { recursive: true })
     await rm(join(input.manager, 'node_modules', 'yaml'), { recursive: true })
-    const result = run(input, "- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n", { NODE_PATH: contaminant })
+    const result = run(input, "- id: first-party\n  name: '@dsh-ray/assistant-web-owner'\n", { NODE_PATH: contaminant })
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('canonical DSH executable')
 
     const insideClosure = join(input.root, 'host', 'node_modules', 'contaminant')
     await mkdir(insideClosure, { recursive: true })
     await cp(parserPackage, join(insideClosure, 'yaml'), { recursive: true })
-    const internalLeak = run(input, "- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n", { NODE_PATH: insideClosure })
+    const internalLeak = run(input, "- id: first-party\n  name: '@dsh-ray/assistant-web-owner'\n", { NODE_PATH: insideClosure })
     expect(internalLeak.status).toBe(1)
     expect(internalLeak.stderr).toContain('canonical DSH executable')
   })
@@ -139,7 +139,7 @@ describe('detached lifecycle YAML parser', () => {
       ...host, version: '0.1.5-rc.1', dependencies: { yaml: '^2.9.0' },
     }))
     await cp(parserPackage, join(input.host, 'node_modules', 'yaml'), { recursive: true })
-    const result = run(input, "- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n")
+    const result = run(input, "- id: first-party\n  name: '@dsh-ray/assistant-web-owner'\n")
     expect(result.status, result.stderr).toBe(0)
   })
 
@@ -158,7 +158,7 @@ describe('detached lifecycle YAML parser', () => {
       dependencies: { yaml: '^2.4.2' },
     }))
     await cp(parserPackage, join(skill, 'node_modules', 'yaml'), { recursive: true })
-    const source = "- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n  config:\n    statePath: !!js dshHomePath('state/policy.sqlite')\n"
+    const source = "- id: first-party\n  name: '@dsh-ray/assistant-web-owner'\n  config:\n    statePath: !!js dshHomePath('state/policy.sqlite')\n"
     const accepted = run(input, source)
     expect(accepted.status, accepted.stderr).toBe(0)
 

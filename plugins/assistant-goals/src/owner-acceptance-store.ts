@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { GoalStoreError } from './types.js'
 import { prepareGoalStoreDatabaseFile } from './store.js'
 import { validateOwnerAcceptanceSeal, type GoalOwnerAcceptanceSeal } from './owner-acceptance.js'

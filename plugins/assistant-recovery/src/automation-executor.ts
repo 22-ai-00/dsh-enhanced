@@ -8,7 +8,7 @@ import type {
   HostAutomationExecutor,
   HostAutomationExecutorInput,
   HostAutomationExecutorResult,
-} from '@dsh-enhanced/assistant-automations'
+} from '@dsh-ray/assistant-automations'
 import { RECOVERY_CATALOG_DIGEST } from './catalog.js'
 import { RecoveryExecutor } from './executor.js'
 import type { RecoveryExecutorResult } from './executor.js'

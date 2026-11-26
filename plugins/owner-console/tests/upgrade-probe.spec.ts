@@ -32,10 +32,10 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
     expect(compareSemver('0.1.74-rc.2', '0.1.74-rc.1')).toBe(1)
   })
 
-  it('reads .dsh-rsi-host.json safely and rejects world-readable or symlinked files', () => {
+  it('reads .dsh-ray-host.json safely and rejects world-readable or symlinked files', () => {
     const root = mkdtempSync(join(tmpdir(), 'owner-console-upg-meta-'))
     dirs.push(root)
-    const metaPath = join(root, '.dsh-rsi-host.json')
+    const metaPath = join(root, '.dsh-ray-host.json')
 
     expect(readBoundHostMetadata(root).status).toBe('missing')
 
@@ -59,7 +59,7 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
     expect(readBoundHostMetadata(root).status).toBe('unreadable')
   })
 
-  it('parses dsh-rsi upgrade --check --json, caches within TTL, deduplicates inflight calls, and bypasses cache when forced', async () => {
+  it('parses dsh-ray upgrade --check --json, caches within TTL, deduplicates inflight calls, and bypasses cache when forced', async () => {
     const dshHome = mkdtempSync(join(tmpdir(), 'owner-console-upg-check-'))
     dirs.push(dshHome)
     const host = makeHost(dshHome)
@@ -122,10 +122,10 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
     expect(execCount).toBe(2)
   })
 
-  it('falls back cleanly to npm registry or offline mode when dsh-rsi CLI is absent', async () => {
+  it('falls back cleanly to npm registry or offline mode when dsh-ray CLI is absent', async () => {
     const dshHome = mkdtempSync(join(tmpdir(), 'owner-console-upg-offline-'))
     dirs.push(dshHome)
-    writeFileSync(join(dshHome, '.dsh-rsi-host.json'), JSON.stringify({
+    writeFileSync(join(dshHome, '.dsh-ray-host.json'), JSON.stringify({
       schemaVersion: 1,
       cacheRoot: join(dshHome, 'cache'),
       version: '0.2.12',
@@ -136,7 +136,7 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
     const registryProber = new SelfUpgradeProber({
       currentVersion: '0.1.73',
       platform: 'darwin',
-      execFn: async () => ({ stdout: '', stderr: 'spawn dsh-rsi ENOENT', exitCode: 127, errorCode: 'ENOENT' }),
+      execFn: async () => ({ stdout: '', stderr: 'spawn dsh-ray ENOENT', exitCode: 127, errorCode: 'ENOENT' }),
       fetchFn: async () => new Response(JSON.stringify({ version: '0.1.76' }), { status: 200 }),
     })
     const reg = await registryProber.check(host, true)
@@ -213,7 +213,7 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
     expect(spawnSpy).not.toHaveBeenCalled()
   })
 
-  it('requires explicit confirmation, runs preflight dry-run, and spawns detached dsh-rsi upgrade --yes cleanly', async () => {
+  it('requires explicit confirmation, runs preflight dry-run, and spawns detached dsh-ray upgrade --yes cleanly', async () => {
     const dshHome = mkdtempSync(join(tmpdir(), 'owner-console-upg-spawn-'))
     dirs.push(dshHome)
     const host = makeHost(dshHome, 'web')
@@ -271,7 +271,7 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
     expect(spawnSpy).toHaveBeenCalledOnce()
 
     const [cmd, argv, spawnOpts] = spawnSpy.mock.calls[0]! as unknown as [string, string[], { shell: boolean; detached: boolean; env: NodeJS.ProcessEnv }]
-    expect(cmd).toBe('dsh-rsi')
+    expect(cmd).toBe('dsh-ray')
     expect(argv).toEqual(['upgrade', '--yes', '--json', '--dsh-home', dshHome, '--profile', 'web'])
     expect(spawnOpts.shell).toBe(false)
     expect(spawnOpts.detached).toBe(true)
@@ -314,14 +314,14 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
     expect((winEnv['PATH'] ?? '').split(';')).toContain(winNpm)
   })
 
-  it('falls back to executable dsh-rsi in user bin dirs on ENOENT and caches resolved path across dryRun and trigger', async () => {
+  it('falls back to executable dsh-ray in user bin dirs on ENOENT and caches resolved path across dryRun and trigger', async () => {
     const root = mkdtempSync(join(tmpdir(), 'owner-console-upg-discover-'))
     dirs.push(root)
     const dshHome = join(root, 'dsh-home')
     const home = join(root, 'home')
     const localBin = join(home, '.local', 'bin')
     mkdirSync(localBin, { recursive: true })
-    const discoveredBin = join(localBin, 'dsh-rsi')
+    const discoveredBin = join(localBin, 'dsh-ray')
     writeFileSync(discoveredBin, '#!/bin/sh\nexit 0\n', { encoding: 'utf8', mode: 0o755 })
 
     const host = makeHost(dshHome, 'desktop')
@@ -336,8 +336,8 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
       spawnFn: spawnSpy,
       execFn: async (cmd, args, opts) => {
         execCalls.push({ cmd, args, timeoutMs: opts.timeoutMs })
-        if (cmd === 'dsh-rsi') {
-          return { stdout: '', stderr: 'spawn dsh-rsi ENOENT', exitCode: 127, errorCode: 'ENOENT' }
+        if (cmd === 'dsh-ray') {
+          return { stdout: '', stderr: 'spawn dsh-ray ENOENT', exitCode: 127, errorCode: 'ENOENT' }
         }
         return {
           stdout: JSON.stringify({
@@ -367,9 +367,9 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
     })
 
     const status = await prober.check(host, true)
-    expect(status.checkSource).toBe('dsh-rsi')
+    expect(status.checkSource).toBe('dsh-ray')
     expect(status.canTriggerDetached).toBe(true)
-    expect(execCalls.map(c => c.cmd)).toEqual(['dsh-rsi', discoveredBin])
+    expect(execCalls.map(c => c.cmd)).toEqual(['dsh-ray', discoveredBin])
     expect(execCalls[0]!.timeoutMs).toBe(25_000)
 
     const preview = await prober.dryRun(host)
@@ -465,8 +465,8 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
 
     const timedOutPreview = await prober.dryRun(host)
     expect(timedOutPreview.supported).toBe(false)
-    expect(timedOutPreview.warnings[0]).toContain('本地 dsh-rsi CLI 执行超时（私有 Host 收据校验或网络较慢）')
-    expect(timedOutPreview.summary).toContain('本地 dsh-rsi CLI 执行超时')
+    expect(timedOutPreview.warnings[0]).toContain('本地 dsh-ray CLI 执行超时（私有 Host 收据校验或网络较慢）')
+    expect(timedOutPreview.summary).toContain('本地 dsh-ray CLI 执行超时')
 
     // 2. Non-zero exit with stderr redacts secrets and surfaces detail in warnings & summary.
     mode = 'stderr'

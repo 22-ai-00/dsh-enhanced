@@ -1,13 +1,13 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { AssistantDeliveryService, OwnerForegroundTaskSourceContent, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import type { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { AssistantDeliveryService, OwnerForegroundTaskSourceContent, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot } from '@dsh-ray/assistant-delivery'
+import type { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import type { AssistantVerifierService } from '@dsh-ray/assistant-verifier'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import {
   growthObjectDigest, memoryLearningRequestDigest, validateMemoryLearningReviewRequest, hasWorkItemLearningFeedbackText,
   validateMemoryLearningOwner,
   type MemoryLearningOwner, type MemoryLearningReviewRequest, type ForegroundMemoryLearningReviewRequest,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import { memoryPrincipalDigest, type MemoryStore } from './store.js'
 import type {
   MemoryAgentContext, MemoryLearningAdoptionGrant, MemoryLearningAdoptionResult,

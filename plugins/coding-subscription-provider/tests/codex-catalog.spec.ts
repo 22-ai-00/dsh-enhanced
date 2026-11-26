@@ -41,7 +41,7 @@ function catalogProcess(): FakeCatalogProcess {
         send({
           id: message.id,
           result: {
-            userAgent: 'dsh_enhanced/0.147.0',
+            userAgent: 'dsh_ray/0.147.0',
             codexHome: '/redacted',
             platformFamily: 'unix',
             platformOs: 'macos',

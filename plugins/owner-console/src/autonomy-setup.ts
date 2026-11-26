@@ -110,7 +110,7 @@ export function canonicalObjectDigest(value: unknown): string {
   return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex')
 }
 
-/** Match `@dsh-enhanced/assistant-delivery` `ownerRouteAuthorityHash` insertion-order SHA-256 digest. */
+/** Match `@dsh-ray/assistant-delivery` `ownerRouteAuthorityHash` insertion-order SHA-256 digest. */
 export function ownerRouteAuthorityHashLocal(route: Readonly<Record<string, unknown>>, defaults?: Readonly<{ workspace: string; agentPreset: string }>): string | null {
   const id = strOrNull(route['id'])
   if (id === null) return null
@@ -538,15 +538,15 @@ export function inspectOwnerRoute(
   seq: YAMLSeq | undefined,
   descriptors: readonly SettingsDescriptor[],
 ): ResolvedOwnerRouteInfo {
-  const patchDelivery = seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-delivery') : {}
-  const deliveryCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-assistant-delivery', patchDelivery)
+  const patchDelivery = seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-delivery') : {}
+  const deliveryCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-delivery', patchDelivery)
   const rawRoutes = Array.isArray(deliveryCfg['ownerRoutes']) ? deliveryCfg['ownerRoutes'] : []
   const validRoutes = rawRoutes
     .map(r => asPlainRecord(r))
     .filter(r => typeof r['id'] === 'string' && r['id'].trim() !== '' && typeof r['workspace'] === 'string' && typeof r['agentPreset'] === 'string')
 
   const preferredRoute = validRoutes.find(r => asPlainRecord(r['principal'])['channel'] === 'web') ?? validRoutes[0]
-  const deliveryNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-delivery') : undefined
+  const deliveryNode = seq ? getPatchRowConfigNode(seq, 'dsh-ray-assistant-delivery') : undefined
   const fallbackWorkspace = paths.canonicalHome !== null ? join(paths.canonicalHome, 'assistant-workspace') : ''
   const defaultWorkspace = resolveScopedWorkspacePath(
     deliveryNode?.get('defaultWorkspace', true),
@@ -696,12 +696,12 @@ function inspectModelRoute(
   descriptors: readonly SettingsDescriptor[],
   installedPackages: ReadonlySet<string> | null,
 ): AutonomySetupStatus['modelRoute'] {
-  const traexPatch = seq ? getPatchRowConfig(seq, 'dsh-enhanced-traex-acp-provider') : {}
+  const traexPatch = seq ? getPatchRowConfig(seq, 'dsh-ray-traex-acp-provider') : {}
   const traexDesc = findEntry(descriptors, ns => ns.endsWith('traex-acp-provider'))
   const traexCfg = { ...(traexDesc ? boundedConfig(traexDesc.value) : {}), ...traexPatch }
   const traexInstalled = installedPackages === null
-    ? (traexDesc !== undefined || (seq !== undefined && findPatchRow(seq, 'dsh-enhanced-traex-acp-provider') !== undefined))
-    : installedPackages.has('@dsh-enhanced/traex-acp-provider')
+    ? (traexDesc !== undefined || (seq !== undefined && findPatchRow(seq, 'dsh-ray-traex-acp-provider') !== undefined))
+    : installedPackages.has('@dsh-ray/traex-acp-provider')
   const traexEnabled = traexCfg['enabled'] === true
   const agyEnabled = traexCfg['agyEnabled'] === true
 
@@ -732,12 +732,12 @@ function inspectModelRoute(
   if (provider === 'traex-agent') {
     routeKind = 'traex-agent'
     ready = traexInstalled && traexEnabled
-    if (!traexInstalled) missingReason = '@dsh-enhanced/traex-acp-provider 未安装'
+    if (!traexInstalled) missingReason = '@dsh-ray/traex-acp-provider 未安装'
     else if (!traexEnabled) missingReason = 'traex-agent 路由未启用（点击授权可自动同步启用或切至 API）'
   } else if (provider === 'agy-agent') {
     routeKind = 'agy-agent'
     ready = traexInstalled && agyEnabled
-    if (!traexInstalled) missingReason = '@dsh-enhanced/traex-acp-provider 未安装'
+    if (!traexInstalled) missingReason = '@dsh-ray/traex-acp-provider 未安装'
     else if (!agyEnabled) missingReason = 'agy-agent 路由未启用（点击授权可自动同步启用）'
   } else if (provider !== null && model !== null) {
     routeKind = 'api'
@@ -771,22 +771,22 @@ export function getPersonalAndPolicyConfigs(
   policyRow?: YAMLMap | undefined
 }> {
   const hasSplitRow = seq !== undefined
-    && (findPatchRow(seq, 'dsh-enhanced-assistant-policy') !== undefined
-      || findPatchRow(seq, 'dsh-enhanced-personal-memory') !== undefined)
-  const paPatch = seq ? getPatchRowConfig(seq, 'dsh-enhanced-personal-assistant') : {}
-  const descPa = findEntry(descriptors, candidate => candidate === 'dsh-enhanced-personal-assistant')
+    && (findPatchRow(seq, 'dsh-ray-assistant-policy') !== undefined
+      || findPatchRow(seq, 'dsh-ray-personal-memory') !== undefined)
+  const paPatch = seq ? getPatchRowConfig(seq, 'dsh-ray-personal-assistant') : {}
+  const descPa = findEntry(descriptors, candidate => candidate === 'dsh-ray-personal-assistant')
   const runtimePaCfg = descPa ? boundedConfig(descPa.value) : {}
 
-  if (hasSplitRow && findPatchRow(seq!, 'dsh-enhanced-personal-assistant') === undefined) {
-    const policyCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-assistant-policy', getPatchRowConfig(seq!, 'dsh-enhanced-assistant-policy'))
-    const automationsCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-assistant-automations', getPatchRowConfig(seq!, 'dsh-enhanced-assistant-automations'))
-    const personalMemoryCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-personal-memory', getPatchRowConfig(seq!, 'dsh-enhanced-personal-memory'))
+  if (hasSplitRow && findPatchRow(seq!, 'dsh-ray-personal-assistant') === undefined) {
+    const policyCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-policy', getPatchRowConfig(seq!, 'dsh-ray-assistant-policy'))
+    const automationsCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-automations', getPatchRowConfig(seq!, 'dsh-ray-assistant-automations'))
+    const personalMemoryCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-personal-memory', getPatchRowConfig(seq!, 'dsh-ray-personal-memory'))
     return {
       layout: 'split',
       policyCfg,
       automationsCfg,
       personalMemoryCfg,
-      policyRow: findPatchRow(seq!, 'dsh-enhanced-assistant-policy'),
+      policyRow: findPatchRow(seq!, 'dsh-ray-assistant-policy'),
     }
   }
 
@@ -795,7 +795,7 @@ export function getPersonalAndPolicyConfigs(
     policyCfg: { ...asPlainRecord(runtimePaCfg['assistantPolicy']), ...asPlainRecord(paPatch['assistantPolicy']) },
     automationsCfg: { ...asPlainRecord(runtimePaCfg['assistantAutomations']), ...asPlainRecord(paPatch['assistantAutomations']) },
     personalMemoryCfg: { ...asPlainRecord(runtimePaCfg['personalMemory']), ...asPlainRecord(paPatch['personalMemory']) },
-    policyRow: seq ? findPatchRow(seq, 'dsh-enhanced-personal-assistant') : undefined,
+    policyRow: seq ? findPatchRow(seq, 'dsh-ray-personal-assistant') : undefined,
   }
 }
 
@@ -889,9 +889,9 @@ export async function inspectAutonomyWizardStatus(
   const modelRoute = inspectModelRoute(host, seq, descriptors, installedPackages)
   const pp = getPersonalAndPolicyConfigs(seq, descriptors)
 
-  const memNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-memory-learning') : undefined
-  const memCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-assistant-memory-learning', seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-memory-learning') : {})
-  const verifierCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-assistant-verifier', seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-verifier') : {})
+  const memNode = seq ? getPatchRowConfigNode(seq, 'dsh-ray-assistant-memory-learning') : undefined
+  const memCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-memory-learning', seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-memory-learning') : {})
+  const verifierCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-verifier', seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-verifier') : {})
   const reviewCfg = asPlainRecord(verifierCfg['memoryReviews'])
   const adoptCfg = asPlainRecord(pp.personalMemoryCfg['automaticLearning'])
 
@@ -908,18 +908,18 @@ export async function inspectAutonomyWizardStatus(
     ? Math.trunc(memCfg['expiresAt']) : null
   const memExpired = memExpiresAt !== null && memExpiresAt <= now
   const memConfigured = extractAuth !== null && reviewAuth !== null && adoptAuth !== null
-  const memEnabled = memConfigured && !isRowDisabled(seq, 'dsh-enhanced-assistant-memory-learning') && !memExpired
+  const memEnabled = memConfigured && !isRowDisabled(seq, 'dsh-ray-assistant-memory-learning') && !memExpired
 
-  const dreamNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-dreaming') : undefined
-  const dreamCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-assistant-dreaming', seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-dreaming') : {})
+  const dreamNode = seq ? getPatchRowConfigNode(seq, 'dsh-ray-assistant-dreaming') : undefined
+  const dreamCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-dreaming', seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-dreaming') : {})
   const dreamDb = checkDbNode('assistant-dreaming', dreamNode?.get('databasePath', true) ?? dreamCfg['databasePath'])
   const dreamScope = asPlainRecord(dreamCfg['scope'])
   const dreamConfigured = strOrNull(dreamScope['ownerRouteId']) !== null && strOrNull(dreamCfg['budgetId']) !== null
   const dreamRetired = dreamCfg['retired'] === true
-  const dreamEnabled = dreamCfg['enabled'] === true && !dreamRetired && !isRowDisabled(seq, 'dsh-enhanced-assistant-dreaming')
+  const dreamEnabled = dreamCfg['enabled'] === true && !dreamRetired && !isRowDisabled(seq, 'dsh-ray-assistant-dreaming')
 
-  const growthNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-growth-driver') : undefined
-  const growthCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-assistant-growth-driver', seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-growth-driver') : {})
+  const growthNode = seq ? getPatchRowConfigNode(seq, 'dsh-ray-assistant-growth-driver') : undefined
+  const growthCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-growth-driver', seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-growth-driver') : {})
   const usageCfg = asPlainRecord(growthCfg['usageLearning'])
   const usageNode = growthNode?.get('usageLearning', true)
   const growthDb = checkDbNode(
@@ -928,10 +928,10 @@ export async function inspectAutonomyWizardStatus(
   )
   const growthScope = asPlainRecord(growthCfg['scope'])
   const growthConfigured = strOrNull(growthScope['ownerRouteId']) !== null && strOrNull(growthCfg['budgetId']) !== null
-  const growthEnabled = growthCfg['enabled'] === true && !isRowDisabled(seq, 'dsh-enhanced-assistant-growth-driver')
+  const growthEnabled = growthCfg['enabled'] === true && !isRowDisabled(seq, 'dsh-ray-assistant-growth-driver')
 
   // Also flag unscoped core delivery/policy/personalMemory DB paths.
-  const deliveryNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-delivery') : undefined
+  const deliveryNode = seq ? getPatchRowConfigNode(seq, 'dsh-ray-assistant-delivery') : undefined
   checkDbNode('assistant-delivery', deliveryNode?.get('databasePath', true))
   if (pp.policyRow !== undefined) {
     const pCfgNode = pp.policyRow.get('config', true)
@@ -996,8 +996,8 @@ export async function inspectAutonomyWizardStatus(
     modelRoute,
     grants: Object.freeze({
       memoryLearning: Object.freeze({
-        installed: hasInstalledBundle(installedPackages, '@dsh-enhanced/assistant-memory-learning',
-          seq !== undefined && findPatchRow(seq, 'dsh-enhanced-assistant-memory-learning') !== undefined,
+        installed: hasInstalledBundle(installedPackages, '@dsh-ray/assistant-memory-learning',
+          seq !== undefined && findPatchRow(seq, 'dsh-ray-assistant-memory-learning') !== undefined,
           findEntry(descriptors, ns => ns.endsWith('assistant-memory-learning')) !== undefined),
         configured: memConfigured,
         enabled: memEnabled,
@@ -1010,8 +1010,8 @@ export async function inspectAutonomyWizardStatus(
         databasePath: memDb,
       }),
       dreaming: Object.freeze({
-        installed: hasInstalledBundle(installedPackages, '@dsh-enhanced/assistant-dreaming',
-          seq !== undefined && findPatchRow(seq, 'dsh-enhanced-assistant-dreaming') !== undefined,
+        installed: hasInstalledBundle(installedPackages, '@dsh-ray/assistant-dreaming',
+          seq !== undefined && findPatchRow(seq, 'dsh-ray-assistant-dreaming') !== undefined,
           findEntry(descriptors, ns => ns.endsWith('assistant-dreaming')) !== undefined),
         configured: dreamConfigured,
         enabled: dreamEnabled,
@@ -1021,8 +1021,8 @@ export async function inspectAutonomyWizardStatus(
         databasePath: dreamDb,
       }),
       growthDriver: Object.freeze({
-        installed: hasInstalledBundle(installedPackages, '@dsh-enhanced/assistant-growth-driver',
-          seq !== undefined && findPatchRow(seq, 'dsh-enhanced-assistant-growth-driver') !== undefined,
+        installed: hasInstalledBundle(installedPackages, '@dsh-ray/assistant-growth-driver',
+          seq !== undefined && findPatchRow(seq, 'dsh-ray-assistant-growth-driver') !== undefined,
           findEntry(descriptors, ns => ns.endsWith('assistant-growth-driver')) !== undefined),
         configured: growthConfigured,
         enabled: growthEnabled,
@@ -1031,7 +1031,7 @@ export async function inspectAutonomyWizardStatus(
         databasePath: growthDb,
       }),
       assistantPolicy: Object.freeze({
-        installed: hasInstalledBundle(installedPackages, '@dsh-enhanced/personal-assistant',
+        installed: hasInstalledBundle(installedPackages, '@dsh-ray/personal-assistant',
           pp.policyRow !== undefined, descriptors.some(d => /personal-assistant|assistant-policy$/u.test(d.ns))),
         schedulerEnabled,
         allowUnbudgetedExecution,
@@ -1284,8 +1284,8 @@ function resolveMemoryLearningDbPaths(
 ): Readonly<{ personalMemoryDbPath: string; verifierDbPath: string; memoryLearningDbPath: string }> {
   const pmRow = seq
     ? (pp.layout === 'split'
-      ? findPatchRow(seq, 'dsh-enhanced-personal-memory')
-      : findPatchRow(seq, 'dsh-enhanced-personal-assistant'))
+      ? findPatchRow(seq, 'dsh-ray-personal-memory')
+      : findPatchRow(seq, 'dsh-ray-personal-assistant'))
     : undefined
   const pmCfgNode = pmRow ? readConfigMap(pmRow, 'config') : undefined
   const pmRaw: unknown = pmCfgNode?.get('personalMemory', true)
@@ -1299,11 +1299,11 @@ function resolveMemoryLearningDbPaths(
     pmSectionNode?.get('databasePath', true) ?? pp.personalMemoryCfg['databasePath'],
   )
 
-  const verifierNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-verifier') : undefined
+  const verifierNode = seq ? getPatchRowConfigNode(seq, 'dsh-ray-assistant-verifier') : undefined
   const verifierCfg = mergeDescriptorConfig(
     descriptors,
-    'dsh-enhanced-assistant-verifier',
-    seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-verifier') : {},
+    'dsh-ray-assistant-verifier',
+    seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-verifier') : {},
   )
   const verifierDbPath = resolveScopedDbTarget(
     canonicalHome,
@@ -1312,11 +1312,11 @@ function resolveMemoryLearningDbPaths(
     verifierNode?.get('databasePath', true) ?? verifierCfg['databasePath'],
   )
 
-  const memNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-memory-learning') : undefined
+  const memNode = seq ? getPatchRowConfigNode(seq, 'dsh-ray-assistant-memory-learning') : undefined
   const memCfg = mergeDescriptorConfig(
     descriptors,
-    'dsh-enhanced-assistant-memory-learning',
-    seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-memory-learning') : {},
+    'dsh-ray-assistant-memory-learning',
+    seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-memory-learning') : {},
   )
   const memoryLearningDbPath = resolveScopedDbTarget(
     canonicalHome,
@@ -1356,14 +1356,14 @@ export function inspectMemoryLearningGrantConflicts(
   const adoptCfg = asPlainRecord(pp.personalMemoryCfg['automaticLearning'])
   const verifierCfg = mergeDescriptorConfig(
     descriptors,
-    'dsh-enhanced-assistant-verifier',
-    seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-verifier') : {},
+    'dsh-ray-assistant-verifier',
+    seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-verifier') : {},
   )
   const reviewCfg = asPlainRecord(verifierCfg['memoryReviews'])
   const memCfg = mergeDescriptorConfig(
     descriptors,
-    'dsh-enhanced-assistant-memory-learning',
-    seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-memory-learning') : {},
+    'dsh-ray-assistant-memory-learning',
+    seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-memory-learning') : {},
   )
   const adoptId = strOrNull(adoptCfg['authorityId'])
   const reviewId = strOrNull(reviewCfg['authorityId'])
@@ -1421,7 +1421,7 @@ export function inspectMemoryLearningGrantConflicts(
       reasons.push(`assistant-verifier 评审账本中已冻结的 ${reviewId} 与当前配置不一致`)
     }
   }
-  const memDisabled = isRowDisabled(seq, 'dsh-enhanced-assistant-memory-learning')
+  const memDisabled = isRowDisabled(seq, 'dsh-ray-assistant-memory-learning')
   if (extractId !== null && !memDisabled && dbPaths !== null && storedLearningGrant !== null) {
     const maxExtractions = typeof memCfg['maxExtractions'] === 'number' ? memCfg['maxExtractions'] : null
     const expectedConfigDigest = hasCompleteLearningDigestFields(normalizedMemCfg)
@@ -1530,7 +1530,7 @@ export function atomicWritePatchWithBackup(patchPath: string, serialized: string
 
 function applyPatchTraexRoute(doc: Document, seq: YAMLSeq, targetProvider: string): void {
   if (targetProvider !== 'traex-agent' && targetProvider !== 'agy-agent') return
-  const traexRow = findPatchRow(seq, 'dsh-enhanced-traex-acp-provider')
+  const traexRow = findPatchRow(seq, 'dsh-ray-traex-acp-provider')
   if (traexRow !== undefined) {
     const key = targetProvider === 'traex-agent' ? 'enabled' : 'agyEnabled'
     const cfg = ensureConfigMap(doc, traexRow, 'config')
@@ -1604,14 +1604,14 @@ export async function applyAutonomyWizardSetup(
   if (input.action === 'pause' || input.action === 'disable') {
     const affected: string[] = []
     if (input.enableMemoryLearning) {
-      const row = findPatchRow(seq, 'dsh-enhanced-assistant-memory-learning')
+      const row = findPatchRow(seq, 'dsh-ray-assistant-memory-learning')
       if (row !== undefined) {
         row.set('disabled', true)
         affected.push('记忆自学习')
       }
     }
     if (input.enableDreaming) {
-      const row = findPatchRow(seq, 'dsh-enhanced-assistant-dreaming')
+      const row = findPatchRow(seq, 'dsh-ray-assistant-dreaming')
       if (row !== undefined) {
         const cfg = readConfigMap(row, 'config')
         if (input.action === 'pause') {
@@ -1631,7 +1631,7 @@ export async function applyAutonomyWizardSetup(
       }
     }
     if (input.enableGrowth) {
-      const row = findPatchRow(seq, 'dsh-enhanced-assistant-growth-driver')
+      const row = findPatchRow(seq, 'dsh-ray-assistant-growth-driver')
       if (row !== undefined) {
         const cfg = readConfigMap(row, 'config')
         if (cfg !== undefined) {
@@ -1710,18 +1710,18 @@ export async function applyAutonomyWizardSetup(
     return failResult('agent-default-model', 'reasoningEffort 格式无效')
   }
   if ((reqProvider === 'traex-agent' || reqProvider === 'agy-agent') && !preflight.modelRoute.traexInstalled) {
-    return failResult('dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider 未安装，无法使用 ACP 编程工具路由')
+    return failResult('dsh-ray-traex-acp-provider', '@dsh-ray/traex-acp-provider 未安装，无法使用 ACP 编程工具路由')
   }
 
   // Validate installed bundle presence if pluginManager is active.
   if (input.enableMemoryLearning && !preflight.grants.memoryLearning.installed && preflight.grants.assistantPolicy.installed) {
-    return failResult('dsh-enhanced-assistant-memory-learning', '@dsh-enhanced/assistant-memory-learning 未安装，请先在插件页安装')
+    return failResult('dsh-ray-assistant-memory-learning', '@dsh-ray/assistant-memory-learning 未安装，请先在插件页安装')
   }
   if (input.enableDreaming && !preflight.grants.dreaming.installed && preflight.grants.assistantPolicy.installed) {
-    return failResult('dsh-enhanced-assistant-dreaming', '@dsh-enhanced/assistant-dreaming 未安装，请先在插件页安装')
+    return failResult('dsh-ray-assistant-dreaming', '@dsh-ray/assistant-dreaming 未安装，请先在插件页安装')
   }
   if (input.enableGrowth && !preflight.grants.growthDriver.installed && preflight.grants.assistantPolicy.installed) {
-    return failResult('dsh-enhanced-assistant-growth-driver', '@dsh-enhanced/assistant-growth-driver 未安装，请先在插件页安装')
+    return failResult('dsh-ray-assistant-growth-driver', '@dsh-ray/assistant-growth-driver 未安装，请先在插件页安装')
   }
 
   const profileSlug = normalizeProfileSlug(paths.profileName)
@@ -1759,9 +1759,9 @@ export async function applyAutonomyWizardSetup(
     const baseExtractAuthId = `${prefix}-memory-extract-${profileSlug}`
     const baseReviewAuthId = `${prefix}-memory-review-${profileSlug}`
     const baseAdoptAuthId = `${prefix}-memory-adopt-${profileSlug}`
-    const existingMemNode = getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-memory-learning')
-    const existingMemCfg = getPatchRowConfig(seq, 'dsh-enhanced-assistant-memory-learning')
-    const existingVerifierCfg = getPatchRowConfig(seq, 'dsh-enhanced-assistant-verifier')
+    const existingMemNode = getPatchRowConfigNode(seq, 'dsh-ray-assistant-memory-learning')
+    const existingMemCfg = getPatchRowConfig(seq, 'dsh-ray-assistant-memory-learning')
+    const existingVerifierCfg = getPatchRowConfig(seq, 'dsh-ray-assistant-verifier')
     const existingReviewCfg = asPlainRecord(existingVerifierCfg['memoryReviews'])
     const existingAdoptCfg = asPlainRecord(pp.personalMemoryCfg['automaticLearning'])
     const dbPaths = resolveMemoryLearningDbPaths(paths.canonicalHome, profileSlug, seq, descriptors, pp)
@@ -1923,19 +1923,19 @@ export async function applyAutonomyWizardSetup(
       return failResult('assistant-memory-learning', '三权分立 authorityId 发生碰撞，拒绝签发')
     }
 
-    const verifierRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier')
+    const verifierRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-verifier', '@dsh-ray/assistant-verifier')
     verifierRow.delete('disabled')
     const verifierCfgNode = ensureConfigMap(doc, verifierRow, 'config')
-    const runtimeVerifierDesc = findEntry(descriptors, candidate => candidate === 'dsh-enhanced-assistant-verifier')
+    const runtimeVerifierDesc = findEntry(descriptors, candidate => candidate === 'dsh-ray-assistant-verifier')
     ensureVerifierDefaults(doc, verifierCfgNode, runtimeVerifierDesc ? boundedConfig(runtimeVerifierDesc.value) : undefined)
     verifierCfgNode.set('memoryReviews', createPlainNode(doc, reviewConfig))
 
-    const learnerRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-memory-learning', '@dsh-enhanced/assistant-memory-learning')
+    const learnerRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-memory-learning', '@dsh-ray/assistant-memory-learning')
     learnerRow.set('disabled', false)
     learnerRow.set('config', createPlainNode(doc, learningConfig))
 
     if (pp.layout === 'split') {
-      const pmRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-memory', '@dsh-enhanced/personal-memory')
+      const pmRow = ensurePatchRow(doc, seq, 'dsh-ray-personal-memory', '@dsh-ray/personal-memory')
       const pmCfgNode = ensureConfigMap(doc, pmRow, 'config')
       if (!pmCfgNode.has('databasePath')) {
         const runtimePmDb = strOrNull(pp.personalMemoryCfg['databasePath'])
@@ -1945,7 +1945,7 @@ export async function applyAutonomyWizardSetup(
       }
       pmCfgNode.set('automaticLearning', createPlainNode(doc, adoptionConfig))
     } else {
-      const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
+      const paRow = ensurePatchRow(doc, seq, 'dsh-ray-personal-assistant', '@dsh-ray/personal-assistant')
       const paCfgNode = ensureConfigMap(doc, paRow, 'config')
       const pmNode = ensureConfigMap(doc, paCfgNode, 'personalMemory')
       if (!pmNode.has('databasePath')) pmNode.set('databasePath', jsDshHomeScalar('personal-memory/memory.sqlite'))
@@ -1972,8 +1972,8 @@ export async function applyAutonomyWizardSetup(
 
   // 2) Dreaming
   if (input.enableDreaming) {
-    const existingDreamNode = getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-dreaming')
-    const existingDreamCfg = getPatchRowConfig(seq, 'dsh-enhanced-assistant-dreaming')
+    const existingDreamNode = getPatchRowConfigNode(seq, 'dsh-ray-assistant-dreaming')
+    const existingDreamCfg = getPatchRowConfig(seq, 'dsh-ray-assistant-dreaming')
     const dreamingDbPath = resolveScopedDbTarget(
       paths.canonicalHome,
       'assistant-dreaming',
@@ -2001,14 +2001,14 @@ export async function applyAutonomyWizardSetup(
     }
     if (reqEffort === '') delete (dreamConfig as Record<string, unknown>)['reasoningEffort']
 
-    const dreamRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-dreaming', '@dsh-enhanced/assistant-dreaming')
+    const dreamRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-dreaming', '@dsh-ray/assistant-dreaming')
     dreamRow.delete('disabled')
     dreamRow.set('config', createPlainNode(doc, dreamConfig))
 
     newBudgets.push({ id: dreamingBudgetId, metric: 'automation-runs', limit: budgets.dailyDreams, periodMs: DAY_MS, scope: 'subject' })
     newRules.push(
-      { id: `wizard-${prefix}-dream-reconcile-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'assistant-dreaming', workspace: owner.workspace, principal: owner.principalId }, actions: ['reconcile'], resource: { kind: 'automation', id: 'dsh-enhanced-assistant-dreaming:*' }, context: { initiators: ['background'] } },
-      { id: `wizard-${prefix}-dream-exec-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-dreaming:*', workspace: owner.workspace, principal: owner.principalId }, actions: ['execute'], resource: { kind: 'automation', id: 'dsh-enhanced-assistant-dreaming:*' }, context: { initiators: ['background'] } },
+      { id: `wizard-${prefix}-dream-reconcile-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'assistant-dreaming', workspace: owner.workspace, principal: owner.principalId }, actions: ['reconcile'], resource: { kind: 'automation', id: 'dsh-ray-assistant-dreaming:*' }, context: { initiators: ['background'] } },
+      { id: `wizard-${prefix}-dream-exec-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-assistant-dreaming:*', workspace: owner.workspace, principal: owner.principalId }, actions: ['execute'], resource: { kind: 'automation', id: 'dsh-ray-assistant-dreaming:*' }, context: { initiators: ['background'] } },
       { id: `wizard-${prefix}-dream-owner-${profileSlug}`, effect: 'allow', subject: { kind: 'external', id: owner.principalId, workspace: owner.workspace, principal: owner.principalId }, actions: ['dream.acknowledge', 'dream.validate', 'dream.reject', 'dream.retire'], resource: { kind: 'evolution', id: 'assistant-dreaming:idea:*' }, context: { initiators: ['foreground'] } },
     )
     enabledNames.push('做梦灵感')
@@ -2016,8 +2016,8 @@ export async function applyAutonomyWizardSetup(
 
   // 3) Growth driver (workflow + usage learning + dreaming idea intake)
   if (input.enableGrowth) {
-    const existingGrowthNode = getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-growth-driver')
-    const existingGrowthCfg = getPatchRowConfig(seq, 'dsh-enhanced-assistant-growth-driver')
+    const existingGrowthNode = getPatchRowConfigNode(seq, 'dsh-ray-assistant-growth-driver')
+    const existingGrowthCfg = getPatchRowConfig(seq, 'dsh-ray-assistant-growth-driver')
     const existingUsageNode = existingGrowthNode?.get('usageLearning', true)
     const existingUsageCfg = asPlainRecord(existingGrowthCfg['usageLearning'])
     const growthUsageDbPath = resolveScopedDbTarget(
@@ -2060,7 +2060,7 @@ export async function applyAutonomyWizardSetup(
     }
     if (reqEffort === '') delete (growthConfig as Record<string, unknown>)['reasoningEffort']
 
-    const growthRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-growth-driver', '@dsh-enhanced/assistant-growth-driver')
+    const growthRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-growth-driver', '@dsh-ray/assistant-growth-driver')
     growthRow.delete('disabled')
     growthRow.set('config', createPlainNode(doc, growthConfig))
 
@@ -2083,7 +2083,7 @@ export async function applyAutonomyWizardSetup(
   const mergedBudgets = upsertById(existingBudgets, newBudgets)
   const mergedRules = upsertById(pp.policyCfg['rules'], newRules)
   if (pp.layout === 'split') {
-    const policyRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy')
+    const policyRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-policy', '@dsh-ray/assistant-policy')
     const pCfg = ensureConfigMap(doc, policyRow, 'config')
     if (!pCfg.has('databasePath')) pCfg.set('databasePath', jsDshHomeScalar('assistant-policy/policy.sqlite'))
     for (const key of ['proposalMaintenanceIntervalMs', 'toolDefaultEffect', 'autoReview'] as const) {
@@ -2092,14 +2092,14 @@ export async function applyAutonomyWizardSetup(
     pCfg.set('budgets', createPlainNode(doc, mergedBudgets))
     pCfg.set('rules', createPlainNode(doc, mergedRules))
 
-    const autoRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-automations', '@dsh-enhanced/assistant-automations')
+    const autoRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-automations', '@dsh-ray/assistant-automations')
     const aCfg = ensureConfigMap(doc, autoRow, 'config')
     if (!aCfg.has('databasePath')) aCfg.set('databasePath', jsDshHomeScalar('assistant-automations/state.sqlite'))
     if (!aCfg.has('runsPath')) aCfg.set('runsPath', jsDshHomeScalar('assistant-automations/runs'))
     aCfg.set('schedulerEnabled', true)
     aCfg.set('allowUnbudgetedExecution', false)
   } else {
-    const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
+    const paRow = ensurePatchRow(doc, seq, 'dsh-ray-personal-assistant', '@dsh-ray/personal-assistant')
     const paCfg = ensureConfigMap(doc, paRow, 'config')
     const polNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
     if (!polNode.has('databasePath')) polNode.set('databasePath', jsDshHomeScalar('assistant-policy/policy.sqlite'))

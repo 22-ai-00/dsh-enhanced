@@ -83,8 +83,8 @@ export async function runProgramUpgrade(options) {
   const homeEntry = await lstat(home)
   if (!homeEntry.isDirectory() || homeEntry.uid !== process.getuid() || homeEntry.mode & 0o077) fail('Home is not owner-private')
   const profile = options.profile
-  const binding = await privateJson(join(home, '.dsh-rsi-host.json'), 16_384)
-  const transactionPath = `${home}.dsh-enhanced-transaction`
+  const binding = await privateJson(join(home, '.dsh-ray-host.json'), 16_384)
+  const transactionPath = `${home}.dsh-ray-transaction`
   let pending
   try { pending = await privateJson(join(transactionPath, 'manifest.json'), 8_388_608) }
   catch (error) { if (error.code !== 'ENOENT') throw error }
@@ -94,7 +94,7 @@ export async function runProgramUpgrade(options) {
       || pending.homePath !== home || pending.profile !== profile
       || pending.transactionPath !== transactionPath
       || !options.recoverReadiness && !options.recoverRollbackReadiness && proof?.installer?.root !== root
-      || proof?.protocol !== 'dsh-enhanced/host-owner-program-update/v1') fail('pending transaction belongs to another reviewed installer or operation')
+      || proof?.protocol !== 'dsh-ray/host-owner-program-update/v1') fail('pending transaction belongs to another reviewed installer or operation')
     if (options.restartConfigPath !== undefined
       && options.restartConfigPath !== proof.ownerUpdate?.restartConfigSourcePath) {
       fail('pending restart config input differs from the frozen transaction')
@@ -149,7 +149,7 @@ export async function runProgramUpgrade(options) {
   const abort = () => controller.abort(new Error('program upgrade preparation interrupted'))
   process.on('SIGINT', abort); process.on('SIGTERM', abort)
   try {
-    const { prepareHostUpdatePlan } = await import(pathToFileURL(join(root, 'packages/dsh-rsi-cli/lib/install-host.js')).href)
+    const { prepareHostUpdatePlan } = await import(pathToFileURL(join(root, 'packages/dsh-ray/lib/install-host.js')).href)
     const hostPlan = await prepareHostUpdatePlan({ dshHome: home, selector: options.selector, signal: controller.signal })
     if (!['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1', '0.2.2-rc.3', '0.2.2-rc.5'].includes(hostPlan.originalRuntime.version)
       || hostPlan.candidateRuntime.version !== '0.2.2-rc.5'
@@ -162,7 +162,7 @@ export async function runProgramUpgrade(options) {
       process.stdout.write(`程序与 DSH 已是当前源码版本（${prepared.source.sourceCommit.slice(0, 12)}），无需停服。\n`)
       return 0
     }
-    const parent = join(dirname(home), `.dsh-rsi-program-updates-${hash(home).slice(0, 16)}`)
+    const parent = join(dirname(home), `.dsh-ray-program-updates-${hash(home).slice(0, 16)}`)
     await mkdir(parent, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error })
     const parentEntry = await lstat(parent)
     if (!parentEntry.isDirectory() || parentEntry.isSymbolicLink() || parentEntry.uid !== process.getuid()
@@ -178,7 +178,7 @@ export async function runProgramUpgrade(options) {
       '/usr/bin/bwrap', '/usr/bin/systemctl', '/usr/bin/journalctl', planPath, prepared.root, root,
       join(runRoot, 'auxiliary'), ...(options.restartConfigPath ? [options.restartConfigPath] : [])], env)
     if (status !== 0) return status
-    const after = await privateJson(join(home, '.dsh-rsi-host.json'), 16_384)
+    const after = await privateJson(join(home, '.dsh-ray-host.json'), 16_384)
     const installed = await privateJson(join(home, 'rsi-local-cohorts', profile, 'receipt.json'), 20_971_520)
     if (after.version !== hostPlan.candidateRuntime.version || after.receiptDigest !== hostPlan.candidateRuntime.receiptDigest
       || installed.sourceCommit !== prepared.source.sourceCommit || installed.version !== prepared.cohort.version) {
@@ -190,7 +190,7 @@ export async function runProgramUpgrade(options) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
-  const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+  const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
   if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
     const originalEmitWarning = process.emitWarning
     const filteredEmitWarning = function emitWarning(warning, ...rest) {

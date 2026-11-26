@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
-import { RECOVERY_CATALOG_DIGEST } from '@dsh-enhanced/assistant-recovery'
+import { RECOVERY_CATALOG_DIGEST } from '@dsh-ray/assistant-recovery'
 import { lifecycleProfileTest } from '../scripts/install/lifecycle-profile.mjs'
 import { nativeInstallerHost, nativeInstallerSetupPackage } from './native-installer-host-fixture.ts'
 import { rsiMemoryLearningInitialRow } from '../plugins/lark-channel/src/rsi-local-roots-extension.ts'
@@ -47,11 +47,11 @@ afterEach(cleanupInstallerFixtures)
 
 const restartScript = join(installDirectory, 'restart.sh')
 const pinnedInstallerSource = readFileSync(npmInstaller, 'utf8')
-const pinnedReleaseRef = pinnedInstallerSource.match(/^DSH_ENHANCED_PINNED_RELEASE_REF='([^']+)'$/mu)?.[1]
+const pinnedReleaseRef = pinnedInstallerSource.match(/^DSH_RAY_PINNED_RELEASE_REF='([^']+)'$/mu)?.[1]
 const pinnedLifecycleConfigHash = pinnedInstallerSource
-  .match(/^DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='([0-9a-f]{64})'$/mu)?.[1]
+  .match(/^DSH_RAY_PINNED_LIFECYCLE_CONFIG_SHA256='([0-9a-f]{64})'$/mu)?.[1]
 const pinnedLifecycleProfileHash = pinnedInstallerSource
-  .match(/^DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='([0-9a-f]{64})'$/mu)?.[1]
+  .match(/^DSH_RAY_PINNED_LIFECYCLE_PROFILE_SHA256='([0-9a-f]{64})'$/mu)?.[1]
 const pinnedRemoteCommon = pinnedReleaseRef === undefined ? undefined : spawnSync('git', [
   'show', `${pinnedReleaseRef}:scripts/install/common.sh`,
 ], {
@@ -97,7 +97,7 @@ function supervisedManifestFixture(phase: string) {
   const plan = { patchDigest: digest64, effectiveConfigDigest: digest64, attestationSetDigest: digest64,
     managedInventoryDigest: digest64, ownerBindingDigest: digest64, externalProviderExemptions: ['larkChannel'], runtimeOverlayDigest: digest64 }
   const { runtimeOverlayDigest: _runtimeOverlayDigest, ...activePlan } = plan
-  return { protocol: 'dsh-enhanced/supervised-lifecycle/v1', phase,
+  return { protocol: 'dsh-ray/supervised-lifecycle/v1', phase,
     activationNonce: '12345678-1234-4123-8123-123456789abc', catalogDigest: digest64,
     databasePaths: source.databasePaths, source, previewPlan: plan,
     previewAcceptance: (({ invocationId: _invocationId, ...value }) => value)(acceptance(2)),
@@ -110,7 +110,7 @@ function supervisedManifestFixture(phase: string) {
 function supervisedUninstallLifecycleFixture(phase: string) {
   const source = supervisedManifestFixture('post-swap-accepted').source
   return {
-    protocol: 'dsh-enhanced/supervised-uninstall/v1',
+    protocol: 'dsh-ray/supervised-uninstall/v1',
     phase,
     ...(['source-attested', 'clean-target-validated', 'clean-target-pending', 'clean-target-accepted'].includes(phase)
       ? { databasePaths: source.databasePaths, source }
@@ -167,7 +167,7 @@ describe('supervised lifecycle v3 invariants', () => {
     const rejects = [
       { ...accepted, operation: 'upgrade' },
       { ...accepted, stagedScenario: 'supervised' },
-      { ...accepted, supervisedLifecycle: { ...accepted.supervisedLifecycle, protocol: 'dsh-enhanced/supervised-lifecycle/v1' } },
+      { ...accepted, supervisedLifecycle: { ...accepted.supervisedLifecycle, protocol: 'dsh-ray/supervised-lifecycle/v1' } },
       { ...accepted, supervisedLifecycle: { ...accepted.supervisedLifecycle, phase: 'post-swap-accepted' } },
       { ...accepted, supervisedLifecycle: { ...accepted.supervisedLifecycle, activationNonce: 'smuggled' } },
       { ...accepted, supervisedLifecycle: { ...accepted.supervisedLifecycle, startAttempt: { kind: 'accept-active', baselineGeneration: 2 } } },
@@ -320,7 +320,7 @@ describe('supervised lifecycle v3 invariants', () => {
       { expectedScenario: 'supervised', canonicalCleanupFails: true, systemdUnsupportedProfile: 'dormant' },
     )
     expect(initial.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const transaction = `${f.dshHome}.dsh-ray-transaction`
     const manifestPath = join(transaction, 'manifest.json')
     const valid = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, any>
     expect(valid).toMatchObject({ version: 3, state: 'cleanup-started', servicePhase: 'service-accepted' })
@@ -383,7 +383,7 @@ describe('supervised lifecycle v3 invariants', () => {
       recovery: { ...supervisedProof('assistant-recovery/operator-snapshot/v1', 5),
         bootstrap: { status: 'running', generation: 0, attestationValid: false, attestationSetDigest: '', attestations: [] } },
       automations: { ...supervisedProof('assistant-automations-operator-snapshot/v1', 15), inFlightCount: 1, inventoryDigest: digest64, storageDigest: digest64, records: [], sidecars: { wal: null, shm: null } },
-      managedProjection: { protocol: 'dsh-enhanced/supervised-growth-managed-automations/v1', records: [], digest: digest64 },
+      managedProjection: { protocol: 'dsh-ray/supervised-growth-managed-automations/v1', records: [], digest: digest64 },
       ownerBindingDigest: digest64,
     }
     expect(lifecycleProfileTest.compactSupervisedSnapshot(snapshot, false).recoveryProof.bootstrap.generation).toBe(0)
@@ -407,7 +407,7 @@ describe('supervised lifecycle v3 invariants', () => {
 })
 
 async function nativeModelSetupHost(dshHome: string, fakeBin: string): Promise<void> {
-  const hostRoot = await realpath(await mkdtemp(join(tmpdir(), 'dsh-enhanced-model-host-')))
+  const hostRoot = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ray-model-host-')))
   temporaryRoots.push(hostRoot)
   const executable = await nativeInstallerHost(hostRoot, `#!/bin/bash
 if [[ "${'$'}{1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
@@ -418,7 +418,7 @@ const { createRequire } = require('node:module')
 const yaml = createRequire(process.env.MODEL_SETUP_SOURCE)('yaml')
 const rows = [
   { id: 'agent-default-model', name: '@deepseek-ai/dsh-agent-default-model', config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } },
-  { id: 'dsh-enhanced-traex-acp-provider', name: '@dsh-enhanced/traex-acp-provider', config: { enabled: false } },
+  { id: 'dsh-ray-traex-acp-provider', name: '@dsh-ray/traex-acp-provider', config: { enabled: false } },
 ]
 if (existsSync(process.argv[2])) {
   const patch = yaml.parseDocument(readFileSync(process.argv[2], 'utf8'))
@@ -431,12 +431,12 @@ if (existsSync(process.argv[2])) {
     else rows[index] = { ...rows[index], ...value }
   }
 }
-if (process.env.DSH_FAKE_CONCURRENT_STATE === '1' && rows.find(row => row.id === 'dsh-enhanced-traex-acp-provider').config?.enabled === true) {
+if (process.env.DSH_FAKE_CONCURRENT_STATE === '1' && rows.find(row => row.id === 'dsh-ray-traex-acp-provider').config?.enabled === true) {
   writeFileSync(process.env.DSH_HOME + '/settings.yaml', 'agent-default-model:\\n  provider: concurrent-owner\\n')
-  writeFileSync(process.argv[2], '- id: dsh-enhanced-traex-acp-provider\\n  config: { enabled: false, command: /fake/traex }\\n')
-  rows.find(row => row.id === 'dsh-enhanced-traex-acp-provider').config.enabled = false
+  writeFileSync(process.argv[2], '- id: dsh-ray-traex-acp-provider\\n  config: { enabled: false, command: /fake/traex }\\n')
+  rows.find(row => row.id === 'dsh-ray-traex-acp-provider').config.enabled = false
 }
-if (process.env.DSH_FAKE_COMPOSED_DISABLED === '1') rows.find(row => row.id === 'dsh-enhanced-traex-acp-provider').disabled = true
+if (process.env.DSH_FAKE_COMPOSED_DISABLED === '1') rows.find(row => row.id === 'dsh-ray-traex-acp-provider').disabled = true
 process.stdout.write(yaml.stringify(rows))
 NODE
   exit $?
@@ -456,26 +456,26 @@ async function autoTraexSetupFixture(commandName: 'traex' | 'trae-cli', loggedIn
   const profileModules = join(dshHome, 'profiles', 'web', 'node_modules')
   await writeFile(join(dshHome, 'profiles', 'web', 'package.json'), JSON.stringify({
     name: 'dsh-profile-web', type: 'module',
-    dependencies: { [policyLayout === 'nested' ? '@dsh-enhanced/personal-assistant' : '@dsh-enhanced/assistant-policy']: '0.1.48' },
-    dsh: { profile: { bundles: policyLayout === 'nested' ? ['@dsh-enhanced/personal-assistant'] : [] } },
+    dependencies: { [policyLayout === 'nested' ? '@dsh-ray/personal-assistant' : '@dsh-ray/assistant-policy']: '0.1.48' },
+    dsh: { profile: { bundles: policyLayout === 'nested' ? ['@dsh-ray/personal-assistant'] : [] } },
   }))
-  await mkdir(join(profileModules, '@dsh-enhanced'), { recursive: true })
+  await mkdir(join(profileModules, '@dsh-ray'), { recursive: true })
   await symlink(join(repoRoot, 'plugins', 'traex-acp-provider'),
-    join(profileModules, '@dsh-enhanced', 'traex-acp-provider'), 'dir')
+    join(profileModules, '@dsh-ray', 'traex-acp-provider'), 'dir')
   if (policyLayout === 'nested') {
-    const personalDir = join(profileModules, '@dsh-enhanced', 'personal-assistant')
-    await mkdir(join(personalDir, 'node_modules', '@dsh-enhanced'), { recursive: true })
+    const personalDir = join(profileModules, '@dsh-ray', 'personal-assistant')
+    await mkdir(join(personalDir, 'node_modules', '@dsh-ray'), { recursive: true })
     await writeFile(join(personalDir, 'package.json'), JSON.stringify({
-      name: '@dsh-enhanced/personal-assistant', version: '0.1.48', type: 'module',
-      dependencies: { '@dsh-enhanced/assistant-policy': '0.1.48' },
+      name: '@dsh-ray/personal-assistant', version: '0.1.48', type: 'module',
+      dependencies: { '@dsh-ray/assistant-policy': '0.1.48' },
       dsh: { bundle: { patch: './cordis.patch.yml' } },
     }))
     await writeFile(join(personalDir, 'cordis.patch.yml'), '[]\n')
     await symlink(join(repoRoot, 'plugins', 'assistant-policy'),
-      join(personalDir, 'node_modules', '@dsh-enhanced', 'assistant-policy'), 'dir')
+      join(personalDir, 'node_modules', '@dsh-ray', 'assistant-policy'), 'dir')
   } else {
     await symlink(join(repoRoot, 'plugins', 'assistant-policy'),
-      join(profileModules, '@dsh-enhanced', 'assistant-policy'), 'dir')
+      join(profileModules, '@dsh-ray', 'assistant-policy'), 'dir')
   }
   await writeExecutable(join(fakeBin, commandName), `#!/bin/bash
 if [[ "$*" == 'login status' ]]; then
@@ -504,8 +504,8 @@ function runRestart(args: readonly string[], dshHome: string, platform?: string)
     env: {
       PATH: process.env.PATH ?? '',
       DSH_HOME: dshHome,
-      DSH_ENHANCED_DRY_RUN: '1',
-      ...(platform === undefined ? {} : { DSH_ENHANCED_PLATFORM_OVERRIDE: platform }),
+      DSH_RAY_DRY_RUN: '1',
+      ...(platform === undefined ? {} : { DSH_RAY_PLATFORM_OVERRIDE: platform }),
     },
   })
 }
@@ -514,7 +514,7 @@ async function configureExistingLark(dshHome: string, profile = 'web'): Promise<
   const profileDirectory = join(dshHome, 'profiles', profile)
   await mkdir(profileDirectory, { recursive: true })
   await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({ dependencies: {} }))
-  await writeFile(join(profileDirectory, 'cordis.patch.yml'), `- id: dsh-enhanced-lark-channel
+  await writeFile(join(profileDirectory, 'cordis.patch.yml'), `- id: dsh-ray-lark-channel
   config:
     enabled: true
     appId: cli_0123456789abcdef
@@ -526,12 +526,12 @@ const zeroSha256 = '0'.repeat(64)
 function withPinnedLifecycleHashes(source: string, configHash: string, profileHash: string): string {
   return source
     .replace(
-      /^DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='[0-9a-f]{64}'$/mu,
-      `DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='${configHash}'`,
+      /^DSH_RAY_PINNED_LIFECYCLE_CONFIG_SHA256='[0-9a-f]{64}'$/mu,
+      `DSH_RAY_PINNED_LIFECYCLE_CONFIG_SHA256='${configHash}'`,
     )
     .replace(
-      /^DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='[0-9a-f]{64}'$/mu,
-      `DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='${profileHash}'`,
+      /^DSH_RAY_PINNED_LIFECYCLE_PROFILE_SHA256='[0-9a-f]{64}'$/mu,
+      `DSH_RAY_PINNED_LIFECYCLE_PROFILE_SHA256='${profileHash}'`,
     )
 }
 
@@ -566,7 +566,7 @@ async function remoteBootstrapFixture(
     'common.sh': [
       '#!/usr/bin/env bash',
       'printf \'source:common\\n\' >> "$REMOTE_BOOTSTRAP_LOG"',
-      'dsh_enhanced_install() {',
+      'dsh_ray_install() {',
       '  { printf \'run\'; printf \'\\t%s\' "$@"; printf \'\\n\'; } >> "$REMOTE_BOOTSTRAP_LOG"',
       '  mkdir -p "$DSH_HOME"',
       '  printf \'mutated\\n\' > "$DSH_HOME/bootstrap-ran"',
@@ -664,18 +664,18 @@ function runRemoteNpmBootstrap(
       REMOTE_BOOTSTRAP_NODE: process.execPath,
       TMPDIR: options.temporaryDirectory ?? fixture.temporaryDirectory,
       DSH_HOME: fixture.dshHome,
-      DSH_ENHANCED_INSTALL_REF: 'v9.8.7',
-      DSH_ENHANCED_INSTALL_BASE_URL: 'https://assets.invalid/v9.8.7',
-      DSH_ENHANCED_INSTALL_COMMON_SHA256: fixture.hashes['common.sh'],
+      DSH_RAY_INSTALL_REF: 'v9.8.7',
+      DSH_RAY_INSTALL_BASE_URL: 'https://assets.invalid/v9.8.7',
+      DSH_RAY_INSTALL_COMMON_SHA256: fixture.hashes['common.sh'],
       ...(options.lifecycleDigests ? {
-        DSH_ENHANCED_INSTALL_LIFECYCLE_CONFIG_SHA256: fixture.hashes['lifecycle-config.mjs'],
-        DSH_ENHANCED_INSTALL_LIFECYCLE_PROFILE_SHA256: fixture.hashes['lifecycle-profile.mjs'],
+        DSH_RAY_INSTALL_LIFECYCLE_CONFIG_SHA256: fixture.hashes['lifecycle-config.mjs'],
+        DSH_RAY_INSTALL_LIFECYCLE_PROFILE_SHA256: fixture.hashes['lifecycle-profile.mjs'],
       } : {}),
       ...(options.hostDigests ? {
-        DSH_ENHANCED_INSTALL_HOST_LIFECYCLE_SHA256: fixture.hashes['host-lifecycle.mjs'],
-        DSH_ENHANCED_INSTALL_HOST_PROFILE_UPDATE_SHA256: fixture.hashes['host-profile-update.mjs'],
-        DSH_ENHANCED_INSTALL_HOST_RSI_UPDATE_SHA256: fixture.hashes['host-rsi-update.mjs'],
-        DSH_ENHANCED_HOST_UPDATE_PLAN: '/private/plan.json',
+        DSH_RAY_INSTALL_HOST_LIFECYCLE_SHA256: fixture.hashes['host-lifecycle.mjs'],
+        DSH_RAY_INSTALL_HOST_PROFILE_UPDATE_SHA256: fixture.hashes['host-profile-update.mjs'],
+        DSH_RAY_INSTALL_HOST_RSI_UPDATE_SHA256: fixture.hashes['host-rsi-update.mjs'],
+        DSH_RAY_HOST_UPDATE_PLAN: '/private/plan.json',
       } : {}),
       REMOTE_BOOTSTRAP_ASSETS: fixture.assetDirectory,
       REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH: options.foreignStatPath ?? '',
@@ -774,10 +774,10 @@ describe('one-click installers', () => {
     const dynamicMarker = join(root, 'dynamic-marker.yml')
     const missingId = join(root, 'missing-id.yml')
     const nonStringId = join(root, 'non-string-id.yml')
-    await writeFile(source, `- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n  config:\n    databasePath: ${join(home, 'inside', 'state.sqlite')}\n`)
+    await writeFile(source, `- id: first-party\n  name: '@dsh-ray/assistant-web-owner'\n  config:\n    databasePath: ${join(home, 'inside', 'state.sqlite')}\n`)
     await writeFile(malformed, '- id: [broken\n')
-    await writeFile(escaping, `- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n  config:\n    databasePath: ${join(root, 'outside.sqlite')}\n`)
-    await writeFile(dynamicMarker, "- id: dsh-enhanced-assistant-web-owner\n  name: '@dsh-enhanced/assistant-web-owner'\n  disabled: !!js process.platform === 'win32'\n")
+    await writeFile(escaping, `- id: first-party\n  name: '@dsh-ray/assistant-web-owner'\n  config:\n    databasePath: ${join(root, 'outside.sqlite')}\n`)
+    await writeFile(dynamicMarker, "- id: dsh-ray-assistant-web-owner\n  name: '@dsh-ray/assistant-web-owner'\n  disabled: !!js process.platform === 'win32'\n")
     await writeFile(missingId, `- name: '@untrusted/example'\n  config:\n    statePath: ${join(root, 'outside-missing-id.sqlite')}\n`)
     await writeFile(nonStringId, `- id: 3\n  name: '@untrusted/example'\n  config:\n    statePath: ${join(root, 'outside-non-string-id.sqlite')}\n`)
     const program = [
@@ -865,10 +865,10 @@ describe('one-click installers', () => {
     await mkdir(dshHome)
     await mkdir(fakeBin)
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
-printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" '  config:' '    databasePath: /srv/shared/state.sqlite'
+printf '%s\n' '- id: custom-state' "  name: '@dsh-ray/personal-assistant'" '  config:' '    databasePath: /srv/shared/state.sqlite'
 `)
 
-    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_validate_lifecycle_state_paths web "$2"',
+    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_ray_validate_lifecycle_state_paths web "$2"',
       'state-path-test', installerLibrary, dshHome], {
       cwd: repoRoot, encoding: 'utf8', env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
     })
@@ -884,10 +884,10 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     await mkdir(dshHome)
     await mkdir(fakeBin)
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
-printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" '  config:' "    databasePath: !!js dshHomePath('../shared/state.sqlite')"
+printf '%s\n' '- id: custom-state' "  name: '@dsh-ray/personal-assistant'" '  config:' "    databasePath: !!js dshHomePath('../shared/state.sqlite')"
 `)
 
-    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_validate_lifecycle_state_paths web "$2"',
+    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_ray_validate_lifecycle_state_paths web "$2"',
       'state-path-test', installerLibrary, dshHome], {
       cwd: repoRoot, encoding: 'utf8', env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
     })
@@ -903,10 +903,10 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     await mkdir(dshHome)
     await mkdir(fakeBin)
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
-printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" '  config:' '    databasePath: !!js dshHomePath()'
+printf '%s\n' '- id: custom-state' "  name: '@dsh-ray/personal-assistant'" '  config:' '    databasePath: !!js dshHomePath()'
 `)
 
-    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_validate_lifecycle_state_paths web "$2"',
+    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_ray_validate_lifecycle_state_paths web "$2"',
       'state-path-test', installerLibrary, dshHome], {
       cwd: repoRoot, encoding: 'utf8', env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
     })
@@ -929,7 +929,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     // A shallow checkout may not contain release tags.  The test deliberately
     // skips there instead of using the network; release-version fixture tests
     // separately cover future pin rewriting.
-    const pinnedHash = pinnedInstallerSource.match(/^DSH_ENHANCED_PINNED_COMMON_SHA256='([0-9a-f]{64})'$/mu)?.[1]
+    const pinnedHash = pinnedInstallerSource.match(/^DSH_RAY_PINNED_COMMON_SHA256='([0-9a-f]{64})'$/mu)?.[1]
 
     expect(pinnedHash).toBe(createHash('sha256').update(pinnedRemoteCommon!.stdout).digest('hex'))
   })
@@ -1274,8 +1274,8 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
 
   test('collects an interactive model route before its npm cohort is preflighted', async () => {
     const source = await readFile(installerLibrary, 'utf8')
-    const routeSelection = source.indexOf('dsh_enhanced_prompt_model_route model_provider model_name model_base_url model_api model_display_name')
-    const cohortPreflight = source.indexOf('dsh_enhanced_resolve_npm_cohort "$plugin_version" "$dry_run"')
+    const routeSelection = source.indexOf('dsh_ray_prompt_model_route model_provider model_name model_base_url model_api model_display_name')
+    const cohortPreflight = source.indexOf('dsh_ray_resolve_npm_cohort "$plugin_version" "$dry_run"')
 
     expect(routeSelection).toBeGreaterThan(-1)
     expect(cohortPreflight).toBeGreaterThan(routeSelection)
@@ -1313,7 +1313,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(result.stdout).toContain('部署模式：supervised-growth')
     expect(result.stdout).toContain('安装成功后，后续任务会产生有限额外模型消耗')
     expect(result.stdout).toContain('dsh-lark-setup --profile web')
-    expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')
+    expect(result.stdout).toContain('dsh-ray-setup --install-owner --profile web')
     expect(result.stdout).not.toContain('--ack-existing-automations')
   })
 
@@ -1330,7 +1330,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain(`部署场景：${scenario}`)
     expect(result.stdout).toContain('普通使用自迭代：本次不启用完整 RSI')
-    expect(result.stdout).not.toContain('dsh-rsi-setup --install-owner')
+    expect(result.stdout).not.toContain('dsh-ray-setup --install-owner')
   })
 
   test.each([['--lark', 'skip'], ['--no-service']])('Linux existing Lark respects limited opt-out %s', async (...args) => {
@@ -1341,7 +1341,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('部署场景：lark')
     expect(result.stdout).toContain('普通使用自迭代：本次不启用完整 RSI')
-    expect(result.stdout).not.toContain('dsh-rsi-setup --install-owner')
+    expect(result.stdout).not.toContain('dsh-ray-setup --install-owner')
   })
 
   test.skipIf(process.platform !== 'linux')('Linux fresh noninteractive install fails before mutation when owner pairing is unavailable', async () => {
@@ -1419,7 +1419,7 @@ require('node:module').syncBuiltinESMExports()
       expect(result.stdout).toContain('自动识别为 supervised')
       expect(result.stdout).toContain('assistant-recovery 但缺少 assistant-goals')
       expect(result.stdout).toContain(source === 'npm'
-        ? '@dsh-enhanced/assistant-goals@1.4.0'
+        ? '@dsh-ray/assistant-goals@1.4.0'
         : join(repoRoot, 'plugins', 'assistant-goals'))
       expect(result.stdout).toContain('macOS 已停止 Home 升级')
       if (source === 'npm') {
@@ -1446,7 +1446,7 @@ require('node:module').syncBuiltinESMExports()
     ], f.dshHome, 'Darwin', {
       ...lifecycleEnvironment(f.dshHome, f.fakeBin),
       ...processView.environment,
-      DSH_ENHANCED_HOST_UPDATE_PLAN: join(f.dshHome, 'host-plan.json'),
+      DSH_RAY_HOST_UPDATE_PLAN: join(f.dshHome, 'host-plan.json'),
     })
     expect(await readFile(processView.marker, 'utf8')).toMatch(/parsed=[1-9]\d* removed=[1-9]\d*/u)
     expect(result.status, result.stderr).toBe(2)
@@ -1680,12 +1680,12 @@ require('node:module').syncBuiltinESMExports()
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('部署场景：supervised')
     expect(result.stdout).toContain('部署模式：supervised-growth')
-    expect(result.stdout).toContain('dsh-rsi-setup --install-owner')
+    expect(result.stdout).toContain('dsh-ray-setup --install-owner')
   })
 
   test.each(['Linux', 'Darwin'])('%s interactive scenario menu defaults to the local core profile and keeps the advanced opt-ins', platform => {
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_choose_scenario 0 "$2"', 'installer-test', installerLibrary, platform,
+      '-c', 'source "$1"; dsh_ray_choose_scenario 0 "$2"', 'installer-test', installerLibrary, platform,
     ], { encoding: 'utf8', input: '\n' })
 
     expect(result.status, result.stderr).toBe(0)
@@ -1722,8 +1722,8 @@ require('node:module').syncBuiltinESMExports()
     const profileDirectory = join(dshHome, 'profiles', 'web')
     await mkdir(profileDirectory, { recursive: true })
     await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
-      dependencies: { '@dsh-enhanced/assistant-evolution': '0.1.7' },
-      dsh: { profile: { bundles: ['@dsh-enhanced/assistant-evolution'] } },
+      dependencies: { '@dsh-ray/assistant-evolution': '0.1.7' },
+      dsh: { profile: { bundles: ['@dsh-ray/assistant-evolution'] } },
     }, null, 2), 'utf8')
 
     const result = runInstaller(localInstaller, [
@@ -1764,11 +1764,11 @@ require('node:module').syncBuiltinESMExports()
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('目标 profile：personal-web')
     expect(result.stdout).toContain('DSH 目标：npm latest（dry-run 未联网解析')
-    expect(result.stdout).toContain('@dsh-enhanced/personal-assistant@0.2.0')
-    expect(result.stdout).toContain('@dsh-enhanced/plugin-control-plane@0.2.0')
-    expect(result.stdout).not.toContain('@dsh-enhanced/lark-channel@0.2.0')
-    expect(result.stdout).not.toContain('@dsh-enhanced/acp@')
-    expect(result.stdout).not.toContain('@dsh-enhanced/hello@')
+    expect(result.stdout).toContain('@dsh-ray/personal-assistant@0.2.0')
+    expect(result.stdout).toContain('@dsh-ray/plugin-control-plane@0.2.0')
+    expect(result.stdout).not.toContain('@dsh-ray/lark-channel@0.2.0')
+    expect(result.stdout).not.toContain('@dsh-ray/acp@')
+    expect(result.stdout).not.toContain('@dsh-ray/hello@')
   })
 
   test('npm cohort preflight resolves latest once from the personal-assistant anchor and verifies every bundle', async () => {
@@ -1781,7 +1781,7 @@ printf '%s\\n' "$*" >> "$NPM_LOG"
 case "$1" in
   view)
     case "$2" in
-      @dsh-enhanced/personal-assistant@latest|@dsh-enhanced/personal-assistant@1.4.0|@dsh-enhanced/plugin-control-plane@1.4.0|@dsh-enhanced/traex-acp-provider@1.4.0)
+      @dsh-ray/personal-assistant@latest|@dsh-ray/personal-assistant@1.4.0|@dsh-ray/plugin-control-plane@1.4.0|@dsh-ray/traex-acp-provider@1.4.0)
         printf '%s\\n' '"1.4.0"'
         ;;
       *) exit 9 ;;
@@ -1793,7 +1793,7 @@ esac
 
     const result = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_resolve_npm_cohort "$2" "$3" personal-assistant plugin-control-plane traex-acp-provider; printf "resolved=%s\\n" "$DSH_ENHANCED_RESOLVED_PLUGIN_VERSION"',
+      'source "$1"; dsh_ray_resolve_npm_cohort "$2" "$3" personal-assistant plugin-control-plane traex-acp-provider; printf "resolved=%s\\n" "$DSH_RAY_RESOLVED_PLUGIN_VERSION"',
       'installer-test', installerLibrary, 'latest', '0',
     ], {
       cwd: repoRoot,
@@ -1804,10 +1804,10 @@ esac
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('resolved=1.4.0')
     expect(await readFile(logPath, 'utf8')).toBe([
-      'view @dsh-enhanced/personal-assistant@latest version --json --location=global',
-      'view @dsh-enhanced/personal-assistant@1.4.0 version --json --location=global',
-      'view @dsh-enhanced/plugin-control-plane@1.4.0 version --json --location=global',
-      'view @dsh-enhanced/traex-acp-provider@1.4.0 version --json --location=global',
+      'view @dsh-ray/personal-assistant@latest version --json --location=global',
+      'view @dsh-ray/personal-assistant@1.4.0 version --json --location=global',
+      'view @dsh-ray/plugin-control-plane@1.4.0 version --json --location=global',
+      'view @dsh-ray/traex-acp-provider@1.4.0 version --json --location=global',
       '',
     ].join('\n'))
   })
@@ -1822,10 +1822,10 @@ esac
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 printf '%s\\n' "$*" >> "$NPM_LOG"
 case "$2" in
-  @dsh-enhanced/personal-assistant@latest|@dsh-enhanced/personal-assistant@1.4.0|@dsh-enhanced/plugin-control-plane@1.4.0)
+  @dsh-ray/personal-assistant@latest|@dsh-ray/personal-assistant@1.4.0|@dsh-ray/plugin-control-plane@1.4.0)
     printf '%s\\n' '"1.4.0"'
     ;;
-  @dsh-enhanced/assistant-delivery@1.4.0)
+  @dsh-ray/assistant-delivery@1.4.0)
     printf '%s\\n' '"1.3.9"'
     ;;
   *) exit 9 ;;
@@ -1834,7 +1834,7 @@ esac
 
     const result = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_resolve_npm_cohort latest 0 personal-assistant plugin-control-plane assistant-delivery || exit $?; printf profile-mutated >> "$PROFILE_LOG"',
+      'source "$1"; dsh_ray_resolve_npm_cohort latest 0 personal-assistant plugin-control-plane assistant-delivery || exit $?; printf profile-mutated >> "$PROFILE_LOG"',
       'installer-test', installerLibrary,
     ], {
       cwd: repoRoot,
@@ -1843,7 +1843,7 @@ esac
     })
 
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain('@dsh-enhanced/assistant-delivery@1.4.0')
+    expect(result.stderr).toContain('@dsh-ray/assistant-delivery@1.4.0')
     await expect(readFile(profileLogPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
@@ -1859,7 +1859,7 @@ printf '%s\\n' '"1.4.0"'
 
     const result = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_resolve_npm_cohort latest 0 personal-assistant plugin-control-plane && dsh_enhanced_resolve_npm_cohort latest 0 personal-assistant plugin-control-plane',
+      'source "$1"; dsh_ray_resolve_npm_cohort latest 0 personal-assistant plugin-control-plane && dsh_ray_resolve_npm_cohort latest 0 personal-assistant plugin-control-plane',
       'installer-test', installerLibrary,
     ], {
       cwd: repoRoot,
@@ -1880,14 +1880,14 @@ printf '%s\\n' '"1.4.0"'
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 printf '%s\\n' "$*" >> "$NPM_LOG"
 case "$2" in
-  @dsh-enhanced/personal-assistant@1.4.0|@dsh-enhanced/plugin-control-plane@1.4.0) printf '%s\\n' '"1.4.0"' ;;
+  @dsh-ray/personal-assistant@1.4.0|@dsh-ray/plugin-control-plane@1.4.0) printf '%s\\n' '"1.4.0"' ;;
   *) exit 9 ;;
 esac
 `)
 
     const explicit = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_resolve_npm_cohort 1.4.0 0 personal-assistant plugin-control-plane; printf "resolved=%s\\n" "$DSH_ENHANCED_RESOLVED_PLUGIN_VERSION"',
+      'source "$1"; dsh_ray_resolve_npm_cohort 1.4.0 0 personal-assistant plugin-control-plane; printf "resolved=%s\\n" "$DSH_RAY_RESOLVED_PLUGIN_VERSION"',
       'installer-test', installerLibrary,
     ], {
       cwd: repoRoot,
@@ -1896,7 +1896,7 @@ esac
     })
     const dryRun = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_resolve_npm_cohort latest 1 personal-assistant plugin-control-plane; printf "resolved=%s\\n" "$DSH_ENHANCED_RESOLVED_PLUGIN_VERSION"',
+      'source "$1"; dsh_ray_resolve_npm_cohort latest 1 personal-assistant plugin-control-plane; printf "resolved=%s\\n" "$DSH_RAY_RESOLVED_PLUGIN_VERSION"',
       'installer-test', installerLibrary,
     ], {
       cwd: repoRoot,
@@ -1911,19 +1911,19 @@ esac
       env: {
         PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
         DSH_HOME: join(root, 'dsh-home'),
-        DSH_ENHANCED_VERSION: '1.4.0',
+        DSH_RAY_VERSION: '1.4.0',
         NPM_LOG: logPath,
       },
     })
 
     expect(explicit.status, explicit.stderr).toBe(0)
     expect(explicit.stdout).toContain('resolved=1.4.0')
-    expect(await readFile(logPath, 'utf8')).toContain('view @dsh-enhanced/personal-assistant@1.4.0 version --json --location=global')
+    expect(await readFile(logPath, 'utf8')).toContain('view @dsh-ray/personal-assistant@1.4.0 version --json --location=global')
     expect(dryRun.status, dryRun.stderr).toBe(0)
     expect(dryRun.stdout).toContain('resolved=<npm-anchor:latest>')
     expect(dryRun.stdout).toContain('不会访问 npm registry')
     expect(environmentDefault.status, environmentDefault.stderr).toBe(0)
-    expect(environmentDefault.stdout).toContain('@dsh-enhanced/personal-assistant@1.4.0')
+    expect(environmentDefault.stdout).toContain('@dsh-ray/personal-assistant@1.4.0')
     expect((await readFile(logPath, 'utf8')).match(/\n/g)?.length).toBe(3)
   })
 
@@ -1940,7 +1940,7 @@ printf '%s\\n' '{not-json'
 
     const malformed = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_resolve_npm_cohort latest 0 personal-assistant',
+      'source "$1"; dsh_ray_resolve_npm_cohort latest 0 personal-assistant',
       'installer-test', installerLibrary,
     ], {
       cwd: repoRoot,
@@ -1949,7 +1949,7 @@ printf '%s\\n' '{not-json'
     })
     const unsafe = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_resolve_npm_cohort "latest; touch $2" 0 personal-assistant',
+      'source "$1"; dsh_ray_resolve_npm_cohort "latest; touch $2" 0 personal-assistant',
       'installer-test', installerLibrary, markerPath,
     ], {
       cwd: repoRoot,
@@ -1962,13 +1962,13 @@ printf '%s\\n' '{not-json'
     expect(unsafe.status).toBe(2)
     expect(unsafe.stderr).toContain('不支持 range')
     await expect(readFile(markerPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(await readFile(logPath, 'utf8')).toBe('view @dsh-enhanced/personal-assistant@latest version --json --location=global\n')
+    expect(await readFile(logPath, 'utf8')).toBe('view @dsh-ray/personal-assistant@latest version --json --location=global\n')
   })
 
   test('npm supervised dry-run describes one unresolved anchor cohort for every required bundle', async () => {
     const dshHome = await temporaryDshHome()
     const installer = await readFile(npmInstaller, 'utf8')
-    const release = installer.match(/^DSH_ENHANCED_PINNED_RELEASE_REF='v([^']+)'$/mu)?.[1]
+    const release = installer.match(/^DSH_RAY_PINNED_RELEASE_REF='v([^']+)'$/mu)?.[1]
     expect(release).toMatch(/^\d+\.\d+\.\d+$/u)
 
     const result = runInstaller(npmInstaller, [
@@ -1976,9 +1976,9 @@ printf '%s\\n' '{not-json'
     ], dshHome)
 
     expect(result.status, result.stderr).toBe(0)
-    const selected = [...result.stdout.matchAll(/@dsh-enhanced\/([a-z0-9-]+)@([^\s]+)/gu)]
+    const selected = [...result.stdout.matchAll(/@dsh-ray\/([a-z0-9-]+)@([^\s]+)/gu)]
     expect(selected.length).toBeGreaterThan(0)
-    expect(result.stdout).toContain('npm cohort（dry-run）：将先解析 @dsh-enhanced/personal-assistant@latest 的精确版本')
+    expect(result.stdout).toContain('npm cohort（dry-run）：将先解析 @dsh-ray/personal-assistant@latest 的精确版本')
     expect(result.stdout).toContain('<npm-anchor:latest>')
     const slugs = new Set(selected.map(match => match[1]))
     for (const required of [
@@ -1990,7 +1990,7 @@ printf '%s\\n' '{not-json'
       'assistant-work-items',
     ]) expect(slugs.has(required), `missing ${required}`).toBe(true)
     expect(result.stdout).toContain('env npm_config_loglevel=error dsh plugin --profile web add')
-    expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')
+    expect(result.stdout).toContain('dsh-ray-setup --install-owner --profile web')
     expect(result.stdout).not.toContain('dsh-supervised-growth-setup')
   })
 
@@ -2126,15 +2126,15 @@ exit 0
       name: 'dsh-profile-probe',
       private: true,
       dependencies: {
-        '@dsh-enhanced/personal-assistant': '0.1.55',
-        '@dsh-enhanced/plugin-control-plane': '0.1.55',
-        '@dsh-enhanced/owner-plain': '1.2.3',
+        '@dsh-ray/personal-assistant': '0.1.55',
+        '@dsh-ray/plugin-control-plane': '0.1.55',
+        '@dsh-ray/owner-plain': '1.2.3',
       },
       dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
     }, null, 2) + '\n')
-    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/personal-assistant', true)
-    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/plugin-control-plane', true)
-    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/owner-plain', false)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-ray/personal-assistant', true)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-ray/plugin-control-plane', true)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-ray/owner-plain', false)
     const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 if [[ "$*" == *'plugin --profile probe add '* ]]; then
@@ -2155,7 +2155,7 @@ exit 0
     expect(result.status, result.stderr).toBe(71)
     expect(await readFile(logPath, 'utf8')).toContain('add\n')
     const manifest = parse(await readFile(join(profileDirectory, 'package.json'), 'utf8'))
-    expect(manifest.dependencies).toEqual({ '@dsh-enhanced/owner-plain': '1.2.3' })
+    expect(manifest.dependencies).toEqual({ '@dsh-ray/owner-plain': '1.2.3' })
     expect(manifest.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base'])
     expect(result.stdout).toContain('半装 bundle')
   })
@@ -2175,14 +2175,14 @@ exit 0
       name: 'dsh-profile-probe',
       private: true,
       dependencies: {
-        '@dsh-enhanced/personal-assistant': '0.1.55',
-        '@dsh-enhanced/owner-tool': '1.2.3',
+        '@dsh-ray/personal-assistant': '0.1.55',
+        '@dsh-ray/owner-tool': '1.2.3',
       },
-      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@dsh-enhanced/personal-assistant'] } },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@dsh-ray/personal-assistant'] } },
     }, null, 2) + '\n'
     await writeFile(join(profileDirectory, 'package.json'), originalManifest)
-    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/personal-assistant', true)
-    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/owner-tool', false)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-ray/personal-assistant', true)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-ray/owner-tool', false)
     const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 if [[ "$*" == *'plugin --profile probe add '* ]]; then
@@ -2217,11 +2217,11 @@ exit 0
     await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
       name: 'dsh-profile-probe',
       private: true,
-      dependencies: { '@dsh-enhanced/plugin-control-plane': '0.1.55' },
+      dependencies: { '@dsh-ray/plugin-control-plane': '0.1.55' },
       dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
     }, null, 2) + '\n')
     // Installed tree does not declare dsh.bundle (or is unreadable): never prune.
-    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/plugin-control-plane', false)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-ray/plugin-control-plane', false)
     const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 if [[ "$*" == *'plugin --profile probe add '* ]]; then exit 71; fi
@@ -2238,7 +2238,7 @@ exit 0
     ], dshHome, undefined, { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin` })
     expect(result.status, result.stderr).toBe(71)
     const manifest = parse(await readFile(join(profileDirectory, 'package.json'), 'utf8'))
-    expect(manifest.dependencies).toEqual({ '@dsh-enhanced/plugin-control-plane': '0.1.55' })
+    expect(manifest.dependencies).toEqual({ '@dsh-ray/plugin-control-plane': '0.1.55' })
   })
 
   test('npm install dry-run reports half-installed cleanup without writing', async () => {
@@ -2253,11 +2253,11 @@ exit 0
     const originalManifest = JSON.stringify({
       name: 'dsh-profile-probe',
       private: true,
-      dependencies: { '@dsh-enhanced/personal-assistant': '0.1.55' },
+      dependencies: { '@dsh-ray/personal-assistant': '0.1.55' },
       dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
     }, null, 2) + '\n'
     await writeFile(join(profileDirectory, 'package.json'), originalManifest)
-    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/personal-assistant', true)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-ray/personal-assistant', true)
     const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 exit 0
@@ -2288,13 +2288,13 @@ exit 0
     // A failed pnpm add links node_modules and writes the dependency, but the
     // Host never registers the bundle: the old directory-exists early return
     // treated this as installed and skipped the retrying add entirely.
-    await mkdir(join(profileDirectory, 'node_modules/@dsh-enhanced/traex-acp-provider'), { recursive: true })
-    await writeFile(join(profileDirectory, 'node_modules/@dsh-enhanced/traex-acp-provider/package.json'),
-      '{"name":"@dsh-enhanced/traex-acp-provider","dsh":{"bundle":"./cordis.patch.yml"}}\n')
+    await mkdir(join(profileDirectory, 'node_modules/@dsh-ray/traex-acp-provider'), { recursive: true })
+    await writeFile(join(profileDirectory, 'node_modules/@dsh-ray/traex-acp-provider/package.json'),
+      '{"name":"@dsh-ray/traex-acp-provider","dsh":{"bundle":"./cordis.patch.yml"}}\n')
     await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
       name: 'dsh-profile-probe',
       private: true,
-      dependencies: { '@dsh-enhanced/traex-acp-provider': '0.1.55' },
+      dependencies: { '@dsh-ray/traex-acp-provider': '0.1.55' },
       dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
     }, null, 2) + '\n')
     await writeFile(join(profileDirectory, 'pnpm-workspace.yaml'),
@@ -2306,7 +2306,7 @@ exit 0
     await symlink(hostExecutable, join(fakeBin, 'dsh'))
     const runEnsure = () => spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_ensure_agent_bundle traex-agent probe "$2" npm "$3" 0.1.55 0',
+      'source "$1"; dsh_ray_ensure_agent_bundle traex-agent probe "$2" npm "$3" 0.1.55 0',
       'installer-test', installerLibrary, dshHome, repoRoot,
     ], {
       cwd: repoRoot,
@@ -2315,7 +2315,7 @@ exit 0
     })
     const result = runEnsure()
     expect(result.status, result.stderr).toBe(0)
-    expect(await readFile(logPath, 'utf8')).toContain('plugin --profile probe add @dsh-enhanced/traex-acp-provider@0.1.55')
+    expect(await readFile(logPath, 'utf8')).toContain('plugin --profile probe add @dsh-ray/traex-acp-provider@0.1.55')
     // The stale dependency entry is pruned before the add so the Host
     // reconciler registers the bundle instead of skipping it as pre-existing.
     const manifest = parse(await readFile(join(profileDirectory, 'package.json'), 'utf8'))
@@ -2324,8 +2324,8 @@ exit 0
     await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
       name: 'dsh-profile-probe',
       private: true,
-      dependencies: { '@dsh-enhanced/traex-acp-provider': '0.1.55' },
-      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@dsh-enhanced/traex-acp-provider'] } },
+      dependencies: { '@dsh-ray/traex-acp-provider': '0.1.55' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@dsh-ray/traex-acp-provider'] } },
     }, null, 2) + '\n')
     await writeFile(logPath, '')
     const rerun = runEnsure()
@@ -2344,13 +2344,13 @@ exit 0
     const originalManifest = JSON.stringify({
       name: 'dsh-profile-probe',
       private: true,
-      dependencies: { '@dsh-enhanced/personal-assistant': '0.1.55' },
-      dsh: { profile: { bundles: '@dsh-enhanced/personal-assistant' } },
+      dependencies: { '@dsh-ray/personal-assistant': '0.1.55' },
+      dsh: { profile: { bundles: '@dsh-ray/personal-assistant' } },
     }, null, 2) + '\n'
     await writeFile(join(profileDirectory, 'package.json'), originalManifest)
     const result = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_prune_half_installed_bundles probe "$2" 0 @dsh-enhanced/personal-assistant@0.1.55',
+      'source "$1"; dsh_ray_prune_half_installed_bundles probe "$2" 0 @dsh-ray/personal-assistant@0.1.55',
       'installer-test', installerLibrary, dshHome,
     ], {
       cwd: repoRoot,
@@ -2389,8 +2389,8 @@ exit 0
     expect(npm.stdout).not.toContain('npm install --global @deepseek-ai/dsh@latest')
     expect(manifest.nextPinnedHostVersion).toBe('0.2.2-rc.5')
     expect(manifest.nextVerifiedHostRange).toBe('>=0.2.2-rc.5 <0.3.0')
-    expect(released).toContain(`DSH_ENHANCED_PINNED_HOST_VERSION='${pinnedRelease.pinnedHostVersion}'`)
-    expect(released).toContain(`DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${pinnedRelease.verifiedHostRange}'`)
+    expect(released).toContain(`DSH_RAY_PINNED_HOST_VERSION='${pinnedRelease.pinnedHostVersion}'`)
+    expect(released).toContain(`DSH_RAY_PINNED_VERIFIED_HOST_RANGE='${pinnedRelease.verifiedHostRange}'`)
   })
 
   test('remote npm installer exports the verified range paired with its pinned common', async () => {
@@ -2400,8 +2400,8 @@ exit 0
     await mkdir(fakeBin, { recursive: true })
     await writeFile(remoteCommon, [
       '#!/usr/bin/env bash',
-      'dsh_enhanced_install() {',
-      "  printf 'remote-range=%s remote-host=%s\\n' \"$DSH_ENHANCED_VERIFIED_HOST_RANGE\" \"$DSH_ENHANCED_PINNED_HOST_VERSION\"",
+      'dsh_ray_install() {',
+      "  printf 'remote-range=%s remote-host=%s\\n' \"$DSH_RAY_VERIFIED_HOST_RANGE\" \"$DSH_RAY_PINNED_HOST_VERSION\"",
       '}',
       '',
     ].join('\n'), 'utf8')
@@ -2414,13 +2414,13 @@ cp "$REMOTE_COMMON" "$4"
     const pinnedRelease = releaseManifest.pending ?? releaseManifest.current
     expect(pinnedRelease).toBeDefined()
     const pinnedRange = installer.match(
-      /^DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='([^']+)'$/mu,
+      /^DSH_RAY_PINNED_VERIFIED_HOST_RANGE='([^']+)'$/mu,
     )?.[1]
     const pinnedHostVersion = installer.match(
-      /^DSH_ENHANCED_PINNED_HOST_VERSION='([^']+)'$/mu,
+      /^DSH_RAY_PINNED_HOST_VERSION='([^']+)'$/mu,
     )?.[1]
     const pinnedReleaseRef = installer.match(
-      /^DSH_ENHANCED_PINNED_RELEASE_REF='([^']+)'$/mu,
+      /^DSH_RAY_PINNED_RELEASE_REF='([^']+)'$/mu,
     )?.[1]
     expect(pinnedReleaseRef).toBe(`v${pinnedRelease.version}`)
     expect(pinnedRange).toBe(pinnedRelease.verifiedHostRange)
@@ -2433,8 +2433,8 @@ cp "$REMOTE_COMMON" "$4"
       env: {
         PATH: `${fakeBin}:/usr/bin:/bin`,
         DSH_HOME: join(root, 'dsh-home'),
-        DSH_ENHANCED_INSTALL_BASE_URL: `https://installer.invalid/v${pinnedRelease.version}`,
-        DSH_ENHANCED_INSTALL_COMMON_SHA256: commonHash,
+        DSH_RAY_INSTALL_BASE_URL: `https://installer.invalid/v${pinnedRelease.version}`,
+        DSH_RAY_INSTALL_COMMON_SHA256: commonHash,
         REMOTE_COMMON: remoteCommon,
       },
     })
@@ -2514,7 +2514,7 @@ cp "$REMOTE_COMMON" "$4"
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-recovery'))
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'traex-acp-provider'))
     expect(result.stdout).toContain('dsh-lark-setup --profile web')
-    expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')
+    expect(result.stdout).toContain('dsh-ray-setup --install-owner --profile web')
     expect(result.stdout).not.toContain('dsh-supervised-growth-setup')
     expect(result.stdout).not.toContain('overlay：未应用')
   })
@@ -2537,7 +2537,7 @@ cp "$REMOTE_COMMON" "$4"
     expect(result.status, result.stderr).toBe(0)
 
     const installedRows = await composeSelectedBundleRows(result.stdout)
-    const lark = installedRows.find(row => row.id === 'dsh-enhanced-lark-channel')
+    const lark = installedRows.find(row => row.id === 'dsh-ray-lark-channel')
     expect(lark).toBeDefined()
     lark.config = { ...lark.config, enabled: true, account: 'primary', tenant: 'personal' }
     const effectiveBefore = stringify(installedRows)
@@ -2580,7 +2580,7 @@ cp "$REMOTE_COMMON" "$4"
     ], dshHome)
 
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')
+    expect(result.stdout).toContain('dsh-ray-setup --install-owner --profile web')
     expect(result.stdout).toContain('--ack-existing-automations')
     expect(result.stdout).not.toContain('dsh-supervised-growth-setup')
   })
@@ -2613,38 +2613,38 @@ cp "$REMOTE_COMMON" "$4"
     const result = spawnSync('/bin/bash', [
       '-c', [
         'source "$1"',
-        'dsh_enhanced_version_ge 0.1.0-rc.8 0.1.0-rc.7',
-        '! dsh_enhanced_version_ge 0.1.0-rc.7 0.1.0-rc.8',
-        'dsh_enhanced_version_ge 0.1.0 0.1.0-rc.8',
-        '! dsh_enhanced_version_ge 0.1.0-rc.8 0.1.0',
-        'dsh_enhanced_version_ge 0.1.2-rc.1 0.1.0-rc.8',
-        'dsh_enhanced_version_ge 0.1.2-rc.10 0.1.2-rc.2',
-        '! dsh_enhanced_version_ge 0.1.2-rc.2 0.1.2-rc.10',
-        'dsh_enhanced_version_ge 0.1.2-rc.beta 0.1.2-rc.1',
-        '! dsh_enhanced_version_ge 0.1.2-rc.1 0.1.2-rc.beta',
-        'dsh_enhanced_version_ge 0.1.2-rc.1.0 0.1.2-rc.1',
-        '! dsh_enhanced_version_ge 0.1.2-rc.1 0.1.2-rc.1.0',
-        'dsh_enhanced_version_ge 0.1.2+build.2 0.1.2+build.1',
-        'dsh_enhanced_version_ge 0.1.2+build.1 0.1.2+build.2',
-        "dsh_enhanced_version_in_range 0.1.2-rc.1 '>=0.1.2-rc.1 <0.2.0'",
-        "dsh_enhanced_version_in_range 0.1.2-rc.2 '>=0.1.2-rc.1 <0.2.0'",
-        "dsh_enhanced_version_in_range 0.1.2-rc.1.0 '>=0.1.2-rc.1 <0.2.0'",
-        "dsh_enhanced_version_in_range 0.1.2 '>=0.1.2-rc.1 <0.2.0'",
-        "dsh_enhanced_version_in_range 0.1.2+build.1 '>=0.1.2-rc.1 <0.2.0'",
-        "dsh_enhanced_version_in_range 0.1.3 '>=0.1.2-rc.1 <0.2.0'",
-        "dsh_enhanced_version_in_range 0.1.3-rc.1 '>=0.1.2-rc.1 <0.2.0'",
-        "dsh_enhanced_version_in_range 0.1.5-rc.1 '>=0.1.2-rc.1 <0.2.0'",
-        "dsh_enhanced_version_in_range 0.1.9-rc.10 '>=0.1.2-rc.1 <0.2.0'",
-        "! dsh_enhanced_version_in_range 0.1.2-alpha.9 '>=0.1.2-rc.1 <0.2.0'",
-        "! dsh_enhanced_version_in_range 0.1.2-rc.0 '>=0.1.2-rc.1 <0.2.0'",
-        "! dsh_enhanced_version_in_range 0.1.3-alpha.1 '>=0.1.2-rc.1 <0.2.0'",
-        "! dsh_enhanced_version_in_range 0.1.5-alpha.1 '>=0.1.2-rc.1 <0.2.0'",
-        "! dsh_enhanced_version_in_range 0.1.5-beta.2 '>=0.1.2-rc.1 <0.2.0'",
-        "! dsh_enhanced_version_in_range 0.2.0-rc.1 '>=0.1.2-rc.1 <0.2.0'",
-        "! dsh_enhanced_version_in_range 0.2.0-alpha.1 '>=0.1.2-rc.1 <0.2.0'",
-        "! dsh_enhanced_version_in_range 0.2.0 '>=0.1.2-rc.1 <0.2.0'",
-        "dsh_enhanced_version_in_range 0.1.4-rc.1 '>=0.1.2 <0.1.5'",
-        "! dsh_enhanced_version_in_range 0.1.5-rc.1 '>=0.1.2 <0.1.5'",
+        'dsh_ray_version_ge 0.1.0-rc.8 0.1.0-rc.7',
+        '! dsh_ray_version_ge 0.1.0-rc.7 0.1.0-rc.8',
+        'dsh_ray_version_ge 0.1.0 0.1.0-rc.8',
+        '! dsh_ray_version_ge 0.1.0-rc.8 0.1.0',
+        'dsh_ray_version_ge 0.1.2-rc.1 0.1.0-rc.8',
+        'dsh_ray_version_ge 0.1.2-rc.10 0.1.2-rc.2',
+        '! dsh_ray_version_ge 0.1.2-rc.2 0.1.2-rc.10',
+        'dsh_ray_version_ge 0.1.2-rc.beta 0.1.2-rc.1',
+        '! dsh_ray_version_ge 0.1.2-rc.1 0.1.2-rc.beta',
+        'dsh_ray_version_ge 0.1.2-rc.1.0 0.1.2-rc.1',
+        '! dsh_ray_version_ge 0.1.2-rc.1 0.1.2-rc.1.0',
+        'dsh_ray_version_ge 0.1.2+build.2 0.1.2+build.1',
+        'dsh_ray_version_ge 0.1.2+build.1 0.1.2+build.2',
+        "dsh_ray_version_in_range 0.1.2-rc.1 '>=0.1.2-rc.1 <0.2.0'",
+        "dsh_ray_version_in_range 0.1.2-rc.2 '>=0.1.2-rc.1 <0.2.0'",
+        "dsh_ray_version_in_range 0.1.2-rc.1.0 '>=0.1.2-rc.1 <0.2.0'",
+        "dsh_ray_version_in_range 0.1.2 '>=0.1.2-rc.1 <0.2.0'",
+        "dsh_ray_version_in_range 0.1.2+build.1 '>=0.1.2-rc.1 <0.2.0'",
+        "dsh_ray_version_in_range 0.1.3 '>=0.1.2-rc.1 <0.2.0'",
+        "dsh_ray_version_in_range 0.1.3-rc.1 '>=0.1.2-rc.1 <0.2.0'",
+        "dsh_ray_version_in_range 0.1.5-rc.1 '>=0.1.2-rc.1 <0.2.0'",
+        "dsh_ray_version_in_range 0.1.9-rc.10 '>=0.1.2-rc.1 <0.2.0'",
+        "! dsh_ray_version_in_range 0.1.2-alpha.9 '>=0.1.2-rc.1 <0.2.0'",
+        "! dsh_ray_version_in_range 0.1.2-rc.0 '>=0.1.2-rc.1 <0.2.0'",
+        "! dsh_ray_version_in_range 0.1.3-alpha.1 '>=0.1.2-rc.1 <0.2.0'",
+        "! dsh_ray_version_in_range 0.1.5-alpha.1 '>=0.1.2-rc.1 <0.2.0'",
+        "! dsh_ray_version_in_range 0.1.5-beta.2 '>=0.1.2-rc.1 <0.2.0'",
+        "! dsh_ray_version_in_range 0.2.0-rc.1 '>=0.1.2-rc.1 <0.2.0'",
+        "! dsh_ray_version_in_range 0.2.0-alpha.1 '>=0.1.2-rc.1 <0.2.0'",
+        "! dsh_ray_version_in_range 0.2.0 '>=0.1.2-rc.1 <0.2.0'",
+        "dsh_ray_version_in_range 0.1.4-rc.1 '>=0.1.2 <0.1.5'",
+        "! dsh_ray_version_in_range 0.1.5-rc.1 '>=0.1.2 <0.1.5'",
       ].join('\n'),
       'installer-test', installerLibrary,
     ], { encoding: 'utf8' })
@@ -2666,7 +2666,7 @@ printf 'npm %s\n' "$*" >> "$INSTALL_LOG"
 `)
 
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_ensure_dsh 0.2.2-rc.5 0 0',
+      '-c', 'source "$1"; dsh_ray_ensure_dsh 0.2.2-rc.5 0 0',
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
@@ -2712,12 +2712,12 @@ printf 'npm %s\n' "$*" >> "$INSTALL_LOG"
     await symlink(canonicalDsh, join(fakeBin, 'dsh'))
 
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_heal_host_module_fallback "$2" 0.1.5-rc.3',
+      '-c', 'source "$1"; dsh_ray_heal_host_module_fallback "$2" 0.1.5-rc.3',
       'installer-test', installerLibrary, dshHome,
     ], {
       cwd: repoRoot,
       encoding: 'utf8',
-      env: { DSH_ENHANCED_VERIFIED_HOST_RANGE: '>=0.1.5-rc.3 <0.1.6', PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin` },
+      env: { DSH_RAY_VERIFIED_HOST_RANGE: '>=0.1.5-rc.3 <0.1.6', PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin` },
     })
 
     expect(result.status, result.stderr).toBe(0)
@@ -2793,7 +2793,7 @@ if [[ "${'$'}{1:-}" == '--version' ]]; then printf '11.7.0\\n'; else printf 'pnp
 if [[ "${'$'}{1:-}" == 'prefix' ]]; then printf '%s\\n' "$FAKE_PREFIX"; exit 0; fi
 printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
 `)
-    await writeExecutable(join(fakeBin, 'dsh-rsi'), `#!/bin/bash
+    await writeExecutable(join(fakeBin, 'dsh-ray'), `#!/bin/bash
 if [[ "${'$'}{1:-}" == 'version' ]]; then printf '0.1.48\\n'; fi
 `)
 
@@ -2802,7 +2802,7 @@ if [[ "${'$'}{1:-}" == 'version' ]]; then printf '0.1.48\\n'; fi
     ], {
       cwd: repoRoot,
       encoding: 'utf8',
-      env: { DSH_ENHANCED_VERIFIED_HOST_RANGE: '>=0.1.5-rc.3 <0.1.6', PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`, DSH_HOME: dshHome, INSTALL_LOG: logPath, FAKE_PREFIX: root, DSH_ENHANCED_WEB_PORT: String(webPort) },
+      env: { DSH_RAY_VERIFIED_HOST_RANGE: '>=0.1.5-rc.3 <0.1.6', PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`, DSH_HOME: dshHome, INSTALL_LOG: logPath, FAKE_PREFIX: root, DSH_RAY_WEB_PORT: String(webPort) },
     })
 
     expect(result.status, result.stderr).toBe(0)
@@ -2826,7 +2826,7 @@ printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
 `)
 
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_ensure_dsh latest 0 0',
+      '-c', 'source "$1"; dsh_ray_ensure_dsh latest 0 0',
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
@@ -2855,7 +2855,7 @@ fi
 exit 8
 `)
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_ensure_dsh latest 0 0',
+      '-c', 'source "$1"; dsh_ray_ensure_dsh latest 0 0',
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
@@ -2882,7 +2882,7 @@ fi
 exit 8
 `)
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_ensure_dsh 0.2.2-rc.5 0 0',
+      '-c', 'source "$1"; dsh_ray_ensure_dsh 0.2.2-rc.5 0 0',
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
@@ -2904,7 +2904,7 @@ if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '%s\\n' "
 exit 8
 `)
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_ensure_dsh latest 0 0',
+      '-c', 'source "$1"; dsh_ray_ensure_dsh latest 0 0',
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
@@ -2926,7 +2926,7 @@ printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
 exit 8
 `)
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_ensure_dsh latest 0 0',
+      '-c', 'source "$1"; dsh_ray_ensure_dsh latest 0 0',
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
@@ -2967,12 +2967,12 @@ exit 8
     expect(acknowledged.stderr).toContain('支持 DSH >=0.2.2-rc.5 <0.3.0')
     expect(acknowledged.stdout).not.toContain('@deepseek-ai/dsh@0.1.0-rc.8')
 
-    const sourcePin = readFileSync(installerLibrary, 'utf8').match(/^DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='([^']+)'$/mu)?.[1]
+    const sourcePin = readFileSync(installerLibrary, 'utf8').match(/^DSH_RAY_SOURCE_PINNED_HOST_VERSION='([^']+)'$/mu)?.[1]
     expect(sourcePin).toBeDefined()
     const override = runInstaller(localInstaller, ['--dry-run', '--lark', 'skip'], dshHome, undefined, {
       // The equality guard must reject any explicit pin different from the
       // source pin, independent of future default version updates.
-      DSH_ENHANCED_PINNED_HOST_VERSION: `${sourcePin!}-tampered`,
+      DSH_RAY_PINNED_HOST_VERSION: `${sourcePin!}-tampered`,
     })
     expect(override.status).toBe(2)
     expect(override.stderr).toContain('Host pin 与安装逻辑不一致')
@@ -2982,13 +2982,13 @@ exit 8
   test('accepts the verified 0.2 release candidates and rejects next-line or malformed Host versions', () => {
     const result = spawnSync('/bin/bash', ['-c', [
       'source "$1"',
-      'dsh_enhanced_require_pinned_host_version 0.2.2-rc.5',
-      'dsh_enhanced_require_pinned_host_version 0.2.3-rc.1',
-      '! dsh_enhanced_require_pinned_host_version 0.2.2-rc.3',
-      '! dsh_enhanced_require_pinned_host_version 0.2.2-rc.1',
-      '! dsh_enhanced_require_pinned_host_version 0.2.1-rc.2',
-      '! dsh_enhanced_require_pinned_host_version 0.2.0-rc.1',
-      '! dsh_enhanced_require_pinned_host_version 0.2.2-rc.5-invalid!',
+      'dsh_ray_require_pinned_host_version 0.2.2-rc.5',
+      'dsh_ray_require_pinned_host_version 0.2.3-rc.1',
+      '! dsh_ray_require_pinned_host_version 0.2.2-rc.3',
+      '! dsh_ray_require_pinned_host_version 0.2.2-rc.1',
+      '! dsh_ray_require_pinned_host_version 0.2.1-rc.2',
+      '! dsh_ray_require_pinned_host_version 0.2.0-rc.1',
+      '! dsh_ray_require_pinned_host_version 0.2.2-rc.5-invalid!',
     ].join('; '), 'installer-test', installerLibrary], { encoding: 'utf8' })
     expect(result.status, result.stderr).toBe(0)
     expect(result.stderr).toContain('支持 DSH >=0.2.2-rc.5 <0.3.0')
@@ -2999,17 +2999,17 @@ exit 8
     const result = spawnSync('/bin/bash', ['-c', [
       'set -e',
       'source "$1"',
-      'dsh_enhanced_require_pinned_host_version 0.2.2-rc.5',
-      '! dsh_enhanced_require_pinned_host_version 0.2.2-rc.3',
-      '! dsh_enhanced_require_pinned_host_version 0.2.2-rc.1',
-      '! dsh_enhanced_require_pinned_host_version 0.2.1-rc.2',
-      '! dsh_enhanced_require_pinned_host_version 0.2.0-rc.2',
-      '! dsh_enhanced_require_pinned_host_version 0.1.5-rc.2',
-      '! dsh_enhanced_require_pinned_host_version 0.1.6-beta.1',
-      '! dsh_enhanced_require_pinned_host_version 0.1.7-rc.2',
+      'dsh_ray_require_pinned_host_version 0.2.2-rc.5',
+      '! dsh_ray_require_pinned_host_version 0.2.2-rc.3',
+      '! dsh_ray_require_pinned_host_version 0.2.2-rc.1',
+      '! dsh_ray_require_pinned_host_version 0.2.1-rc.2',
+      '! dsh_ray_require_pinned_host_version 0.2.0-rc.2',
+      '! dsh_ray_require_pinned_host_version 0.1.5-rc.2',
+      '! dsh_ray_require_pinned_host_version 0.1.6-beta.1',
+      '! dsh_ray_require_pinned_host_version 0.1.7-rc.2',
     ].join('; '), 'installer-test', installerLibrary], {
       encoding: 'utf8',
-      env: { ...process.env, DSH_ENHANCED_VERIFIED_HOST_RANGE: manifest.nextVerifiedHostRange },
+      env: { ...process.env, DSH_RAY_VERIFIED_HOST_RANGE: manifest.nextVerifiedHostRange },
     })
     expect(result.status, result.stderr).toBe(0)
     expect(result.stderr).toContain('支持 DSH >=0.2.2-rc.5 <0.3.0')
@@ -3046,9 +3046,9 @@ if [[ "$*" == 'install --global @deepseek-ai/dsh@0.2.2-rc.5' ]]; then
   cp "$FAKE_BIN/dsh-new" "$FAKE_BIN/dsh"
   chmod 755 "$FAKE_BIN/dsh"
 fi
-if [[ "\${1:-}" == 'install' && "$*" == *rsi-cli* ]]; then
-  printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-rsi"
-  chmod 755 "$FAKE_BIN/dsh-rsi"
+if [[ "\${1:-}" == 'install' && "$*" == *dsh-ray* ]]; then
+  printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-ray"
+  chmod 755 "$FAKE_BIN/dsh-ray"
 fi
 `)
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
@@ -3088,8 +3088,8 @@ printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
     await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
     await writeFile(join(dshHome, 'profiles', 'web', 'package.json'), JSON.stringify({
       dependencies: {
-        '@dsh-enhanced/assistant-evolution': '0.1.7',
-        '@dsh-enhanced/assistant-evaluation': '0.1.7',
+        '@dsh-ray/assistant-evolution': '0.1.7',
+        '@dsh-ray/assistant-evaluation': '0.1.7',
       },
     }, null, 2), 'utf8')
     await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
@@ -3109,7 +3109,7 @@ if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
 if [[ "$*" == *'--no-open --port 0'* ]]; then
   printf '%s\\n' 'Error: dsh: plugin tree failed to load: dsh: 1 entry did not activate' >&2
-  printf '%s\\n' '@dsh-enhanced/assistant-evolution: pending (waiting for service: assistantEvaluation)' >&2
+  printf '%s\\n' '@dsh-ray/assistant-evolution: pending (waiting for service: assistantEvaluation)' >&2
   exit 1
 fi
 if [[ "\${1:-}" == 'plugin' ]]; then
@@ -3154,20 +3154,20 @@ fi
     const profile = join(dshHome, 'profiles', 'web')
     await writeFile(join(profile, 'package.json'), JSON.stringify({
       name: 'dsh-profile-web', type: 'module',
-      dependencies: { '@dsh-enhanced/lark-channel': '0.0.0' }, dsh: { profile: { bundles: [] } },
+      dependencies: { '@dsh-ray/lark-channel': '0.0.0' }, dsh: { profile: { bundles: [] } },
     }))
     const larkExecutable = await nativeInstallerSetupPackage(profile, 'lark-channel', 'dsh-lark-setup', 'setup',
       `import { appendFile } from 'node:fs/promises'
 export async function runLarkSetup(args) { await appendFile(process.env.INSTALL_LOG, 'lark-setup ' + args.join(' ') + '\\n') }
 `)
-    const rsiExecutable = await nativeInstallerSetupPackage(profile, 'lark-channel', 'dsh-rsi-setup', 'rsi-setup',
+    const rsiExecutable = await nativeInstallerSetupPackage(profile, 'lark-channel', 'dsh-ray-setup', 'rsi-setup',
       `import { appendFile } from 'node:fs/promises'
 export async function runRsiSetup(args) { await appendFile(process.env.INSTALL_LOG, 'rsi-source-setup ' + args.join(' ') + '\\n') }
 `)
     const setupBin = join(profile, 'node_modules', '.bin')
     await mkdir(setupBin, { recursive: true })
     await symlink(larkExecutable, join(setupBin, 'dsh-lark-setup'))
-    await symlink(rsiExecutable, join(setupBin, 'dsh-rsi-setup'))
+    await symlink(rsiExecutable, join(setupBin, 'dsh-ray-setup'))
     await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; exit 0; fi
 if [[ "\${6:-}" == 'source-rsi' && "$*" == *'--install-local-cohort'* ]]; then
@@ -3180,9 +3180,9 @@ exec "$FIXTURE_REAL_NODE" "$@"
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 if [[ "\${1:-}" == 'prefix' ]]; then printf '%s\\n' "$FAKE_PREFIX"; fi
-if [[ "\${1:-}" == 'install' && "$*" == *rsi-cli* ]]; then
-  printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-rsi"
-  chmod 755 "$FAKE_BIN/dsh-rsi"
+if [[ "\${1:-}" == 'install' && "$*" == *dsh-ray* ]]; then
+  printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-ray"
+  chmod 755 "$FAKE_BIN/dsh-ray"
 fi
 exit 0
 `)
@@ -3222,10 +3222,10 @@ fi
         FAKE_BIN: fakeBin,
         FIXTURE_REAL_NODE: process.execPath,
         FAKE_PREFIX: root,
-        DSH_ENHANCED_SERVICE_STABILITY_SECONDS: '0',
+        DSH_RAY_SERVICE_STABILITY_SECONDS: '0',
         // The fake bin stubs systemd tooling, so pin the detected platform
         // instead of inheriting the host's own `uname -s`.
-        DSH_ENHANCED_PLATFORM_OVERRIDE: 'Linux',
+        DSH_RAY_PLATFORM_OVERRIDE: 'Linux',
       },
     })
 
@@ -3276,7 +3276,7 @@ printf '%s\\n' 'simulated DSH activation failure'
 `)
 
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_verify_linux_service_stability web',
+      '-c', 'source "$1"; dsh_ray_verify_linux_service_stability web',
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
@@ -3284,7 +3284,7 @@ printf '%s\\n' 'simulated DSH activation failure'
         PATH: `${fakeBin}:/usr/bin:/bin`,
         COMMAND_LOG: commandLog,
         SHOW_COUNT: showCount,
-        DSH_ENHANCED_SERVICE_STABILITY_SECONDS: '0',
+        DSH_RAY_SERVICE_STABILITY_SECONDS: '0',
       },
     })
 
@@ -3338,7 +3338,7 @@ exit 1
 if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 printf 'dsh %s\\n' "$*" >> "$COMMAND_LOG"
 if [[ "$*" == *'--dump-config'* ]]; then
-  printf '%s\\n' "name: '@dsh-enhanced/traex-acp-provider'"
+  printf '%s\\n' "name: '@dsh-ray/traex-acp-provider'"
 fi
 if [[ "\${1:-}" == 'plugin' ]]; then
   bin="$DSH_HOME/profiles/web/node_modules/.bin"
@@ -3390,10 +3390,10 @@ fi
     const result = spawnSync('/bin/bash', [
       '-c', [
         'source "$1"',
-        'snapshot="$(dsh_enhanced_snapshot_agent_route_configuration "$2" "$3")" || exit $?',
+        'snapshot="$(dsh_ray_snapshot_agent_route_configuration "$2" "$3")" || exit $?',
         "printf 'agent-default-model:\\n  provider: traex-agent\\n' > \"$3/settings.yaml\"",
-        "printf '%s\\n' '- id: dsh-enhanced-traex-acp-provider' '  config: { enabled: true }' > \"$3/profiles/$2/cordis.patch.yml\"",
-        'dsh_enhanced_restore_agent_route_configuration "$snapshot" "$2" "$3"',
+        "printf '%s\\n' '- id: dsh-ray-traex-acp-provider' '  config: { enabled: true }' > \"$3/profiles/$2/cordis.patch.yml\"",
+        'dsh_ray_restore_agent_route_configuration "$snapshot" "$2" "$3"',
       ].join('\n'),
       'installer-test', installerLibrary, 'web', dshHome,
     ], { encoding: 'utf8' })
@@ -3428,13 +3428,13 @@ fi
       '-c', [
         'inner=$(cat <<\'SCRIPT\'',
         'source "$1"',
-        'dsh_enhanced_apply_model() {',
+        'dsh_ray_apply_model() {',
         `  printf 'agent-default-model:\\n  provider: traex-agent\\n' > "$2/settings.yaml"`,
-        `  printf '%s\\n' '- id: dsh-enhanced-traex-acp-provider' > "$2/profiles/$1/cordis.patch.yml"`,
+        `  printf '%s\\n' '- id: dsh-ray-traex-acp-provider' > "$2/profiles/$1/cordis.patch.yml"`,
         '  kill -TERM "$$"',
         '}',
-        'dsh_enhanced_verify_model_route() { return 1; }',
-        'dsh_enhanced_apply_verified_agent_model "$2" "$3" traex-agent "" "" "" "" 0 1',
+        'dsh_ray_verify_model_route() { return 1; }',
+        'dsh_ray_apply_verified_agent_model "$2" "$3" traex-agent "" "" "" "" 0 1',
         'SCRIPT',
         ')',
         '/bin/bash -c "$inner" installer-test "$1" "$2" "$3"',
@@ -3517,9 +3517,9 @@ exit 0
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.33"\\n'; fi
-if [[ "\${1:-}" == 'install' && "$*" == *rsi-cli* ]]; then
-  printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-rsi"
-  chmod 755 "$FAKE_BIN/dsh-rsi"
+if [[ "\${1:-}" == 'install' && "$*" == *dsh-ray* ]]; then
+  printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-ray"
+  chmod 755 "$FAKE_BIN/dsh-ray"
 fi
 exit 0
 `)
@@ -3560,8 +3560,8 @@ export async function runLaunchdControl(args) {
       name: `dsh-profile-${profile}`, type: 'module',
       // A healthy prior add leaves the bundle both in dependencies and in the
       // Host's registered bundle list; this rerun only reconciles service state.
-      dependencies: { '@dsh-enhanced/lark-channel': '0.0.0' },
-      dsh: { profile: { bundles: ['@dsh-enhanced/lark-channel'] } },
+      dependencies: { '@dsh-ray/lark-channel': '0.0.0' },
+      dsh: { profile: { bundles: ['@dsh-ray/lark-channel'] } },
     }))
     if (installer === npmInstaller) {
       await writeFile(join(dshHome, 'profiles', profile, 'pnpm-workspace.yaml'),
@@ -3607,7 +3607,7 @@ export async function runLaunchdControl(args) {
     ['Darwin', 'supervised'],
   ])('recognizes a home-layer Lark binding as the effective profile binding on %s', async (platform, scenario) => {
     const dshHome = await temporaryDshHome()
-    await writeFile(join(dshHome, 'cordis.patch.yml'), `- id: dsh-enhanced-lark-channel
+    await writeFile(join(dshHome, 'cordis.patch.yml'), `- id: dsh-ray-lark-channel
   config:
     enabled: true
     appId: cli_0123456789abcdef
@@ -3625,17 +3625,17 @@ export async function runLaunchdControl(args) {
     const dshHome = await temporaryDshHome()
     const profilePatch = join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
     await mkdir(dirname(profilePatch), { recursive: true })
-    await writeFile(join(dshHome, 'cordis.patch.yml'), `- id: dsh-enhanced-lark-channel
+    await writeFile(join(dshHome, 'cordis.patch.yml'), `- id: dsh-ray-lark-channel
   config:
     enabled: true
     appId: cli_0123456789abcdef
 `, 'utf8')
-    await writeFile(profilePatch, `- id: dsh-enhanced-lark-channel
+    await writeFile(profilePatch, `- id: dsh-ray-lark-channel
   disabled: true
 `, 'utf8')
 
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_effective_lark_is_configured "$2" "$3"',
+      '-c', 'source "$1"; dsh_ray_effective_lark_is_configured "$2" "$3"',
       'installer-test', installerLibrary, profilePatch, join(dshHome, 'cordis.patch.yml'),
     ], { encoding: 'utf8' })
 
@@ -3689,7 +3689,7 @@ exit 0
 `)
 
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_prepare_linux_resident_service 0',
+      '-c', 'source "$1"; dsh_ray_prepare_linux_resident_service 0',
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
@@ -3697,7 +3697,7 @@ exit 0
         PATH: `${fakeBin}:/usr/bin:/bin`,
         COMMAND_LOG: commandLog,
         LINGER_STATE: lingerState,
-        DSH_ENHANCED_PLATFORM_OVERRIDE: 'linux',
+        DSH_RAY_PLATFORM_OVERRIDE: 'linux',
       },
     })
 
@@ -3728,14 +3728,14 @@ exit 0
 `)
 
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_prepare_linux_resident_service 0',
+      '-c', 'source "$1"; dsh_ray_prepare_linux_resident_service 0',
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
       env: {
         PATH: `${fakeBin}:/usr/bin:/bin`,
         COMMAND_LOG: commandLog,
-        DSH_ENHANCED_PLATFORM_OVERRIDE: 'linux',
+        DSH_RAY_PLATFORM_OVERRIDE: 'linux',
       },
     })
 
@@ -3774,8 +3774,8 @@ if [[ "\${1:-}" == '--' ]]; then shift; fi
 
     const result = spawnSync('/bin/bash', [
       '-c', `source "$1"
-dsh_enhanced_trusted_system_command() { printf '%s/%s\\n' "$FAKE_BIN" "$1"; }
-dsh_enhanced_prepare_linux_resident_service 0 force`,
+dsh_ray_trusted_system_command() { printf '%s/%s\\n' "$FAKE_BIN" "$1"; }
+dsh_ray_prepare_linux_resident_service 0 force`,
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
@@ -3785,7 +3785,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
         COMMAND_LOG: commandLog,
         LINGER_STATE: lingerState,
         FAKE_BIN: fakeBin,
-        DSH_ENHANCED_PLATFORM_OVERRIDE: 'linux',
+        DSH_RAY_PLATFORM_OVERRIDE: 'linux',
       },
     })
 
@@ -3852,7 +3852,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
       'ui-theme:\n  preference: dark\nagent-default-model:\n  provider: traex-agent\n  model: default\nllm-pi-ai:\n  providers: {}\n', 'utf8')
 
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_effective_default_provider "$2"', 'installer-test', installerLibrary, dshHome,
+      '-c', 'source "$1"; dsh_ray_effective_default_provider "$2"', 'installer-test', installerLibrary, dshHome,
     ], { encoding: 'utf8' })
 
     expect(result.status, result.stderr).toBe(0)
@@ -3867,7 +3867,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     const read = async (document: string): Promise<string> => {
       await writeFile(join(dshHome, 'settings.yaml'), document, 'utf8')
       const result = spawnSync('/bin/bash', [
-        '-c', 'source "$1"; dsh_enhanced_effective_default_provider "$2"', 'installer-test', installerLibrary, dshHome,
+        '-c', 'source "$1"; dsh_ray_effective_default_provider "$2"', 'installer-test', installerLibrary, dshHome,
       ], { encoding: 'utf8' })
       expect(result.status, result.stderr).toBe(0)
       return result.stdout.trim()
@@ -3895,12 +3895,12 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     const profilePatch = await readFile(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
     expect(profilePatch).toContain('id: agent-default-model')
     expect(profilePatch).toContain('provider: traex-agent')
-    expect(profilePatch).toContain('id: dsh-enhanced-traex-acp-provider')
+    expect(profilePatch).toContain('id: dsh-ray-traex-acp-provider')
     expect(profilePatch).toContain('enabled: true')
     expect(existsSync(join(dshHome, 'settings.yaml'))).toBe(false)
 
     const read = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_effective_default_provider "$2" web', 'installer-test', installerLibrary, dshHome,
+      '-c', 'source "$1"; dsh_ray_effective_default_provider "$2" web', 'installer-test', installerLibrary, dshHome,
     ], { encoding: 'utf8', env: { ...process.env, DSH_HOME: dshHome,
       PATH: `${fakeBin}:${process.env.PATH ?? ''}`, NODE_BIN: process.execPath,
       MODEL_SETUP_SOURCE: join(repoRoot, 'plugins', 'assistant-policy', 'src', 'model-setup.ts') } })
@@ -3924,7 +3924,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     await writeFile(join(dshHome, 'settings.yaml'),
       'agent-default-model:\n  provider: stale-legacy-provider\n  model: deepseek-chat\n', 'utf8')
     const effective = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_effective_default_provider "$2" web', 'installer-test', installerLibrary, dshHome,
+      '-c', 'source "$1"; dsh_ray_effective_default_provider "$2" web', 'installer-test', installerLibrary, dshHome,
     ], { encoding: 'utf8', env: { ...process.env, DSH_HOME: dshHome,
       PATH: `${fakeBin}:${process.env.PATH ?? ''}`, NODE_BIN: process.execPath,
       MODEL_SETUP_SOURCE: join(repoRoot, 'plugins', 'assistant-policy', 'src', 'model-setup.ts') } })
@@ -3948,7 +3948,7 @@ printf 'DSH_ROUTE_READY\\n'
 `)
     await symlink(routeHost, join(routeBin, 'dsh'))
     const blocked = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_verify_model_route verify 0 web "$2" deepseek-official',
+      '-c', 'source "$1"; dsh_ray_verify_model_route verify 0 web "$2" deepseek-official',
       'installer-test', installerLibrary, dshHome,
     ], { encoding: 'utf8', env: { ...process.env, PATH: `${routeBin}:${process.env.PATH ?? ''}`, ROUTE_LOG: routeLog } })
     expect(blocked.status).not.toBe(0)
@@ -3956,7 +3956,7 @@ printf 'DSH_ROUTE_READY\\n'
 
     await rm(join(dshHome, 'settings.yaml'))
     const verified = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_verify_model_route verify 0 web "$2" deepseek-official',
+      '-c', 'source "$1"; dsh_ray_verify_model_route verify 0 web "$2" deepseek-official',
       'installer-test', installerLibrary, dshHome,
     ], { encoding: 'utf8', env: { ...process.env, PATH: `${routeBin}:${process.env.PATH ?? ''}`, ROUTE_LOG: routeLog } })
     expect(verified.status, verified.stderr).toBe(0)
@@ -3978,11 +3978,11 @@ printf 'DSH_ROUTE_READY\\n'
     const dshHome = await temporaryDshHome()
     const base = join(dshHome, 'profiles', 'web', 'node_modules')
     const binDir = join(base, '.bin')
-    const paScript = join(base, '@dsh-enhanced', 'personal-assistant', 'bin', 'dsh-model-setup.js')
-    const apScript = join(base, '@dsh-enhanced', 'assistant-policy', 'bin', 'dsh-model-setup.js')
+    const paScript = join(base, '@dsh-ray', 'personal-assistant', 'bin', 'dsh-model-setup.js')
+    const apScript = join(base, '@dsh-ray', 'assistant-policy', 'bin', 'dsh-model-setup.js')
 
     const resolve = (): { status: number | null; stdout: string } => spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_resolve_model_setup web "$2"', 'installer-test', installerLibrary, dshHome,
+      '-c', 'source "$1"; dsh_ray_resolve_model_setup web "$2"', 'installer-test', installerLibrary, dshHome,
     ], { encoding: 'utf8' })
 
     // No launcher anywhere -> non-zero, no output.
@@ -3991,13 +3991,13 @@ printf 'DSH_ROUTE_READY\\n'
     expect(none.stdout).toBe('')
 
     // Package bin present but no shim -> node fallback (prefers personal-assistant).
-    await mkdir(join(base, '@dsh-enhanced', 'assistant-policy', 'bin'), { recursive: true })
+    await mkdir(join(base, '@dsh-ray', 'assistant-policy', 'bin'), { recursive: true })
     await writeFile(apScript, '// stub\n', 'utf8')
     const apOnly = resolve()
     expect(apOnly.status, apOnly.stdout).toBe(0)
     expect(apOnly.stdout).toBe(`node\n${apScript}\n`)
 
-    await mkdir(join(base, '@dsh-enhanced', 'personal-assistant', 'bin'), { recursive: true })
+    await mkdir(join(base, '@dsh-ray', 'personal-assistant', 'bin'), { recursive: true })
     await writeFile(paScript, '// stub\n', 'utf8')
     const preferPa = resolve()
     expect(preferPa.stdout).toBe(`node\n${paScript}\n`)
@@ -4036,7 +4036,7 @@ printf 'DSH_ROUTE_READY\\n'
     ], {
       cwd: repoRoot,
       encoding: 'utf8',
-      env: { PATH: process.env.PATH ?? '', DSH_HOME: dshHome, DSH_ENHANCED_MODEL_API_KEY: 'plat-secret' },
+      env: { PATH: process.env.PATH ?? '', DSH_HOME: dshHome, DSH_RAY_MODEL_API_KEY: 'plat-secret' },
     })
 
     expect(result.status, result.stderr).toBe(0)
@@ -4133,14 +4133,14 @@ printf 'DSH_ROUTE_READY\\n'
 
   test('model menu writes UI separately from its machine-readable selection', () => {
     const configured = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_choose_model_mode 1', 'installer-test', installerLibrary,
+      '-c', 'source "$1"; dsh_ray_choose_model_mode 1', 'installer-test', installerLibrary,
     ], { encoding: 'utf8', input: '2\n' })
     expect(configured.status, configured.stderr).toBe(0)
     expect(configured.stdout).toBe('configure')
     expect(configured.stderr).toContain('检测到当前 profile 已能解析默认模型')
 
     const unconfigured = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_choose_model_mode 0', 'installer-test', installerLibrary,
+      '-c', 'source "$1"; dsh_ray_choose_model_mode 0', 'installer-test', installerLibrary,
     ], { encoding: 'utf8', input: '\n' })
     expect(unconfigured.status, unconfigured.stderr).toBe(0)
     expect(unconfigured.stdout).toBe('configure')
@@ -4186,7 +4186,7 @@ printf 'DSH_ROUTE_READY\\n'
 
   test('the model prompt offers TraeX only when a local traex command is present', () => {
     const scriptWithTraex = 'export PATH="$2:$PATH"; source "$1"; '
-      + 'dsh_enhanced_prompt_model_route p m b a d >/dev/null; printf "provider=%s" "$p"'
+      + 'dsh_ray_prompt_model_route p m b a d >/dev/null; printf "provider=%s" "$p"'
     const fakeBin = join(tmpdir(), `dsh-fake-traex-${Date.now()}`)
 
     return (async () => {
@@ -4202,7 +4202,7 @@ printf 'DSH_ROUTE_READY\\n'
 
       // Without a traex command on PATH, option 3 is not offered and is invalid.
       const withoutTraex = spawnSync('/bin/bash', [
-        '-c', 'export PATH="/nonexistent-only"; source "$1"; dsh_enhanced_prompt_model_route p m b a d; printf "rc=%s" "$?"',
+        '-c', 'export PATH="/nonexistent-only"; source "$1"; dsh_ray_prompt_model_route p m b a d; printf "rc=%s" "$?"',
         'installer-test', installerLibrary,
       ], { encoding: 'utf8', input: '3\n' })
       expect(withoutTraex.stderr).not.toContain('本机 TraeX')
@@ -4213,18 +4213,18 @@ printf 'DSH_ROUTE_READY\\n'
 
   test('auto-discovers trae-cli as an executable path and enables its profile route and default', async () => {
     const f = await autoTraexSetupFixture('trae-cli', true)
-    const detected = spawnSync('/bin/bash', ['-c', 'PATH="$2"; export PATH; source "$1"; dsh_enhanced_detect_traex_command',
+    const detected = spawnSync('/bin/bash', ['-c', 'PATH="$2"; export PATH; source "$1"; dsh_ray_detect_traex_command',
       'installer-test', installerLibrary, f.environment.PATH], { encoding: 'utf8', env: f.environment })
     expect(detected.status, detected.stderr).toBe(0)
     expect(detected.stdout).toBe(f.commandPath)
     const result = spawnSync('/bin/bash', [
-      '-c', 'PATH="$3"; export PATH; source "$1"; detected="$(dsh_enhanced_detect_traex_command)"; dsh_enhanced_apply_auto_traex web "$2" "$detected" 1 0',
+      '-c', 'PATH="$3"; export PATH; source "$1"; detected="$(dsh_ray_detect_traex_command)"; dsh_ray_apply_auto_traex web "$2" "$detected" 1 0',
       'installer-test', installerLibrary, f.dshHome, f.environment.PATH,
     ], { encoding: 'utf8', env: f.environment })
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain(`TraeX 自动接入：${f.commandPath}`)
     const patch = await readFile(join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
-    expect(patch).toContain('id: dsh-enhanced-traex-acp-provider')
+    expect(patch).toContain('id: dsh-ray-traex-acp-provider')
     expect(patch).toContain('enabled: true')
     expect(patch).toContain(`command: ${f.commandPath}`)
     expect(patch).toContain('id: agent-default-model')
@@ -4235,10 +4235,10 @@ printf 'DSH_ROUTE_READY\\n'
   test('auto TraeX postflight resolves Policy YAML through isolated personal-assistant dependencies', async () => {
     const f = await autoTraexSetupFixture('trae-cli', true, 'nested')
     const profileModules = join(f.dshHome, 'profiles', 'web', 'node_modules')
-    expect(existsSync(join(profileModules, '@dsh-enhanced', 'assistant-policy'))).toBe(false)
+    expect(existsSync(join(profileModules, '@dsh-ray', 'assistant-policy'))).toBe(false)
     expect(existsSync(join(profileModules, 'yaml'))).toBe(false)
     const positive = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      '-c', 'source "$1"; dsh_ray_apply_auto_traex web "$2" "$3" 1 0',
       'installer-test', installerLibrary, f.dshHome, f.commandPath,
     ], { encoding: 'utf8', env: f.environment })
     expect(positive.status, positive.stderr).toBe(0)
@@ -4247,15 +4247,15 @@ printf 'DSH_ROUTE_READY\\n'
     expect(patch).toContain(`command: ${f.commandPath}`)
 
     const composedPath = join(f.dshHome, 'disabled-composed.yml')
-    await writeFile(composedPath, `- id: dsh-enhanced-traex-acp-provider
-  name: '@dsh-enhanced/traex-acp-provider'
+    await writeFile(composedPath, `- id: dsh-ray-traex-acp-provider
+  name: '@dsh-ray/traex-acp-provider'
   disabled: true
   config:
     enabled: true
     command: ${f.commandPath}
 `)
     const negative = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_probe_auto_traex_route web "$2" "$3"',
+      '-c', 'source "$1"; dsh_ray_probe_auto_traex_route web "$2" "$3"',
       'installer-test', installerLibrary, f.dshHome, composedPath,
     ], { encoding: 'utf8', env: f.environment })
     expect(negative.status).not.toBe(0)
@@ -4267,17 +4267,17 @@ printf 'DSH_ROUTE_READY\\n'
     const patchPath = join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml')
     const composedPath = join(f.dshHome, 'composed-traex.yml')
     const row = (command: string, options: { name?: string; disabled?: boolean } = {}) =>
-      `- id: dsh-enhanced-traex-acp-provider\n`
+      `- id: dsh-ray-traex-acp-provider\n`
       + (options.name === undefined ? '' : `  name: '${options.name}'\n`)
       + (options.disabled ? '  disabled: true\n' : '')
       + `  config:\n    enabled: true\n${command}`
     const probe = (withComposed: boolean) => spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_probe_auto_traex_route web "$2" "$3"',
+      '-c', 'source "$1"; dsh_ray_probe_auto_traex_route web "$2" "$3"',
       'installer-test', installerLibrary, f.dshHome, withComposed ? composedPath : '',
     ], { encoding: 'utf8', env: f.environment })
 
     await writeFile(patchPath, row(''))
-    await writeFile(composedPath, row('', { name: '@dsh-enhanced/traex-acp-provider' }))
+    await writeFile(composedPath, row('', { name: '@dsh-ray/traex-acp-provider' }))
     const defaulted = probe(true)
     expect(defaulted.status, defaulted.stderr).toBe(0)
     expect(defaulted.stdout).toBe('traex')
@@ -4286,7 +4286,7 @@ printf 'DSH_ROUTE_READY\\n'
     expect(profileOnly.stdout).toBe('traex')
 
     await writeFile(patchPath, row('    command: /custom/traex\n'))
-    await writeFile(composedPath, row('    command: /custom/traex\n', { name: '@dsh-enhanced/traex-acp-provider' }))
+    await writeFile(composedPath, row('    command: /custom/traex\n', { name: '@dsh-ray/traex-acp-provider' }))
     const custom = probe(true)
     expect(custom.status, custom.stderr).toBe(0)
     expect(custom.stdout).toBe('/custom/traex')
@@ -4306,8 +4306,8 @@ printf 'DSH_ROUTE_READY\\n'
     await writeFile(patchPath, row(''))
     for (const overridden of [
       row('', { name: '@example/not-traex' }),
-      row('', { name: '@dsh-enhanced/traex-acp-provider', disabled: true }),
-      row('    command: /other/traex\n', { name: '@dsh-enhanced/traex-acp-provider' }),
+      row('', { name: '@dsh-ray/traex-acp-provider', disabled: true }),
+      row('    command: /other/traex\n', { name: '@dsh-ray/traex-acp-provider' }),
     ]) {
       await writeFile(composedPath, overridden)
       const rejected = probe(true)
@@ -4318,11 +4318,11 @@ printf 'DSH_ROUTE_READY\\n'
 
   test('TraeX postflight reads the installed schema when the plugin entrypoint fails', async () => {
     const f = await autoTraexSetupFixture('traex', true)
-    const providerDir = join(f.dshHome, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'traex-acp-provider')
+    const providerDir = join(f.dshHome, 'profiles', 'web', 'node_modules', '@dsh-ray', 'traex-acp-provider')
     await rm(providerDir)
     await mkdir(join(providerDir, 'lib'), { recursive: true })
     await writeFile(join(providerDir, 'package.json'), JSON.stringify({
-      name: '@dsh-enhanced/traex-acp-provider', type: 'module',
+      name: '@dsh-ray/traex-acp-provider', type: 'module',
       exports: { '.': './lib/index.js', './package.json': './package.json' },
     }))
     await writeFile(join(providerDir, 'lib', 'index.js'), "throw new Error('fixture plugin entrypoint must not load')\n")
@@ -4333,9 +4333,9 @@ printf 'DSH_ROUTE_READY\\n'
     expect(brokenEntry.stderr).toContain('fixture plugin entrypoint must not load')
 
     await writeFile(join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml'),
-      '- id: dsh-enhanced-traex-acp-provider\n  config:\n    enabled: true\n')
+      '- id: dsh-ray-traex-acp-provider\n  config:\n    enabled: true\n')
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_probe_auto_traex_route web "$2"',
+      '-c', 'source "$1"; dsh_ray_probe_auto_traex_route web "$2"',
       'installer-test', installerLibrary, f.dshHome,
     ], { encoding: 'utf8', env: f.environment })
     expect(result.status, result.stderr).toBe(0)
@@ -4349,9 +4349,9 @@ printf 'DSH_ROUTE_READY\\n'
     const settingsPath = join(f.dshHome, 'settings.yaml')
     const originalSettings = 'agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-flash\n'
     await writeFile(settingsPath, originalSettings)
-    await writeFile(patchPath, "- id: dsh-enhanced-traex-acp-provider\n  config:\n    enabled: false\n    command: /custom/traex\n    cwd: !!js dshHomePath('custom-workspace')\n")
+    await writeFile(patchPath, "- id: dsh-ray-traex-acp-provider\n  config:\n    enabled: false\n    command: /custom/traex\n    cwd: !!js dshHomePath('custom-workspace')\n")
     const invoke = () => spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      '-c', 'source "$1"; dsh_ray_apply_auto_traex web "$2" "$3" 1 0',
       'installer-test', installerLibrary, f.dshHome, f.commandPath,
     ], { encoding: 'utf8', env: f.environment })
     const first = invoke()
@@ -4373,7 +4373,7 @@ printf 'DSH_ROUTE_READY\\n'
     await writeFile(patchPath, '- id: agent-default-model\n  config:\n    provider: custom-gateway\n    model: glm5.2\n')
 
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      '-c', 'source "$1"; dsh_ray_apply_auto_traex web "$2" "$3" 1 0',
       'installer-test', installerLibrary, fixture.dshHome, fixture.commandPath,
     ], { encoding: 'utf8', env: fixture.environment })
 
@@ -4382,7 +4382,7 @@ printf 'DSH_ROUTE_READY\\n'
     expect(patch.match(/id: agent-default-model/gu)).toHaveLength(1)
     expect(patch).toContain('provider: custom-gateway')
     expect(patch).toContain('model: glm5.2')
-    expect(patch).toContain('id: dsh-enhanced-traex-acp-provider')
+    expect(patch).toContain('id: dsh-ray-traex-acp-provider')
     expect(patch).toContain('enabled: true')
     expect(existsSync(join(fixture.dshHome, 'settings.yaml'))).toBe(false)
   })
@@ -4390,9 +4390,9 @@ printf 'DSH_ROUTE_READY\\n'
   test('auto-enabling TraeX does not use a discovered login for an existing custom command', async () => {
     const f = await autoTraexSetupFixture('traex', true)
     const patchPath = join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml')
-    await writeFile(patchPath, '- id: dsh-enhanced-traex-acp-provider\n  config:\n    command: /custom/traex\n')
+    await writeFile(patchPath, '- id: dsh-ray-traex-acp-provider\n  config:\n    command: /custom/traex\n')
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      '-c', 'source "$1"; dsh_ray_apply_auto_traex web "$2" "$3" 1 0',
       'installer-test', installerLibrary, f.dshHome, f.commandPath,
     ], { encoding: 'utf8', env: f.environment })
     expect(result.status, result.stderr).toBe(0)
@@ -4411,7 +4411,7 @@ printf 'DSH_ROUTE_READY\\n'
     const originalPatch = '- id: existing-owner-row\n  config: { enabled: true }\n'
     await writeFile(patchPath, originalPatch)
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      '-c', 'source "$1"; dsh_ray_apply_auto_traex web "$2" "$3" 1 0',
       'installer-test', installerLibrary, f.dshHome, f.commandPath,
     ], { encoding: 'utf8', env: { ...f.environment, DSH_FAKE_CONCURRENT_STATE: '1' } })
     expect(result.status).not.toBe(0)
@@ -4426,7 +4426,7 @@ printf 'DSH_ROUTE_READY\\n'
     const originalPatch = '- id: existing-owner-row\n  config: { enabled: true }\n'
     await writeFile(patchPath, originalPatch)
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      '-c', 'source "$1"; dsh_ray_apply_auto_traex web "$2" "$3" 1 0',
       'installer-test', installerLibrary, f.dshHome, f.commandPath,
     ], { encoding: 'utf8', env: { ...f.environment, DSH_FAKE_COMPOSED_DISABLED: '1' } })
     expect(result.status).not.toBe(0)
@@ -4449,7 +4449,7 @@ fi
 exit 7
 `)
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      '-c', 'source "$1"; dsh_ray_apply_auto_traex web "$2" "$3" 1 0',
       'installer-test', installerLibrary, f.dshHome, f.commandPath,
     ], { encoding: 'utf8', env: f.environment })
     expect(result.status, result.stderr).toBe(0)
@@ -4463,7 +4463,7 @@ exit 7
     async ({ loggedIn, defaultCandidate }) => {
       const f = await autoTraexSetupFixture('traex', loggedIn)
       const result = spawnSync('/bin/bash', [
-        '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" "$4" 0',
+        '-c', 'source "$1"; dsh_ray_apply_auto_traex web "$2" "$3" "$4" 0',
         'installer-test', installerLibrary, f.dshHome, f.commandPath, defaultCandidate,
       ], { encoding: 'utf8', env: f.environment })
       expect(result.status, result.stderr).toBe(0)
@@ -4484,7 +4484,7 @@ exit 7
       '--dry-run', '--scenario', 'core', '--model', 'skip', '--plugin-version', '0.1.48',
     ], f.dshHome, undefined, { PATH: f.environment.PATH })
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('@dsh-enhanced/traex-acp-provider@0.1.48')
+    expect(result.stdout).toContain('@dsh-ray/traex-acp-provider@0.1.48')
     expect(result.stdout.indexOf('npm cohort（dry-run）')).toBeLessThan(result.stdout.indexOf('dsh plugin --profile'))
     expect(result.stdout).toContain(`--agent-command ${f.commandPath} --enable-only`)
     expect(result.stdout).not.toContain('--default-if-absent')
@@ -4506,7 +4506,7 @@ exit 7
 
   test('Feishu menu writes UI separately from its machine-readable selection', () => {
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_choose_lark_mode 1', 'installer-test', installerLibrary,
+      '-c', 'source "$1"; dsh_ray_choose_lark_mode 1', 'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
       input: '2\n',
@@ -4588,7 +4588,7 @@ describe.skipIf(process.platform !== 'linux')('pre-owner native base entry', () 
       action: string; transactionPresent: boolean; proof: { physicalHome: string; originalBackend: string;
         relocation: { sourceHome: string; elements: Array<{ name: string; ino: number; dev: number }> } }
     }>
-    const formal = stages.find(event => event.proof.physicalHome === f.dshHome + '.dsh-enhanced-transaction/staged-home')!
+    const formal = stages.find(event => event.proof.physicalHome === f.dshHome + '.dsh-ray-transaction/staged-home')!
     const preview = stages.find(event => event.proof.physicalHome.includes('.dsh-local-candidate-'))!
     expect(formal).toBeDefined(); expect(preview).toBeDefined()
     expect(preview.transactionPresent).toBe(false); expect(formal.transactionPresent).toBe(true)
@@ -4622,7 +4622,7 @@ describe.skipIf(process.platform !== 'linux')('pre-owner native base entry', () 
       : fault === 'original-inode' ? /identity differs/u : /candidate native staging failed/u)
     expect((await readLifecycleSystemdLog(f.systemdLog)).some(call => call.some(arg => ['stop', 'start', 'mask', 'unmask'].includes(arg)))).toBe(false)
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
-    expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
+    expect(existsSync(f.dshHome + '.dsh-ray-transaction')).toBe(false)
     expect(await readFile(join(f.dshHome, 'sessions/owner-session.jsonl'), 'utf8')).toBe('durable-session')
   }, 60000)
 
@@ -4645,7 +4645,7 @@ describe.skipIf(process.platform !== 'linux')('pre-owner native base entry', () 
     const before = await lstat(join(f.dshHome, 'rsi-linux-runtimes/web/runtime'))
     const first = runPreOwnerLifecycle(f, 'local-service-upgrade', { killLifecycleAfterOriginalRename: true })
     expect(first.status).not.toBe(0); expect(existsSync(f.dshHome)).toBe(false)
-    const backup = f.dshHome + '.dsh-enhanced-transaction/original-home'
+    const backup = f.dshHome + '.dsh-ray-transaction/original-home'
     if (copy) {
       const runtime = join(backup, 'rsi-linux-runtimes/web/runtime'), detached = join(f.root, 'detached-runtime')
       await cp(runtime, detached, { recursive: true, verbatimSymlinks: true })
@@ -4678,7 +4678,7 @@ describe.skipIf(process.platform !== 'linux')('pre-owner native base entry', () 
     const f = await nativePreOwnerLifecycleFixture({ originalNative: true, memoryExtension: true })
     const configPath = join(f.dshHome, '.lifecycle-dump-config')
     const rows = parse(await readFile(configPath, 'utf8')) as Array<{ id: string; config?: Record<string, unknown> }>
-    const assistant = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+    const assistant = rows.find(row => row.id === 'dsh-ray-personal-assistant')!
     assistant.config = { assistantAutomations: { schedulerEnabled: false, maxModelCalls: 7, maxToolCalls: 3 } }
     await writeFile(configPath, stringify(rows))
     const counter = new DatabaseSync(f.databasePath)
@@ -4708,10 +4708,10 @@ exit 9
 `)
     await writeExecutable(join(fakeBinTraex, 'traex'), '#!/bin/bash\nexit 0\n')
 
-    // dsh_enhanced_is_agent_route recognizes both traex-agent and agy-agent.
+    // dsh_ray_is_agent_route recognizes both traex-agent and agy-agent.
     const routeCheck = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_is_agent_route traex-agent && dsh_enhanced_is_agent_route agy-agent && ! dsh_enhanced_is_agent_route deepseek-official',
+      'source "$1"; dsh_ray_is_agent_route traex-agent && dsh_ray_is_agent_route agy-agent && ! dsh_ray_is_agent_route deepseek-official',
       'installer-test',
       installerLibrary,
     ], { encoding: 'utf8' })
@@ -4720,7 +4720,7 @@ exit 9
     // Only `agy models` is run cleanly without session/prompt.
     const agyProbe = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; cmd="$(dsh_enhanced_detect_agy_command)"; printf "cmd=%s\\n" "$cmd"; dsh_enhanced_agy_login_ready "$cmd"',
+      'source "$1"; cmd="$(dsh_ray_detect_agy_command)"; printf "cmd=%s\\n" "$cmd"; dsh_ray_agy_login_ready "$cmd"',
       'installer-test',
       installerLibrary,
     ], { encoding: 'utf8', env: { PATH: `${fakeBinAgy}:${pathWithoutAgents}` } })
@@ -4731,7 +4731,7 @@ exit 9
     // Menu offers TraeX as 3 and Antigravity as 4 when both exist; choosing 4 picks agy-agent.
     const bothMenu = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_prompt_model_route p m b a d >/dev/null; printf "provider=%s" "$p"',
+      'source "$1"; dsh_ray_prompt_model_route p m b a d >/dev/null; printf "provider=%s" "$p"',
       'installer-test',
       installerLibrary,
     ], {
@@ -4747,7 +4747,7 @@ exit 9
     // Menu promotes Antigravity to 3 when only `agy` is installed.
     const onlyAgyMenu = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_prompt_model_route p m b a d >/dev/null; printf "provider=%s" "$p"',
+      'source "$1"; dsh_ray_prompt_model_route p m b a d >/dev/null; printf "provider=%s" "$p"',
       'installer-test',
       installerLibrary,
     ], {
@@ -4758,14 +4758,14 @@ exit 9
     expect(onlyAgyMenu.status, onlyAgyMenu.stderr).toBe(0)
     expect(onlyAgyMenu.stdout).toBe('provider=agy-agent')
 
-    // dsh_enhanced_verify_agent_route distinguishes `enabled` (traex-agent) vs `agyEnabled` (agy-agent).
+    // dsh_ray_verify_agent_route distinguishes `enabled` (traex-agent) vs `agyEnabled` (agy-agent).
     const fakeDshBin = join(dshHome, 'fake-dsh')
     await mkdir(fakeDshBin, { recursive: true })
     await writeExecutable(join(fakeDshBin, 'dsh'), `#!/bin/bash
 if [[ "$*" == *'--dump-config'* ]]; then
   printf '%s\\n' \
-    '- id: dsh-enhanced-traex-acp-provider' \
-    '  name: "@dsh-enhanced/traex-acp-provider"' \
+    '- id: dsh-ray-traex-acp-provider' \
+    '  name: "@dsh-ray/traex-acp-provider"' \
     '  config:' \
     '    enabled: true' \
     '    agyEnabled: false'
@@ -4775,7 +4775,7 @@ exit 0
 `)
     const traexVerify = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_verify_agent_route traex-agent web 0 1',
+      'source "$1"; dsh_ray_verify_agent_route traex-agent web 0 1',
       'installer-test',
       installerLibrary,
     ], { encoding: 'utf8', env: { PATH: `${fakeDshBin}:${pathWithoutAgents}` } })
@@ -4783,7 +4783,7 @@ exit 0
 
     const agyVerifyFail = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_verify_agent_route agy-agent web 0 1',
+      'source "$1"; dsh_ray_verify_agent_route agy-agent web 0 1',
       'installer-test',
       installerLibrary,
     ], { encoding: 'utf8', env: { PATH: `${fakeDshBin}:${pathWithoutAgents}` } })
@@ -4801,7 +4801,7 @@ exit 0
     expect(dryRunAgy.stdout).toContain('--enable-in-profile web')
   })
 
-  test('dsh_enhanced_apply_auto_agy enables agy-agent cleanly and probes agyEnabled without clobbering defaults', async () => {
+  test('dsh_ray_apply_auto_agy enables agy-agent cleanly and probes agyEnabled without clobbering defaults', async () => {
     const f = await autoTraexSetupFixture('traex', false)
     const agyBin = join(f.fakeBin, 'agy')
     const callsLog = join(f.dshHome, 'agy-setup-calls.log')
@@ -4811,8 +4811,8 @@ exit 0
     await writeExecutable(join(f.dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-model-setup'), `#!/bin/bash
 printf '%s\\n' "$*" >> ${JSON.stringify(callsLog)}
 cat > ${JSON.stringify(patchPath)} <<'YAML'
-- id: dsh-enhanced-traex-acp-provider
-  name: '@dsh-enhanced/traex-acp-provider'
+- id: dsh-ray-traex-acp-provider
+  name: '@dsh-ray/traex-acp-provider'
   config:
     agyEnabled: true
     agyCommand: ${agyBin}
@@ -4828,7 +4828,7 @@ exit 0
 
     const applied = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_apply_auto_agy web "$2" "$3" 1 0',
+      'source "$1"; dsh_ray_apply_auto_agy web "$2" "$3" 1 0',
       'installer-test',
       installerLibrary,
       f.dshHome,
@@ -4844,7 +4844,7 @@ exit 0
 
     const probed = spawnSync('/bin/bash', [
       '-c',
-      'source "$1"; dsh_enhanced_probe_auto_agy_route web "$2"',
+      'source "$1"; dsh_ray_probe_auto_agy_route web "$2"',
       'installer-test',
       installerLibrary,
       f.dshHome,

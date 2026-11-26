@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { CredentialsKeychainService } from '@dsh-ray/credentials-keychain'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import eventTriggersPlugin, {
   boundEventIntakeId,
@@ -145,7 +145,7 @@ async function createBaseEnv(options: {
       { id: 'repo-observe', effect: 'allow', subject: { kind: 'background', id: 'event-triggers:repo-ci', workspace: root, principal: 'owner:one' }, actions: ['observe'], resource: { kind: 'network', id: 'https://api.github.com/repos/owner/repo' }, context: { initiators: ['background'] }, budget: { id: 'event-observations', amount: 1 } },
       { id: 'repo-ext-observe', effect: 'allow', subject: { kind: 'background', id: 'event-triggers:repo-commit', workspace: root, principal: 'owner:one' }, actions: ['observe'], resource: { kind: 'network', id: 'https://api.github.com/repos/owner/repo' }, context: { initiators: ['background'] }, budget: { id: 'event-observations', amount: 1 } },
       { id: 'calendar-observe', effect: 'allow', subject: { kind: 'background', id: 'event-triggers:calendar-intake', workspace: root, principal: 'owner:one' }, actions: ['observe'], resource: { kind: 'network', id: 'lark-calendar:cal_owner' }, context: { initiators: ['background'] }, budget: { id: 'event-observations', amount: 1 } },
-      { id: 'cred-use', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: '*' }, context: { initiators: ['background'] } },
+      { id: 'cred-use', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: '*' }, context: { initiators: ['background'] } },
       { id: 'ingest-all', effect: 'allow', subject: { kind: 'external', id: '*', workspace: root }, actions: ['ingest'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['external'] } },
       { id: 'accept-webhook', effect: 'allow', subject: { kind: 'external', id: 'webhook:webhook-intake' }, actions: ['accept'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['external'] } },
     ],
@@ -164,8 +164,8 @@ async function createBaseEnv(options: {
         new CredentialsKeychainService(runtime, {
           databasePath: join(root, 'credentials.sqlite'),
           handles: [
-            { id: 'github', provider: 'environment', environmentName: 'GH_TOKEN', consumers: ['dsh-enhanced-event-triggers'], purposes: ['github.observe'], maxLeaseMs: 30_000 },
-            { id: 'hook-secret', provider: 'environment', environmentName: 'WEBHOOK_SECRET', consumers: ['dsh-enhanced-event-triggers'], purposes: ['verify-webhook'], maxLeaseMs: 30_000 },
+            { id: 'github', provider: 'environment', environmentName: 'GH_TOKEN', consumers: ['dsh-ray-event-triggers'], purposes: ['github.observe'], maxLeaseMs: 30_000 },
+            { id: 'hook-secret', provider: 'environment', environmentName: 'WEBHOOK_SECRET', consumers: ['dsh-ray-event-triggers'], purposes: ['verify-webhook'], maxLeaseMs: 30_000 },
           ],
         }, { env: { GH_TOKEN: 'ghp_intake_secret_never_leak', WEBHOOK_SECRET: 'whsec_intake_secret_never_leak' } })
       },
@@ -409,7 +409,7 @@ describe('event-triggers normalized intake adapter & WP11 unsubscribe lifecycle'
 
     let service!: EventTriggersService
     const serviceFiber = await env.ctx.plugin({
-      name: 'dsh-enhanced-event-triggers',
+      name: 'dsh-ray-event-triggers',
       apply(runtime: Context) {
         service = new EventTriggersService(runtime, {
           databasePath: join(env.root, 'events.sqlite'),
@@ -528,7 +528,7 @@ describe('event-triggers normalized intake adapter & WP11 unsubscribe lifecycle'
 
     let service!: EventTriggersService
     const serviceFiber = await env.ctx.plugin({
-      name: 'dsh-enhanced-event-triggers',
+      name: 'dsh-ray-event-triggers',
       apply(runtime: Context) {
         service = new EventTriggersService(runtime, {
           databasePath: join(env.root, 'events.sqlite'),
@@ -775,7 +775,7 @@ describe('event-triggers normalized intake adapter & WP11 unsubscribe lifecycle'
 
     let service!: EventTriggersService
     const eventFiber = await env.ctx.plugin({
-      name: 'dsh-enhanced-event-triggers',
+      name: 'dsh-ray-event-triggers',
       apply(runtime: Context) {
         service = new EventTriggersService(runtime, {
           databasePath: join(env.root, 'events.sqlite'),

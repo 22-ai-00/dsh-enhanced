@@ -1,7 +1,7 @@
 import { chmod, lstat, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { hashLinuxRuntimeTree, linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
+import { hashLinuxRuntimeTree, linuxRuntimeDigest } from '@dsh-ray/assistant-isolation'
 import {
   materializeLinuxRsiNativeInStage, type LinuxRsiNativeMaterializeInput,
 } from '../src/rsi-linux-native-materialize.js'
@@ -10,7 +10,7 @@ import { elementMap, fixture, homePath, privateDirectory, PROFILE, readJson, rel
   removeFixtureDirectories, sha, SOURCE_COMMIT, type Fixture } from './fixtures/linux-native-home-fixture.js'
 
 const mocks = vi.hoisted(() => ({ validateBehavior: vi.fn(), behaviorDigest: vi.fn() }))
-const PEER = '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+const PEER = '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 vi.mock('node:module', async importOriginal => {
   const actual = await importOriginal<typeof import('node:module')>()
   // Only the optional behavior peer is faked; every other resolution (the

@@ -5,8 +5,8 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { assertLocalSourceInstaller } from './local-source-maintenance.mjs'
 
-const protocol = 'dsh-enhanced/owner-repair-successor-intent/v1'
-const repairProtocol = 'dsh-enhanced/host-owner-source-repair/v1'
+const protocol = 'dsh-ray/owner-repair-successor-intent/v1'
+const repairProtocol = 'dsh-ray/host-owner-source-repair/v1'
 const hash = source => createHash('sha256').update(source).digest('hex')
 const canonical = value => value === null || typeof value !== 'object' ? JSON.stringify(value)
   : Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
@@ -25,7 +25,7 @@ const identity = entry => ({ dev: String(entry.dev), ino: String(entry.ino), uid
 const keys = (value, expected) => value !== null && typeof value === 'object' && !Array.isArray(value)
   && isDeepStrictEqual(Object.keys(value).sort(), [...expected].sort())
 
-function pendingPath(homePath) { return `${homePath}.dsh-enhanced-owner-successor.json` }
+function pendingPath(homePath) { return `${homePath}.dsh-ray-owner-successor.json` }
 
 async function directory(path, privateMode = false) {
   if (!exact(path) || await realpath(path) !== path) fail(`noncanonical directory: ${path}`)
@@ -80,7 +80,7 @@ function manifestProof(source, homePath, profile) {
   const resources = repair?.original?.resources
   if (manifest.version !== 4 || manifest.operation !== 'host-update'
     || manifest.homePath !== homePath || manifest.canonicalHome !== homePath || manifest.profile !== profile
-    || manifest.transactionPath !== `${homePath}.dsh-enhanced-transaction`
+    || manifest.transactionPath !== `${homePath}.dsh-ray-transaction`
     || !validIdentity(manifest.transactionIdentity) || !validIdentity(manifest.originalIdentity)
     || !validIdentity(manifest.stagedIdentity)
     || !transactionId.test(manifest.id) || manifest.state !== 'swapped'
@@ -197,7 +197,7 @@ function validArchive(homePath, archivePath, successorTransactionId) {
   return exact(archivePath) && dirname(archivePath) === dirname(homePath)
     && archivePath !== homePath && archivePath !== pendingPath(homePath)
     && transactionId.test(successorTransactionId)
-    && archivePath === `${homePath}.dsh-enhanced-transaction.owner-predecessor-${successorTransactionId}`
+    && archivePath === `${homePath}.dsh-ray-transaction.owner-predecessor-${successorTransactionId}`
 }
 
 async function fsyncDirectory(path) {
@@ -322,7 +322,7 @@ export async function createOwnerRepairSuccessorIntent({ homePath, profile, oldM
   }
   await directory(preparationRoot, true)
   if (auxiliaryRoot !== null) await auxiliaryDestination(auxiliaryRoot,
-    [homePath, installer.root, preparationRoot, archivePath, `${homePath}.dsh-enhanced-transaction`])
+    [homePath, installer.root, preparationRoot, archivePath, `${homePath}.dsh-ray-transaction`])
   await assertLocalSourceInstaller(installer)
   if (hash(await stable(planPath, 131_072)) !== planDigest) fail('successor plan file differs')
   const request = { protocol, schemaVersion: 1, homePath, profile, archivePath,

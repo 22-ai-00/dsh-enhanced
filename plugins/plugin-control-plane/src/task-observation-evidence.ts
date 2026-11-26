@@ -1,5 +1,5 @@
-import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-ray/assistant-delivery'
+import type { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
 import { controlPlaneDigest } from './store.js'
 import type { ForegroundDeploymentRecord } from './foreground-deployment.js'
 import type { TaskObservationOwner, TaskObservationVote } from './task-observation-types.js'

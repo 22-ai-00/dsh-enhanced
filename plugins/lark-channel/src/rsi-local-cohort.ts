@@ -14,7 +14,7 @@ const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
 const HASH = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
-const INTERNAL = '@dsh-enhanced/'
+const INTERNAL = '@dsh-ray/'
 const COORDINATOR = ['assistant-policy', 'assistant-automations', 'plugin-control-plane'] as const
 const MAX_ARCHIVE = 268_435_456
 const MAX_PACKAGE_FILES = 10_000
@@ -225,7 +225,7 @@ function archiveEntries(packed: Buffer, onManifest?: (bytes: Buffer) => void): {
 }
 async function adapterNormalize(bytes: Buffer): Promise<Buffer> {
   const require = createRequire(import.meta.url)
-  const root = dirname(require.resolve('@dsh-enhanced/plugin-control-plane/package.json'))
+  const root = dirname(require.resolve('@dsh-ray/plugin-control-plane/package.json'))
   const adapter = await import(pathToFileURL(join(root, 'bin', 'dsh-local-release-adapter.js')).href) as { normalizePackedDependencyOrder?: (bytes: Buffer) => Buffer }
   if (typeof adapter.normalizePackedDependencyOrder !== 'function') fail('installed Control Plane lacks archive validation')
   return adapter.normalizePackedDependencyOrder(bytes)
@@ -271,7 +271,7 @@ function validateReceipt(value: RsiLocalCohort, home: string, profile: string): 
   if (!value || value.schemaVersion !== 1 || value.root !== expectedRoot(home, profile)
     || !COMMIT.test(value.sourceCommit) || typeof value.version !== 'string'
     || typeof value.sourceRepository !== 'string'
-    || !exact(value.sourceRepository) && value.sourceRepository !== 'https://github.com/22-ai-00/dsh-enhanced.git'
+    || !exact(value.sourceRepository) && value.sourceRepository !== 'https://github.com/22-ai-00/dsh-ray.git'
     || !value.allowBuilds || typeof value.allowBuilds !== 'object' || Array.isArray(value.allowBuilds)
     || !Array.isArray(value.bundles) || !Array.isArray(value.packages) || !HASH.test(value.receiptDigest)) fail('invalid cohort receipt')
   const { receiptDigest, ...content } = value
@@ -352,7 +352,7 @@ export async function prepareRsiLocalCohort(input: { dshHome: string; profile: s
   if (input.source.schemaVersion !== 1 || !COMMIT.test(input.source.sourceCommit)
     || !exact(input.source.repository)
     || input.source.repository !== join(input.dshHome, 'rsi-sources', input.profile, 'checkout')
-    || !exact(input.source.origin.locator) && input.source.origin.locator !== 'https://github.com/22-ai-00/dsh-enhanced.git'
+    || !exact(input.source.origin.locator) && input.source.origin.locator !== 'https://github.com/22-ai-00/dsh-ray.git'
     || !Array.isArray(input.bundles) || input.bundles.some(slug => !SLUG.test(slug))) fail('invalid source or bundle selection')
   const bundles = [...new Set(input.bundles)].sort()
   const parent = join(input.dshHome, 'rsi-local-cohorts')
@@ -381,7 +381,7 @@ export async function prepareRsiLocalCohort(input: { dshHome: string; profile: s
     if (await git(['-C', workspace, 'rev-parse', 'HEAD']) !== input.source.sourceCommit
       || await git(['-C', workspace, 'status', '--porcelain=v1', '--untracked-files=all']) !== '') fail('build workspace is not exact clean commit')
     const rootManifest = JSON.parse((await stableFile(join(workspace, 'package.json'), 1_048_576)).toString('utf8')) as Record<string, unknown>
-    if (rootManifest.name !== 'dsh-enhanced' || rootManifest.version !== input.source.version) fail('source root version differs')
+    if (rootManifest.name !== 'dsh-ray' || rootManifest.version !== input.source.version) fail('source root version differs')
     const allowBuilds = await approvedBuilds(workspace)
     const packages = await closure(workspace, input.source.version, bundles)
     const sourceManifests = new Map<string, Record<string, unknown>>()

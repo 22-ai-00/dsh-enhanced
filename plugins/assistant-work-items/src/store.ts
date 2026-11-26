@@ -2,7 +2,7 @@ import { chmodSync, closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirS
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import { continuationUtf8, validateContinuationInput, type WorkItemContinuationInput, type WorkItemContinuationRecord } from './continuation-record.js'
 import { canonicalDiagnosis, diagnosisPlanMatchesItem, MAX_DIAGNOSIS_EVENT_BYTES, parseDiagnosisPlan, strictDiagnosisJson, type WorkItemDiagnosisPlan } from './diagnosis-contract.js'
 import {

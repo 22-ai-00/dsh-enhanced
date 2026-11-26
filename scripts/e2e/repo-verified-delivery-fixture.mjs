@@ -75,11 +75,11 @@ export async function prepareRepositoryFixture(home, patchPath, env) {
   }
   const config = id => {
     let row = find(patch.contents, id)
-    if (!row) { row = patch.createNode({ id, name: `@dsh-enhanced/${id.slice('dsh-enhanced-'.length)}` }); patch.contents.add(row) }
+    if (!row) { row = patch.createNode({ id, name: `@dsh-ray/${id.slice('dsh-ray-'.length)}` }); patch.contents.add(row) }
     if (!row.has('config')) row.set('config', patch.createNode({}))
     return row.get('config', true)
   }
-  const isolation = config('dsh-enhanced-assistant-isolation').toJSON().grants[0]
+  const isolation = config('dsh-ray-assistant-isolation').toJSON().grants[0]
   const secretDirectory = join(home, 'repo-fixture-secrets')
   await mkdir(secretDirectory, { mode: 0o700 })
   const secretPath = join(secretDirectory, 'github')
@@ -90,8 +90,8 @@ export async function prepareRepositoryFixture(home, patchPath, env) {
     env: {}, run: async () => { throw new Error('unexpected fixture subprocess') }, timeoutMs: 1000, maxSecretBytes: 4096,
   })
   if (secret !== 'non-production-github-fixture') throw new Error('fixture credential mismatch')
-  config('dsh-enhanced-credentials-keychain').set('handles', patch.createNode([{ id: 'repo-fixture', provider: 'linux-protected-file', path: secretPath,
-    consumers: ['dsh-enhanced-assistant-actions', ...(process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? ['dsh-enhanced-event-triggers'] : [])], purposes: ['github.commit', ...(process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? ['github.observe'] : [])], maxLeaseMs: 30000 }]))
+  config('dsh-ray-credentials-keychain').set('handles', patch.createNode([{ id: 'repo-fixture', provider: 'linux-protected-file', path: secretPath,
+    consumers: ['dsh-ray-assistant-actions', ...(process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? ['dsh-ray-event-triggers'] : [])], purposes: ['github.commit', ...(process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? ['github.observe'] : [])], maxLeaseMs: 30000 }]))
   patch.contents.add(patch.createNode({ insert: [{ id: name, name: fileURLToPath(import.meta.url) }] }))
   env.DSH_REPO_DELIVERY_FIXTURE_LOG = join(home, 'github-fixture.jsonl')
   if (process.env.DSH_REPO_EVENT_SOURCE === 'fixture') { env.DSH_REPO_EVENT_STATE = join(home, 'repository-event-fixture.json'); env.DSH_REPO_EVENT_SOURCE_LOG = join(home, 'repository-event-source.jsonl'); await writeFile(env.DSH_REPO_EVENT_STATE, '{"ready":false}', { mode: 0o600 }) }

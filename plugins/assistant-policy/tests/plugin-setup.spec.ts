@@ -21,38 +21,38 @@ import {
 } from '../src/plugin-setup.ts'
 
 const bundles = `
-- id: dsh-enhanced-assistant-policy
-  name: '@dsh-enhanced/assistant-policy'
+- id: dsh-ray-assistant-policy
+  name: '@dsh-ray/assistant-policy'
   config:
     toolDefaultEffect: deny
-- id: dsh-enhanced-assistant-work-items
-  name: '@dsh-enhanced/assistant-work-items'
+- id: dsh-ray-assistant-work-items
+  name: '@dsh-ray/assistant-work-items'
   config:
     enabled: false
     mode: observe
     databasePath: !!js dshHomePath('assistant-work-items/state.sqlite')
     intakeSourceId: work-items/v1
-- id: dsh-enhanced-assistant-delivery
-  name: '@dsh-enhanced/assistant-delivery'
+- id: dsh-ray-assistant-delivery
+  name: '@dsh-ray/assistant-delivery'
   config:
     schedulerEnabled: true
     maxAttempts: 5
     ownerRoutes: []
-- id: dsh-enhanced-event-triggers
-  name: '@dsh-enhanced/event-triggers'
+- id: dsh-ray-event-triggers
+  name: '@dsh-ray/event-triggers'
   config:
     pollerEnabled: false
     allowedHttpHosts: []
-- id: dsh-enhanced-lark-channel
-  name: '@dsh-enhanced/lark-channel'
+- id: dsh-ray-lark-channel
+  name: '@dsh-ray/lark-channel'
   config:
     enabled: false
     tenant: replace-with-tenant-key
     appId: cli_0000000000000000
     appSecret: hunter2
     appSecretHandle: lark/app-secret
-- id: dsh-enhanced-assistant-memory-learning
-  name: '@dsh-enhanced/assistant-memory-learning'
+- id: dsh-ray-assistant-memory-learning
+  name: '@dsh-ray/assistant-memory-learning'
   disabled: true
   config: {}
 `
@@ -109,11 +109,11 @@ function memoryIo(answers: string[] = [], isTTY = false): PluginSetupIo & { outp
 
 describe('plugin setup: naming and validation', () => {
   test('resolves short slugs, package names and row ids', () => {
-    const ids = ['dsh-enhanced-assistant-work-items', 'dsh-enhanced-event-triggers']
-    expect(resolvePluginId('work-items', ids)).toBe('dsh-enhanced-assistant-work-items')
-    expect(resolvePluginId('assistant-work-items', ids)).toBe('dsh-enhanced-assistant-work-items')
-    expect(resolvePluginId('@dsh-enhanced/event-triggers', ids)).toBe('dsh-enhanced-event-triggers')
-    expect(resolvePluginId('dsh-enhanced-event-triggers', ids)).toBe('dsh-enhanced-event-triggers')
+    const ids = ['dsh-ray-assistant-work-items', 'dsh-ray-event-triggers']
+    expect(resolvePluginId('work-items', ids)).toBe('dsh-ray-assistant-work-items')
+    expect(resolvePluginId('assistant-work-items', ids)).toBe('dsh-ray-assistant-work-items')
+    expect(resolvePluginId('@dsh-ray/event-triggers', ids)).toBe('dsh-ray-event-triggers')
+    expect(resolvePluginId('dsh-ray-event-triggers', ids)).toBe('dsh-ray-event-triggers')
     expect(resolvePluginId('nope', ids)).toBeUndefined()
   })
 
@@ -135,91 +135,91 @@ describe('plugin setup: naming and validation', () => {
     expect(() => coerceConfigValue('row', 'expr', 'x', map.get('expr', true))).toThrow(/!!js expression/u)
     expect(() => coerceConfigValue('row', 'missing', 'x', undefined)).toThrow(/--force/u)
     expect(coerceConfigValue('row', 'missing', '3', undefined, true)).toBe(3)
-    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'mode', 'active', undefined)).toBe('active')
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'mode', 'loud', undefined)).toThrow(/observe, active/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'follows.eventTriggers.enabled', 'true', undefined)).toBe(true)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'follows.eventTriggers.enabled', 'maybe', undefined)).toThrow(/expects a boolean/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.autoSettle.enabled', 'on', undefined)).toBe(true)
-    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.autoSettle.maxPerTick', '3', undefined)).toBe(3)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.autoSettle.maxPerTick', 'many', undefined)).toThrow(/expects a number/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.bindWorkerRun.enabled', 'on', undefined)).toBe(true)
-    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.bindWorkerRun.maxPerTick', '4', undefined)).toBe(4)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.bindWorkerRun.enabled', 'maybe', undefined)).toThrow(/expects a boolean/u)
+    expect(coerceConfigValue('dsh-ray-assistant-work-items', 'mode', 'active', undefined)).toBe('active')
+    expect(() => coerceConfigValue('dsh-ray-assistant-work-items', 'mode', 'loud', undefined)).toThrow(/observe, active/u)
+    expect(coerceConfigValue('dsh-ray-assistant-work-items', 'follows.eventTriggers.enabled', 'true', undefined)).toBe(true)
+    expect(() => coerceConfigValue('dsh-ray-assistant-work-items', 'follows.eventTriggers.enabled', 'maybe', undefined)).toThrow(/expects a boolean/u)
+    expect(coerceConfigValue('dsh-ray-assistant-work-items', 'acceptance.autoSettle.enabled', 'on', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-ray-assistant-work-items', 'acceptance.autoSettle.maxPerTick', '3', undefined)).toBe(3)
+    expect(() => coerceConfigValue('dsh-ray-assistant-work-items', 'acceptance.autoSettle.maxPerTick', 'many', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-ray-assistant-work-items', 'acceptance.bindWorkerRun.enabled', 'on', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-ray-assistant-work-items', 'acceptance.bindWorkerRun.maxPerTick', '4', undefined)).toBe(4)
+    expect(() => coerceConfigValue('dsh-ray-assistant-work-items', 'acceptance.bindWorkerRun.enabled', 'maybe', undefined)).toThrow(/expects a boolean/u)
     // Documented optional switches of the WP21 slices need no `--force` either.
-    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'follows.eventTriggers.acceptHeadRef', 'true', undefined)).toBe(true)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'follows.eventTriggers.acceptHeadRef', 'maybe', undefined)).toThrow(/expects a boolean/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.verdictGate.enabled', 'on', undefined)).toBe(true)
-    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.holdReport.enabled', 'on', undefined)).toBe(true)
-    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.holdReport.holdTimeoutMs', '900000', undefined)).toBe(900000)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.holdReport.holdTimeoutMs', 'soon', undefined)).toThrow(/expects a number/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-delivery', 'ownerReportRouting.orderAcrossLanes', 'on', undefined)).toBe(true)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-delivery', 'ownerReportRouting.orderAcrossLanes', 'maybe', undefined)).toThrow(/expects a boolean/u)
+    expect(coerceConfigValue('dsh-ray-assistant-work-items', 'follows.eventTriggers.acceptHeadRef', 'true', undefined)).toBe(true)
+    expect(() => coerceConfigValue('dsh-ray-assistant-work-items', 'follows.eventTriggers.acceptHeadRef', 'maybe', undefined)).toThrow(/expects a boolean/u)
+    expect(coerceConfigValue('dsh-ray-assistant-work-items', 'acceptance.verdictGate.enabled', 'on', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-ray-assistant-work-items', 'acceptance.holdReport.enabled', 'on', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-ray-assistant-work-items', 'acceptance.holdReport.holdTimeoutMs', '900000', undefined)).toBe(900000)
+    expect(() => coerceConfigValue('dsh-ray-assistant-work-items', 'acceptance.holdReport.holdTimeoutMs', 'soon', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-ray-assistant-delivery', 'ownerReportRouting.orderAcrossLanes', 'on', undefined)).toBe(true)
+    expect(() => coerceConfigValue('dsh-ray-assistant-delivery', 'ownerReportRouting.orderAcrossLanes', 'maybe', undefined)).toThrow(/expects a boolean/u)
     // Slice S3 assistant-association optional nested keys validate without `--force`.
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.enabled', 'false', undefined)).toBe(false)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.intervalMs', '3600000', undefined)).toBe(3600000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.idleMinMs', '1800000', undefined)).toBe(1800000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.maxPairsPerRun', '16', undefined)).toBe(16)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.maxAbstractionsPerRun', '4', undefined)).toBe(4)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.maxSynonymsPerRun', '16', undefined)).toBe(16)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.nodeTtlMs', '2592000000', undefined)).toBe(2592000000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.allowModelSynthesis', 'false', undefined)).toBe(false)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.budgetId', 'dream-budget', undefined)).toBe('dream-budget')
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.budgetAmount', '5', undefined)).toBe(5)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.allowModelSynthesis', 'maybe', undefined)).toThrow(/expects a boolean/u)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.intervalMs', 'soon', undefined)).toThrow(/expects a number/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.enabled', 'false', undefined)).toBe(false)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.minScore', '0.75', undefined)).toBe(0.75)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.maxSignalsPerHour', '10', undefined)).toBe(10)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.cooldownMs', '3600000', undefined)).toBe(3600000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.maxSummaryBytes', '1024', undefined)).toBe(1024)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.sourceId', 'assistant-association', undefined)).toBe('assistant-association')
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.budgetId', 'intake-budget', undefined)).toBe('intake-budget')
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.budgetAmount', '2', undefined)).toBe(2)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.minScore', 'high', undefined)).toThrow(/expects a number/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.entityWeight', '0.4', undefined)).toBe(0.4)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.toolWeight', '0.6', undefined)).toBe(0.6)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.minSimilarity', '0.55', undefined)).toBe(0.55)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.minClusterSize', '3', undefined)).toBe(3)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.reAskWindowMs', '3600000', undefined)).toBe(3600000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.reAskMinEntityJaccard', '0.5', undefined)).toBe(0.5)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.minClusterSize', 'three', undefined)).toThrow(/expects a number/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.enabled', 'false', undefined)).toBe(false)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', '["docs.python.org","nodejs.org"]', undefined)).toEqual(['docs.python.org', 'nodejs.org'])
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', '["example.com"]', map.get('list', true))).toEqual(['example.com'])
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.seedUrls', '["https://nodejs.org/api/"]', undefined)).toEqual(['https://nodejs.org/api/'])
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', '{}', undefined)).toThrow(/JSON array/u)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', 'not-json', undefined)).toThrow(/JSON array/u)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', '[123]', undefined)).toThrow(/JSON array of strings/u)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', '["ok", null]', map.get('list', true))).toThrow(/JSON array of strings/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowSubdomains', 'true', undefined)).toBe(true)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowIpv6', 'false', undefined)).toBe(false)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.isolationMode', 'subprocess', undefined)).toBe('subprocess')
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.isolationMode', 'in-process', undefined)).toBe('in-process')
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.isolationMode', 'docker', undefined)).toThrow(/subprocess, in-process/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.intervalMs', '3600000', undefined)).toBe(3600000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.idleMinMs', '300000', undefined)).toBe(300000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.cooldownMs', '86400000', undefined)).toBe(86400000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxInterestsPerRun', '3', undefined)).toBe(3)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxRequestsPerRun', '5', undefined)).toBe(5)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxPagesPerRun', '3', undefined)).toBe(3)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxBytesPerRequest', '524288', undefined)).toBe(524288)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxTotalBytesPerRun', '1048576', undefined)).toBe(1048576)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxRequestsPerDay', '20', undefined)).toBe(20)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxBytesPerDay', '5242880', undefined)).toBe(5242880)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxDurationMs', '30000', undefined)).toBe(30000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.requestTimeoutMs', '10000', undefined)).toBe(10000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxRedirects', '2', undefined)).toBe(2)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.discoverLinks', 'true', undefined)).toBe(true)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.nodeTtlMs', '1209600000', undefined)).toBe(1209600000)
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.budgetId', 'web-learn-budget', undefined)).toBe('web-learn-budget')
-    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.budgetAmount', '2', undefined)).toBe(2)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxRequestsPerDay', 'many', undefined)).toThrow(/expects a number/u)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.discoverLinks', 'maybe', undefined)).toThrow(/expects a boolean/u)
-    expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'dreamingIdeas.enabled', 'false', undefined)).toBe(false)
-    expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'dreamingIdeas.maxIdeasPerWake', '3', undefined)).toBe(3)
-    expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'associationCandidates.enabled', 'false', undefined)).toBe(false)
-    expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'associationCandidates.maxCandidatesPerWake', '3', undefined)).toBe(3)
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'associationCandidates.maxCandidatesPerWake', 'many', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'dreaming.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'dreaming.intervalMs', '3600000', undefined)).toBe(3600000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'dreaming.idleMinMs', '1800000', undefined)).toBe(1800000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'dreaming.maxPairsPerRun', '16', undefined)).toBe(16)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'dreaming.maxAbstractionsPerRun', '4', undefined)).toBe(4)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'dreaming.maxSynonymsPerRun', '16', undefined)).toBe(16)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'dreaming.nodeTtlMs', '2592000000', undefined)).toBe(2592000000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'dreaming.allowModelSynthesis', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'dreaming.budgetId', 'dream-budget', undefined)).toBe('dream-budget')
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'dreaming.budgetAmount', '5', undefined)).toBe(5)
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'dreaming.allowModelSynthesis', 'maybe', undefined)).toThrow(/expects a boolean/u)
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'dreaming.intervalMs', 'soon', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'intakeSignal.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'intakeSignal.minScore', '0.75', undefined)).toBe(0.75)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'intakeSignal.maxSignalsPerHour', '10', undefined)).toBe(10)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'intakeSignal.cooldownMs', '3600000', undefined)).toBe(3600000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'intakeSignal.maxSummaryBytes', '1024', undefined)).toBe(1024)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'intakeSignal.sourceId', 'assistant-association', undefined)).toBe('assistant-association')
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'intakeSignal.budgetId', 'intake-budget', undefined)).toBe('intake-budget')
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'intakeSignal.budgetAmount', '2', undefined)).toBe(2)
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'intakeSignal.minScore', 'high', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'clustering.entityWeight', '0.4', undefined)).toBe(0.4)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'clustering.toolWeight', '0.6', undefined)).toBe(0.6)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'clustering.minSimilarity', '0.55', undefined)).toBe(0.55)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'clustering.minClusterSize', '3', undefined)).toBe(3)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'clustering.reAskWindowMs', '3600000', undefined)).toBe(3600000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'clustering.reAskMinEntityJaccard', '0.5', undefined)).toBe(0.5)
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'clustering.minClusterSize', 'three', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.allowedDomains', '["docs.python.org","nodejs.org"]', undefined)).toEqual(['docs.python.org', 'nodejs.org'])
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.allowedDomains', '["example.com"]', map.get('list', true))).toEqual(['example.com'])
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.seedUrls', '["https://nodejs.org/api/"]', undefined)).toEqual(['https://nodejs.org/api/'])
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'webLearning.allowedDomains', '{}', undefined)).toThrow(/JSON array/u)
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'webLearning.allowedDomains', 'not-json', undefined)).toThrow(/JSON array/u)
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'webLearning.allowedDomains', '[123]', undefined)).toThrow(/JSON array of strings/u)
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'webLearning.allowedDomains', '["ok", null]', map.get('list', true))).toThrow(/JSON array of strings/u)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.allowSubdomains', 'true', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.allowIpv6', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.isolationMode', 'subprocess', undefined)).toBe('subprocess')
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.isolationMode', 'in-process', undefined)).toBe('in-process')
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'webLearning.isolationMode', 'docker', undefined)).toThrow(/subprocess, in-process/u)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.intervalMs', '3600000', undefined)).toBe(3600000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.idleMinMs', '300000', undefined)).toBe(300000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.cooldownMs', '86400000', undefined)).toBe(86400000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.maxInterestsPerRun', '3', undefined)).toBe(3)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.maxRequestsPerRun', '5', undefined)).toBe(5)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.maxPagesPerRun', '3', undefined)).toBe(3)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.maxBytesPerRequest', '524288', undefined)).toBe(524288)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.maxTotalBytesPerRun', '1048576', undefined)).toBe(1048576)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.maxRequestsPerDay', '20', undefined)).toBe(20)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.maxBytesPerDay', '5242880', undefined)).toBe(5242880)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.maxDurationMs', '30000', undefined)).toBe(30000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.requestTimeoutMs', '10000', undefined)).toBe(10000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.maxRedirects', '2', undefined)).toBe(2)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.discoverLinks', 'true', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.nodeTtlMs', '1209600000', undefined)).toBe(1209600000)
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.budgetId', 'web-learn-budget', undefined)).toBe('web-learn-budget')
+    expect(coerceConfigValue('dsh-ray-assistant-association', 'webLearning.budgetAmount', '2', undefined)).toBe(2)
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'webLearning.maxRequestsPerDay', 'many', undefined)).toThrow(/expects a number/u)
+    expect(() => coerceConfigValue('dsh-ray-assistant-association', 'webLearning.discoverLinks', 'maybe', undefined)).toThrow(/expects a boolean/u)
+    expect(coerceConfigValue('dsh-ray-assistant-growth-driver', 'dreamingIdeas.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-ray-assistant-growth-driver', 'dreamingIdeas.maxIdeasPerWake', '3', undefined)).toBe(3)
+    expect(coerceConfigValue('dsh-ray-assistant-growth-driver', 'associationCandidates.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-ray-assistant-growth-driver', 'associationCandidates.maxCandidatesPerWake', '3', undefined)).toBe(3)
+    expect(() => coerceConfigValue('dsh-ray-assistant-growth-driver', 'associationCandidates.maxCandidatesPerWake', 'many', undefined)).toThrow(/expects a number/u)
   })
 
   test('parses commands and rejects bad arity or options', () => {
@@ -240,9 +240,9 @@ describe('plugin setup: profile edits', () => {
     const listed = await listProfilePlugins({ dshHome: home }, options)
     expect(listed.profile).toBe('web')
     const byId = new Map(listed.plugins.map(plugin => [plugin.id, plugin]))
-    expect(byId.get('dsh-enhanced-assistant-work-items')).toMatchObject({ slug: 'assistant-work-items', loaded: true, enabled: false, overridden: false })
-    expect(byId.get('dsh-enhanced-assistant-delivery')?.flags).toEqual({ schedulerEnabled: true })
-    expect(byId.get('dsh-enhanced-assistant-memory-learning')?.loaded).toBe(false)
+    expect(byId.get('dsh-ray-assistant-work-items')).toMatchObject({ slug: 'assistant-work-items', loaded: true, enabled: false, overridden: false })
+    expect(byId.get('dsh-ray-assistant-delivery')?.flags).toEqual({ schedulerEnabled: true })
+    expect(byId.get('dsh-ray-assistant-memory-learning')?.loaded).toBe(false)
   })
 
   test('requires --profile when several profiles exist', async () => {
@@ -254,7 +254,7 @@ describe('plugin setup: profile edits', () => {
     const home = await temporaryHome()
     await writeFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), '# keep me\n- id: permission\n  config:\n    defaultPreset: auto\n', 'utf8')
     const result = await setPluginEnabled({ dshHome: home, profile: 'web', plugin: 'work-items', enabled: true }, options)
-    expect(result.changes).toEqual([{ id: 'dsh-enhanced-assistant-work-items', key: 'enabled', from: false, to: true }])
+    expect(result.changes).toEqual([{ id: 'dsh-ray-assistant-work-items', key: 'enabled', from: false, to: true }])
     const source = await profilePatch(home)
     expect(source).toContain('# keep me')
     expect(source).toContain('defaultPreset: auto')
@@ -279,7 +279,7 @@ describe('plugin setup: profile edits', () => {
     await expect(setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'delivery', key: 'maxAttempts', value: 'lots' }, options)).rejects.toThrow(/expects a number/u)
     await expect(setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'delivery', key: 'mystery', value: '1' }, options)).rejects.toThrow(/--force/u)
     const result = await setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'delivery', key: 'maxAttempts', value: '9' }, options)
-    expect(result.changes).toEqual([{ id: 'dsh-enhanced-assistant-delivery', key: 'maxAttempts', from: 5, to: 9 }])
+    expect(result.changes).toEqual([{ id: 'dsh-ray-assistant-delivery', key: 'maxAttempts', from: 5, to: 9 }])
     expect(await profilePatch(home)).toContain('schedulerEnabled: true')
     await setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'work-items', key: 'intakeLedger.enabled', value: 'true' }, options)
     expect((await showProfilePlugin({ dshHome: home, plugin: 'work-items' }, options)).config).toMatch(/intakeLedger:\n {2}enabled: true/u)
@@ -295,7 +295,7 @@ describe('plugin setup: profile edits', () => {
     await expect(setPluginConfigValue({ ...target, plugin: 'delivery', key: 'ownerRoutes', value: '[]' }, options)).rejects.toThrow(/authorization/u)
     await expect(setPluginEnabled({ ...target, plugin: 'policy', enabled: false }, options)).rejects.toThrow(/refusing to disable assistant-policy/u)
     await expect(setPluginEnabled({ ...target, plugin: 'lark-channel', enabled: true }, options)).rejects.toThrow(/dsh-lark-setup/u)
-    await expect(setPluginEnabled({ ...target, plugin: 'not-installed', enabled: true }, options)).rejects.toThrow(/dsh plugin --profile web add @dsh-enhanced\/not-installed/u)
+    await expect(setPluginEnabled({ ...target, plugin: 'not-installed', enabled: true }, options)).rejects.toThrow(/dsh plugin --profile web add @dsh-ray\/not-installed/u)
     await expect(readFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')).rejects.toThrow()
   })
 
@@ -340,27 +340,27 @@ describe('plugin setup: recommended preset', () => {
     const home = await temporaryHome()
     const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, options)
     expect(result.changes).toEqual([
-      { id: 'dsh-enhanced-assistant-work-items', key: 'enabled', from: false, to: true },
-      { id: 'dsh-enhanced-assistant-work-items', key: 'intakeLedger.enabled', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-delivery', key: 'attentionAttachOverCap', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-delivery', key: 'naturalFeedback.coverage', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-delivery', key: 'naturalFeedback.mixedIntent', from: undefined, to: true },
-      { id: 'dsh-enhanced-event-triggers', key: 'pollerEnabled', from: false, to: true },
+      { id: 'dsh-ray-assistant-work-items', key: 'enabled', from: false, to: true },
+      { id: 'dsh-ray-assistant-work-items', key: 'intakeLedger.enabled', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-delivery', key: 'attentionAttachOverCap', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-delivery', key: 'naturalFeedback.coverage', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-delivery', key: 'naturalFeedback.mixedIntent', from: undefined, to: true },
+      { id: 'dsh-ray-event-triggers', key: 'pollerEnabled', from: false, to: true },
     ])
     expect(result.skipped).toEqual([
-      { id: 'dsh-enhanced-assistant-work-items', reason: 'waiting for explicit configuration: dsh-enhanced-assistant-proactive is not installed' },
-      { id: 'dsh-enhanced-assistant-proactive', reason: 'not installed' },
-      { id: 'dsh-enhanced-assistant-dreaming', reason: 'not installed' },
-      { id: 'dsh-enhanced-assistant-evaluation', reason: 'not installed' },
-      { id: 'dsh-enhanced-assistant-memory-learning', reason: 'plugin is disabled in this profile; enable it first' },
-      { id: 'dsh-enhanced-assistant-growth-driver', reason: 'not installed' },
-      { id: 'dsh-enhanced-plugin-control-plane', reason: 'not installed' },
+      { id: 'dsh-ray-assistant-work-items', reason: 'waiting for explicit configuration: dsh-ray-assistant-proactive is not installed' },
+      { id: 'dsh-ray-assistant-proactive', reason: 'not installed' },
+      { id: 'dsh-ray-assistant-dreaming', reason: 'not installed' },
+      { id: 'dsh-ray-assistant-evaluation', reason: 'not installed' },
+      { id: 'dsh-ray-assistant-memory-learning', reason: 'plugin is disabled in this profile; enable it first' },
+      { id: 'dsh-ray-assistant-growth-driver', reason: 'not installed' },
+      { id: 'dsh-ray-plugin-control-plane', reason: 'not installed' },
     ])
     const source = await profilePatch(home)
     expect(source).toContain('mode: observe')
-    expect(source).not.toContain('dsh-enhanced-lark-channel')
-    expect(source).not.toContain('dsh-enhanced-assistant-policy')
-    expect(source).not.toContain('dsh-enhanced-assistant-memory-learning')
+    expect(source).not.toContain('dsh-ray-lark-channel')
+    expect(source).not.toContain('dsh-ray-assistant-policy')
+    expect(source).not.toContain('dsh-ray-assistant-memory-learning')
     const again = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, options)
     expect(again.changed).toBe(false)
     expect(again.changes).toEqual([])
@@ -370,16 +370,16 @@ describe('plugin setup: recommended preset', () => {
   test('skips disabled plugins and active work-items that are not yet enabled', async () => {
     const home = await temporaryHome()
     await writeFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), [
-      '- id: dsh-enhanced-event-triggers', '  disabled: true',
-      '- id: dsh-enhanced-assistant-work-items', '  config:', '    enabled: false', '    mode: active', '',
+      '- id: dsh-ray-event-triggers', '  disabled: true',
+      '- id: dsh-ray-assistant-work-items', '  config:', '    enabled: false', '    mode: active', '',
     ].join('\n'), 'utf8')
     const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, options)
     expect(result.changes.map(change => change.id)).toEqual([
-      'dsh-enhanced-assistant-delivery', 'dsh-enhanced-assistant-delivery', 'dsh-enhanced-assistant-delivery',
+      'dsh-ray-assistant-delivery', 'dsh-ray-assistant-delivery', 'dsh-ray-assistant-delivery',
     ])
-    expect(result.skipped.map(skip => skip.id)).toEqual(expect.arrayContaining(['dsh-enhanced-event-triggers', 'dsh-enhanced-assistant-work-items']))
-    const workItemsSkips = result.skipped.filter(skip => skip.id === 'dsh-enhanced-assistant-work-items')
-    expect(workItemsSkips).toEqual([{ id: 'dsh-enhanced-assistant-work-items', reason: 'mode is active but not enabled; complete the active config deliberately' }])
+    expect(result.skipped.map(skip => skip.id)).toEqual(expect.arrayContaining(['dsh-ray-event-triggers', 'dsh-ray-assistant-work-items']))
+    const workItemsSkips = result.skipped.filter(skip => skip.id === 'dsh-ray-assistant-work-items')
+    expect(workItemsSkips).toEqual([{ id: 'dsh-ray-assistant-work-items', reason: 'mode is active but not enabled; complete the active config deliberately' }])
     expect(await profilePatch(home)).not.toContain('intakeLedger')
   })
 })
@@ -390,16 +390,16 @@ describe('plugin setup: recommended preset', () => {
  * owner-signed grant is still un-expanded on purpose.
  */
 const assemblyBundles = `
-- id: dsh-enhanced-assistant-work-items
-  name: '@dsh-enhanced/assistant-work-items'
+- id: dsh-ray-assistant-work-items
+  name: '@dsh-ray/assistant-work-items'
   config:
     enabled: false
     mode: observe
     intakeLedger:
       evaluation:
         enabled: false
-- id: dsh-enhanced-assistant-proactive
-  name: '@dsh-enhanced/assistant-proactive'
+- id: dsh-ray-assistant-proactive
+  name: '@dsh-ray/assistant-proactive'
   config:
     intakeEvaluation:
       enabled: false
@@ -408,41 +408,41 @@ const assemblyBundles = `
           ceiling: digest
       provider: deepseek-official
       model: deepseek-v4-flash
-- id: dsh-enhanced-assistant-delivery
-  name: '@dsh-enhanced/assistant-delivery'
+- id: dsh-ray-assistant-delivery
+  name: '@dsh-ray/assistant-delivery'
   config:
     schedulerEnabled: true
-- id: dsh-enhanced-assistant-evaluation
-  name: '@dsh-enhanced/assistant-evaluation'
+- id: dsh-ray-assistant-evaluation
+  name: '@dsh-ray/assistant-evaluation'
   config:
     notificationOutcomesEnabled: false
-- id: dsh-enhanced-event-triggers
-  name: '@dsh-enhanced/event-triggers'
+- id: dsh-ray-event-triggers
+  name: '@dsh-ray/event-triggers'
   config:
     pollerEnabled: false
-- id: dsh-enhanced-assistant-memory-learning
-  name: '@dsh-enhanced/assistant-memory-learning'
+- id: dsh-ray-assistant-memory-learning
+  name: '@dsh-ray/assistant-memory-learning'
   config:
     databasePath: /tmp/learning.sqlite
-- id: dsh-enhanced-assistant-verifier
-  name: '@dsh-enhanced/assistant-verifier'
+- id: dsh-ray-assistant-verifier
+  name: '@dsh-ray/assistant-verifier'
   config:
     memoryReviews:
       workItemExperiences: false
-- id: dsh-enhanced-personal-assistant
-  name: '@dsh-enhanced/personal-assistant'
+- id: dsh-ray-personal-assistant
+  name: '@dsh-ray/personal-assistant'
   config:
     personalMemory:
       automaticLearning:
         workItemExperiences: false
-- id: dsh-enhanced-assistant-growth-driver
-  name: '@dsh-enhanced/assistant-growth-driver'
+- id: dsh-ray-assistant-growth-driver
+  name: '@dsh-ray/assistant-growth-driver'
   config:
     enabled: true
     usageLearning:
       enabled: true
-- id: dsh-enhanced-plugin-control-plane
-  name: '@dsh-enhanced/plugin-control-plane'
+- id: dsh-ray-plugin-control-plane
+  name: '@dsh-ray/plugin-control-plane'
   config:
     catalogPath: /tmp/catalog.json
 `
@@ -474,25 +474,25 @@ describe('plugin setup: assembly preset guards', () => {
     const assemblyOptions = { readDump: dumpFixture(assemblyBundles) }
     const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, assemblyOptions)
     expect(result.changes).toEqual([
-      { id: 'dsh-enhanced-assistant-work-items', key: 'enabled', from: false, to: true },
-      { id: 'dsh-enhanced-assistant-work-items', key: 'intakeLedger.enabled', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-work-items', key: 'intakeLedger.evaluation.enabled', from: false, to: true },
-      { id: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.enabled', from: false, to: true },
-      { id: 'dsh-enhanced-assistant-delivery', key: 'attentionAttachOverCap', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-delivery', key: 'naturalFeedback.coverage', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-delivery', key: 'naturalFeedback.mixedIntent', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-evaluation', key: 'notificationOutcomesEnabled', from: false, to: true },
-      { id: 'dsh-enhanced-assistant-evaluation', key: 'intakeAttentionAgreementEnabled', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-evaluation', key: 'intakeEvaluationAgreementEnabled', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-evaluation', key: 'attentionTuningAutoAdopt', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-evaluation', key: 'attentionLooseningEnabled', from: undefined, to: true },
-      { id: 'dsh-enhanced-event-triggers', key: 'pollerEnabled', from: false, to: true },
+      { id: 'dsh-ray-assistant-work-items', key: 'enabled', from: false, to: true },
+      { id: 'dsh-ray-assistant-work-items', key: 'intakeLedger.enabled', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-work-items', key: 'intakeLedger.evaluation.enabled', from: false, to: true },
+      { id: 'dsh-ray-assistant-proactive', key: 'intakeEvaluation.enabled', from: false, to: true },
+      { id: 'dsh-ray-assistant-delivery', key: 'attentionAttachOverCap', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-delivery', key: 'naturalFeedback.coverage', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-delivery', key: 'naturalFeedback.mixedIntent', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-evaluation', key: 'notificationOutcomesEnabled', from: false, to: true },
+      { id: 'dsh-ray-assistant-evaluation', key: 'intakeAttentionAgreementEnabled', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-evaluation', key: 'intakeEvaluationAgreementEnabled', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-evaluation', key: 'attentionTuningAutoAdopt', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-evaluation', key: 'attentionLooseningEnabled', from: undefined, to: true },
+      { id: 'dsh-ray-event-triggers', key: 'pollerEnabled', from: false, to: true },
     ])
     expect(result.skipped.map(skip => skip.id)).toEqual([
-      'dsh-enhanced-assistant-dreaming',
-      'dsh-enhanced-assistant-memory-learning',
-      'dsh-enhanced-assistant-growth-driver',
-      'dsh-enhanced-plugin-control-plane',
+      'dsh-ray-assistant-dreaming',
+      'dsh-ray-assistant-memory-learning',
+      'dsh-ray-assistant-growth-driver',
+      'dsh-ray-plugin-control-plane',
     ])
     expect(result.skipped[0]!.reason).toBe('not installed')
     expect(result.skipped[1]!.reason).toMatch(/waiting for explicit configuration: .*memoryReviews\.workItemExperiences/u)
@@ -501,10 +501,10 @@ describe('plugin setup: assembly preset guards', () => {
     const source = await profilePatch(home)
     const patchRows = parseDocument(source, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] }).toJSON() as Array<Record<string, any>>
     const configOf = (id: string) => patchRows.find(row => row.id === id)?.config
-    expect(configOf('dsh-enhanced-assistant-work-items')).toMatchObject({
+    expect(configOf('dsh-ray-assistant-work-items')).toMatchObject({
       enabled: true, mode: 'observe', intakeLedger: { enabled: true, evaluation: { enabled: true } },
     })
-    expect(configOf('dsh-enhanced-assistant-proactive')).toMatchObject({ intakeEvaluation: { enabled: true } })
+    expect(configOf('dsh-ray-assistant-proactive')).toMatchObject({ intakeEvaluation: { enabled: true } })
     expect(source).not.toContain('workItemExperiences')
     expect(source).not.toContain('workItemFailures')
     expect(source).not.toContain('revisionCapabilities')
@@ -521,11 +521,11 @@ describe('plugin setup: assembly preset guards', () => {
       .replace('    memoryReviews:\n      workItemExperiences: false', '    memoryReviews:\n      workItemExperiences: true')
       .replace('      automaticLearning:\n        workItemExperiences: false', '      automaticLearning:\n        workItemExperiences: true')
     const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, { readDump: dumpFixture(expanded) })
-    expect(result.changes).toContainEqual({ id: 'dsh-enhanced-assistant-memory-learning', key: 'workItemExperiences', from: undefined, to: true })
+    expect(result.changes).toContainEqual({ id: 'dsh-ray-assistant-memory-learning', key: 'workItemExperiences', from: undefined, to: true })
     expect(result.skipped.map(skip => skip.id)).toEqual([
-      'dsh-enhanced-assistant-dreaming',
-      'dsh-enhanced-assistant-growth-driver',
-      'dsh-enhanced-plugin-control-plane',
+      'dsh-ray-assistant-dreaming',
+      'dsh-ray-assistant-growth-driver',
+      'dsh-ray-plugin-control-plane',
     ])
     expect(await profilePatch(home)).toContain('workItemExperiences: true')
   })
@@ -534,9 +534,9 @@ describe('plugin setup: assembly preset guards', () => {
     const home = await temporaryHome()
     const invalid = assemblyBundles.replace('        - ruleId: triage\n          ceiling: digest', '        - ruleId: triage\n          ceiling: execute')
     const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, { readDump: dumpFixture(invalid) })
-    expect(result.changes.map(change => `${change.id}.${change.key}`)).not.toContain('dsh-enhanced-assistant-proactive.intakeEvaluation.enabled')
-    expect(result.skipped).toContainEqual({ id: 'dsh-enhanced-assistant-work-items', reason: expect.stringMatching(/rules is missing or invalid/u) })
-    expect(result.skipped).toContainEqual({ id: 'dsh-enhanced-assistant-proactive', reason: expect.stringMatching(/rules is missing or invalid/u) })
+    expect(result.changes.map(change => `${change.id}.${change.key}`)).not.toContain('dsh-ray-assistant-proactive.intakeEvaluation.enabled')
+    expect(result.skipped).toContainEqual({ id: 'dsh-ray-assistant-work-items', reason: expect.stringMatching(/rules is missing or invalid/u) })
+    expect(result.skipped).toContainEqual({ id: 'dsh-ray-assistant-proactive', reason: expect.stringMatching(/rules is missing or invalid/u) })
   })
 })
 
@@ -548,7 +548,7 @@ describe('plugin setup: CLI', () => {
     expect(io.output).toContain('Profile web')
     expect(io.output).toMatch(/assistant-work-items\s+idle\s+enabled=false/u)
     await runPluginSetup(['set', 'event-triggers', 'pollerEnabled', 'yes', '--dsh-home', home], io, options)
-    expect(io.output).toContain('dsh-enhanced-event-triggers.pollerEnabled: false -> true')
+    expect(io.output).toContain('dsh-ray-event-triggers.pollerEnabled: false -> true')
     const json = memoryIo()
     await runPluginSetup(['preset', '--json', '--dry-run', '--dsh-home', home], json, options)
     expect(JSON.parse(json.output)).toMatchObject({ dryRun: true, profile: 'web' })
@@ -571,7 +571,7 @@ describe('plugin setup: CLI', () => {
     const workItems = listed.plugins.findIndex(plugin => plugin.slug === 'assistant-work-items') + 1
     const io = memoryIo([String(workItems), 'e', 'lark-channel', 's', 'appSecret', 'x', 'q'], true)
     await runPluginSetup(['--dsh-home', home], io, options)
-    expect(io.output).toContain('dsh-enhanced-assistant-work-items.enabled: false -> true')
+    expect(io.output).toContain('dsh-ray-assistant-work-items.enabled: false -> true')
     expect(io.output).toContain('looks like a secret')
     expect(await profilePatch(home)).not.toContain('appSecret')
   })
@@ -579,8 +579,8 @@ describe('plugin setup: CLI', () => {
   test('fails closed when enabling assistant-dreaming without explicit scope, model, budget and $DSH_HOME databasePath', async () => {
     const home = await temporaryHome()
     const incompleteDreaming = `
-- id: dsh-enhanced-assistant-dreaming
-  name: '@dsh-enhanced/assistant-dreaming'
+- id: dsh-ray-assistant-dreaming
+  name: '@dsh-ray/assistant-dreaming'
   config:
     enabled: false
     retired: false
@@ -596,20 +596,20 @@ describe('plugin setup: CLI', () => {
 
     const presetIncomplete = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, dumpIncomplete)
     expect(presetIncomplete.changes).toContainEqual({
-      id: 'dsh-enhanced-assistant-dreaming',
+      id: 'dsh-ray-assistant-dreaming',
       key: 'databasePath',
       from: undefined,
       to: join(home, 'assistant-dreaming', 'web.sqlite'),
     })
-    expect(presetIncomplete.changes.some(c => c.id === 'dsh-enhanced-assistant-dreaming' && c.key === 'enabled')).toBe(false)
+    expect(presetIncomplete.changes.some(c => c.id === 'dsh-ray-assistant-dreaming' && c.key === 'enabled')).toBe(false)
     expect(presetIncomplete.skipped).toContainEqual({
-      id: 'dsh-enhanced-assistant-dreaming',
+      id: 'dsh-ray-assistant-dreaming',
       reason: expect.stringMatching(/scope\.workspace/u),
     })
 
     const completeDreaming = `
-- id: dsh-enhanced-assistant-dreaming
-  name: '@dsh-enhanced/assistant-dreaming'
+- id: dsh-ray-assistant-dreaming
+  name: '@dsh-ray/assistant-dreaming'
   config:
     enabled: false
     retired: false
@@ -629,8 +629,8 @@ describe('plugin setup: CLI', () => {
     const dumpComplete = { readDump: dumpFixture(completeDreaming) }
     const enabled = await applyRecommendedPluginPreset({ dshHome: homeComplete, profile: 'web' }, dumpComplete)
     expect(enabled.changes).toEqual([
-      { id: 'dsh-enhanced-assistant-dreaming', key: 'databasePath', from: undefined, to: join(homeComplete, 'assistant-dreaming', 'web.sqlite') },
-      { id: 'dsh-enhanced-assistant-dreaming', key: 'enabled', from: false, to: true },
+      { id: 'dsh-ray-assistant-dreaming', key: 'databasePath', from: undefined, to: join(homeComplete, 'assistant-dreaming', 'web.sqlite') },
+      { id: 'dsh-ray-assistant-dreaming', key: 'enabled', from: false, to: true },
     ])
     const listed = await listProfilePlugins({ dshHome: homeComplete, profile: 'web' }, dumpComplete)
     const dreamingSummary = listed.plugins.find(p => p.slug === 'assistant-dreaming')!
@@ -656,27 +656,27 @@ describe('plugin setup: CLI', () => {
     const publishedProactive = join(homedir(), '.dsh', 'assistant-proactive.sqlite')
     const publishedGoals = join(homedir(), '.dsh', 'assistant-goals.sqlite')
     const multiPluginDump = `
-- id: dsh-enhanced-owner-console
-  name: '@dsh-enhanced/owner-console'
+- id: dsh-ray-owner-console
+  name: '@dsh-ray/owner-console'
   config:
     enabled: false
-- id: dsh-enhanced-assistant-proactive
-  name: '@dsh-enhanced/assistant-proactive'
+- id: dsh-ray-assistant-proactive
+  name: '@dsh-ray/assistant-proactive'
   config:
     databasePath: ${publishedProactive}
     schedulerEnabled: false
-- id: dsh-enhanced-assistant-goals
-  name: '@dsh-enhanced/assistant-goals'
+- id: dsh-ray-assistant-goals
+  name: '@dsh-ray/assistant-goals'
   config:
     databasePath: ${publishedGoals}
     eventWaits: true
-- id: dsh-enhanced-assistant-growth-driver
-  name: '@dsh-enhanced/assistant-growth-driver'
+- id: dsh-ray-assistant-growth-driver
+  name: '@dsh-ray/assistant-growth-driver'
   config:
     usageLearning:
       workItemFailures: false
-- id: dsh-enhanced-assistant-evaluation
-  name: '@dsh-enhanced/assistant-evaluation'
+- id: dsh-ray-assistant-evaluation
+  name: '@dsh-ray/assistant-evaluation'
   config:
     attentionTuningAutoAdopt: true
 `
@@ -709,12 +709,12 @@ describe('plugin setup: CLI', () => {
     const presetResult = await applyRecommendedPluginPreset({ dshHome: homePreset, profile: 'web' }, dumpOpts)
     if (existsSync(publishedProactive)) {
       expect(presetResult.skipped).toContainEqual({
-        id: 'dsh-enhanced-assistant-proactive',
+        id: 'dsh-ray-assistant-proactive',
         reason: expect.stringMatching(/offline migration/u),
       })
     } else {
       expect(presetResult.changes).toContainEqual({
-        id: 'dsh-enhanced-assistant-proactive',
+        id: 'dsh-ray-assistant-proactive',
         key: 'databasePath',
         from: publishedProactive,
         to: join(homePreset, 'assistant-proactive', 'web.sqlite'),
@@ -722,12 +722,12 @@ describe('plugin setup: CLI', () => {
     }
     if (existsSync(publishedGoals)) {
       expect(presetResult.skipped).toContainEqual({
-        id: 'dsh-enhanced-assistant-goals',
+        id: 'dsh-ray-assistant-goals',
         reason: expect.stringMatching(/offline migration/u),
       })
     } else {
       expect(presetResult.changes).toContainEqual({
-        id: 'dsh-enhanced-assistant-goals',
+        id: 'dsh-ray-assistant-goals',
         key: 'databasePath',
         from: publishedGoals,
         to: join(homePreset, 'assistant-goals', 'web.sqlite'),
@@ -737,8 +737,8 @@ describe('plugin setup: CLI', () => {
     // Verify `preset dogfood` and `applyDogfoodPluginPreset` enable full R3 capabilities across evaluation/work-items/proactive/event-triggers/association.
     const homeDogfood = await temporaryHome()
     const dogfoodBundles = `${assemblyBundles.replace('    mode: observe\n', '    mode: active\n    enabled: true\n').replace('    enabled: false\n    mode: active', '    mode: active').replace('    pollerEnabled: false\n', '    pollerEnabled: false\n')}
-- id: dsh-enhanced-preference-learning
-  name: '@dsh-enhanced/preference-learning'
+- id: dsh-ray-preference-learning
+  name: '@dsh-ray/preference-learning'
   config:
     enabled: false
     autonomousT1Enabled: false
@@ -748,13 +748,13 @@ describe('plugin setup: CLI', () => {
     await runPluginSetup(['preset', 'dogfood', '--yes', '--dsh-home', homeDogfood, '--profile', 'web'], dogfoodIo, {
       readDump: dumpFixture(dogfoodBundles),
     })
-    expect(dogfoodIo.output).toContain('dsh-enhanced-preference-learning.enabled: false -> true')
-    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-evaluation.intakeEvaluationAgreementEnabled: (unset) -> true')
-    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-evaluation.attentionLooseningEnabled: (unset) -> true')
-    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-work-items.intakeLedger.enabled: (unset) -> true')
-    expect(dogfoodIo.output).not.toContain('dsh-enhanced-assistant-work-items.intakeLedger.evaluation.admit.enabled')
-    expect(dogfoodIo.output).toContain('skipped dsh-enhanced-assistant-work-items: waiting for explicit configuration: assistant-work-items.intakeLedger.evaluation.admit.originBindingId is not configured; automatic admission requires an explicit owner originBindingId')
-    expect(dogfoodIo.output).toContain('dsh-enhanced-event-triggers.pollerEnabled: false -> true')
+    expect(dogfoodIo.output).toContain('dsh-ray-preference-learning.enabled: false -> true')
+    expect(dogfoodIo.output).toContain('dsh-ray-assistant-evaluation.intakeEvaluationAgreementEnabled: (unset) -> true')
+    expect(dogfoodIo.output).toContain('dsh-ray-assistant-evaluation.attentionLooseningEnabled: (unset) -> true')
+    expect(dogfoodIo.output).toContain('dsh-ray-assistant-work-items.intakeLedger.enabled: (unset) -> true')
+    expect(dogfoodIo.output).not.toContain('dsh-ray-assistant-work-items.intakeLedger.evaluation.admit.enabled')
+    expect(dogfoodIo.output).toContain('skipped dsh-ray-assistant-work-items: waiting for explicit configuration: assistant-work-items.intakeLedger.evaluation.admit.originBindingId is not configured; automatic admission requires an explicit owner originBindingId')
+    expect(dogfoodIo.output).toContain('dsh-ray-event-triggers.pollerEnabled: false -> true')
 
     const homeDogfoodApi = await temporaryHome()
     const apiResult = await applyDogfoodPluginPreset(
@@ -763,19 +763,19 @@ describe('plugin setup: CLI', () => {
     )
     expect(apiResult.changed).toBe(true)
     expect(apiResult.changes).toContainEqual({
-      id: 'dsh-enhanced-assistant-work-items',
+      id: 'dsh-ray-assistant-work-items',
       key: 'intakeLedger.enabled',
       from: undefined,
       to: true,
     })
-    expect(apiResult.changes.some(c => c.id === 'dsh-enhanced-assistant-work-items' && c.key === 'intakeLedger.evaluation.admit.enabled')).toBe(false)
+    expect(apiResult.changes.some(c => c.id === 'dsh-ray-assistant-work-items' && c.key === 'intakeLedger.evaluation.admit.enabled')).toBe(false)
     expect(apiResult.skipped).toContainEqual({
-      id: 'dsh-enhanced-assistant-work-items',
+      id: 'dsh-ray-assistant-work-items',
       reason: 'waiting for explicit configuration: assistant-work-items.intakeLedger.evaluation.admit.originBindingId is not configured; automatic admission requires an explicit owner originBindingId',
     })
     expect(await profilePatch(homeDogfoodApi)).not.toContain('admit')
     expect(apiResult.changes).toContainEqual({
-      id: 'dsh-enhanced-event-triggers',
+      id: 'dsh-ray-event-triggers',
       key: 'pollerEnabled',
       from: false,
       to: true,
@@ -784,7 +784,7 @@ describe('plugin setup: CLI', () => {
     // When originBindingId is explicitly present in cordis.patch.yml, dogfood preset enables admit.enabled.
     const homeDogfoodBound = await temporaryHome()
     await writeFile(join(homeDogfoodBound, 'profiles', 'web', 'cordis.patch.yml'), [
-      '- id: dsh-enhanced-assistant-work-items',
+      '- id: dsh-ray-assistant-work-items',
       '  config:',
       '    enabled: false',
       '    mode: observe',
@@ -800,31 +800,31 @@ describe('plugin setup: CLI', () => {
       { readDump: dumpFixture(dogfoodBundles) },
     )
     expect(boundResult.changes).toContainEqual({
-      id: 'dsh-enhanced-assistant-work-items',
+      id: 'dsh-ray-assistant-work-items',
       key: 'enabled',
       from: false,
       to: true,
     })
     expect(boundResult.changes).toContainEqual({
-      id: 'dsh-enhanced-assistant-work-items',
+      id: 'dsh-ray-assistant-work-items',
       key: 'intakeLedger.enabled',
       from: undefined,
       to: true,
     })
     expect(boundResult.changes).toContainEqual({
-      id: 'dsh-enhanced-assistant-work-items',
+      id: 'dsh-ray-assistant-work-items',
       key: 'intakeLedger.evaluation.admit.enabled',
       from: undefined,
       to: true,
     })
-    expect(boundResult.skipped.filter(s => s.id === 'dsh-enhanced-assistant-work-items')).toEqual([])
+    expect(boundResult.skipped.filter(s => s.id === 'dsh-ray-assistant-work-items')).toEqual([])
   })
 
   test('sets S3 assistant-association nested keys without --force and enables S3/S4 flags in dogfood preset', async () => {
     const home = await temporaryHome()
     const assocBundle = `
-- id: dsh-enhanced-assistant-association
-  name: '@dsh-enhanced/assistant-association'
+- id: dsh-ray-assistant-association
+  name: '@dsh-ray/assistant-association'
   config:
     enabled: false
     dreaming:
@@ -878,10 +878,10 @@ describe('plugin setup: CLI', () => {
     )
     expect(dogfoodResult.changes).toEqual(
       expect.arrayContaining([
-        { id: 'dsh-enhanced-assistant-association', key: 'enabled', from: false, to: true },
-        { id: 'dsh-enhanced-assistant-association', key: 'dreaming.enabled', from: false, to: true },
-        { id: 'dsh-enhanced-assistant-association', key: 'intakeSignal.enabled', from: false, to: true },
-        { id: 'dsh-enhanced-assistant-association', key: 'webLearning.enabled', from: false, to: true },
+        { id: 'dsh-ray-assistant-association', key: 'enabled', from: false, to: true },
+        { id: 'dsh-ray-assistant-association', key: 'dreaming.enabled', from: false, to: true },
+        { id: 'dsh-ray-assistant-association', key: 'intakeSignal.enabled', from: false, to: true },
+        { id: 'dsh-ray-assistant-association', key: 'webLearning.enabled', from: false, to: true },
       ]),
     )
   })
@@ -889,8 +889,8 @@ describe('plugin setup: CLI', () => {
   test('sets S4 assistant-association webLearning keys including string[] arrays without --force while dogfood preset keeps webLearning.enabled true', async () => {
     const home = await temporaryHome()
     const assocS4Bundle = `
-- id: dsh-enhanced-assistant-association
-  name: '@dsh-enhanced/assistant-association'
+- id: dsh-ray-assistant-association
+  name: '@dsh-ray/assistant-association'
   config:
     enabled: true
     webLearning:
@@ -955,7 +955,7 @@ describe('plugin setup: CLI', () => {
       { readDump: dumpFixture(assocS4Bundle) },
     )
     expect(dogfoodResult.changes).toContainEqual({
-      id: 'dsh-enhanced-assistant-association',
+      id: 'dsh-ray-assistant-association',
       key: 'webLearning.enabled',
       from: false,
       to: true,
@@ -966,15 +966,15 @@ describe('plugin setup: CLI', () => {
   test('sets memory-learning enabled and personal-memory/personal-assistant automaticLearning without --force', async () => {
     const home = await temporaryHome()
     const memoryBundle = `
-- id: dsh-enhanced-assistant-memory-learning
-  name: '@dsh-enhanced/assistant-memory-learning'
+- id: dsh-ray-assistant-memory-learning
+  name: '@dsh-ray/assistant-memory-learning'
   config: {}
-- id: dsh-enhanced-personal-memory
-  name: '@dsh-enhanced/personal-memory'
+- id: dsh-ray-personal-memory
+  name: '@dsh-ray/personal-memory'
   config:
     databasePath: /tmp/pm.sqlite
-- id: dsh-enhanced-personal-assistant
-  name: '@dsh-enhanced/personal-assistant'
+- id: dsh-ray-personal-assistant
+  name: '@dsh-ray/personal-assistant'
   config:
     personalMemory:
       databasePath: /tmp/pa-pm.sqlite
@@ -1003,22 +1003,22 @@ describe('plugin setup: CLI', () => {
     }, dumpOpts)
 
     const patchText = await profilePatch(home)
-    expect(patchText).toContain('dsh-enhanced-assistant-memory-learning')
+    expect(patchText).toContain('dsh-ray-assistant-memory-learning')
     expect(patchText).toContain('enabled: true')
-    expect(patchText).toContain('dsh-enhanced-personal-memory')
+    expect(patchText).toContain('dsh-ray-personal-memory')
     expect(patchText).toContain('automaticLearning: false')
-    expect(patchText).toContain('dsh-enhanced-personal-assistant')
+    expect(patchText).toContain('dsh-ray-personal-assistant')
   })
 
   test('coerces R3/F12/F14 optional keys for delivery, evolution, and verifier without --force', () => {
-    expect(coerceConfigValue('dsh-enhanced-assistant-delivery', 'attentionEnforce', 'true', undefined)).toBe(true)
-    expect(coerceConfigValue('dsh-enhanced-assistant-delivery', 'inProcessReload.enabled', 'false', undefined)).toBe(false)
-    expect(coerceConfigValue('dsh-enhanced-assistant-evolution', 'autonomousRollback', 'true', undefined)).toBe(true)
-    expect(coerceConfigValue('dsh-enhanced-assistant-evolution', 'databasePath', '/var/lib/dsh/evolution.sqlite', undefined)).toBe('/var/lib/dsh/evolution.sqlite')
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-evolution', 'databasePath', 'relative.sqlite', undefined)).toThrow('canonical absolute path')
-    expect(coerceConfigValue('dsh-enhanced-assistant-verifier', 'requireAcceptance', 'true', undefined)).toBe(true)
-    expect(coerceConfigValue('dsh-enhanced-assistant-verifier', 'tickIntervalMs', '2500', undefined)).toBe(2500)
-    expect(coerceConfigValue('dsh-enhanced-assistant-verifier', 'databasePath', '/var/lib/dsh/verifier.sqlite', undefined)).toBe('/var/lib/dsh/verifier.sqlite')
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-verifier', 'tickIntervalMs', 'not-a-number', undefined)).toThrow('expects a number')
+    expect(coerceConfigValue('dsh-ray-assistant-delivery', 'attentionEnforce', 'true', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-ray-assistant-delivery', 'inProcessReload.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-ray-assistant-evolution', 'autonomousRollback', 'true', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-ray-assistant-evolution', 'databasePath', '/var/lib/dsh/evolution.sqlite', undefined)).toBe('/var/lib/dsh/evolution.sqlite')
+    expect(() => coerceConfigValue('dsh-ray-assistant-evolution', 'databasePath', 'relative.sqlite', undefined)).toThrow('canonical absolute path')
+    expect(coerceConfigValue('dsh-ray-assistant-verifier', 'requireAcceptance', 'true', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-ray-assistant-verifier', 'tickIntervalMs', '2500', undefined)).toBe(2500)
+    expect(coerceConfigValue('dsh-ray-assistant-verifier', 'databasePath', '/var/lib/dsh/verifier.sqlite', undefined)).toBe('/var/lib/dsh/verifier.sqlite')
+    expect(() => coerceConfigValue('dsh-ray-assistant-verifier', 'tickIntervalMs', 'not-a-number', undefined)).toThrow('expects a number')
   })
 })

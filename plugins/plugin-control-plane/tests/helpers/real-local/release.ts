@@ -54,7 +54,7 @@ export async function realLocalReleaseFixture(input: { name?: string; ownerBound
     join(root, 'review-decisions'), join(root, 'toolchain'), join(root, 'store', 'v11', 'projects'), join(root, 'store', 'v11', 'files')]) await mkdir(path, { recursive: true, mode: 0o700 })
   const dsh = await realpath(process.env.DSH_REAL_LOCAL_DSH!); const nodePath = await realpath(process.execPath); const nodePin = await pin(nodePath)
 
-  const name = input.name ?? 'e2e-helper', packageName = '@dsh-enhanced/' + name, version = '0.1.123'
+  const name = input.name ?? 'e2e-helper', packageName = '@dsh-ray/' + name, version = '0.1.123'
   const targetBranch = 'dsh-source'
   // Base repository: no candidate package, pushed to a local bare remote.
   await writeFile(join(repository, 'package.json'), JSON.stringify({ name: 'd3a0-source', private: true,

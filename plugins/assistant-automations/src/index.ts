@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { AssistantAutomationsService, Config } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-automations'
+export const name = 'dsh-ray-assistant-automations'
 export { AssistantAutomationsService, Config, version }
 export type { AutomationIncidentAlertMode } from './coordinator.js'
 export type { PendingAutomationProposal, SystemAutomationReconcileInput } from './service.js'

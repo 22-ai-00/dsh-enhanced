@@ -3,7 +3,7 @@ import type { HostAgentAuthorizationFence, HostAgentExecutionContract, HostAgent
 import { isAbsolute, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { validateTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import { validateTaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import Schema from '@deepseek-ai/schemastery'
 import type {
@@ -11,15 +11,15 @@ import type {
   DeliveryPresentationUpdate,
   TrustedDeliveryPresentationProducer,
   TrustedDeliveryPresentationRegistration,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import type {
   StoredOutcome,
   TrustedAutomationEvaluationProducer,
   TrustedAutomationEvaluationClaims,
   TrustedAutomationEvaluationRegistration,
   AssistantEvaluationService,
-} from '@dsh-enhanced/assistant-evaluation'
-import type { AssistantPolicyService, PolicyDecision } from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-evaluation'
+import type { AssistantPolicyService, PolicyDecision } from '@dsh-ray/assistant-policy'
 import {
   canonicalGrowthJson,
   growthObjectDigest,
@@ -53,7 +53,7 @@ import {
   type GrowthRollbackReceipt,
   type GrowthShadowReceipt,
   type WorkflowTemplateResolver,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import { AutomationArtifactStore } from './artifacts.js'
 import { HostAutomationExecutorRegistry } from './host-executors.js'
 import {
@@ -2333,10 +2333,10 @@ export class AssistantAutomationsService extends Service implements
       return { principal: explicitPrincipal }
     }
     const dispatch = delivery.prepareAgentApproval(agent, {
-      sourceId: 'dsh-enhanced-assistant-automations',
+      sourceId: 'dsh-ray-assistant-automations',
     })
     if (dispatch.routeVersion !== 2
-      || dispatch.sourceId !== 'dsh-enhanced-assistant-automations'
+      || dispatch.sourceId !== 'dsh-ray-assistant-automations'
       || dispatch.workspace !== identity.workspace
       || dispatch.bindingId.trim() === ''
       || dispatch.principal.trim() === '') {

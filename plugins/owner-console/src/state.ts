@@ -2,21 +2,21 @@ import type { OwnerConsoleStatus } from './typert.js'
 
 /** Which bundle provides each companion service this console surfaces; a missing one is actionable. */
 export const DEPENDENCY_BUNDLES: Readonly<Record<string, string>> = Object.freeze({
-  assistantPolicy: '@dsh-enhanced/assistant-policy',
-  assistantDelivery: '@dsh-enhanced/assistant-delivery',
-  assistantSkills: '@dsh-enhanced/assistant-skills',
+  assistantPolicy: '@dsh-ray/assistant-policy',
+  assistantDelivery: '@dsh-ray/assistant-delivery',
+  assistantSkills: '@dsh-ray/assistant-skills',
 })
 
-const PERSONAL_ASSISTANT_PACKAGE = '@dsh-enhanced/personal-assistant'
+const PERSONAL_ASSISTANT_PACKAGE = '@dsh-ray/personal-assistant'
 const PERSONAL_ASSISTANT_SUB_BUNDLES = new Set([
-  '@dsh-enhanced/assistant-policy',
-  '@dsh-enhanced/personal-memory',
-  '@dsh-enhanced/personal-wiki',
-  '@dsh-enhanced/assistant-automations',
+  '@dsh-ray/assistant-policy',
+  '@dsh-ray/personal-memory',
+  '@dsh-ray/personal-wiki',
+  '@dsh-ray/assistant-automations',
 ])
-const POLICY_PROVIDER_BUNDLES = [PERSONAL_ASSISTANT_PACKAGE, '@dsh-enhanced/assistant-policy'] as const
+const POLICY_PROVIDER_BUNDLES = [PERSONAL_ASSISTANT_PACKAGE, '@dsh-ray/assistant-policy'] as const
 const COMPONENT_DEPENDENCIES: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  '@dsh-enhanced/lark-channel': ['assistantPolicy', 'assistantDelivery'],
+  '@dsh-ray/lark-channel': ['assistantPolicy', 'assistantDelivery'],
 })
 
 export type StatusTone = 'ok' | 'warn' | 'error' | 'neutral'
@@ -81,7 +81,7 @@ function resolveMissingDependency(
     }
     return { service, bundle: DEPENDENCY_BUNDLES[service]! }
   }
-  const bundleName = DEPENDENCY_BUNDLES[service] ?? `@dsh-enhanced/${kebab(service)}`
+  const bundleName = DEPENDENCY_BUNDLES[service] ?? `@dsh-ray/${kebab(service)}`
   const existing = list.find(candidate => candidate.name === bundleName && candidate.installed)
   if (existing !== undefined) {
     return { service, bundle: bundleName, state: existing.enabled ? 'stalled' : 'disabled' }
@@ -140,7 +140,7 @@ export function componentState(status: OwnerConsoleStatus | undefined, name: str
 /** A minimal, safe repair step: override the failing row to disabled in the profile's patch.
  * It is the only write the panel can suggest without knowing the bundle's required config. */
 export function repairPatch(state: ComponentState, name: string): string {
-  const rowId = state.bundle?.rows?.[0]?.rowId ?? `dsh-enhanced-${name.split('/').at(-1) ?? name}`
+  const rowId = state.bundle?.rows?.[0]?.rowId ?? `dsh-ray-${name.split('/').at(-1) ?? name}`
   const missing = state.missing.map(item =>
     item.state === 'disabled'
       ? `# 缺少服务 ${item.service}：${item.bundle} 已安装但未启用，请先启用后重启 profile。`

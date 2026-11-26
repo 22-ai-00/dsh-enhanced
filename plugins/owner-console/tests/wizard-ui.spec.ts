@@ -113,12 +113,12 @@ function baseUpgradeStatus(frozenSystemdProfile = false): SelfUpgradeStatus {
     dshHome: '/tmp/dsh-home',
     canTriggerDetached: !frozenSystemdProfile,
     upgradeCommand: frozenSystemdProfile
-      ? '先停止受控 systemd 服务后执行：dsh-rsi upgrade --yes'
-      : 'dsh-rsi upgrade --yes --profile web',
+      ? '先停止受控 systemd 服务后执行：dsh-ray upgrade --yes'
+      : 'dsh-ray upgrade --yes --profile web',
     checkedAt: 1_760_000_000_000,
     cached: false,
     offline: false,
-    checkSource: 'dsh-rsi',
+    checkSource: 'dsh-ray',
     note: '发现新版本 0.1.75',
   }
 }
@@ -152,11 +152,11 @@ describe('AutonomyWizardCard & SelfUpgradeCard UI surfaces', () => {
       ok: true as const,
       value: {
         supported: true, frozenSystemdProfile: false, requiresOutOfBandCli: false,
-        command: 'dsh-rsi upgrade --yes', currentEnhancedVersion: '0.1.73', targetEnhancedVersion: '0.1.75',
+        command: 'dsh-ray upgrade --yes', currentEnhancedVersion: '0.1.73', targetEnhancedVersion: '0.1.75',
         boundHostVersion: '0.2.10', targetHostVersion: '0.2.11', backupRequired: true, warnings: [], summary: '预演通过',
       },
     }))
-    const runSelfUpgrade = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'dsh-rsi-upgrade', note: '已启动后台升级（PID 12345）' } }))
+    const runSelfUpgrade = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'dsh-ray-upgrade', note: '已启动后台升级（PID 12345）' } }))
 
     const remote = makeBaseRemote({
       autonomySetupStatus: async () => ({ ok: true, value: baseAutonomyStatus() }),
@@ -238,7 +238,7 @@ describe('AutonomyWizardCard & SelfUpgradeCard UI surfaces', () => {
       canTriggerDetached: false,
       offline: true,
       checkSource: 'offline',
-      note: '本地 dsh-rsi CLI 执行超时',
+      note: '本地 dsh-ray CLI 执行超时',
     }
     const dryRunSelfUpgrade = vi.fn(async () => ({
       ok: true as const,
@@ -246,7 +246,7 @@ describe('AutonomyWizardCard & SelfUpgradeCard UI surfaces', () => {
         supported: true,
         frozenSystemdProfile: false,
         requiresOutOfBandCli: false,
-        command: 'dsh-rsi upgrade --yes --profile web',
+        command: 'dsh-ray upgrade --yes --profile web',
         currentEnhancedVersion: '0.1.80',
         targetEnhancedVersion: '0.1.81',
         boundHostVersion: '0.2.2-rc.1',
@@ -258,7 +258,7 @@ describe('AutonomyWizardCard & SelfUpgradeCard UI surfaces', () => {
     }))
     const runSelfUpgrade = vi.fn(async () => ({
       ok: true as const,
-      value: { applied: true, entry: 'dsh-rsi-upgrade', note: '已启动后台升级（PID 77777）' },
+      value: { applied: true, entry: 'dsh-ray-upgrade', note: '已启动后台升级（PID 77777）' },
     }))
     const remote = makeBaseRemote({
       autonomySetupStatus: async () => ({ ok: true, value: baseAutonomyStatus() }),

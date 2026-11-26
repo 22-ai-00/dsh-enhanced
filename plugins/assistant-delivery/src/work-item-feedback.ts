@@ -1,4 +1,4 @@
-import type { TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
+import type { TrustedTaskLearningProjectionReceipt } from '@dsh-ray/assistant-evaluation'
 import type { OwnerForegroundTaskSourceContent, OwnerForegroundTaskSourceScope, OwnerRouteValidationReceipt } from './types.js'
 import type { OwnerForegroundLearningTask } from './service.js'
 import type { WorkItemReplySource } from './work-item-replies.js'

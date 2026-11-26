@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { canonicalExternalEventEnvelope, externalEventDigest, type ExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
+import { canonicalExternalEventEnvelope, externalEventDigest, type ExternalEventEnvelope } from '@dsh-ray/assistant-automations/external-event'
 import { EventTriggerStore } from '../src/store.ts'
 
 const roots: string[] = []

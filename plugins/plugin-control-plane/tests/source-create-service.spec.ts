@@ -13,18 +13,18 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, anySourceGrowthRunDigest as sourceGrowthRunDigest, SourceGrowthRunUnavailableError, verifyPluginRevisionVerificationCertificate, pluginRevisionVerificationSigningPayload, type RevisionRegressionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type PluginRevisionVerificationCertificate, growthObjectDigest, type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import { normalizeForegroundToolArguments, type ForegroundToolCallAttestation, type OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
-import { linuxRuntimeDigest, type LinuxRepositoryRunnerConfig, type LinuxRepositoryRunnerResult, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
-import { AssistantVerifierService, compileRevisionReviewConfig, type PluginBehaviorRunnerInput, type RevisionReviewConfig } from '@dsh-enhanced/assistant-verifier'
-import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, anySourceGrowthRunDigest as sourceGrowthRunDigest, SourceGrowthRunUnavailableError, verifyPluginRevisionVerificationCertificate, pluginRevisionVerificationSigningPayload, type RevisionRegressionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type PluginRevisionVerificationCertificate, growthObjectDigest, type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
+import { normalizeForegroundToolArguments, type ForegroundToolCallAttestation, type OwnerForegroundLearningTask } from '@dsh-ray/assistant-delivery'
+import { linuxRuntimeDigest, type LinuxRepositoryRunnerConfig, type LinuxRepositoryRunnerResult, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
+import { AssistantVerifierService, compileRevisionReviewConfig, type PluginBehaviorRunnerInput, type RevisionReviewConfig } from '@dsh-ray/assistant-verifier'
+import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 import { afterEach, expect, it, vi } from 'vitest'
 import { runPluginControl } from '../src/cli.ts'
 import { PluginControlPlaneService, normalizeControlPlaneConfig, type Config } from '../src/service.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
-import { revisionBenefitContractDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { revisionBenefitContractDigest } from '@dsh-ray/assistant-growth-contract'
 import { checkedSourceSnapshot } from '../src/source-workspace.ts'
 import * as build from '../src/source-build.ts'
 import * as trust from '../src/trust.ts'
@@ -52,12 +52,12 @@ const linuxTransport = vi.hoisted(() => ({ inspect: vi.fn<() => Promise<LinuxRep
   run: vi.fn(), close: vi.fn(async () => undefined), verify: vi.fn(async (runtime: LinuxRuntime) => runtime),
   adoptionVerify: vi.fn(async () => undefined) }))
 
-vi.mock('@dsh-enhanced/assistant-verifier/linux-behavior-runtime', async original => ({
-  ...await original<typeof import('@dsh-enhanced/assistant-verifier/linux-behavior-runtime')>(),
+vi.mock('@dsh-ray/assistant-verifier/linux-behavior-runtime', async original => ({
+  ...await original<typeof import('@dsh-ray/assistant-verifier/linux-behavior-runtime')>(),
   verifyLinuxPluginBehaviorAdoptionRuntime: linuxTransport.adoptionVerify,
 }))
 
-vi.mock('@dsh-enhanced/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-enhanced/assistant-isolation')>(),
+vi.mock('@dsh-ray/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-ray/assistant-isolation')>(),
   verifyLinuxRuntime: linuxTransport.verify,
   LinuxRepositoryRunner: class {
     contractDigest = 'f'.repeat(64)
@@ -344,7 +344,7 @@ async function fixture(withVerification = false, withAdoption = false, withReten
   // The build is a mock: these bytes exercise the Host handoff, not npm
   // publication or real package behavior.
   const packArtifact = Buffer.from('fixture-package-bytes')
-  const pack = { name: 'dsh-enhanced-rsi-service-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: packArtifact.length,
+  const pack = { name: 'dsh-ray-rsi-service-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: packArtifact.length,
     sha256: createHash('sha256').update(packArtifact).digest('hex') }
   const buildEnvironment = { npmConfigIgnoreScripts: true as const, frozenLockfile: true as const, offline: true,
     nodeVersion: 'fixture', pnpmVersion: 'fixture' }

@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const evaluationRoot = join(repositoryRoot, 'plugins', 'assistant-evaluation')
-const acceptanceContractRoot = join(repositoryRoot, 'node_modules', '@dsh-enhanced', 'task-acceptance-contract')
+const acceptanceContractRoot = join(repositoryRoot, 'node_modules', '@dsh-ray', 'task-acceptance-contract')
 const temporaryRoots: string[] = []
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 
@@ -44,7 +44,7 @@ describe('assistant-evaluation holdout package contract', () => {
       && !/^package\/lib\/.+-evidence\.(?:d\.ts|js)(?:\.map)?$/u.test(path))).toEqual([])
     expect(listing.some(path => /(?:^|\/)(?:private[-_.]?key[^/]*|[^/]+\.(?:key|pem|p12|pfx|jwk|sqlite|sqlite3|db))(?:$|\/)/iu.test(path))).toBe(false)
 
-    const packageRoot = join(root, 'app', 'node_modules', '@dsh-enhanced', 'assistant-evaluation')
+    const packageRoot = join(root, 'app', 'node_modules', '@dsh-ray', 'assistant-evaluation')
     await mkdir(packageRoot, { recursive: true })
     run('tar', ['-xzf', tarball, '--strip-components=1', '-C', packageRoot])
     const privateKeyMarkers = ['-----BEGIN PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----',
@@ -67,7 +67,7 @@ describe('assistant-evaluation holdout package contract', () => {
     await expect(access(join(packageRoot, 'bin', 'dsh-benchmark.js'), constants.X_OK)).resolves.toBeUndefined()
 
     const probe = run(process.execPath, ['--input-type=module', '--eval', `
-      const holdout = await import('@dsh-enhanced/assistant-evaluation/benchmark/holdout')
+      const holdout = await import('@dsh-ray/assistant-evaluation/benchmark/holdout')
       const required = [
         'HOLDOUT_PROTOCOL_V1', 'HoldoutEvidenceStore', 'createHoldoutEvidenceVerifier', 'holdoutEnvelopeDigest',
         'openHoldoutProvider', 'parseSignedHoldoutManifest', 'runIndependentHoldout',

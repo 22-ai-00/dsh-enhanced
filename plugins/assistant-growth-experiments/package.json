@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-growth-experiments",
+  "name": "@dsh-ray/assistant-growth-experiments",
   "version": "0.1.88",
   "description": "Durable supervised workflow learning with approval, replay, effect-blocked shadow, one-shot canary, and exact rollback.",
   "license": "MIT",
@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-growth-experiments"
   },
   "keywords": [
@@ -50,17 +50,17 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
-    "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">0.1.7 <0.2.0"
+    "@dsh-ray/assistant-automations": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-delivery": ">0.1.7 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-automations": {
+    "@dsh-ray/assistant-automations": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-delivery": {
+    "@dsh-ray/assistant-delivery": {
       "optional": true
     }
   },
@@ -71,10 +71,10 @@
     "@deepseek-ai/dsh-llm": "catalog:",
     "@deepseek-ai/dsh-session-projection": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
-    "@dsh-enhanced/assistant-automations": "workspace:*",
-    "@dsh-enhanced/assistant-delivery": "workspace:*",
-    "@dsh-enhanced/assistant-evaluation": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
+    "@dsh-ray/assistant-automations": "workspace:*",
+    "@dsh-ray/assistant-delivery": "workspace:*",
+    "@dsh-ray/assistant-evaluation": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
@@ -83,6 +83,6 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/assistant-growth-contract": "workspace:*"
+    "@dsh-ray/assistant-growth-contract": "workspace:*"
   }
 }

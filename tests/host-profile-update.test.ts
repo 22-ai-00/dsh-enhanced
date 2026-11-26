@@ -45,28 +45,28 @@ async function profile(home: string, name: string, oldHost: string) {
   await writeFile(join(cohortPath, 'artifacts', 'child.tgz'), 'frozen tarball bytes')
   await mkdir(path, { recursive: true, mode: 0o700 })
   const manifest = { name: `dsh-profile-${name}`, private: true,
-    dependencies: { '@dsh-enhanced/demo': '1.0.0', '@deepseek-ai/cordis': '4.0.1' },
-    dsh: { profile: { bundles: ['@dsh-enhanced/demo'] } } }
+    dependencies: { '@dsh-ray/demo': '1.0.0', '@deepseek-ai/cordis': '4.0.1' },
+    dsh: { profile: { bundles: ['@dsh-ray/demo'] } } }
   const lock = { lockfileVersion: '9.0', importers: { '.': { dependencies: {
-    '@dsh-enhanced/demo': { specifier: '1.0.0', version: '1.0.0' },
+    '@dsh-ray/demo': { specifier: '1.0.0', version: '1.0.0' },
     '@deepseek-ai/cordis': { specifier: '4.0.1', version: '4.0.1' },
   } } }, packages: {
-    '@dsh-enhanced/demo@1.0.0': { resolution: { integrity: 'sha512-frozen' } },
+    '@dsh-ray/demo@1.0.0': { resolution: { integrity: 'sha512-frozen' } },
     '@deepseek-ai/cordis@4.0.1': { resolution: { integrity: 'sha512-old' } },
     '@deepseek-ai/old-only@0.1.4': { resolution: { integrity: 'sha512-old' } },
   }, snapshots: {
-    '@dsh-enhanced/demo@1.0.0': { dependencies: { '@deepseek-ai/cordis': '4.0.1' } },
+    '@dsh-ray/demo@1.0.0': { dependencies: { '@deepseek-ai/cordis': '4.0.1' } },
     '@deepseek-ai/cordis@4.0.1': {}, '@deepseek-ai/old-only@0.1.4': {},
   } }
   const workspace = { packages: ['.'], nodeLinker: 'isolated', autoInstallPeers: false,
-    overrides: { '@dsh-enhanced/demo@1.0.0>@dsh-enhanced/child': `file:${join(cohortPath, 'artifacts', 'child.tgz')}` } }
+    overrides: { '@dsh-ray/demo@1.0.0>@dsh-ray/child': `file:${join(cohortPath, 'artifacts', 'child.tgz')}` } }
   await writeFile(join(path, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
   await writeFile(join(path, 'pnpm-lock.yaml'), stringify(lock))
   await writeFile(join(path, 'pnpm-workspace.yaml'), stringify(workspace))
   await writeFile(join(path, 'cordis.patch.yml'), '[]\n')
-  const installed = join(path, 'node_modules/.pnpm/@dsh-enhanced+demo@1.0.0/node_modules/@dsh-enhanced/demo')
+  const installed = join(path, 'node_modules/.pnpm/@dsh-ray+demo@1.0.0/node_modules/@dsh-ray/demo')
   await mkdir(installed, { recursive: true })
-  await writeFile(join(installed, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/demo', version: '1.0.0' }))
+  await writeFile(join(installed, 'package.json'), JSON.stringify({ name: '@dsh-ray/demo', version: '1.0.0' }))
   await writeFile(join(installed, 'index.js'), 'frozen artifact bytes')
   await mkdir(join(path, 'node_modules/.pnpm/@deepseek-ai+cordis@4.0.1'), { recursive: true })
   await mkdir(join(path, 'node_modules/@deepseek-ai'), { recursive: true })
@@ -105,13 +105,13 @@ async function fixture(names = ['alpha', 'beta']) {
       delete lock.snapshots['@deepseek-ai/old-only@0.1.4']
       lock.packages['@deepseek-ai/cordis@4.0.2'] = { resolution: { integrity } }
       lock.snapshots['@deepseek-ai/cordis@4.0.2'] = {}
-      lock.snapshots['@dsh-enhanced/demo@1.0.0'].dependencies['@deepseek-ai/cordis'] = '4.0.2'
+      lock.snapshots['@dsh-ray/demo@1.0.0'].dependencies['@deepseek-ai/cordis'] = '4.0.2'
       await writeFile(lockPath, stringify(lock))
     }
     if (options.phase === 'materialize') {
-      const pkg = join(path, 'node_modules/.pnpm/@dsh-enhanced+demo@1.0.0/node_modules/@dsh-enhanced/demo')
+      const pkg = join(path, 'node_modules/.pnpm/@dsh-ray+demo@1.0.0/node_modules/@dsh-ray/demo')
       await mkdir(pkg, { recursive: true })
-      await writeFile(join(pkg, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/demo', version: '1.0.0' }))
+      await writeFile(join(pkg, 'package.json'), JSON.stringify({ name: '@dsh-ray/demo', version: '1.0.0' }))
       await writeFile(join(pkg, 'index.js'), 'frozen artifact bytes')
       await mkdir(join(path, 'node_modules/.pnpm/@deepseek-ai+cordis@4.0.2'), { recursive: true })
     }
@@ -133,8 +133,8 @@ test('migrates all profiles, removes old pnpm natives and proven old fallback li
   for (const name of proof.profileNames) {
     const path = join(f.stagedHome, 'profiles', name)
     expect(await readdir(join(path, 'node_modules/.pnpm'))).not.toContain('@deepseek-ai+cordis@4.0.1')
-    expect(await readFile(join(path, 'node_modules/.pnpm/@dsh-enhanced+demo@1.0.0/node_modules/@dsh-enhanced/demo/index.js'), 'utf8')).toBe('frozen artifact bytes')
-    expect((parse(await readFile(join(path, 'pnpm-workspace.yaml'), 'utf8')) as { overrides: Record<string, string> }).overrides['@dsh-enhanced/demo@1.0.0>@dsh-enhanced/child']).toBe(`file:${join(f.originalHome, 'rsi-local-cohorts', name, 'artifacts', 'child.tgz')}`)
+    expect(await readFile(join(path, 'node_modules/.pnpm/@dsh-ray+demo@1.0.0/node_modules/@dsh-ray/demo/index.js'), 'utf8')).toBe('frozen artifact bytes')
+    expect((parse(await readFile(join(path, 'pnpm-workspace.yaml'), 'utf8')) as { overrides: Record<string, string> }).overrides['@dsh-ray/demo@1.0.0>@dsh-ray/child']).toBe(`file:${join(f.originalHome, 'rsi-local-cohorts', name, 'artifacts', 'child.tgz')}`)
     expect(await lstat(join(path, 'node_modules/@deepseek-ai/cordis')).catch(() => undefined)).toBeUndefined()
   }
   expect(await lstat(join(f.stagedHome, 'profiles/node_modules/@deepseek-ai/old-only')).catch(() => undefined)).toBeUndefined()
@@ -234,14 +234,14 @@ test('migrates an edge-scoped native override again while preserving a frozen no
       delete lock.packages['@deepseek-ai/cordis@4.0.2']; delete lock.snapshots['@deepseek-ai/cordis@4.0.2']
       lock.packages['@deepseek-ai/cordis@4.0.3'] = { resolution: { integrity } }
       lock.snapshots['@deepseek-ai/cordis@4.0.3'] = {}
-      lock.snapshots['@dsh-enhanced/demo@1.0.0'].dependencies['@deepseek-ai/cordis'] = '4.0.3'
+      lock.snapshots['@dsh-ray/demo@1.0.0'].dependencies['@deepseek-ai/cordis'] = '4.0.3'
       await writeFile(lockPath, stringify(lock))
     } })
   expect(first.profiles[0]?.name).toBe('alpha')
   expect(second.profiles[0]?.name).toBe('alpha')
   const workspace = parse(await readFile(join(secondRoot, 'alpha', 'pnpm-workspace.yaml'), 'utf8'))
-  expect(workspace.overrides['@dsh-enhanced/demo@1.0.0>@deepseek-ai/cordis']).toBe('4.0.3')
-  expect(workspace.overrides['@dsh-enhanced/demo@1.0.0>@dsh-enhanced/child'])
+  expect(workspace.overrides['@dsh-ray/demo@1.0.0>@deepseek-ai/cordis']).toBe('4.0.3')
+  expect(workspace.overrides['@dsh-ray/demo@1.0.0>@dsh-ray/child'])
     .toBe(`file:${join(f.originalHome, 'rsi-local-cohorts', 'alpha', 'artifacts', 'child.tgz')}`)
 })
 
@@ -249,30 +249,30 @@ test('canonicalizes peer-context native override selectors and rejects unrelated
   const f = await fixture(['alpha'])
   const path = join(f.originalHome, 'profiles', 'alpha')
   const lockPath = join(path, 'pnpm-lock.yaml'), lock = parse(await readFile(lockPath, 'utf8'))
-  lock.importers['.'].dependencies['@dsh-enhanced/demo'].version = '1.0.0(@deepseek-ai/cordis@4.0.1)'
-  lock.snapshots['@dsh-enhanced/demo@1.0.0(@deepseek-ai/cordis@4.0.1)'] = lock.snapshots['@dsh-enhanced/demo@1.0.0']
-  lock.snapshots['@dsh-enhanced/demo@1.0.0(@deepseek-ai/cordis@4.0.1)'].optionalDependencies = {
+  lock.importers['.'].dependencies['@dsh-ray/demo'].version = '1.0.0(@deepseek-ai/cordis@4.0.1)'
+  lock.snapshots['@dsh-ray/demo@1.0.0(@deepseek-ai/cordis@4.0.1)'] = lock.snapshots['@dsh-ray/demo@1.0.0']
+  lock.snapshots['@dsh-ray/demo@1.0.0(@deepseek-ai/cordis@4.0.1)'].optionalDependencies = {
     '@deepseek-ai/cordis': '4.0.1(@deepseek-ai/dsh-base@0.1.4)',
   }
-  delete lock.snapshots['@dsh-enhanced/demo@1.0.0']
+  delete lock.snapshots['@dsh-ray/demo@1.0.0']
   lock.snapshots['@deepseek-ai/cordis@4.0.1(e676a1)'] = lock.snapshots['@deepseek-ai/cordis@4.0.1']
   delete lock.snapshots['@deepseek-ai/cordis@4.0.1']
   await writeFile(lockPath, stringify(lock))
   const preparation = await prepareHostProfileUpdate({ ...f, runPnpm: async (args: string[], options: { cwd: string; phase: string }) => {
     if (options.phase === 'resolve') {
       const currentPath = join(options.cwd, 'pnpm-lock.yaml'), current = parse(await readFile(currentPath, 'utf8'))
-      current.snapshots['@dsh-enhanced/demo@1.0.0'] = current.snapshots['@dsh-enhanced/demo@1.0.0(@deepseek-ai/cordis@4.0.1)']
-      delete current.snapshots['@dsh-enhanced/demo@1.0.0(@deepseek-ai/cordis@4.0.1)']
+      current.snapshots['@dsh-ray/demo@1.0.0'] = current.snapshots['@dsh-ray/demo@1.0.0(@deepseek-ai/cordis@4.0.1)']
+      delete current.snapshots['@dsh-ray/demo@1.0.0(@deepseek-ai/cordis@4.0.1)']
       current.snapshots['@deepseek-ai/cordis@4.0.1'] = current.snapshots['@deepseek-ai/cordis@4.0.1(e676a1)']
       delete current.snapshots['@deepseek-ai/cordis@4.0.1(e676a1)']
       await writeFile(currentPath, stringify(current))
       await f.runPnpm(args, options)
       const changed = parse(await readFile(currentPath, 'utf8'))
-      changed.importers['.'].dependencies['@dsh-enhanced/demo'].version = '1.0.0(@deepseek-ai/cordis@4.0.2)'
-      changed.snapshots['@dsh-enhanced/demo@1.0.0'].optionalDependencies['@deepseek-ai/cordis']
+      changed.importers['.'].dependencies['@dsh-ray/demo'].version = '1.0.0(@deepseek-ai/cordis@4.0.2)'
+      changed.snapshots['@dsh-ray/demo@1.0.0'].optionalDependencies['@deepseek-ai/cordis']
         = '4.0.2(@deepseek-ai/dsh-base@0.1.5-rc.3)'
-      changed.snapshots['@dsh-enhanced/demo@1.0.0(@deepseek-ai/cordis@4.0.2)'] = changed.snapshots['@dsh-enhanced/demo@1.0.0']
-      delete changed.snapshots['@dsh-enhanced/demo@1.0.0']
+      changed.snapshots['@dsh-ray/demo@1.0.0(@deepseek-ai/cordis@4.0.2)'] = changed.snapshots['@dsh-ray/demo@1.0.0']
+      delete changed.snapshots['@dsh-ray/demo@1.0.0']
       changed.snapshots['@deepseek-ai/cordis@4.0.2(e676b2)'] = changed.snapshots['@deepseek-ai/cordis@4.0.2']
       delete changed.snapshots['@deepseek-ai/cordis@4.0.2']
       await writeFile(currentPath, stringify(changed))
@@ -280,10 +280,10 @@ test('canonicalizes peer-context native override selectors and rejects unrelated
   } })
   expect(preparation.profiles).toHaveLength(1)
   const workspace = parse(await readFile(join(f.preparationRoot, 'alpha', 'pnpm-workspace.yaml'), 'utf8'))
-  expect(workspace.overrides['@dsh-enhanced/demo@1.0.0>@deepseek-ai/cordis']).toBe('4.0.2')
+  expect(workspace.overrides['@dsh-ray/demo@1.0.0>@deepseek-ai/cordis']).toBe('4.0.2')
   expect(Object.keys(workspace.overrides).some((key: string) => key.includes('('))).toBe(false)
   const originalWorkspacePath = join(path, 'pnpm-workspace.yaml'), owner = parse(await readFile(originalWorkspacePath, 'utf8'))
-  owner.overrides['@dsh-enhanced/demo@1.0.0>@deepseek-ai/cordis'] = '9.9.9'
+  owner.overrides['@dsh-ray/demo@1.0.0>@deepseek-ai/cordis'] = '9.9.9'
   await writeFile(originalWorkspacePath, stringify(owner))
   const negativeRoot = join(f.root, 'negative-preparation')
   await mkdir(negativeRoot, { mode: 0o700 })
@@ -312,7 +312,7 @@ test('rejects a disappearing native edge or stale native peer context in a non-n
     await f.runPnpm(args, options)
     if (options.phase !== 'resolve') return
     const path = join(options.cwd, 'pnpm-lock.yaml'), lock = parse(await readFile(path, 'utf8'))
-    delete lock.snapshots['@dsh-enhanced/demo@1.0.0'].dependencies['@deepseek-ai/cordis']
+    delete lock.snapshots['@dsh-ray/demo@1.0.0'].dependencies['@deepseek-ai/cordis']
     await writeFile(path, stringify(lock))
   } })).rejects.toThrow('non-native snapshot graph changed')
   const secondRoot = join(f.root, 'stale-peer-preparation')
@@ -322,7 +322,7 @@ test('rejects a disappearing native edge or stale native peer context in a non-n
       await f.runPnpm(args, options)
       if (options.phase !== 'resolve') return
       const path = join(options.cwd, 'pnpm-lock.yaml'), lock = parse(await readFile(path, 'utf8'))
-      lock.importers['.'].dependencies['@dsh-enhanced/demo'].version = '1.0.0(@deepseek-ai/cordis@4.0.1)'
+      lock.importers['.'].dependencies['@dsh-ray/demo'].version = '1.0.0(@deepseek-ai/cordis@4.0.1)'
       await writeFile(path, stringify(lock))
     } })).rejects.toThrow('native peer context differs')
   const thirdRoot = join(f.root, 'foreign-peer-preparation')
@@ -332,7 +332,7 @@ test('rejects a disappearing native edge or stale native peer context in a non-n
       await f.runPnpm(args, options)
       if (options.phase !== 'resolve') return
       const path = join(options.cwd, 'pnpm-lock.yaml'), lock = parse(await readFile(path, 'utf8'))
-      lock.importers['.'].dependencies['@dsh-enhanced/demo'].version = '1.0.0(@vendor/sdk@2.0.0)'
+      lock.importers['.'].dependencies['@dsh-ray/demo'].version = '1.0.0(@vendor/sdk@2.0.0)'
       await writeFile(path, stringify(lock))
     } })).rejects.toThrow('non-native importer changed')
 })
@@ -343,7 +343,7 @@ test('rejects native artifact mismatch, non-native lock drift and unprepared pro
     await f.runPnpm(args, options)
     if (options.phase === 'resolve') {
       const lockPath = join(options.cwd, 'pnpm-lock.yaml'), lock = parse(await readFile(lockPath, 'utf8'))
-      lock.packages['@dsh-enhanced/demo@1.0.0'].resolution.integrity = 'sha512-tampered'
+      lock.packages['@dsh-ray/demo@1.0.0'].resolution.integrity = 'sha512-tampered'
       await writeFile(lockPath, stringify(lock))
     }
   } })).rejects.toThrow('non-native lock entry changed')
@@ -370,7 +370,7 @@ test('includes only approved rollback backups and preserves their pinned cohort 
   expect(proof.profiles.find(x => x.name === backup)?.backupOf).toBe('alpha')
   expect(proof.profiles.find(x => x.name === backup)?.nonNativePackageDigest).toMatch(/^[a-f0-9]{64}$/u)
   expect(proof.profiles.find(x => x.name === backup)?.localCohortDigest).toMatch(/^[a-f0-9]{64}$/u)
-  expect(await readFile(join(f.stagedHome, 'profiles', backup, 'node_modules/.pnpm/@dsh-enhanced+demo@1.0.0/node_modules/@dsh-enhanced/demo/index.js'), 'utf8')).toBe('frozen artifact bytes')
+  expect(await readFile(join(f.stagedHome, 'profiles', backup, 'node_modules/.pnpm/@dsh-ray+demo@1.0.0/node_modules/@dsh-ray/demo/index.js'), 'utf8')).toBe('frozen artifact bytes')
 })
 
 test('includes a clean profile without inventing a package-manager lockfile', async () => {

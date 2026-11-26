@@ -1,5 +1,5 @@
-import type { GoalScope, VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { GoalScope, VerifiedWorkflowSource } from '@dsh-ray/assistant-goals'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import {
   assertDefinitionProtocol,
   createDefinition,

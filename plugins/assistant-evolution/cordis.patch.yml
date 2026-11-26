@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-evolution
-      name: '@dsh-enhanced/assistant-evolution'
+    - id: dsh-ray-assistant-evolution
+      name: '@dsh-ray/assistant-evolution'
       inject:
         - assistantPolicy
         - assistantEvaluation

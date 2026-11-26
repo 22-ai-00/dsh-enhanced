@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-goals",
+  "name": "@dsh-ray/assistant-goals",
   "version": "0.1.88",
   "description": "Persistent owner-scoped business goals over the native DSH goal domain.",
   "license": "MIT",
@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-goals"
   },
   "keywords": [
@@ -59,14 +59,14 @@
     "@deepseek-ai/dsh-subagent": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-enhanced/assistant-automations": ">=0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/event-triggers": ">=0.1.24 <0.2.0"
+    "@dsh-ray/assistant-automations": ">=0.1.24 <0.2.0",
+    "@dsh-ray/assistant-delivery": ">0.1.24 <0.2.0",
+    "@dsh-ray/assistant-policy": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-verifier": ">=0.1.0 <0.2.0",
+    "@dsh-ray/event-triggers": ">=0.1.24 <0.2.0"
   },
   "peerDependenciesMeta": {
-    "@dsh-enhanced/assistant-automations": {
+    "@dsh-ray/assistant-automations": {
       "optional": true
     },
     "@deepseek-ai/cordis": {
@@ -93,13 +93,13 @@
     "@deepseek-ai/dsh-tools": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-delivery": {
+    "@dsh-ray/assistant-delivery": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-policy": {
+    "@dsh-ray/assistant-policy": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-verifier": {
+    "@dsh-ray/assistant-verifier": {
       "optional": true
     },
     "@deepseek-ai/dsh-llm": {
@@ -108,7 +108,7 @@
     "@deepseek-ai/dsh-subagent": {
       "optional": true
     },
-    "@dsh-enhanced/event-triggers": {
+    "@dsh-ray/event-triggers": {
       "optional": true
     }
   },
@@ -128,11 +128,11 @@
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tool-goal": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
-    "@dsh-enhanced/assistant-automations": "workspace:*",
-    "@dsh-enhanced/assistant-delivery": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
-    "@dsh-enhanced/assistant-verifier": "workspace:*",
-    "@dsh-enhanced/event-triggers": "workspace:*",
+    "@dsh-ray/assistant-automations": "workspace:*",
+    "@dsh-ray/assistant-delivery": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
+    "@dsh-ray/assistant-verifier": "workspace:*",
+    "@dsh-ray/event-triggers": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
@@ -141,6 +141,6 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
+    "@dsh-ray/task-acceptance-contract": "workspace:*"
   }
 }

@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach } from 'vitest'
 import * as yaml from 'yaml'
-import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
+import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 import { CreationCapabilityJournal } from '../../plugins/plugin-control-plane/src/creation-capability-journal.js'
 import { CreationReviewStore } from '../../plugins/assistant-verifier/src/creation-review-store.js'
 import { compileCreationReviewConfig, compileLegacyCreationReviewIdentity,
@@ -113,14 +113,14 @@ export async function ownerFixture(seed?: OwnerHistorySeed, options: OwnerFixtur
     sourceReviews: { authorityId: 'source' }, controlPlane: { statePath: join(f.root, 'control-plane'), creationCapabilities: f.oldConfig,
       sourceBuild: { schemaVersion: 1, sourceCommit: 'a'.repeat(40) },
       ...(reviewConfigs ? { creationVerifications: { authority: compileLegacyCreationReviewIdentity(reviewConfigs.old).authority } } : {}) } }
-  const ownerUpdate = { protocol: 'dsh-enhanced/host-owner-program-update/v1', homePath: f.root, profile: 'assistant',
+  const ownerUpdate = { protocol: 'dsh-ray/host-owner-program-update/v1', homePath: f.root, profile: 'assistant',
     hostPlanDigest: d('e'), original: { build: { schemaVersion: 1 }, resources, receiptSource: 'owner-bootstrap',
       ...(reviewConfigs ? { source: { workspace: { sourceCommit: 'a'.repeat(40) } } } : {}),
       fileDigests: { [join(resources.configRoot, 'manifest.json')]: d('a') }, patchDigests: { assistant: d('b'), coordinator: d('c') },
       manifest, effective: { targetEffective: yaml.stringify([
-        { id: 'dsh-enhanced-assistant-verifier', config: { databasePath: verifierPath,
+        { id: 'dsh-ray-assistant-verifier', config: { databasePath: verifierPath,
           sourceReviews: manifest.sourceReviews, creationReviews: manifest.pluginCreation.reviews } },
-        { id: 'dsh-enhanced-plugin-control-plane', config: manifest.controlPlane },
+        { id: 'dsh-ray-plugin-control-plane', config: manifest.controlPlane },
       ]) } } }
   const emptyCreationHistory = await inspect({ ownerUpdate, api })
   const stageHome = mkdtempSync(join(realpathSync(tmpdir()), 'empty-owner-stage-')); roots.push(stageHome); chmodSync(stageHome, 0o700)

@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
-import { linuxRuntimeDigest, validateLinuxRuntime, verifyLinuxRuntime, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { linuxRuntimeDigest, validateLinuxRuntime, verifyLinuxRuntime, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { rsiBuildResources as io, type LegacyDockerSourceBuildEnvironment } from './rsi-build.js'
 import type { LinuxRsiBuildEnvironment } from './rsi-linux-runtime-bootstrap.js'
 
@@ -40,7 +40,7 @@ function digest(bytes: string | Buffer): string { return createHash('sha256').up
 
 async function inspect(root: string): Promise<RsiReleaseBuildConfig> {
   const require = createRequire(import.meta.url)
-  const packageRoot = dirname(require.resolve('@dsh-enhanced/plugin-control-plane/package.json'))
+  const packageRoot = dirname(require.resolve('@dsh-ray/plugin-control-plane/package.json'))
   const adapter = await import(pathToFileURL(join(packageRoot, 'bin', 'dsh-local-release-adapter.js')).href) as {
     inspectLocalReleaseBuildEnvironment?: (paths: { pnpmRoot: string; storeRoot: string; cacheRoot: string }) => RsiReleaseBuildConfig
   }

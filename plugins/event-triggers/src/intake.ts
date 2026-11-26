@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
-import type { OwnerRouteValidationReceipt } from '@dsh-enhanced/assistant-delivery'
+import type { ExternalEventEnvelope } from '@dsh-ray/assistant-automations/external-event'
+import type { OwnerRouteValidationReceipt } from '@dsh-ray/assistant-delivery'
 import type { NormalizedTrigger } from './config.js'
 
 export const EVENT_TRIGGERS_INTAKE_SOURCE = 'event-triggers' as const
@@ -56,7 +56,7 @@ export interface EventIntakeObserver {
 
 /**
  * Exact closed `WorkItemIntakeInput` structural projection accepted by
- * `@dsh-enhanced/assistant-work-items`'s `recordIntake(input, sourceText?)`.
+ * `@dsh-ray/assistant-work-items`'s `recordIntake(input, sourceText?)`.
  */
 export interface WorkItemIntakeRecordInput {
   readonly source: string

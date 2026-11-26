@@ -50,7 +50,7 @@ function assertLocalOverrideIdentity(source: string, cohort: RsiLocalCohort, pee
   for (const item of mapping.items) {
     if (!isScalar(item.key) || typeof item.key.value !== 'string') fail('profile override selector is invalid')
     const selector = item.key.value
-    if (selector.includes('@dsh-enhanced/') && (!Object.hasOwn(known, selector)
+    if (selector.includes('@dsh-ray/') && (!Object.hasOwn(known, selector)
       || !isScalar(item.value) || item.value.value !== known[selector])) fail(`unknown or changed frozen internal override: ${selector}`)
   }
 }
@@ -128,7 +128,7 @@ export async function installRsiLocalProfile(input: RsiLocalProfileInput, ports 
   const cohort = await readRsiLocalCohort({dshHome:input.dshHome,profile:input.cohort.root.split('/').at(-1)!})
   if (JSON.stringify(cohort) !== JSON.stringify(input.cohort)) fail('local cohort changed before installation')
   const tarballs = input.bundles.map(slug => {
-    const item = cohort.packages.find(value => value.name === `@dsh-enhanced/${slug}` && value.bundle)
+    const item = cohort.packages.find(value => value.name === `@dsh-ray/${slug}` && value.bundle)
     if (!item) fail(`bundle ${slug} is absent from the frozen cohort`)
     return item.tarball
   })

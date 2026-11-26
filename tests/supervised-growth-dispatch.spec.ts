@@ -1,16 +1,16 @@
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { AutomationQualityEvidenceReceipt } from '@dsh-enhanced/assistant-automations'
-import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
+import type { AutomationQualityEvidenceReceipt } from '@dsh-ray/assistant-automations'
+import { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
 import {
   AssistantEvaluationService,
   canonicalEvaluationHostScope,
   type StoredOutcome,
   type TrustedAutomationEvaluationClaims,
-} from '@dsh-enhanced/assistant-evaluation'
-import { AssistantEvolutionService } from '@dsh-enhanced/assistant-evolution'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { RECOVERY_CATALOG_DIGEST } from '@dsh-enhanced/assistant-recovery'
+} from '@dsh-ray/assistant-evaluation'
+import { AssistantEvolutionService } from '@dsh-ray/assistant-evolution'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { RECOVERY_CATALOG_DIGEST } from '@dsh-ray/assistant-recovery'
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -92,7 +92,7 @@ function effectiveConfig(input: {
   evolutionPath: string
 }): string {
   return `
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   config:
     assistantPolicy:
       databasePath: ${input.policyPath}
@@ -103,7 +103,7 @@ function effectiveConfig(input: {
       databasePath: ${input.root}/automations.sqlite
       runsPath: ${input.root}/runs
       schedulerEnabled: false
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config:
     databasePath: ${input.deliveryPath}
     spoolPath: ${input.root}/spool
@@ -112,32 +112,32 @@ function effectiveConfig(input: {
     defaultAgentPreset: standard
     agentProvider: deepseek-official
     agentModel: default
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config: { enabled: true, account: primary, tenant: personal }
-- id: dsh-enhanced-traex-acp-provider
+- id: dsh-ray-traex-acp-provider
   config: { enabled: false, cwd: /tmp/old }
-- id: dsh-enhanced-assistant-heartbeat
+- id: dsh-ray-assistant-heartbeat
   config: { heartbeats: [] }
-- id: dsh-enhanced-assistant-evolution
+- id: dsh-ray-assistant-evolution
   config:
     databasePath: ${input.evolutionPath}
     evaluationWindow: 10
     minSample: 4
     reconcileIntervalMs: 0
-- id: dsh-enhanced-assistant-evaluation
+- id: dsh-ray-assistant-evaluation
   config:
     databasePath: ${input.root}/evaluation.sqlite
-- id: dsh-enhanced-assistant-growth-experiments
+- id: dsh-ray-assistant-growth-experiments
   config:
     databasePath: ${input.root}/growth.sqlite
-- id: dsh-enhanced-preference-learning
+- id: dsh-ray-preference-learning
   config:
     enabled: true
     databasePath: ${input.root}/preferences.sqlite
-- id: dsh-enhanced-assistant-health
+- id: dsh-ray-assistant-health
   config:
     requiredProviders: [assistantPolicy, personalMemory, personalWiki, assistantAutomations, assistantGrowthExperiments]
-- id: dsh-enhanced-assistant-recovery
+- id: dsh-ray-assistant-recovery
   config:
     databasePath: ${input.root}/recovery.sqlite
     jobs: []
@@ -177,10 +177,10 @@ describe('supervised-growth approval dispatch', () => {
     })
     const rows = parse(patch) as Array<{ id: string; config: Record<string, unknown> }>
     const effectiveRows = parse(effective) as Array<{ id: string; config: Record<string, unknown> }>
-    const personal = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config
-    const delivery = rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config
-    const evolution = effectiveRows.find(row => row.id === 'dsh-enhanced-assistant-evolution')!.config
-    const evaluation = effectiveRows.find(row => row.id === 'dsh-enhanced-assistant-evaluation')!.config
+    const personal = rows.find(row => row.id === 'dsh-ray-personal-assistant')!.config
+    const delivery = rows.find(row => row.id === 'dsh-ray-assistant-delivery')!.config
+    const evolution = effectiveRows.find(row => row.id === 'dsh-ray-assistant-evolution')!.config
+    const evaluation = effectiveRows.find(row => row.id === 'dsh-ray-assistant-evaluation')!.config
 
     const ctx = new Context()
     contexts.add(ctx)
@@ -239,7 +239,7 @@ describe('supervised-growth approval dispatch', () => {
       expect(proposed.status).toBe('pending')
       expect(ctx.assistantPolicy.listPendingApprovalDispatches()).toEqual([
         expect.objectContaining({
-          sourceId: 'dsh-enhanced-assistant-evolution',
+          sourceId: 'dsh-ray-assistant-evolution',
           workspace,
           principal: 'lark/primary/personal/ou_owner',
           bindingId: binding.id,

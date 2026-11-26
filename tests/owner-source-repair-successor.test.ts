@@ -61,7 +61,7 @@ test('successor append accepts signed seq1 trust bytes, but rejects staged trust
   stageState.ledger = sourceState
   stageState.trust = { installationId: 'installation', ledger: { id: 'ledger' }, dshHome: homePath }
   stageState.appendCount = 0
-  const ownerRepair = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath, profile,
+  const ownerRepair = { protocol: 'dsh-ray/host-owner-source-repair/v1', homePath, profile,
     installer: { root: process.cwd() }, original: {
       resources: { installationId: 'installation', ledgerId: 'ledger', configRoot },
       source: { records: [prior], anchor: { kind: 'owner' }, workspace: { repository: '/source', baseline: {} } },
@@ -160,7 +160,7 @@ test.skipIf(process.platform !== 'linux')('successor pre-finalize accepts a vali
     receiptSource: bootstrapSource, journalSource, creationDigest: sha(creationSource), manifestSource,
     runtimeReceiptDigest: oldRuntimeDigest, environments: {}, units: {},
     source: { records: [prior], workspace: { repository: '/source' } }, sourceState: { history: [], records: [prior] } }
-  const ownerRepair = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath, profile,
+  const ownerRepair = { protocol: 'dsh-ray/host-owner-source-repair/v1', homePath, profile,
     installer: { root: process.cwd() }, original, predecessor: { sourceProofDigest: sha('predecessor'),
       overlayDigest: rsiHostUpdateOverlayDigest(overlay), records: [overlay] } }
   const input = { ownerRepair, homePath, physicalHome: stageHome, phase: 'before-finalize', record }
@@ -227,7 +227,7 @@ test('successor capture rejects missing or forged predecessor before loading an 
   await expect(captureOwnerSourceRepairSuccessor({ ...input, predecessorProof: undefined }))
     .rejects.toThrow('successor predecessor scope differs')
   await expect(captureOwnerSourceRepairSuccessor({ ...input, predecessorProof: {
-    protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath, profile: 'target',
+    protocol: 'dsh-ray/host-owner-source-repair/v1', homePath, profile: 'target',
     ownerRepairNext: {}, ownerRepair: { permissionPreset: 'danger-full-access', dshPath: '/usr/bin/dsh' },
   } })).rejects.toThrow('successor predecessor scope differs')
 })

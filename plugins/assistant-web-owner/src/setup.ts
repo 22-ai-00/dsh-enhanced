@@ -14,7 +14,7 @@ import {
   sqliteStateExists,
   withinDshHome,
 } from './host-dsh.js'
-import { ensurePrincipalLocally } from '@dsh-enhanced/assistant-delivery'
+import { ensurePrincipalLocally } from '@dsh-ray/assistant-delivery'
 import { isMap, isScalar, isSeq, parseDocument, type Document, type YAMLMap, type YAMLSeq } from 'yaml'
 
 export interface WebOwnerSetupInput {
@@ -107,7 +107,7 @@ export function prepareWebOwnerProfile(input: WebOwnerSetupInput, source: string
     explicitConfigs.set(slug, existingConfig)
     const base = inherited.has('config') ? map(inherited.get('config', true), slug) : target.document.createNode({}) as YAMLMap
     const config = existingConfig !== undefined ? mergeConfigMaps(base, existingConfig, fail) : map(base.clone(), slug)
-    const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${slug}`, name: `@dsh-enhanced/${slug}` }) as YAMLMap
+    const destination = existing ?? target.document.createNode({ id: `dsh-ray-${slug}`, name: `@dsh-ray/${slug}` }) as YAMLMap
     destination.set('config', config)
     if (existing === undefined) target.rows.add(destination)
     configs.set(slug, config)
@@ -154,8 +154,8 @@ export function prepareWebOwnerProfile(input: WebOwnerSetupInput, source: string
   if (!isSeq(rules)) fail('Policy rules must be a sequence')
   const principalId = `web/${input.profile}/local/operator`
   const managed = [
-    { id: `dsh-enhanced-web-${input.profile}-ingest`, effect: 'allow', subject: { kind: 'external', id: principalId }, actions: ['ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
-    { id: `dsh-enhanced-web-${input.profile}-capability`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['*'], resource: { kind: '*', id: '*' }, context: { initiators: ['external'] } },
+    { id: `dsh-ray-web-${input.profile}-ingest`, effect: 'allow', subject: { kind: 'external', id: principalId }, actions: ['ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+    { id: `dsh-ray-web-${input.profile}-capability`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['*'], resource: { kind: '*', id: '*' }, context: { initiators: ['external'] } },
   ]
   for (const rule of managed) {
     const matches = rules.items.filter(item => isMap(item) && item.get('id') === rule.id) as YAMLMap[]
@@ -199,7 +199,7 @@ export function prepareWebOwnerProfile(input: WebOwnerSetupInput, source: string
       withinDshHome(literalPath(config.get('workRoot', true), input, 'Work-items workRoot'), input.dshHome, 'Work-items workRoot', fail)
     }
     if (existing !== undefined || modified) {
-      const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${spec.slug}`, name: `@dsh-enhanced/${spec.slug}` }) as YAMLMap
+      const destination = existing ?? target.document.createNode({ id: `dsh-ray-${spec.slug}`, name: `@dsh-ray/${spec.slug}` }) as YAMLMap
       destination.set('config', config)
       if (existing === undefined) target.rows.add(destination)
     }
@@ -236,14 +236,14 @@ export async function configureWebOwner(input: WebOwnerSetupInput, effectiveSour
     let resolvedIsolation: AutonomyResolvedOptions | undefined
     if (input.isolation) {
       const preflight = preflightAutonomyProfile({ ...input, isolation: input.isolation }, plan.patch, effectiveSource)
-      const resources = await import('@dsh-enhanced/assistant-isolation/native-resources')
+      const resources = await import('@dsh-ray/assistant-isolation/native-resources')
       const metadata = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }
       if (typeof metadata.version !== 'string' || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$/u.test(metadata.version)) fail('invalid installed package version')
       const selected = input.isolation.source ?? { kind: 'official-tag' as const }
       const source = await resources.freezeLinuxRuntimeSource({ ...selected, version: metadata.version })
       const preparation = { dshHome: input.dshHome, profile: input.profile, source }
       const parsed = parse(preflight, 'autonomy preflight')
-      const isolationRow = parsed.rows.items.find(item => isMap(item) && item.get('id') === 'dsh-enhanced-assistant-isolation') as YAMLMap
+      const isolationRow = parsed.rows.items.find(item => isMap(item) && item.get('id') === 'dsh-ray-assistant-isolation') as YAMLMap
       const hasExisting = map(isolationRow.get('config', true), 'Isolation config').has('linux')
       if (!hasExisting) await resources.prepareLinuxRuntime(preparation)
       const prepared = await resources.readLinuxRuntime(preparation)

@@ -1,6 +1,6 @@
 # Independent skill holdout authority
 
-`dsh-skill-holdout` is an operator process shipped by `@dsh-enhanced/assistant-skills`. It keeps a fixed dataset and an Ed25519 signing key outside the candidate execution environment. A trusted executor requests one input at a time, executes the frozen arm, and returns observed output. The authority compares that output with its own expected result and signs a bounded report. It never accepts a caller-supplied verdict and never enables a skill.
+`dsh-skill-holdout` is an operator process shipped by `@dsh-ray/assistant-skills`. It keeps a fixed dataset and an Ed25519 signing key outside the candidate execution environment. A trusted executor requests one input at a time, executes the frozen arm, and returns observed output. The authority compares that output with its own expected result and signs a bounded report. It never accepts a caller-supplied verdict and never enables a skill.
 
 This is a runnable judging and recovery boundary, not a declaration that a dataset was historically independent. Operators must independently select and freeze the dataset and pin the authority public key. A signature proves which configured authority judged which scope, two arm digests, dataset, limits, budget binding and observations; it does not prove that the trusted executor honestly ran a model, that training never saw the cases, or that a candidate should be promoted.
 
@@ -80,7 +80,7 @@ Run the installed `dsh-skill-holdout --inspect-config /operator/private/config.j
 
 On `begin`, the operator first durably freezes the exact scope, baseline, candidate, budget and optional canary-admission binding with a unique freeze ID. Only then does it generate private cases and sign the certificate binding the exact profile, dataset digest and generation sequence to that frozen request. A failure after the freeze makes that plan unavailable; restart cannot draw a replacement dataset, and a lost acknowledgement resumes the already persisted bytes. Completed receipts can be reread without rerunning cells. Profile, dataset, certificate, receipt or admission drift fails closed. The certificate proves the configured authority's generation sequence; it does not prove training-data history or general intelligence improvement.
 
-Configure owner Policy actions `canary`, `compare`, and `watch` for `{kind: 'evolution', id: 'verified-workflows'}`, plus background `promote`, `watch`, and `rollback` for subject `dsh-enhanced-assistant-skills` in the same owner/workspace. Supply an existing Delivery owner route. Normal `skill_run` and nested tools continue to require their own current permissions and fresh native Goal acceptance.
+Configure owner Policy actions `canary`, `compare`, and `watch` for `{kind: 'evolution', id: 'verified-workflows'}`, plus background `promote`, `watch`, and `rollback` for subject `dsh-ray-assistant-skills` in the same owner/workspace. Supply an existing Delivery owner route. Normal `skill_run` and nested tools continue to require their own current permissions and fresh native Goal acceptance.
 
 The owner can request: “Evaluate candidate C using profile P; allow one independently accepted canary run, at most three executions in total, until this expiry; promote only if its comparison and subsequent checks pass, and revert on regression.” The registered `skill_canary(candidate_id, profile_id, invocation_id, owner_route_id, expires_at, max_runs, canary_runs)` performs the comparison and admission. The grant is limited to 1–100 total runs and at most seven days, cannot outlive its comparison profile, and requires `1 <= canary_runs <= max_runs`.
 
@@ -106,7 +106,7 @@ Only one cell can be outstanding. Cells alternate arm order and preserve case/re
 
 Each successful operation commits state before emitting its response. SQLite uses full synchronous durability and an eight-second controller lease renewed every two seconds. A concurrent controller is rejected. Clean shutdown releases the lease; after a crash, wait for the actual persisted lease to expire before reconnecting. An issued cell without a durable result is never reissued. A result committed before its response was lost remains settled. Restoring with changed data, key or limits fails closed.
 
-The authority library and signature helper are available from `@dsh-enhanced/assistant-skills/holdout-authority`. Signatures must be checked against the pinned public key, exact profile digest and exact expected qualification/admission identity. Serialized public authority state excludes raw cases and private keys. In prospective mode, the private SQLite database additionally retains the generated dataset and certificate for recovery; it must remain outside candidate access.
+The authority library and signature helper are available from `@dsh-ray/assistant-skills/holdout-authority`. Signatures must be checked against the pinned public key, exact profile digest and exact expected qualification/admission identity. Serialized public authority state excludes raw cases and private keys. In prospective mode, the private SQLite database additionally retains the generated dataset and certificate for recovery; it must remain outside candidate access.
 
 ## Validation and remaining gates
 
@@ -116,7 +116,7 @@ Run these tests with an explicit prepared native runtime:
 
 ```sh
 DSH_ISOLATION_TEST_NATIVE_RUNTIME=/absolute/prepared/linux-runtime \
-pnpm --filter @dsh-enhanced/assistant-skills exec vitest run tests/holdout-cli.spec.ts
+pnpm --filter @dsh-ray/assistant-skills exec vitest run tests/holdout-cli.spec.ts
 ```
 
 The native runtime needs the Isolation toolchain contract (`bin/node`, `pnpm`/`pnpm-native`, `node_modules`, store and cache trees); the authority test process uses the Host Node executable. Nothing is downloaded automatically. Test data and programs are explicit synthetic fixtures, not evidence of model improvement or production historical independence.

@@ -5,7 +5,7 @@ import { closeSync, constants as F, existsSync, fsyncSync, fstatSync, lstatSync,
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
   const filteredEmitWarning = function emitWarning(warning, ...rest) {

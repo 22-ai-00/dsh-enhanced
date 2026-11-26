@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { canonicalGrowthJson, type PluginCreationVerificationCertificate,
-  type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginRevisionVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { normalizeControlPlaneConfig, type Config } from '../src/index.js'
 import { RevisionCapabilityJournal, revisionCapabilityPublicKey, validateRevisionCapabilityConfig,
   verifyRevisionCapabilityAdoptionReceipt } from '../src/revision-capability-journal.js'

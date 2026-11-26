@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs'
 import { isAbsolute, dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { GoalStoreError } from './types.js'
 import type { GoalCheckpoint, GoalDefinition, GoalDependencyBinding, GoalRecord, GoalScope, NativeGoalState } from './types.js'
 

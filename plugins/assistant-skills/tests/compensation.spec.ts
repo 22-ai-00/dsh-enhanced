@@ -12,8 +12,8 @@ import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import ToolRuntime, { defineTool, type ToolExecution } from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import WorkingDirectoryService from '@deepseek-ai/dsh-working-directory'
-import { AssistantCompensationService } from '@dsh-enhanced/assistant-recovery'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { AssistantCompensationService } from '@dsh-ray/assistant-recovery'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -482,7 +482,7 @@ describe('assistant-skills failure compensation (WP10)', () => {
     expect(executeSpy).toHaveBeenCalledTimes(1)
     expect(executeSpy.mock.calls[0]![0]).toMatchObject({
       kind: 'external.undo',
-      sourcePlugin: 'dsh-enhanced-assistant-skills',
+      sourcePlugin: 'dsh-ray-assistant-skills',
       stepId: 'step-1',
       scope: f.scope,
     })
@@ -661,7 +661,7 @@ describe('assistant-skills failure compensation (WP10)', () => {
     expect(recoveryRecords).toHaveLength(1)
     expect(recoveryRecords[0]).toMatchObject({
       kind: 'fs.restore-via-recovery',
-      sourcePlugin: 'dsh-enhanced-assistant-skills',
+      sourcePlugin: 'dsh-ray-assistant-skills',
       runId,
       stepId: 'step-1',
       status: 'succeeded',

@@ -5,11 +5,11 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter, resolveRetryPolicy, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantDeliveryService, type Config as DeliveryConfig } from '@dsh-enhanced/assistant-delivery'
+import { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantDeliveryService, type Config as DeliveryConfig } from '@dsh-ray/assistant-delivery'
 import type { DeliveryAdapterContext, OutboundIntent, DeliveryToolApprovalRequest } from '../../assistant-delivery/lib/types.js'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { DeliveryStore } from '../../assistant-delivery/lib/store.js'
 import { existsSync } from 'node:fs'
 import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
@@ -22,12 +22,12 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, vi } from 'vitest'
 import { AssistantWorkItemsService } from '../../assistant-work-items/lib/index.js'
 import type { Config } from '../../assistant-work-items/lib/config.js'
-import { AssistantVerifierService, compileCreationReviewConfig, type CreationReviewConfig } from '@dsh-enhanced/assistant-verifier'
+import { AssistantVerifierService, compileCreationReviewConfig, type CreationReviewConfig } from '@dsh-ray/assistant-verifier'
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { PluginControlPlaneService, type Config as ControlPlaneConfig } from '@dsh-enhanced/plugin-control-plane'
-import { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
-import { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
+import { PluginControlPlaneService, type Config as ControlPlaneConfig } from '@dsh-ray/plugin-control-plane'
+import { AssistantGoalsService } from '@dsh-ray/assistant-goals'
+import { AssistantSkillsService } from '@dsh-ray/assistant-skills'
 import GrowthPlugin, { type AssistantGrowthDriverConfig } from '../src/index.ts'
 import type { LinuxRsiRepositoryBuildEnvironment } from '../../lark-channel/lib/rsi-linux-repository-bootstrap.js'
 import type { LinuxRsiCreationBuildEnvironment } from '../../lark-channel/lib/rsi-linux-creation-build.js'
@@ -52,7 +52,7 @@ export function normalizeRecords(text:string):Record<string,string>{
  const compare=(a:string,b:string)=>{const x=Array.from(a,c=>c.codePointAt(0)!),y=Array.from(b,c=>c.codePointAt(0)!);for(let i=0;i<Math.min(x.length,y.length);i++){if(x[i]!==y[i])return x[i]!-y[i]!}return x.length-y.length};
  return Object.fromEntries([...entries.keys()].sort(compare).map(key=>[key,entries.get(key)!]))
 }
-export default {name:${JSON.stringify('dsh-enhanced-'+name)},inject:['tools'],apply(ctx:Context){ctx.tools.register(defineTool({name:'normalize_records',description:'Parse key=value records, preserving Unicode and all value characters.',parameters:{text:{type:'string',required:true}},output:{schema:{type:'json'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},async execute(args){return normalizeRecords(args.text)}}))}}
+export default {name:${JSON.stringify('dsh-ray-'+name)},inject:['tools'],apply(ctx:Context){ctx.tools.register(defineTool({name:'normalize_records',description:'Parse key=value records, preserving Unicode and all value characters.',parameters:{text:{type:'string',required:true}},output:{schema:{type:'json'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},async execute(args){return normalizeRecords(args.text)}}))}}
 `
   return [{path:'src/index.ts',content},{path:'README.md',content:'# Pure record normalization\n\nParses text only, with no filesystem, subprocess, credential or network authority. Duplicate or empty keys are rejected.\n'},
     {path:'tests/index.spec.ts',content:"import { expect,test } from 'vitest'\nimport { normalizeRecords } from '../src/index.js'\ntest('ordinary records',()=>{expect(normalizeRecords('b=two\\na=one')).toEqual({a:'one',b:'two'})})\n"}]
@@ -404,7 +404,7 @@ import { readFileSync } from 'node:fs'
 const root=process.env.PLUGIN_ROOT
 if(!root||!/^plugins\\/[a-z][a-z0-9-]+$/u.test(root))throw new Error('invalid frozen candidate plugin root')
 const manifest=JSON.parse(readFileSync(root+'/package.json','utf8'))
-if(!manifest.name.startsWith('@dsh-enhanced/owner-engineering-'))throw new Error('candidate outside fixture namespace')
+if(!manifest.name.startsWith('@dsh-ray/owner-engineering-'))throw new Error('candidate outside fixture namespace')
 for(const args of [['--dir',root,'run','typecheck'],['--dir',root,'exec','vitest','run','--maxWorkers=1'],['--dir',root,'run','build']]){
  const result=spawnSync('pnpm',args,{stdio:'inherit',env:{...process.env,CI:'1',ROLLDOWN_WORKER_THREADS:'1'}})
  if(result.error)throw result.error

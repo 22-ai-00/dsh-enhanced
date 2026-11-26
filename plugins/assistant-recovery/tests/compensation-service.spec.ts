@@ -149,7 +149,7 @@ describe('Compensation services in Cordis', () => {
       target: { messageId: 'om_1' },
       runId: 'skill-run-1',
       stepId: 'step-1',
-      sourcePlugin: 'dsh-enhanced-assistant-skills',
+      sourcePlugin: 'dsh-ray-assistant-skills',
     })
     expect(res.status).toBe('succeeded')
     expect(ctx.assistantRecovery.listCompensations({ runId: 'skill-run-1' })).toHaveLength(1)

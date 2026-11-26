@@ -12,9 +12,9 @@
 - **设置页与 DSH 原生设置槽**（右上角 ⚙ 及 DSH 左侧设置弹窗 `wenyao-assistant`）：按「全部 / 体检自愈 / 模型与工具 / 自主与成长 / 飞书与插件 / 只读诊断」分组浏览 `src/settings-cards.ts` 卡片，提供一键体检自愈、`/model` 级联模型/Effort 与 CLI 路径下拉选择器、自主能力一键授权向导与飞书极简安全接入。除「文鳐」⚙ 设置页外，
   客户端还向 DSH `0.2.2-rc.5` 注入原生设置扩展槽：左侧栏设置分组 `settings.section` / `settings.section.icon`
   （「文鳐助手」）、通用设置一行快捷切换 `settings.general.item`（默认编程工具 `TraeX` / `Antigravity` /
-  API 路由）、模型设置页脚 `settings.models.footer`（本地 ACP 就绪探测与默认路由切换），`settings.models.provider-card`（`dsh-enhanced-traex-acp-provider` 的模型/Effort/CLI 一键绑定），以及插件管理详情/摘要
+  API 路由）、模型设置页脚 `settings.models.footer`（本地 ACP 就绪探测与默认路由切换），`settings.models.provider-card`（`dsh-ray-traex-acp-provider` 的模型/Effort/CLI 一键绑定），以及插件管理详情/摘要
   `plugins.bundle.config`（覆盖 `traex-acp-provider`、`lark-channel`、`assistant-proactive`、`assistant-dreaming`、
-  `assistant-growth-driver`、`assistant-memory-learning` 6 个 `@dsh-enhanced/*` bundle）。
+  `assistant-growth-driver`、`assistant-memory-learning` 6 个 `@dsh-ray/*` bundle）。
   配置写入只经 Host `settings` 服务合并到指定条目；bundle/条目管理与安装只经 Host `pluginManager`；
   本机 CLI 探测与 `/model` 目录聚合（`modelCatalog`）均只读无交互、不发起付费推理，受每 provider 6 秒超时与 30 秒 TTL 缓存保护。安装会把 pnpm 子进程和 registry 网络调用委托给
   DSH 自身的 plugin manager，不在本插件里实现网络或进程逻辑。
@@ -22,7 +22,7 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/owner-console
+dsh plugin --profile web add @dsh-ray/owner-console
 dsh --profile web --dump-config
 ```
 
@@ -47,15 +47,15 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 | 卡片 | 内容 | 数据来源 |
 | --- | --- | --- |
 | 自主能力一键开启向导（`AutonomyWizardCard`） | 基于当前激活的 Web 或飞书 owner 路由，一键授权、切换档位（`conservative` / `balanced` / `custom`）、选择默认模型或 `traex-agent` / `agy-agent` 路由并生成三权分立授权，或执行安全暂停（做梦保持 `enabled: true` + `retired: true`，成长安全关闭含子开关）与停用 | `autonomySetupStatus` + `configureAutonomySetup`（读只读 SQLite 与原子备份写 `cordis.patch.yml`） |
-| 版本与自助升级（`SelfUpgradeCard`） | 检查当前包与 Host 版本及在线/离线最新可用版，预览升级计划（`--dry-run`），在受控 Linux systemd 下阻断应用内热改并给出 CLI 命令，在本地/macOS 二次确认后以后台无 shell 进程启动 `dsh-rsi upgrade --yes` | `checkSelfUpgrade` + `dryRunSelfUpgrade` + `runSelfUpgrade`（`src/upgrade-probe.ts`） |
+| 版本与自助升级（`SelfUpgradeCard`） | 检查当前包与 Host 版本及在线/离线最新可用版，预览升级计划（`--dry-run`），在受控 Linux systemd 下阻断应用内热改并给出 CLI 命令，在本地/macOS 二次确认后以后台无 shell 进程启动 `dsh-ray upgrade --yes` | `checkSelfUpgrade` + `dryRunSelfUpgrade` + `runSelfUpgrade`（`src/upgrade-probe.ts`） |
 | 编程工具与默认模型 | `traex-acp-provider` 条目中的 TraeX (`traex-agent`) 与 Antigravity (`agy-agent`) 开关/命令、`agent-default-model` 默认路由切换、无交互本机 CLI 就绪探测与修复提示 | `settings.describe` + `agentDefaultModel` + `llm` + `probeCodingTool` |
 | 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接状态（`larkChannel.health()` 快照）、appId 是否配置；支持一键官方扫码接入授权（RFC 8628 设备授权，自动加密存入系统凭据库并同步通道/消息策略）、扫码完成后三步一键向导（确认/一键设为主主人、一键重启生效、开放平台与私聊验证）、手动输入凭据入库、环境变量引用或 keychain handle 引用 | `settings.describe` + `larkChannel.health()` + `startFeishuQrOnboarding` / `feishuQrOnboardingStatus` / `cancelFeishuQrOnboarding` / `promoteFeishuQrOwner` / `restartProfile` |
 | 自主做梦想法（Dreaming） | `assistant-dreaming` 运行健康与额度、想法列表（`recorded` / `acknowledged` / `validated` / `rejected` / `retired`）及主人授权流转（确认 / 验证 / 拒绝 / 休眠） | `assistantDreaming`（结构化读取，可缺省） |
 | 主动准备与工作项 | `assistant-proactive` 未验证草稿（接受 / 拒绝 / 取消）、WP22 主人注意力放宽请求（仅本次授权 / 拒绝）及 `assistant-work-items` `observe` / `would-admit` 观察队列 | `assistantProactive` + `assistantWorkItems`（+ `assistantEvaluation` 回退，可缺省） |
 | 成长与记忆学习 | `assistant-memory-learning` 剩余额度/授权可用性、`assistant-growth-driver` 最近唤醒、`usageHealth` 与 `dreamingIntake` 统计 | `assistantMemoryLearning` + `assistantGrowthDriver`（可缺省） |
 | 成长计分卡（只读）（`GrowthReportCard`） | 支持切换 `7 天 / 14 天 / 30 天` 窗口，只读汇总五组闭环指标（任务与纠正/重做/撤回率及趋势、新增与有来源记忆/提示词暴露/同类纠正变化、候选生成/验收通过与失败/采用/回退、通知送达/反应/忽略与 `would-accept` 吻合度及 1/4 留出已决样本数、按冻结模型分层的成本与延迟均值/P50/P95）以及记忆通道 14 天预登记口径与主动放宽 20 样本门控，严格区分「无数据（`no-data`）」与「窗口内为 0（`zero`）」 | `growthReport`（复用 `assistantEvaluation` / `pluginControlPlane` / `assistantWorkItems` 只读接口与可选只读 SQLite，零 schema 变更） |
-| 版本与自迭代统计（只读）（`versionInfo`） | 返回 `dsh-rsi/version/v1`（`schemaVersion: 1`）整体助手版本、绑定与运行中的 `@deepseek-ai/dsh` Host 版本、core 与 evolved 插件清单（去重不双计），以及 20 余项严格区分 `no-data`（`null`）与 `zero`（`0`）的自迭代/演进/升级计数；同步暴露 Host 工具 `owner_console_version_info`（仅对已授权 Owner 会话可见与执行）与对话端 `/version`、`/autonomy version` 及自然语言查询 | `versionInfo`（`src/version-info.ts` 只读 `DatabaseSync` + `.dsh-rsi-host.json` + `.dsh-enhanced/upgrade-history.jsonl` + `.dsh-rsi-upgrade-backups/` + 可选 Cordis `health()` 回退） |
-| 本项目插件管理 | 本项目的 bundle 层（已安装/已启用/已加载、停用/启用、移除）、已加载条目（按 fiber 阶段的启用/禁用/诊断）、安装 `@dsh-enhanced/*`，以及对 live 字段的合并配置 | `pluginManager`（bundle/entry/安装）+ `settings.describe` / `settings.mutate`（live 字段） |
+| 版本与自迭代统计（只读）（`versionInfo`） | 返回 `dsh-ray/version/v1`（`schemaVersion: 1`）整体助手版本、绑定与运行中的 `@deepseek-ai/dsh` Host 版本、core 与 evolved 插件清单（去重不双计），以及 20 余项严格区分 `no-data`（`null`）与 `zero`（`0`）的自迭代/演进/升级计数；同步暴露 Host 工具 `owner_console_version_info`（仅对已授权 Owner 会话可见与执行）与对话端 `/version`、`/autonomy version` 及自然语言查询 | `versionInfo`（`src/version-info.ts` 只读 `DatabaseSync` + `.dsh-ray-host.json` + `.dsh-ray/upgrade-history.jsonl` + `.dsh-ray-upgrade-backups/` + 可选 Cordis `health()` 回退） |
+| 本项目插件管理 | 本项目的 bundle 层（已安装/已启用/已加载、停用/启用、移除）、已加载条目（按 fiber 阶段的启用/禁用/诊断）、安装 `@dsh-ray/*`，以及对 live 字段的合并配置 | `pluginManager`（bundle/entry/安装）+ `settings.describe` / `settings.mutate`（live 字段） |
 | 趋势快照（只读） | 已封存的普通使用趋势快照：序号、计划、窗口边界、会话数、flags、按冻结模型分层的 DiD 与平行趋势、digest 前缀；每页 10 条，可翻到更早一页 | `pluginControlPlane.inspectCreatedCapabilityOrdinaryUseTrendSnapshots`（结构化读取，可缺省） |
 | intake 吻合度（只读） | 填写 Evaluation 作用域（workspace + preset）后读取：窗口、扫描通知数（是否截断）、intake 准入合计与按 level 的吻合 / 不吻合计数与比例、非 intake / 无法判断 / 他 scope 计数；只有计数，不含工作项 id 或正文 | `assistantEvaluation.inspectIntakeAttentionAgreement`（结构化读取，可缺省；开关关闭时显示未启用）+ `loader` 条目配置（只读开关，无需作用域） |
 
@@ -89,24 +89,24 @@ composer 由 DSH 的会话骨架自己滚动。飞书「连接」行读取
 2. **手动填入凭据**：填写 `appId`（`cli_` + 16 位十六进制）与 `App Secret`，在 Host 内存直接加密写入本机凭据库并签发访问策略，配置文件零明文。
 3. **环境变量 / keychain handle 引用配置**：填写 `appId` 或从 Host 环境探测 `LARK_APP_ID` / `FEISHU_APP_ID`，仅写入环境变量名或已有 keychain handle 引用。
 
-扫码与手动入库模式采用原子备份写 `cordis.patch.yml`（绝不在进程内触发 `settings.mutate` 协调或热重载 `credentials-keychain` / `personal-assistant` / `lark-channel`），保存后显式提示重启一次 profile（重启 `DeepSeek Harness.app` 或运行 `dsh-rsi restart`）以干净加载新凭据句柄、策略与 WebSocket 长连接；环境变量 / 既有 handle 引用模式仍走 Host `settings.mutate` 的显式 set/unset + `secretSource` 判别字段，校验拒绝保持红色告警。
+扫码与手动入库模式采用原子备份写 `cordis.patch.yml`（绝不在进程内触发 `settings.mutate` 协调或热重载 `credentials-keychain` / `personal-assistant` / `lark-channel`），保存后显式提示重启一次 profile（重启 `DeepSeek Harness.app` 或运行 `dsh-ray restart`）以干净加载新凭据句柄、策略与 WebSocket 长连接；环境变量 / 既有 handle 引用模式仍走 Host `settings.mutate` 的显式 set/unset + `secretSource` 判别字段，校验拒绝保持红色告警。
 secret 明文永不进入 `cordis.patch.yml`、日志或浏览器状态。
 
 卡片按实际状态给出下一步，状态由 `bundles[].enabled` 与 `plugins[].fiberPhase` 判定，不再把
 “条目不在 `settings.describe()` 里”一律当成未启用：
 
 - 未安装：显示「安装 lark-channel」（走 Host pluginManager 的 pnpm 安装，会先补装激活与加密入库所需的
-  同伴 bundle `@dsh-enhanced/assistant-delivery`、`@dsh-enhanced/credentials-keychain`，再装该包及其 pnpm 依赖）；
+  同伴 bundle `@dsh-ray/assistant-delivery`、`@dsh-ray/credentials-keychain`，再装该包及其 pnpm 依赖）；
 - 已安装但 bundle 未启用：显示「启用 lark-channel」；
 - 已启用但 fiber 为 pending / failed / 无条目：显示「已启用，等待依赖服务 / 已启用但加载失败 /
   已启用，但 Loader 没有条目」，附 fiber 阶段、诊断、缺少的 companion 服务（及对应要安装的
-  `@dsh-enhanced/*` bundle）和一段可复制的最小 `cordis.patch.yml` 修复行；此时绝不显示「启用」
+  `@dsh-ray/*` bundle）和一段可复制的最小 `cordis.patch.yml` 修复行；此时绝不显示「启用」
   （对已启用的 bundle 是无效动作），也不会把配置拒绝推给泛化文案；
 - fiber active 且条目有 live 字段：才显示配置表单。
 
-安装只包含该包本身及其 pnpm `dependencies`；`peerDependencies` 里的 `@dsh-enhanced/*` bundle 与它
+安装只包含该包本身及其 pnpm `dependencies`；`peerDependencies` 里的 `@dsh-ray/*` bundle 与它
 在 profile 里需要的 Host 服务不会由 pnpm 自动装上。`lark-channel` 在激活时静态 import
-`@dsh-enhanced/assistant-delivery`，因此面板的「安装 lark-channel」会先安装这个同伴 bundle；
+`@dsh-ray/assistant-delivery`，因此面板的「安装 lark-channel」会先安装这个同伴 bundle；
 其余缺失项仍由上面的状态区列出。
 TraeX 卡片同理（安装/启用 traex-acp-provider）。
 
@@ -120,21 +120,21 @@ provider/model/reasoningEffort。没有 live 字段的条目不会出现在面�
 - **编程工具与默认模型路由**：保留 `status.traex` 与 `configureTraex(enabled, command)` 向后兼容，同时提供
   `configureAgy(enabled, command)`、`setDefaultModelRoute(provider, model, reasoningEffort)` 与
   `probeCodingTool(tool, command, force)`。切换默认工具为 `traex-agent` / `agy-agent` 时若对应 ACP 路由尚未启用，
-  会先通过 `settings.mutate` 启用该路由并重载 `dsh-enhanced-traex-acp-provider`，再写入 `agent-default-model`。
+  会先通过 `settings.mutate` 启用该路由并重载 `dsh-ray-traex-acp-provider`，再写入 `agent-default-model`。
   CLI 探测严格走只读无交互参数（`traex login status` 与 `agy --version` / `agy models`），仅传入最小环境变量白名单、
   拒绝含控制字符或换行命令、带有限超时（TraeX 8 秒，`agy --version` 3 秒 / `agy models` 18 秒）与
   15 秒结果缓存（同工具并发去重）。
 - **自主做梦 / 主动准备 / 成长 / 记忆学习**：通过 `assistantOverview`、`actDreamingIdea`、
   `actAttentionQuestion`、`actProactiveDraft` 暴露可控开关与主人裁决入口；所有同伴插件缺失或权限门控未满足时
   均 fail-closed 降级展示，不绕过 owner 授权、预算或评估门控。
-- **Bundle 层**：列出本 profile 里 `@dsh-enhanced/*` bundle 的版本、是否安装、是否启用、是否可移除
+- **Bundle 层**：列出本 profile 里 `@dsh-ray/*` bundle 的版本、是否安装、是否启用、是否可移除
   （`not-bundle` 依赖行不显示，避免给出会被 Host 拒绝的启停按钮），
   一键启用/停用；停用只摘除该 bundle 的 patch 层，已安装依赖保留。每行另有「移除」（仅对可移除且非本面板自身的
   bundle 显示，并需浏览器确认；移除后可用面板安装入口或 `dsh plugin add` 重新添加；依赖是否留在
   profile 中由 DSH 的 pluginManager/pnpm 决定）。
-- **已加载条目**：列出模块属于 `@dsh-enhanced/*` 的 Loader 条目（entryId、模块名、fiber 阶段），
+- **已加载条目**：列出模块属于 `@dsh-ray/*` 的 Loader 条目（entryId、模块名、fiber 阶段），
   可单独启用/禁用；按模块归属而不是 bundle row 归属判断，第三方模块行不在此面板管理。
-- **安装**：只接受 `@dsh-enhanced/<name>` 形式的包名，走 DSH 自身的 `pluginManager.installBundle`
+- **安装**：只接受 `@dsh-ray/<name>` 形式的包名，走 DSH 自身的 `pluginManager.installBundle`
   （与 `dsh plugin` 相同的 pnpm 路径），会一并安装该包声明的依赖并默认激活；本地路径和 git 地址
   不在此面板处理，避免面板成为任意代码源入口。安装/启用后如返回 `restart-required`，按提示重启 profile。
 - **依赖构建脚本**：pnpm 可能拒绝依赖的构建脚本（`ERR_PNPM_IGNORED_BUILDS`）。Host 记录到
@@ -163,7 +163,7 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 口径混合了执行与注意力结果，不是 intake 准确率，只覆盖 auto 准入的工作项，不作为采用依据。
 
 卡片顶部的「Evaluation 开关」来自 Host 状态的 `evaluation.intakeAgreement`，不需要作用域：没有 Evaluation
-显示「未加载」；Evaluation 存在且唯一启用的 `@dsh-enhanced/assistant-evaluation` Loader 条目未开启
+显示「未加载」；Evaluation 存在且唯一启用的 `@dsh-ray/assistant-evaluation` Loader 条目未开启
 `intakeAttentionAgreementEnabled` 时显示「未启用」，开启时显示「已启用」；Evaluation 缺少该读取方法、没有 loader、
 找不到或找到多个启用条目、或开关值不是布尔时显示「已加载，开关状态未知」。它不调用 Evaluation、不扫描通知，
 只透传这四个枚举值，不含作用域、计数或其它配置；它也不阻止「读取」，作用域内的结果仍以读取为准。
@@ -173,8 +173,8 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 在 profile 的 `cordis.patch.yml` 覆盖本行配置：
 
 ```yaml
-- id: dsh-enhanced-owner-console
-  name: '@dsh-enhanced/owner-console'
+- id: dsh-ray-owner-console
+  name: '@dsh-ray/owner-console'
   config:
     feishuAppId: ''        # 可选：一键探测的默认 appId；app secret 不进入配置
 ```
@@ -189,18 +189,18 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
   `assistant-delivery` 只读 SQLite（`delivery_principals` / `conversation_bindings`）与目标 profile 的
   `cordis.patch.yml`，按 `0o600` 权限创建时间戳备份并以临时文件+原子重命名更新 `cordis.patch.yml`
   （保留无关配置与 `!!js` 表达式；拒绝符号链接、拒绝 `~/.dsh` 越界数据库路径，绝不绕过
-  `assistantPolicy` 有限预算与三权分立）。**只读成长计分卡**（`growthReport` / `src/growth-report.ts`）仅调用宿主只读检查方法并在存在 `$DSH_HOME` 内已配置的 `assistant-growth-driver`、`assistant-memory-learning`、`preference-learning` 等只读 SQLite 文件时以 `readOnly: true`（拒绝符号链接与越界路径、必要时仅对无有效 `-wal` 的只读目录启用 `immutable=1`，经 `PRAGMA quick_check` 与表/列存在性校验）统计记忆、偏好、演进与自迭代计数，不创建数据库、不调用插件 Store 构造函数、不写 WAL 且不改变任何 schema；同时只读读取 `$DSH_HOME/.dsh-enhanced/upgrade-history.jsonl` 与 `$DSH_HOME/.dsh-rsi-upgrade-backups/`（其中包含自助升级与 `doctor-*` 备份子目录）。
+  `assistantPolicy` 有限预算与三权分立）。**只读成长计分卡**（`growthReport` / `src/growth-report.ts`）仅调用宿主只读检查方法并在存在 `$DSH_HOME` 内已配置的 `assistant-growth-driver`、`assistant-memory-learning`、`preference-learning` 等只读 SQLite 文件时以 `readOnly: true`（拒绝符号链接与越界路径、必要时仅对无有效 `-wal` 的只读目录启用 `immutable=1`，经 `PRAGMA quick_check` 与表/列存在性校验）统计记忆、偏好、演进与自迭代计数，不创建数据库、不调用插件 Store 构造函数、不写 WAL 且不改变任何 schema；同时只读读取 `$DSH_HOME/.dsh-ray/upgrade-history.jsonl` 与 `$DSH_HOME/.dsh-ray-upgrade-backups/`（其中包含自助升级与 `doctor-*` 备份子目录）。
 - **子进程、网络与凭据边界**（`src/probes.ts`、`src/upgrade-probe.ts`、`src/feishu-qr-onboarding.ts`、`src/doctor-repair.ts`）：
   - **飞书官方扫码授权、主主人移交与一键重启**（`startFeishuQrOnboarding` / `feishuQrOnboardingStatus` / `cancelFeishuQrOnboarding` / `promoteFeishuQrOwner` / `restartProfile` / `configureFeishuEasy`）：仅在主人显式点击后由 Host 侧通过 HTTPS POST 访问 `https://accounts.feishu.cn/oauth/v1/app/registration`（及国际版自动切域后的 `https://accounts.larksuite.com/oauth/v1/app/registration`），严格校验返回的授权链接与开放平台链接属于 `*.feishu.cn` / `*.larksuite.com`；`device_code` 与 `client_secret` 仅存在于 Host 瞬态内存中，经 `/usr/bin/security`（macOS Keychain）或 `$DSH_HOME/credentials-keychain/*.secret`（Linux `0o600` 原子写入且拒绝符号链接）持久化；`promoteFeishuQrOwner` 需显式确认后才以事务方式更新 `$DSH_HOME/assistant-delivery/state.sqlite` 主主人并同步 `cordis.patch.yml`；`restartProfile` 需显式确认后以无 shell 独立后台 helper（`ELECTRON_RUN_AS_NODE=1`）触发 macOS LaunchAgent（`/bin/launchctl kickstart -k`）、`DeepSeek Harness.app`（`/usr/bin/osascript` + `/usr/bin/open`）或非冻结 Linux systemd user unit（`systemctl --user restart`）；受控 Linux systemd 冻结实例拒绝在线改写凭据、移交主主人或触发重启；插件卸载时通过 Cordis effect 立即中止轮询。Setup Doctor 同时检测并一键修复 `assistant-verifier` 缺失 `databasePath` 与 YAML alias 导致的损坏策略规则。
   - 本机编程 CLI 就绪探测仅在主人显式触发时执行无 shell（`execFile`）只读命令（`traex login status`
     或 `agy --version` + `agy models`），传递最小环境变量白名单、有限超时与 15 秒缓存；绝不触发模型推理。
   - **版本检查与自助升级**（`checkSelfUpgrade` / `dryRunSelfUpgrade` / `runSelfUpgrade`）：严格只读读取
-    `$DSH_HOME/.dsh-rsi-host.json`（`O_NOFOLLOW` / `0o600`）与运行时包版本；子进程环境变量沿用最小白名单并严格过滤密钥/token，校验并保留合法绝对路径的 `DSH_DESKTOP_NODE_EXECUTABLE`（供桌面端内置 `node` 包装脚本执行），注入 `DSH_HOME` 并去重追加实际存在的用户可执行目录（`~/.local/bin`、`~/.npm-global/bin`、`~/Library/pnpm`、`/opt/homebrew/bin`、`/usr/local/bin`；Windows 为 `%APPDATA%\npm`）到 `PATH`。通过有界超时的 `dsh-rsi upgrade --check`（25 秒）/ `--dry-run --json`（30 秒）或 `https://registry.npmjs.org/@dsh-enhanced%2Fowner-console/latest` 获取最新版本（带 60 秒 TTL 缓存与离线回退）；若 `dsh-rsi` 返回 `ENOENT`/`ENOTDIR`/`EACCES` 则回退扫描上述用户可执行目录并缓存绝对路径，且细化区分未安装、超时（`ETIMEDOUT`）、离线及脱敏后的 CLI 错误/阻塞诊断（预演通过后自动清理陈旧失败缓存并激活面板升级确认入口）。在非受控本地 / macOS profile 且主人完成预演与明确二次确认后，以无 shell 独立后台进程启动 `dsh-rsi upgrade --yes`（`standard-local` 模式自动附加 `--confirm-dsh-home-stopped`，`macos-launchd` 保持 LaunchAgent 停启事务参数不变；日志写入 `$DSH_HOME/logs/`）；在受控 Linux systemd profile 上拒绝进程内自升级并仅展示带外终端升级命令。
+    `$DSH_HOME/.dsh-ray-host.json`（`O_NOFOLLOW` / `0o600`）与运行时包版本；子进程环境变量沿用最小白名单并严格过滤密钥/token，校验并保留合法绝对路径的 `DSH_DESKTOP_NODE_EXECUTABLE`（供桌面端内置 `node` 包装脚本执行），注入 `DSH_HOME` 并去重追加实际存在的用户可执行目录（`~/.local/bin`、`~/.npm-global/bin`、`~/Library/pnpm`、`/opt/homebrew/bin`、`/usr/local/bin`；Windows 为 `%APPDATA%\npm`）到 `PATH`。通过有界超时的 `dsh-ray upgrade --check`（25 秒）/ `--dry-run --json`（30 秒）或 `https://registry.npmjs.org/@dsh-ray%2Fowner-console/latest` 获取最新版本（带 60 秒 TTL 缓存与离线回退）；若 `dsh-ray` 返回 `ENOENT`/`ENOTDIR`/`EACCES` 则回退扫描上述用户可执行目录并缓存绝对路径，且细化区分未安装、超时（`ETIMEDOUT`）、离线及脱敏后的 CLI 错误/阻塞诊断（预演通过后自动清理陈旧失败缓存并激活面板升级确认入口）。在非受控本地 / macOS profile 且主人完成预演与明确二次确认后，以无 shell 独立后台进程启动 `dsh-ray upgrade --yes`（`standard-local` 模式自动附加 `--confirm-dsh-home-stopped`，`macos-launchd` 保持 LaunchAgent 停启事务参数不变；日志写入 `$DSH_HOME/logs/`）；在受控 Linux systemd profile 上拒绝进程内自升级并仅展示带外终端升级命令。
 - 安装动作因此会经由 Host 启动 pnpm 并访问 registry（与 `dsh plugin` 相同）；只在主人点击时发生。
   依赖构建脚本只有在主人于面板再次确认后、且仅针对 Host 记入 `pendingBuilds` 或安装输出中读到的
   精确名称才被批准；确认写入 profile 的 `allowBuilds` 后由服务端重试，不经模型。
 - 配置写入只经 Host `settings.mutate`，且限定到单个已安装条目；bundle/entry 管理只经 Host
-  `pluginManager` 且限定 `@dsh-enhanced/*`；授权来源是主人自己在面板上的点击，不是模型工具调用，
+  `pluginManager` 且限定 `@dsh-ray/*`；授权来源是主人自己在面板上的点击，不是模型工具调用，
   也不存在后台自动写配置。
 - 对话窗口只读取当前 retained Session 自己的 `eventSource` / snapshot / `permissions` / `modelSelection`
   projection，用来显示消息流、模型选择和朗读；不读取其它会话、报告或记忆，也不上报内容。
@@ -310,7 +310,7 @@ pnpm --dir plugins/owner-console build:assets
   登录态、模型连接与真实飞书 Bot 仍未验收。
 - 本地 `pnpm pack` 产物（非 workspace 链接）经 `dsh plugin add <tgz>` 安装已验证：随包依赖
   `@deepseek-ai/schemastery` / `zod` 由 pnpm 一并装入，入口、设置页与插件页已安装行正常；
-  从 registry 发布后安装尚未验证。面板安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
+  从 registry 发布后安装尚未验证。面板安装只接受 `@dsh-ray/*` 包名（不支持任意本地/git 源）。
 - 设置页会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
   重新启用（与 DSH 原生插件页语义一致）。
 - 停用 bundle 只摘除 patch 层，依赖与包文件保留；「移除」经 Host `pluginManager.removeBundle`

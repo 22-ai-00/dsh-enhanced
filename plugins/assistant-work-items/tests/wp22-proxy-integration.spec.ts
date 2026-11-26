@@ -9,9 +9,9 @@ import {
   attentionHoldoutMember,
   defaultAttentionTuningParameters,
   normalizeAttentionTuningParameters,
-} from '@dsh-enhanced/assistant-evaluation'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { createTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/assistant-evaluation'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { createTaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantWorkItemsService } from '../src/index.ts'
 

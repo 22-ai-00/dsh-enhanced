@@ -3,17 +3,17 @@ import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from 'vitest'
-import { withLaunchdProfileLock } from '../packages/dsh-rsi-cli/src/launchd-lock.ts'
+import { withLaunchdProfileLock } from '../packages/dsh-ray/src/launchd-lock.ts'
 import { withLaunchAgentTargetLock } from '../plugins/lark-channel/src/launchd-target-lock.ts'
 import { dshHomeLifecycleRendezvousPath as cliHomeLockPath,
-  withDshHomeLifecycleLock as withCliHomeLock } from '../packages/dsh-rsi-cli/src/home-lifecycle-lock.ts'
+  withDshHomeLifecycleLock as withCliHomeLock } from '../packages/dsh-ray/src/home-lifecycle-lock.ts'
 import { dshHomeLifecycleRendezvousPath as installerHomeLockPath,
   withDshHomeLifecycleLock as withInstallerHomeLock } from '../plugins/lark-channel/src/setup.ts'
 
 test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
   'CLI and installer exclude each other on the same launchd target and release on failure', async () => {
     const profile = `lock-test-${process.pid}-${randomBytes(6).toString('hex')}`
-    const path = `/tmp/.dsh-enhanced-launchd-${process.getuid?.()}-${profile}.lock`
+    const path = `/tmp/.dsh-ray-launchd-${process.getuid?.()}-${profile}.lock`
     try {
       await withLaunchdProfileLock(profile, async () => {
         await expect(withLaunchAgentTargetLock({ profile }, async () => 'unexpected')).rejects.toThrow('busy')

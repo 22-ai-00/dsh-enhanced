@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-web-owner",
+  "name": "@dsh-ray/assistant-web-owner",
   "version": "0.1.88",
   "description": "A DeepSeek Harness plugin for Assistant Web Owner.",
   "license": "MIT",
@@ -44,7 +44,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-web-owner"
   },
   "keywords": [
@@ -85,17 +85,17 @@
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-typert-registry": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-workspace": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-enhanced/assistant-actions": ">=0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-deepseek-budget": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-goals": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-isolation": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-skills": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/event-triggers": ">=0.1.24 <0.2.0"
+    "@dsh-ray/assistant-actions": ">=0.1.24 <0.2.0",
+    "@dsh-ray/assistant-deepseek-budget": ">=0.1.0 <0.2.0",
+    "@dsh-ray/assistant-delivery": ">0.1.24 <0.2.0",
+    "@dsh-ray/assistant-goals": ">=0.1.0 <0.2.0",
+    "@dsh-ray/assistant-isolation": ">=0.1.0 <0.2.0",
+    "@dsh-ray/assistant-skills": ">=0.1.0 <0.2.0",
+    "@dsh-ray/assistant-verifier": ">=0.1.0 <0.2.0",
+    "@dsh-ray/event-triggers": ">=0.1.24 <0.2.0"
   },
   "peerDependenciesMeta": {
-    "@dsh-enhanced/event-triggers": {
+    "@dsh-ray/event-triggers": {
       "optional": true
     },
     "@deepseek-ai/cordis": {
@@ -131,25 +131,25 @@
     "@deepseek-ai/dsh-workspace": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-delivery": {
+    "@dsh-ray/assistant-delivery": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-isolation": {
+    "@dsh-ray/assistant-isolation": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-goals": {
+    "@dsh-ray/assistant-goals": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-verifier": {
+    "@dsh-ray/assistant-verifier": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-deepseek-budget": {
+    "@dsh-ray/assistant-deepseek-budget": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-actions": {
+    "@dsh-ray/assistant-actions": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-skills": {
+    "@dsh-ray/assistant-skills": {
       "optional": true
     },
     "@deepseek-ai/cordis-plugin-loader": {
@@ -169,14 +169,14 @@
     "@deepseek-ai/dsh-typert-protocol": "catalog:",
     "@deepseek-ai/dsh-typert-registry": "catalog:",
     "@deepseek-ai/dsh-workspace": "catalog:",
-    "@dsh-enhanced/assistant-actions": "workspace:*",
-    "@dsh-enhanced/assistant-deepseek-budget": "workspace:*",
-    "@dsh-enhanced/assistant-delivery": "workspace:*",
-    "@dsh-enhanced/assistant-goals": "workspace:*",
-    "@dsh-enhanced/assistant-isolation": "workspace:*",
-    "@dsh-enhanced/assistant-skills": "workspace:*",
-    "@dsh-enhanced/assistant-verifier": "workspace:*",
-    "@dsh-enhanced/event-triggers": "workspace:*",
+    "@dsh-ray/assistant-actions": "workspace:*",
+    "@dsh-ray/assistant-deepseek-budget": "workspace:*",
+    "@dsh-ray/assistant-delivery": "workspace:*",
+    "@dsh-ray/assistant-goals": "workspace:*",
+    "@dsh-ray/assistant-isolation": "workspace:*",
+    "@dsh-ray/assistant-skills": "workspace:*",
+    "@dsh-ray/assistant-verifier": "workspace:*",
+    "@dsh-ray/event-triggers": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "~18.3.1",
     "esbuild": "^0.27.0",

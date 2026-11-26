@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# scripts/install/purge.sh — DSH enhanced 插件集合的彻底卸载（单文件救机脚本）。
+# scripts/install/purge.sh — DSH Ray 插件集合的彻底卸载（单文件救机脚本）。
 #
 # 这是 mutable-main 运维脚本（始终取 main 分支最新版本），不是 install-npm.sh
 # 那样的供应链引导路径，因此不做 release pin/sha256 校验。
 #
-# 优先委托全局 dsh-rsi（随插件集合一起安装，实现完整、带单测）；
-# macOS 必须使用具有服务归属校验能力的 dsh-rsi；缺失或旧版 CLI 会停止清理。
-# Linux 机器上没有 dsh-rsi 时（崩溃后/手动删过），使用本文件内联的精简实现：
+# 优先委托全局 dsh-ray（随插件集合一起安装，实现完整、带单测）；
+# macOS 必须使用具有服务归属校验能力的 dsh-ray；缺失或旧版 CLI 会停止清理。
+# Linux 机器上没有 dsh-ray 时（崩溃后/手动删过），使用本文件内联的精简实现：
 # 先自动停用受管常驻服务 → 停服后复检残留进程（可证明归属本 home 的 dsh 进程交互/--yes
 # 终止，无法证明归属的 fail-closed）→ tar.gz 备份 → 删除 profile/DSH home/生命周期残留
 # → 清理外部凭据 → 可选卸载全局 host。local checkout 源码绝不删除。
 #
 # 用法：
-#   curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/purge.sh \
+#   curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-ray/main/scripts/install/purge.sh \
 #     | bash -s -- --yes
 #   bash purge.sh [--dsh-home PATH] [--profile NAME] [--no-backup] [--keep-keychain]
 #                 [--remove-host] [--dry-run] [--yes] [-h|--help]
@@ -31,7 +31,7 @@ purge_usage() {
   cat <<'EOF'
 用法：purge.sh [选项]
 
-彻底卸载 DSH enhanced 插件集合（默认先备份 ~/.dsh 再删除）。
+彻底卸载 DSH Ray 插件集合（默认先备份 ~/.dsh 再删除）。
 
 选项：
   --dsh-home <path>   DSH home（默认 $DSH_HOME，否则 ~/.dsh）
@@ -70,23 +70,20 @@ case "$(uname -s)" in
   *) printf 'purge.sh: 仅支持 macOS 与 Linux，当前平台：%s\n' "$(uname -s)" >&2; exit 1 ;;
 esac
 
-# 完整实现始终以 dsh-rsi 为准。全局 bin 可能不在 PATH（手动删过 PATH / 用别的 node prefix），
-# 因此按多路径定位，兼容新旧包名（@dsh-enhanced/dsh-rsi-cli 与 @dsh-enhanced/rsi-cli）；
+# 完整实现始终以 dsh-ray 为准。全局 bin 可能不在 PATH（手动删过 PATH / 用别的 node prefix），
+# 因此按多路径定位，兼容 PATH 与全局 npm prefix 路径；
 # 只有所有路径都找不到时才降级到内联实现。
 purge_locate_rsi() {
   local purge_prefix purge_cand purge_prefix_js
   purge_prefix="$(npm prefix -g 2>/dev/null || true)"
   for purge_cand in \
-    "$(command -v dsh-rsi 2>/dev/null || true)" \
-    "${purge_prefix:+$purge_prefix/bin/dsh-rsi}"; do
+    "$(command -v dsh-ray 2>/dev/null || true)" \
+    "${purge_prefix:+$purge_prefix/bin/dsh-ray}"; do
     [[ -n "$purge_cand" && -e "$purge_cand" ]] && { printf '%s\n' "$purge_cand"; return 0; }
   done
   # .js 入口（包名路径）：需用 node 执行。
-  for purge_prefix_js in \
-    "${purge_prefix:+$purge_prefix/lib/node_modules/@dsh-enhanced/dsh-rsi-cli/bin/dsh-rsi.js}" \
-    "${purge_prefix:+$purge_prefix/lib/node_modules/@dsh-enhanced/rsi-cli/bin/dsh-rsi.js}"; do
-    [[ -n "$purge_prefix_js" && -e "$purge_prefix_js" ]] && { printf 'node %s\n' "$purge_prefix_js"; return 0; }
-  done
+  purge_prefix_js="${purge_prefix:+$purge_prefix/lib/node_modules/dsh-ray/bin/dsh-ray.js}"
+  [[ -n "$purge_prefix_js" && -e "$purge_prefix_js" ]] && { printf 'node %s\n' "$purge_prefix_js"; return 0; }
   return 1
 }
 
@@ -100,7 +97,7 @@ if purge_rsi_found="$(purge_locate_rsi)"; then
   if [[ "$PURGE_PLATFORM" == 'darwin' ]]; then
     if ! purge_capabilities="$("$@" --capabilities 2>/dev/null)" \
       || ! node -e 'try { const value = JSON.parse(process.argv[1]); process.exit(Array.isArray(value.capabilities) && value.capabilities.includes("macos-launchd-ownership-v1") ? 0 : 1) } catch { process.exit(1) }' "$purge_capabilities"; then
-      printf 'purge.sh: 已找到的 dsh-rsi 缺少 macOS 服务归属校验能力，已停止，未操作服务或删除数据。请升级到包含该能力的 @dsh-enhanced/dsh-rsi-cli 后重试。\n' >&2
+      printf 'purge.sh: 已找到的 dsh-ray 缺少 macOS 服务归属校验能力，已停止，未操作服务或删除数据。请升级到包含该能力的 dsh-ray 后重试。\n' >&2
       exit 1
     fi
   fi
@@ -114,7 +111,7 @@ if purge_rsi_found="$(purge_locate_rsi)"; then
   exec "$@" purge "${purge_rsi_args[@]+"${purge_rsi_args[@]}"}"
 fi
 
-printf 'purge.sh: 未找到全局 dsh-rsi（已查 PATH、npm prefix bin 与新旧包名路径），使用内联精简实现（建议日后安装插件集合获得完整 dsh-rsi）。\n' >&2
+printf 'purge.sh: 未找到全局 dsh-ray（已查 PATH、npm prefix bin 与全局包路径），使用内联精简实现（建议日后安装插件集合获得完整 dsh-ray）。\n' >&2
 
 if [[ -n "$PURGE_PROFILE" && "$PURGE_REMOVE_HOST" == '1' ]]; then
   printf 'purge.sh: --remove-host 只能在全量 purge（不指定 --profile）时使用。\n' >&2
@@ -125,7 +122,7 @@ if [[ ! -d "$PURGE_DSH_HOME" ]]; then
   exit 0
 fi
 if [[ "$PURGE_PLATFORM" == 'darwin' ]]; then
-  printf 'purge.sh: macOS 清理需要 dsh-rsi 的服务归属与停服校验；当前未找到完整 CLI，已停止，未操作服务或删除数据。请安装 @dsh-enhanced/dsh-rsi-cli 后重试。\n' >&2
+  printf 'purge.sh: macOS 清理需要 dsh-ray 的服务归属与停服校验；当前未找到完整 CLI，已停止，未操作服务或删除数据。请安装 dsh-ray 后重试。\n' >&2
   exit 1
 fi
 if [[ -n "$PURGE_PROFILE" && ! -d "$PURGE_DSH_HOME/profiles/$PURGE_PROFILE" ]]; then
@@ -189,7 +186,7 @@ for purge_p in "${PURGE_PROFILES[@]+"${PURGE_PROFILES[@]}"}"; do
 done
 
 # --- 3. 停服后复检残留进程，分类终止 ---
-# self(dsh-rsi/purge.sh) 跳过；proven=命令行带 --profile 且是 dsh 操作，可终止；
+# self(dsh-ray/purge.sh) 跳过；proven=命令行带 --profile 且是 dsh 操作，可终止；
 # foreign=命令行带 --profile 但无法证明是 dsh 操作 → fail-closed，绝不自动杀。
 PURGE_TERMINATE_PIDS=()
 purge_foreign_list=''
@@ -199,9 +196,9 @@ for purge_p in "${PURGE_PROFILES[@]+"${PURGE_PROFILES[@]}"}"; do
       [[ -n "$purge_pid" ]] || continue
       purge_cmd="$(ps -p "$purge_pid" -o command= 2>/dev/null || printf 'PID %s' "$purge_pid")"
       case "$purge_cmd" in
-        *dsh-rsi*|*rsi-cli*|*purge.sh*) continue ;;
+        *dsh-ray*|*purge.sh*) continue ;;
       esac
-      if printf '%s' "$purge_cmd" | grep -qE '(^|[[:space:]])(dsh|dsh-rsi)([[:space:]]|$)|dsh[[:space:]]+plugin'; then
+      if printf '%s' "$purge_cmd" | grep -qE '(^|[[:space:]])(dsh|dsh-ray)([[:space:]]|$)|dsh[[:space:]]+plugin'; then
         PURGE_TERMINATE_PIDS+=("$purge_pid")
       else
         purge_foreign_list="$purge_foreign_list  PID $purge_pid: $purge_cmd"$'\n'
@@ -287,7 +284,7 @@ fi
 # --- 5. 外部凭据（journal 权威反查；node 随全局 dsh 必然存在） ---
 if [[ "$PURGE_KEEP_KEYCHAIN" != '1' ]]; then
   if ! command -v node >/dev/null 2>&1; then
-    printf 'purge.sh: 找不到 node，跳过外部凭据清理；文件仍会删除，凭据请稍后用 dsh-rsi purge 复查。\n' >&2
+    printf 'purge.sh: 找不到 node，跳过外部凭据清理；文件仍会删除，凭据请稍后用 dsh-ray purge 复查。\n' >&2
   else
     PURGE_DSH_HOME="$PURGE_DSH_HOME" PURGE_WANT_PROFILE="$PURGE_PROFILE" \
     PURGE_PLATFORM="$PURGE_PLATFORM" PURGE_DRY_RUN="$PURGE_DRY_RUN" node <<'PURGE_NODE'
@@ -356,7 +353,7 @@ if [[ -n "$PURGE_PROFILE" ]]; then
   purge_run rm -f "$PURGE_DSH_HOME/logs/$PURGE_PROFILE-host.log" "$PURGE_DSH_HOME/logs/$PURGE_PROFILE-host.error.log"
   purge_home_base="$(basename "$PURGE_DSH_HOME")"
   purge_home_parent="$(dirname "$PURGE_DSH_HOME")"
-  purge_failed_prefix="$purge_home_base.dsh-enhanced-transaction.failed-$PURGE_PROFILE-"
+  purge_failed_prefix="$purge_home_base.dsh-ray-transaction.failed-$PURGE_PROFILE-"
   if [[ -d "$purge_home_parent" ]]; then
     for purge_diag in "$purge_home_parent"/$purge_failed_prefix*; do
       [[ -e "$purge_diag" ]] || continue
@@ -368,17 +365,17 @@ else
     while IFS= read -r -d '' purge_link; do
       purge_target="$(readlink "$purge_link" || true)"
       [[ -n "$purge_target" ]] && printf 'local checkout 源码保留（确认无用可手工 rm -rf）：%s\n' "$purge_target"
-    done < <(find "$PURGE_DSH_HOME/profiles" -type l -path '*/node_modules/@dsh-enhanced/*' -print0 2>/dev/null || true)
+    done < <(find "$PURGE_DSH_HOME/profiles" -type l -path '*/node_modules/@dsh-ray/*' -print0 2>/dev/null || true)
   fi
   purge_home_parent="$(dirname "$PURGE_DSH_HOME")"
   purge_home_base="$(basename "$PURGE_DSH_HOME")"
   purge_run rm -rf "$PURGE_DSH_HOME"
   for purge_residual in \
-      "$purge_home_parent/$purge_home_base.dsh-enhanced-transaction" \
-      "$purge_home_parent/$purge_home_base.dsh-enhanced-lifecycle.lock"; do
+      "$purge_home_parent/$purge_home_base.dsh-ray-transaction" \
+      "$purge_home_parent/$purge_home_base.dsh-ray-lifecycle.lock"; do
     [[ -e "$purge_residual" ]] && purge_run rm -rf "$purge_residual"
   done
-  for purge_diag in "$purge_home_parent/$purge_home_base.dsh-enhanced-transaction.failed-"*; do
+  for purge_diag in "$purge_home_parent/$purge_home_base.dsh-ray-transaction.failed-"*; do
     [[ -e "$purge_diag" ]] || continue
     purge_run rm -rf "$purge_diag"
   done

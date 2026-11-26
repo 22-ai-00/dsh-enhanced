@@ -2,9 +2,9 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
-import { validateMemoryReviewConfig } from '@dsh-enhanced/assistant-verifier'
-import { validateMemoryLearningAdoptionGrant } from '@dsh-enhanced/personal-memory'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
+import { validateMemoryReviewConfig } from '@dsh-ray/assistant-verifier'
+import { validateMemoryLearningAdoptionGrant } from '@dsh-ray/personal-memory'
 import { createRsiMemoryLearningSetup } from '../../lark-channel/lib/rsi-memory-learning.js'
 import type { TrustedTaskLearningProjectionReceipt } from '../../assistant-evaluation/lib/types.js'
 import { validateLearningConfig } from '../src/config.ts'
@@ -113,7 +113,7 @@ async function mountGenerated(f: Fixture, grants: ReturnType<typeof createRsiMem
 // This spec consumes the compiled generator artifact
 // (plugins/lark-channel/lib/rsi-memory-learning.js), matching the repository
 // build-then-test order. A standalone package test run must build lark-channel
-// first: pnpm --filter @dsh-enhanced/lark-channel run build.
+// first: pnpm --filter @dsh-ray/lark-channel run build.
 describe('installer-generated memory-learning configuration', () => {
   test('generator grants drive owner feedback through extraction, independent review, adoption and withdrawal', async () => {
     const f = await workItemLearningFixture({ learningPolicyIds })

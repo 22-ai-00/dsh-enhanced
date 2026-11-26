@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-recovery
+# @dsh-ray/assistant-recovery
 
 `supervised-growth/v2` 的确定性恢复控制面。它把“成长心跳”从交互 Agent、模型和
 preset 工具面中移出，注册一个版本化 Host executor，并按固定 catalog 执行有界步骤。
@@ -16,15 +16,15 @@ dsh --profile web --dump-config
 ```
 
 安装已发布版本时，从同一个固定发布标签运行 npm 安装器（把 `vX.Y.Z` 替换为真实标签）。安装器
-默认把全部 `@dsh-enhanced/*` bundle 精确固定到它自身的发布版本，不使用可能在递归发布中途产生
+默认把全部 `@dsh-ray/*` bundle 精确固定到它自身的发布版本，不使用可能在递归发布中途产生
 混合版本的 `latest`：
 
 ```sh
-DSH_ENHANCED_RELEASE=vX.Y.Z
-bash -c "$(curl -fsSL "https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/$DSH_ENHANCED_RELEASE/scripts/install/install-npm.sh")" -- --scenario supervised --lark configure
+DSH_RAY_RELEASE=vX.Y.Z
+bash -c "$(curl -fsSL "https://raw.githubusercontent.com/22-ai-00/dsh-ray/$DSH_RAY_RELEASE/scripts/install/install-npm.sh")" -- --scenario supervised --lark configure
 ```
 
-不要把 `dsh plugin --profile web add @dsh-enhanced/assistant-recovery` 当作 fresh-profile 安装命令。
+不要把 `dsh plugin --profile web add @dsh-ray/assistant-recovery` 当作 fresh-profile 安装命令。
 本包的 Cordis row 会等待 `assistantAutomations`、`assistantDelivery`、`assistantEvaluation`、
 `assistantEvolution`、`assistantPreferenceLearning` 和 `assistantHealth`；peer 在包管理器层标记为
 optional 只是为了让 DSH profile 提供唯一 Host 实例，不代表这些运行时服务可以缺失。手工组合仅适合

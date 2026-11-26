@@ -15,7 +15,7 @@ import {
   type IsolatedSubprocessRequest,
   type IsolatedSubprocessResult,
   type IsolationBackendConfig,
-} from '@dsh-enhanced/assistant-isolation'
+} from '@dsh-ray/assistant-isolation'
 import { assertReadOnlyWebToolSurface, sanitizeWebLearningEnv } from './web-fetch.ts'
 import {
   executeWebLearningPlan,

@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-memory-learning
-      name: '@dsh-enhanced/assistant-memory-learning'
+    - id: dsh-ray-assistant-memory-learning
+      name: '@dsh-ray/assistant-memory-learning'
       inject:
         - assistantDelivery
         - assistantEvaluation

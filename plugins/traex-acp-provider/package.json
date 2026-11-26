@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/traex-acp-provider",
+  "name": "@dsh-ray/traex-acp-provider",
   "version": "0.1.88",
   "description": "Use local TraeX and Antigravity (agy) coding agents as DeepSeek Harness model providers over ACP.",
   "license": "MIT",
@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/traex-acp-provider"
   },
   "keywords": [
@@ -56,7 +56,7 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "catalog:",
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/llm-route-capabilities": "workspace:*",
+    "@dsh-ray/llm-route-capabilities": "workspace:*",
     "zod": "catalog:"
   },
   "peerDependencies": {

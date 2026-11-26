@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, test, vi } from 'vitest'
 import type {
   DeliveryProgressIntent, DeliveryProgressJournal, DeliveryProgressRecord,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import { LarkProgressPresenter } from '../src/progress.ts'
 import type { LarkTransport } from '../src/types.ts'
 import { DeliveryStore } from '../../assistant-delivery/lib/store.js'

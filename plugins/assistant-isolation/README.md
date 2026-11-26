@@ -10,7 +10,7 @@ retain their existing recovery rules. Unloading during the wait cancels admissio
 and closes the ledger without a later claim. Startup supervisors must allow this
 lease interval plus ordinary boot time before treating readiness as a failure.
 
-`@dsh-enhanced/assistant-isolation` adds `isolation_run` to the native DSH ToolRuntime. An operator grants a finite number of offline shell jobs to one authenticated owner, workspace and agent preset. Each job receives only explicitly supplied text files in a fresh scratch directory. Results and artifacts are untrusted process output; exit code zero does not establish that a user goal was achieved.
+`@dsh-ray/assistant-isolation` adds `isolation_run` to the native DSH ToolRuntime. An operator grants a finite number of offline shell jobs to one authenticated owner, workspace and agent preset. Each job receives only explicitly supplied text files in a fresh scratch directory. Results and artifacts are untrusted process output; exit code zero does not establish that a user goal was achieved.
 
 This is an actual isolation component of the autonomy work. External action/credential brokerage, rollback/compensation and installer bootstrap remain separate delivery requirements. It does not isolate arbitrary Host plugins or replace the native AgentLoop. The Host, local operator, configured runtime and kernel remain trusted. The package contains no Docker dependency: Linux isolation is the native user-namespace/cgroup/seccomp backend, and macOS verification uses the seatbelt primitive. Each workspace uses a private tmpfs volume with byte and inode hard limits. A persistent pool bounds admitted worker/workspace/keeper reservations across this ledger; it is not a machine-wide guarantee against runtime/kernel overhead or unrelated workloads. Do not treat this component as a complete hostile-code production platform.
 
@@ -290,7 +290,7 @@ trusted verifier API, not the public `isolation_run` tool.
 ## Installation
 
 ```sh
-dsh plugin --profile <profile> add @dsh-enhanced/assistant-isolation
+dsh plugin --profile <profile> add @dsh-ray/assistant-isolation
 ```
 
 Required Host services: `agents`, `tools`, `assistantDelivery`, and `assistantPolicy`. The bundle is independently publishable; installing it does not install or activate peers. Without the services it does not register an execution tool. With no grants it does not execute jobs. The plugin downloads no image and contacts no container daemon.
@@ -431,7 +431,7 @@ Native skill benchmark cells may expose `skill_run` and `skill_status` through t
 
 ## Non-activating native resources
 
-`@dsh-enhanced/assistant-isolation/native-resources` is a programmatic resource
+`@dsh-ray/assistant-isolation/native-resources` is a programmatic resource
 entry, with no Cordis plugin/default export. Importing it does not mount Isolation
 or create grants. `freezeLinuxRuntimeSource({kind:'git-object', repository, commit,
 version})` reads exact commit objects from an existing checkout or bare repository;

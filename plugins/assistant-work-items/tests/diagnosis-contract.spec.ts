@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import { normalizeConfig } from '../src/config.ts'
 import { assertDiagnosisSource, canonicalDiagnosis, createDiagnosisPlan, diagnosisConfigurationDigest, diagnosisDefinition,
   diagnosisDefinitionHash, diagnosisExternalId, diagnosisToolDigest, DIAGNOSIS_SOURCE, DIAGNOSIS_TOOLS, parseDiagnosisPlan,

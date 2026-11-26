@@ -380,64 +380,64 @@ importers:
       '@deepseek-ai/dsh-util-workspace-path':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:plugins/assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:plugins/assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:plugins/assistant-evaluation
-      '@dsh-enhanced/assistant-evolution':
+      '@dsh-ray/assistant-evolution':
         specifier: workspace:*
         version: link:plugins/assistant-evolution
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:packages/assistant-growth-contract
-      '@dsh-enhanced/assistant-health':
+      '@dsh-ray/assistant-health':
         specifier: workspace:*
         version: link:plugins/assistant-health
-      '@dsh-enhanced/assistant-heartbeat':
+      '@dsh-ray/assistant-heartbeat':
         specifier: workspace:*
         version: link:plugins/assistant-heartbeat
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:plugins/assistant-policy
-      '@dsh-enhanced/assistant-recovery':
+      '@dsh-ray/assistant-recovery':
         specifier: workspace:*
         version: link:plugins/assistant-recovery
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:plugins/assistant-verifier
-      '@dsh-enhanced/coding-subscription-provider':
+      '@dsh-ray/coding-subscription-provider':
         specifier: workspace:*
         version: link:plugins/coding-subscription-provider
-      '@dsh-enhanced/credentials-keychain':
+      '@dsh-ray/credentials-keychain':
         specifier: workspace:*
         version: link:plugins/credentials-keychain
-      '@dsh-enhanced/event-triggers':
+      '@dsh-ray/event-triggers':
         specifier: workspace:*
         version: link:plugins/event-triggers
-      '@dsh-enhanced/lark-channel':
+      '@dsh-ray/lark-channel':
         specifier: workspace:*
         version: link:plugins/lark-channel
-      '@dsh-enhanced/llm-route-capabilities':
+      '@dsh-ray/llm-route-capabilities':
         specifier: workspace:*
         version: link:packages/llm-route-capabilities
-      '@dsh-enhanced/memory-wiki-bridge':
+      '@dsh-ray/memory-wiki-bridge':
         specifier: workspace:*
         version: link:plugins/memory-wiki-bridge
-      '@dsh-enhanced/personal-memory':
+      '@dsh-ray/personal-memory':
         specifier: workspace:*
         version: link:plugins/personal-memory
-      '@dsh-enhanced/personal-wiki':
+      '@dsh-ray/personal-wiki':
         specifier: workspace:*
         version: link:plugins/personal-wiki
-      '@dsh-enhanced/preference-learning':
+      '@dsh-ray/preference-learning':
         specifier: workspace:*
         version: link:plugins/preference-learning
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:packages/task-acceptance-contract
       '@playwright/test':
@@ -471,7 +471,7 @@ importers:
         specifier: 'catalog:'
         version: 4.1.8(@types/node@22.20.0)(jsdom@29.1.1)(vite@8.2.1(@types/node@22.20.0)(esbuild@0.27.7)(yaml@2.9.0))
 
-  packages/dsh-rsi-cli:
+  packages/dsh-ray:
     dependencies:
       yaml:
         specifier: 2.9.0
@@ -595,7 +595,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
       koffi:
@@ -635,25 +635,25 @@ importers:
       '@deepseek-ai/dsh-user-approval':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64)
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-isolation':
+      '@dsh-ray/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
-      '@dsh-enhanced/credentials-keychain':
+      '@dsh-ray/credentials-keychain':
         specifier: workspace:*
         version: link:../credentials-keychain
       '@types/node':
@@ -671,10 +671,10 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
-      '@dsh-enhanced/assistant-isolation':
+      '@dsh-ray/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
     devDependencies:
@@ -705,40 +705,40 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-dreaming':
+      '@dsh-ray/assistant-dreaming':
         specifier: workspace:*
         version: link:../assistant-dreaming
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-skills':
+      '@dsh-ray/assistant-skills':
         specifier: workspace:*
         version: link:../assistant-skills
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
-      '@dsh-enhanced/assistant-work-items':
+      '@dsh-ray/assistant-work-items':
         specifier: workspace:*
         version: link:../assistant-work-items
-      '@dsh-enhanced/event-triggers':
+      '@dsh-ray/event-triggers':
         specifier: workspace:*
         version: link:../event-triggers
-      '@dsh-enhanced/personal-memory':
+      '@dsh-ray/personal-memory':
         specifier: workspace:*
         version: link:../personal-memory
-      '@dsh-enhanced/personal-wiki':
+      '@dsh-ray/personal-wiki':
         specifier: workspace:*
         version: link:../personal-wiki
       '@types/node':
@@ -756,13 +756,13 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
-      '@dsh-enhanced/llm-route-capabilities':
+      '@dsh-ray/llm-route-capabilities':
         specifier: workspace:*
         version: link:../../packages/llm-route-capabilities
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -802,16 +802,16 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-evolution':
+      '@dsh-ray/assistant-evolution':
         specifier: workspace:*
         version: link:../assistant-evolution
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
       '@types/node':
@@ -839,7 +839,7 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
       '@types/node':
@@ -857,13 +857,13 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
-      '@dsh-enhanced/llm-route-capabilities':
+      '@dsh-ray/llm-route-capabilities':
         specifier: workspace:*
         version: link:../../packages/llm-route-capabilities
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -942,22 +942,22 @@ importers:
       '@deepseek-ai/dsh-user-questions':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session-projection@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-typert-protocol@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-evolution':
+      '@dsh-ray/assistant-evolution':
         specifier: workspace:*
         version: link:../assistant-evolution
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
       '@types/node':
@@ -975,7 +975,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -1006,25 +1006,25 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-skills':
+      '@dsh-ray/assistant-skills':
         specifier: workspace:*
         version: link:../assistant-skills
-      '@dsh-enhanced/personal-memory':
+      '@dsh-ray/personal-memory':
         specifier: workspace:*
         version: link:../personal-memory
       '@types/node':
@@ -1042,7 +1042,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -1103,40 +1103,40 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-deepseek-budget':
+      '@dsh-ray/assistant-deepseek-budget':
         specifier: workspace:*
         version: link:../assistant-deepseek-budget
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evolution':
+      '@dsh-ray/assistant-evolution':
         specifier: workspace:*
         version: link:../assistant-evolution
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-isolation':
+      '@dsh-ray/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-skills':
+      '@dsh-ray/assistant-skills':
         specifier: workspace:*
         version: link:../assistant-skills
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
-      '@dsh-enhanced/llm-route-capabilities':
+      '@dsh-ray/llm-route-capabilities':
         specifier: workspace:*
         version: link:../../packages/llm-route-capabilities
-      '@dsh-enhanced/personal-memory':
+      '@dsh-ray/personal-memory':
         specifier: workspace:*
         version: link:../personal-memory
-      '@dsh-enhanced/traex-acp-provider':
+      '@dsh-ray/traex-acp-provider':
         specifier: workspace:*
         version: link:../traex-acp-provider
       '@types/node':
@@ -1154,7 +1154,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -1188,22 +1188,22 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
       '@types/node':
@@ -1221,7 +1221,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -1276,19 +1276,19 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
-      '@dsh-enhanced/event-triggers':
+      '@dsh-ray/event-triggers':
         specifier: workspace:*
         version: link:../event-triggers
       '@types/node':
@@ -1306,10 +1306,10 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -1361,40 +1361,40 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-dreaming':
+      '@dsh-ray/assistant-dreaming':
         specifier: workspace:*
         version: link:../assistant-dreaming
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-isolation':
+      '@dsh-ray/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-skills':
+      '@dsh-ray/assistant-skills':
         specifier: workspace:*
         version: link:../assistant-skills
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
-      '@dsh-enhanced/assistant-work-items':
+      '@dsh-ray/assistant-work-items':
         specifier: workspace:*
         version: link:../assistant-work-items
-      '@dsh-enhanced/lark-channel':
+      '@dsh-ray/lark-channel':
         specifier: workspace:*
         version: link:../lark-channel
-      '@dsh-enhanced/plugin-control-plane':
+      '@dsh-ray/plugin-control-plane':
         specifier: workspace:*
         version: link:../plugin-control-plane
       '@types/node':
@@ -1412,7 +1412,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
     devDependencies:
@@ -1440,16 +1440,16 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
       '@types/node':
@@ -1477,10 +1477,10 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/preference-learning':
+      '@dsh-ray/preference-learning':
         specifier: workspace:*
         version: link:../preference-learning
       '@types/node':
@@ -1508,10 +1508,10 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
       '@types/node':
@@ -1529,7 +1529,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
       yaml:
@@ -1566,10 +1566,10 @@ importers:
       '@deepseek-ai/dsh-user-approval':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64)
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
       '@types/node':
@@ -1587,7 +1587,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
     devDependencies:
@@ -1624,22 +1624,22 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
-      '@dsh-enhanced/personal-memory':
+      '@dsh-ray/personal-memory':
         specifier: workspace:*
         version: link:../personal-memory
       '@types/node':
@@ -1712,7 +1712,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:^
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -1731,16 +1731,16 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:^
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:^
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:^
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:^
         version: link:../assistant-policy
       '@types/node':
@@ -1762,25 +1762,25 @@ importers:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'
         version: 4.1.0(@deepseek-ai/cordis-plugin-include@1.1.0)(@deepseek-ai/cordis-plugin-loader@1.1.0)
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-evolution':
+      '@dsh-ray/assistant-evolution':
         specifier: workspace:*
         version: link:../assistant-evolution
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-health':
+      '@dsh-ray/assistant-health':
         specifier: workspace:*
         version: link:../assistant-health
-      '@dsh-enhanced/preference-learning':
+      '@dsh-ray/preference-learning':
         specifier: workspace:*
         version: link:../preference-learning
       '@types/node':
@@ -1798,7 +1798,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -1856,25 +1856,25 @@ importers:
       '@deepseek-ai/dsh-working-directory':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(ba8ad73bb7623f42a353e55cbebc081d)
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-isolation':
+      '@dsh-ray/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-recovery':
+      '@dsh-ray/assistant-recovery':
         specifier: workspace:*
         version: link:../assistant-recovery
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
       '@types/node':
@@ -1892,19 +1892,19 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-actions':
+      '@dsh-ray/assistant-actions':
         specifier: '>=0.1.0 <0.2.0'
         version: link:../assistant-actions
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
-      '@dsh-enhanced/assistant-isolation':
+      '@dsh-ray/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
-      '@dsh-enhanced/plugin-control-plane':
+      '@dsh-ray/plugin-control-plane':
         specifier: '>=0.1.0 <0.2.0'
         version: link:../plugin-control-plane
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -1941,16 +1941,16 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
       '@types/node':
@@ -2011,28 +2011,28 @@ importers:
       '@deepseek-ai/dsh-workspace':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-session-persistence@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-brand@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-timeout@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-storage-domain@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-storage@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-storage@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-typert-protocol@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))
-      '@dsh-enhanced/assistant-actions':
+      '@dsh-ray/assistant-actions':
         specifier: workspace:*
         version: link:../assistant-actions
-      '@dsh-enhanced/assistant-deepseek-budget':
+      '@dsh-ray/assistant-deepseek-budget':
         specifier: workspace:*
         version: link:../assistant-deepseek-budget
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-isolation':
+      '@dsh-ray/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
-      '@dsh-enhanced/assistant-skills':
+      '@dsh-ray/assistant-skills':
         specifier: workspace:*
         version: link:../assistant-skills
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
-      '@dsh-enhanced/event-triggers':
+      '@dsh-ray/event-triggers':
         specifier: workspace:*
         version: link:../event-triggers
       '@types/node':
@@ -2059,7 +2059,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/task-acceptance-contract':
+      '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
     devDependencies:
@@ -2093,19 +2093,19 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
       '@types/node':
@@ -2123,7 +2123,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/llm-route-capabilities':
+      '@dsh-ray/llm-route-capabilities':
         specifier: workspace:*
         version: link:../../packages/llm-route-capabilities
     devDependencies:
@@ -2161,7 +2161,7 @@ importers:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'
         version: 4.1.0(@deepseek-ai/cordis-plugin-include@1.1.0)(@deepseek-ai/cordis-plugin-loader@1.1.0)
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
       '@types/node':
@@ -2183,22 +2183,22 @@ importers:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'
         version: 4.1.0(@deepseek-ai/cordis-plugin-include@1.1.0)(@deepseek-ai/cordis-plugin-loader@1.1.0)
-      '@dsh-enhanced/assistant-actions':
+      '@dsh-ray/assistant-actions':
         specifier: workspace:*
         version: link:../assistant-actions
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/credentials-keychain':
+      '@dsh-ray/credentials-keychain':
         specifier: workspace:*
         version: link:../credentials-keychain
-      '@dsh-enhanced/lark-channel':
+      '@dsh-ray/lark-channel':
         specifier: workspace:*
         version: link:../lark-channel
       '@types/node':
@@ -2231,10 +2231,10 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
-      '@dsh-enhanced/assistant-isolation':
+      '@dsh-ray/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
       '@larksuiteoapi/node-sdk':
@@ -2256,55 +2256,55 @@ importers:
       '@deepseek-ai/dsh-tool-executor-native':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-tools@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64)))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-evolution':
+      '@dsh-ray/assistant-evolution':
         specifier: workspace:*
         version: link:../assistant-evolution
-      '@dsh-enhanced/assistant-growth-driver':
+      '@dsh-ray/assistant-growth-driver':
         specifier: workspace:*
         version: link:../assistant-growth-driver
-      '@dsh-enhanced/assistant-growth-experiments':
+      '@dsh-ray/assistant-growth-experiments':
         specifier: workspace:*
         version: link:../assistant-growth-experiments
-      '@dsh-enhanced/assistant-health':
+      '@dsh-ray/assistant-health':
         specifier: workspace:*
         version: link:../assistant-health
-      '@dsh-enhanced/assistant-heartbeat':
+      '@dsh-ray/assistant-heartbeat':
         specifier: workspace:*
         version: link:../assistant-heartbeat
-      '@dsh-enhanced/assistant-memory-learning':
+      '@dsh-ray/assistant-memory-learning':
         specifier: workspace:*
         version: link:../assistant-memory-learning
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-recovery':
+      '@dsh-ray/assistant-recovery':
         specifier: workspace:*
         version: link:../assistant-recovery
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
-      '@dsh-enhanced/credentials-keychain':
+      '@dsh-ray/credentials-keychain':
         specifier: workspace:*
         version: link:../credentials-keychain
-      '@dsh-enhanced/personal-assistant':
+      '@dsh-ray/personal-assistant':
         specifier: workspace:*
         version: link:../personal-assistant
-      '@dsh-enhanced/personal-memory':
+      '@dsh-ray/personal-memory':
         specifier: workspace:*
         version: link:../personal-memory
-      '@dsh-enhanced/plugin-control-plane':
+      '@dsh-ray/plugin-control-plane':
         specifier: workspace:*
         version: link:../plugin-control-plane
-      '@dsh-enhanced/preference-learning':
+      '@dsh-ray/preference-learning':
         specifier: workspace:*
         version: link:../preference-learning
       '@types/markdown-it':
@@ -2338,10 +2338,10 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/personal-memory':
+      '@dsh-ray/personal-memory':
         specifier: workspace:*
         version: link:../personal-memory
-      '@dsh-enhanced/personal-wiki':
+      '@dsh-ray/personal-wiki':
         specifier: workspace:*
         version: link:../personal-wiki
       '@types/node':
@@ -2426,16 +2426,16 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/personal-memory':
+      '@dsh-ray/personal-memory':
         specifier: workspace:*
         version: link:../personal-memory
-      '@dsh-enhanced/personal-wiki':
+      '@dsh-ray/personal-wiki':
         specifier: workspace:*
         version: link:../personal-wiki
     devDependencies:
@@ -2457,7 +2457,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
     devDependencies:
@@ -2488,19 +2488,19 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-goals':
+      '@dsh-ray/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
       '@types/node':
@@ -2546,10 +2546,10 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
       '@types/node':
@@ -2567,10 +2567,10 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
-      '@dsh-enhanced/assistant-isolation':
+      '@dsh-ray/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
     devDependencies:
@@ -2589,19 +2589,19 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-automations':
+      '@dsh-ray/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-evaluation':
+      '@dsh-ray/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/assistant-verifier':
+      '@dsh-ray/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
       '@types/node':
@@ -2619,7 +2619,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/assistant-growth-contract':
+      '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
     devDependencies:
@@ -2647,13 +2647,13 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(0ed64d44925d0c713f38f0da8dc986ac))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(3b5da5a163d911e06a2cca6f415e2b64))
-      '@dsh-enhanced/assistant-delivery':
+      '@dsh-ray/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
-      '@dsh-enhanced/assistant-policy':
+      '@dsh-ray/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
-      '@dsh-enhanced/personal-memory':
+      '@dsh-ray/personal-memory':
         specifier: workspace:*
         version: link:../personal-memory
       '@types/node':
@@ -2674,7 +2674,7 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
-      '@dsh-enhanced/llm-route-capabilities':
+      '@dsh-ray/llm-route-capabilities':
         specifier: workspace:*
         version: link:../../packages/llm-route-capabilities
       zod:

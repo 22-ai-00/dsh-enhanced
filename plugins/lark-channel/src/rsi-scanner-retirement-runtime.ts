@@ -1,6 +1,6 @@
 import type { Fiber } from '@deepseek-ai/cordis'
-import type { AssistantAutomationsService, Config as AutomationsConfig } from '@dsh-enhanced/assistant-automations'
-import type { Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
+import type { AssistantAutomationsService, Config as AutomationsConfig } from '@dsh-ray/assistant-automations'
+import type { Config as PolicyConfig } from '@dsh-ray/assistant-policy'
 
 export type ScannerRetirementOperation = Parameters<AssistantAutomationsService['retireSystemOwned']>[0]
 export type ScannerRetirementResult = ReturnType<AssistantAutomationsService['retireSystemOwned']>
@@ -52,7 +52,7 @@ export async function applyScannerRetirementMaintenance(input: {
   }
   // Optional peers are loaded only for this explicitly invoked installer path.
   const [{ Context }, { AssistantPolicyService }, { AssistantAutomationsService }] = await Promise.all([
-    import('@deepseek-ai/cordis'), import('@dsh-enhanced/assistant-policy'), import('@dsh-enhanced/assistant-automations'),
+    import('@deepseek-ai/cordis'), import('@dsh-ray/assistant-policy'), import('@dsh-ray/assistant-automations'),
   ])
   signal.throwIfAborted()
   const policy = AssistantPolicyService.Config(policyConfig)

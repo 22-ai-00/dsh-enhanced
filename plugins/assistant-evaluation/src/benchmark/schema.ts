@@ -1,4 +1,4 @@
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { benchmarkDomains } from './types.js'
 import type { BenchmarkCell, BenchmarkMetrics, BenchmarkPlan, BenchmarkResult } from './types.js'
 

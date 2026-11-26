@@ -1171,31 +1171,31 @@ describe('Tier 3 Pairwise — F02–F07 & F15: Evaluation, WorkItems, Proactive,
     const { AssistantProactiveService } = await loadAssistantProactive()
 
     const bundlesYaml = [
-      '- id: dsh-enhanced-assistant-work-items',
-      '  name: "@dsh-enhanced/assistant-work-items"',
+      '- id: dsh-ray-assistant-work-items',
+      '  name: "@dsh-ray/assistant-work-items"',
       '  config:',
       '    enabled: false',
       '    mode: observe',
       `    databasePath: ${ws.sqlitePath('wi')}`,
       `    workRoot: ${ws.workspace}`,
-      '- id: dsh-enhanced-assistant-evaluation',
-      '  name: "@dsh-enhanced/assistant-evaluation"',
+      '- id: dsh-ray-assistant-evaluation',
+      '  name: "@dsh-ray/assistant-evaluation"',
       '  config:',
       `    databasePath: ${ws.sqlitePath('eval')}`,
       '    projectionIntervalMs: 0',
       '    notificationOutcomesEnabled: false',
       '    attentionTuningAutoAdopt: false',
       '    attentionLooseningEnabled: false',
-      '- id: dsh-enhanced-assistant-proactive',
-      '  name: "@dsh-enhanced/assistant-proactive"',
+      '- id: dsh-ray-assistant-proactive',
+      '  name: "@dsh-ray/assistant-proactive"',
       '  config:',
       `    databasePath: ${ws.sqlitePath('pro')}`,
       '    intakeEvaluation:',
       '      enabled: false',
       '      provider: deepseek',
       '      model: deepseek-chat',
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       `    databasePath: ${ws.sqlitePath('del')}`,
       `    spoolPath: ${join(ws.stateDir, 'spool')}`,
@@ -1214,10 +1214,10 @@ describe('Tier 3 Pairwise — F02–F07 & F15: Evaluation, WorkItems, Proactive,
     expect(res.changed).toBe(true)
 
     const patchDoc = parseCordisPatch(await readFile(join(profileDir, 'cordis.patch.yml'), 'utf8'))
-    const wiPatchCfg = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-enhanced-assistant-work-items'))
-    const evalPatchCfg = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-enhanced-assistant-evaluation'))
-    const proPatchCfg = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-enhanced-assistant-proactive'))
-    const delPatchCfg = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-enhanced-assistant-delivery'))
+    const wiPatchCfg = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-ray-assistant-work-items'))
+    const evalPatchCfg = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-ray-assistant-evaluation'))
+    const proPatchCfg = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-ray-assistant-proactive'))
+    const delPatchCfg = getPatchConfig(findPatchRow(patchDoc.document, 'dsh-ray-assistant-delivery'))
 
     expect(wiPatchCfg.enabled).toBe(true)
     expect(evalPatchCfg.notificationOutcomesEnabled).toBe(true)

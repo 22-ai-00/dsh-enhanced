@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SystemPrompt, { renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type UserMessage } from '@deepseek-ai/dsh-session'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -13,7 +13,7 @@ import { PersonalMemoryError, PersonalMemoryService } from '../src/service.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    'plugin:@dsh-enhanced/assistant-automations': { kind: 'plugin:@dsh-enhanced/assistant-automations' }
+    'plugin:@dsh-ray/assistant-automations': { kind: 'plugin:@dsh-ray/assistant-automations' }
   }
 }
 
@@ -132,7 +132,7 @@ function addInput(content: string, idempotencyKey = `add:${content}`) {
 describe('personal memory Cordis service', () => {
   test('uses only a matching live Goals task and falls back to the latest human query when it is absent, revoked, or invalid', async () => {
     let step = 'nginx rollback'; let mode = 'valid'
-    const route = { routeVersion: 2 as const, sourceId: 'dsh-enhanced-personal-memory', bindingId: 'binding-owner', bindingVersion: 1, bindingGeneration: 1,
+    const route = { routeVersion: 2 as const, sourceId: 'dsh-ray-personal-memory', bindingId: 'binding-owner', bindingVersion: 1, bindingGeneration: 1,
       workspace: '/work/alpha', principal: 'owner:lark:123', principalRecordId: 'principal-owner', principalVersion: 1 }
     const { ctx, service } = await harness({ runtimePrompt: true, snapshotLimit: 1, delivery: {
       prepareAgentApproval: () => route,
@@ -200,7 +200,7 @@ describe('personal memory Cordis service', () => {
     agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Garden' }] }), { surfaceOp: 'append' })
     expect(await render()).toContain('Garden watering schedule')
     expect(await render()).not.toContain('Redis retry needs idempotency')
-    agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin:@dsh-enhanced/assistant-automations' },
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin:@dsh-ray/assistant-automations' },
       content: [{ type: 'text', text: 'Redis retry' }] }), { surfaceOp: 'append' })
     expect(await render()).toContain('Redis retry needs idempotency')
     expect(await render()).not.toContain('Garden watering schedule')
@@ -235,7 +235,7 @@ describe('personal memory Cordis service', () => {
     let ownerAvailable = true
     let principalVersion = 1
     const route = () => ({
-      routeVersion: 2 as const, sourceId: 'dsh-enhanced-personal-memory',
+      routeVersion: 2 as const, sourceId: 'dsh-ray-personal-memory',
       bindingId: 'binding-owner', bindingVersion: 1, bindingGeneration: 1,
       workspace: '/work/alpha', principal: 'owner:lark:123',
       principalRecordId: 'principal-owner', principalVersion,
@@ -269,7 +269,7 @@ describe('personal memory Cordis service', () => {
     const calls: Array<{ agent: Agent | undefined; sourceId: string }> = []
     const route = {
       routeVersion: 2 as const,
-      sourceId: 'dsh-enhanced-personal-memory',
+      sourceId: 'dsh-ray-personal-memory',
       bindingId: 'binding-owner-dm',
       bindingVersion: 1,
       bindingGeneration: 1,
@@ -291,7 +291,7 @@ describe('personal memory Cordis service', () => {
 
     const proposal = service.propose(agent, input)
 
-    expect(calls).toEqual([{ agent, sourceId: 'dsh-enhanced-personal-memory' }])
+    expect(calls).toEqual([{ agent, sourceId: 'dsh-ray-personal-memory' }])
     expect(policy.listPendingApprovalDispatches()).toEqual([
       expect.objectContaining({
         proposalId: proposal.policyProposalId,
@@ -364,7 +364,7 @@ describe('personal memory Cordis service', () => {
   test('derives the same Delivery authority for model-originated imports', async () => {
     const route = {
       routeVersion: 2 as const,
-      sourceId: 'dsh-enhanced-personal-memory',
+      sourceId: 'dsh-ray-personal-memory',
       bindingId: 'binding-import-owner',
       bindingVersion: 1,
       bindingGeneration: 1,

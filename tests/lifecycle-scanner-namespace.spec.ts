@@ -8,9 +8,9 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService, type Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
-import { inspectAutomationRetirementSnapshot, type AutomationRetirementSnapshot, type HostAutomationDefinition } from '@dsh-enhanced/assistant-automations'
-import { externalPrincipalId, ownerRouteAuthorityHash, inspectRevokedOwnerRouteLocally } from '@dsh-enhanced/assistant-delivery'
+import { AssistantPolicyService, type Config as PolicyConfig } from '@dsh-ray/assistant-policy'
+import { inspectAutomationRetirementSnapshot, type AutomationRetirementSnapshot, type HostAutomationDefinition } from '@dsh-ray/assistant-automations'
+import { externalPrincipalId, ownerRouteAuthorityHash, inspectRevokedOwnerRouteLocally } from '@dsh-ray/assistant-delivery'
 import { afterEach, describe, expect, test } from 'vitest'
 import { stringify } from 'yaml'
 import { lifecycleProfileTest as api } from '../scripts/install/lifecycle-profile.mjs'
@@ -18,8 +18,8 @@ import { createRsiMemoryLearningSetup } from '../plugins/lark-channel/src/rsi-me
 import { deriveScannerRetirementConfiguration } from '../plugins/lark-channel/src/rsi-scanner-retirement-config.ts'
 
 const require = createRequire(import.meta.url)
-const { AutomationStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-enhanced/assistant-automations/package.json')), 'lib/store.js')).href)
-const { DeliveryStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-enhanced/assistant-delivery/package.json')), 'lib/store.js')).href)
+const { AutomationStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-ray/assistant-automations/package.json')), 'lib/store.js')).href)
+const { DeliveryStore } = await import(pathToFileURL(join(dirname(require.resolve('@dsh-ray/assistant-delivery/package.json')), 'lib/store.js')).href)
 const available = process.platform === 'linux' && spawnSync('/usr/bin/bwrap', ['--unshare-all', '--die-with-parent', '--ro-bind', '/', '/',
   '--proc', '/proc', '--dev', '/dev', '--', '/bin/true'], { timeout: 5000 }).status === 0
 const roots: string[] = []
@@ -31,7 +31,7 @@ async function identity(path: string) {
 }
 async function paths() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'scanner-namespace-'))); roots.push(root)
-  const home = join(root, 'home'), transaction = `${home}.dsh-enhanced-transaction`, staged = join(transaction, 'staged-home')
+  const home = join(root, 'home'), transaction = `${home}.dsh-ray-transaction`, staged = join(transaction, 'staged-home')
   await mkdir(home, { mode: 0o700 }); await mkdir(transaction, { mode: 0o700 })
   return { root, home, transaction, staged }
 }
@@ -66,7 +66,7 @@ async function maintenanceFixture(version: 15 | 16 | 17 | 18) {
     budgets: [{ id: 'existing-retirement', metric: 'maintenance', limit: 4, periodMs: 86400000, scope: 'global' }],
     rules: [{ id: 'existing-authorization', effect: 'allow', subject: { kind: 'background', id: '*', workspace: owner.workspace, principal: owner.principalId },
       actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] }, budget: { id: 'existing-retirement', amount: 1 } }] }
-  const row = (name: string, config: unknown) => ({ id: `dsh-enhanced-${name}`, name: `@dsh-enhanced/${name}`, config })
+  const row = (name: string, config: unknown) => ({ id: `dsh-ray-${name}`, name: `@dsh-ray/${name}`, config })
   const client = { executable: { path: '/unavailable/client', sha256: 'b'.repeat(64) }, configPath: '/unavailable/authority.json', timeoutMs: 1000 }
   const effectiveConfig = stringify([
     row('personal-assistant', { assistantPolicy: policy, assistantAutomations: { databasePath: join(home, 'automations.sqlite'), runsPath: join(home, 'runs'),
@@ -103,11 +103,11 @@ async function maintenanceFixture(version: 15 | 16 | 17 | 18) {
   })
   const ctx = new Context(), fiber = ctx.plugin(AssistantPolicyService, { ...policy, proposalMaintenanceIntervalMs: 0 })
   try { await fiber.await() } finally { await fiber.dispose(); await ctx.fiber.dispose() }
-  const moduleRoot = join(home, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'lark-channel')
+  const moduleRoot = join(home, 'profiles', 'web', 'node_modules', '@dsh-ray', 'lark-channel')
   await mkdir(moduleRoot, { recursive: true, mode: 0o700 })
   await writeFile(join(home, 'profiles', 'web', 'package.json'), '{}')
   await writeFile(join(moduleRoot, 'package.json'), JSON.stringify({ type: 'module', main: './index.mjs' }))
-  await writeFile(join(moduleRoot, 'index.mjs'), `export * from ${JSON.stringify(pathToFileURL(require.resolve('@dsh-enhanced/lark-channel')).href)}\n`)
+  await writeFile(join(moduleRoot, 'index.mjs'), `export * from ${JSON.stringify(pathToFileURL(require.resolve('@dsh-ray/lark-channel')).href)}\n`)
   await writeFile(join(home, 'effective.yml'), effectiveConfig, { mode: 0o600 })
   await writeFile(join(home, 'dsh'), `#!${process.execPath}\nimport {readFileSync} from 'node:fs'; process.stdout.write(readFileSync(process.env.DSH_HOME+'/effective.yml'))\n`, { mode: 0o700 })
   await writeFile(join(home, 'package.json'), '{"type":"module"}')
@@ -121,10 +121,10 @@ async function maintenanceFixture(version: 15 | 16 | 17 | 18) {
   const manifest = { id: randomUUID(), version: 3, operation: 'upgrade', homePath: home, canonicalHome: home, profile: 'web',
     transactionPath: f.transaction, transactionIdentity: await identity(f.transaction), originalIdentity: await identity(home), stagedIdentity: await identity(f.staged),
     state: 'prepared', servicePhase: 'stopped', supervisedLifecycle: { phase: 'source-attested', source, scannerRetirement: undefined as unknown } }
-  const sourceArtifact = await api.writeScannerArtifact(f.transaction, manifest, 'source', { protocol: 'dsh-enhanced/scanner-retirement-source/v1',
+  const sourceArtifact = await api.writeScannerArtifact(f.transaction, manifest, 'source', { protocol: 'dsh-ray/scanner-retirement-source/v1',
     transactionId: manifest.id, homePath: home, profile: 'web', source, effectiveConfig,
     ownerSource: { protocol: 'host-rsi/scanner-owner-source/v1', homePath: home, profile: 'web', owner, sourceDigest: hash(JSON.stringify(owner)) } })
-  manifest.supervisedLifecycle.scannerRetirement = { protocol: 'dsh-enhanced/scanner-retirement-transaction/v1', phase: 'source-bound',
+  manifest.supervisedLifecycle.scannerRetirement = { protocol: 'dsh-ray/scanner-retirement-transaction/v1', phase: 'source-bound',
     transactionId: manifest.id, homePath: home, profile: 'web', originalIdentity: manifest.originalIdentity, stagedIdentity: manifest.stagedIdentity,
     sourceDigest: api.scannerBindingDigest(source), sourceArtifact }
   const sandbox = { bwrapExecutable: '/usr/bin/bwrap', homePath: home, stageHome: f.staged, profile: 'web', dshExecutable: join(home, 'dsh') }
@@ -167,8 +167,8 @@ describe.skipIf(!available)('real scanner maintenance namespace', () => {
 
   test.each([1, 2, 3, 4])('SIGKILL after formal retirement %s preserves the prepared tuples and original Home', async count => {
     const f = await maintenanceFixture(15)
-    const automationsUrl = pathToFileURL(require.resolve('@dsh-enhanced/assistant-automations')).href
-    const larkUrl = pathToFileURL(require.resolve('@dsh-enhanced/lark-channel')).href
+    const automationsUrl = pathToFileURL(require.resolve('@dsh-ray/assistant-automations')).href
+    const larkUrl = pathToFileURL(require.resolve('@dsh-ray/lark-channel')).href
     // Only the crash trigger is injected. Each preceding call is the actual
     // Policy-authorized durable Automations operation in the child namespace.
     const injection = `import { AssistantAutomationsService as Service } from ${JSON.stringify(automationsUrl)};
@@ -179,7 +179,7 @@ Service.prototype.retireSystemOwned = function(input) {
   return result;
 };
 export * from ${JSON.stringify(larkUrl)};\n`
-    await writeFile(join(f.staged, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'lark-channel', 'index.mjs'), injection)
+    await writeFile(join(f.staged, 'profiles', 'web', 'node_modules', '@dsh-ray', 'lark-channel', 'index.mjs'), injection)
     await expect(api.prepareScannerRetirement({ manifest: f.manifest, physicalTransactionRoot: f.transaction, sandbox: f.sandbox })).rejects.toThrow('failed')
     const persisted = JSON.parse(await readFile(join(f.transaction, 'manifest.json'), 'utf8'))
     expect(persisted.supervisedLifecycle.scannerRetirement.phase).toBe('prepared')

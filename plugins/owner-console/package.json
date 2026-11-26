@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/owner-console",
+  "name": "@dsh-ray/owner-console",
   "version": "0.1.88",
   "description": "A DeepSeek Harness plugin for Owner Console.",
   "license": "MIT",
@@ -40,7 +40,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/owner-console"
   },
   "keywords": [

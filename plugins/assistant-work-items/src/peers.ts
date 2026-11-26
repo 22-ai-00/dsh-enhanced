@@ -9,8 +9,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
-import type { AutomationRecord, HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput, HostAgentExecutionContract, HostAgentExecutionResult, HostAgentAuthorizationFence, ProductionOccurrenceTerminalProjection } from '@dsh-enhanced/assistant-automations'
-export type { HostAutomationExecutorInput, HostAgentExecutionContract, HostAgentExecutionResult } from '@dsh-enhanced/assistant-automations'
+import type { AutomationRecord, HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput, HostAgentExecutionContract, HostAgentExecutionResult, HostAgentAuthorizationFence, ProductionOccurrenceTerminalProjection } from '@dsh-ray/assistant-automations'
+export type { HostAutomationExecutorInput, HostAgentExecutionContract, HostAgentExecutionResult } from '@dsh-ray/assistant-automations'
 
 /** Structural copies of Delivery's versioned reply protocol. Keeping these
  * local preserves disabled/older-peer .d.ts compatibility; runtime gates the

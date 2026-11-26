@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-automations
+# @dsh-ray/assistant-automations
 
 面向个人助理的单机、冷启动可恢复调度器。它把 automation 定义、稳定 occurrence、task、attempt、run 和 duty lease 写入 SQLite；进程重启后从账本继续，而不是把内存 timer 当作事实源。普通 Agent automation 每次执行创建一个新的原生 DSH Agent（基线见[兼容性基线](../../docs/compatibility.md)），固定 workspace、preset 身份、provider/model、输出预算、工具白名单和工具调用上限；system-owned Host automation 调用进程内注册、版本和 catalog digest 精确匹配的固定执行器；执行器只有取得下述新预算与私有 invocation 能力后，才可启动一次有界原生 Agent。
 
@@ -6,19 +6,19 @@
 
 ## 安装
 
-本插件要求 `@dsh-enhanced/assistant-policy` 先提供 `ctx.assistantPolicy`，并要求运行中的 DSH profile 已有 agent loop、LLM、session 和 tools 服务：
+本插件要求 `@dsh-ray/assistant-policy` 先提供 `ctx.assistantPolicy`，并要求运行中的 DSH profile 已有 agent loop、LLM、session 和 tools 服务：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-policy
-dsh plugin --profile web add @dsh-enhanced/assistant-automations
+dsh plugin --profile web add @dsh-ray/assistant-policy
+dsh plugin --profile web add @dsh-ray/assistant-automations
 dsh --profile web --dump-config
 ```
 
 默认 `schedulerEnabled: false`，且 assistant-policy 默认拒绝，所以安装后不会在后台调用模型。确认规则和预算后再同时开启调度器与精确的 background allow 规则：
 
 ```yaml
-- id: dsh-enhanced-assistant-policy
-  name: '@dsh-enhanced/assistant-policy'
+- id: dsh-ray-assistant-policy
+  name: '@dsh-ray/assistant-policy'
   config:
     databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
     rules:
@@ -46,8 +46,8 @@ dsh --profile web --dump-config
         limit: 8
         periodMs: 86400000
         scope: workspace
-- id: dsh-enhanced-assistant-automations
-  name: '@dsh-enhanced/assistant-automations'
+- id: dsh-ray-assistant-automations
+  name: '@dsh-ray/assistant-automations'
   config:
     databasePath: !!js dshHomePath('assistant-automations/state.sqlite')
     runsPath: !!js dshHomePath('assistant-automations/runs')

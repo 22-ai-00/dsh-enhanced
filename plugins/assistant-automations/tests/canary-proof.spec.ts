@@ -8,7 +8,7 @@ import {
   AssistantEvaluationService,
   EvaluationStore,
   canonicalEvaluationHostScope,
-} from '@dsh-enhanced/assistant-evaluation'
+} from '@dsh-ray/assistant-evaluation'
 import { AssistantAutomationsService } from '../src/service.ts'
 import { GrowthAutomationStore } from '../src/growth.ts'
 

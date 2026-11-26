@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { HostAutomationDefinition } from '@dsh-enhanced/assistant-automations'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { HostAutomationDefinition } from '@dsh-ray/assistant-automations'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { expect, vi } from 'vitest'
 import { WorkItemAdmission } from '../src/admission.ts'
 import { normalizeConfig, type Config } from '../src/config.ts'

@@ -20,7 +20,7 @@ describe('CLI SQLite ExperimentalWarning suppression across plugin & install ent
     { relPath: 'plugins/assistant-web-owner/bin/dsh-autonomy-doctor.js', args: ['--help'], expectedStatus: 0, expectedStderr: '' },
     { relPath: 'plugins/assistant-web-owner/bin/dsh-web-owner-setup.js', args: ['--help'], expectedStatus: 0, expectedStderr: '' },
     { relPath: 'plugins/lark-channel/bin/dsh-lark-setup.js', args: ['--help'], expectedStatus: 0, expectedStderr: '' },
-    { relPath: 'plugins/lark-channel/bin/dsh-rsi-setup.js', args: ['--help'], expectedStatus: 0, expectedStderr: '' },
+    { relPath: 'plugins/lark-channel/bin/dsh-ray-setup.js', args: ['--help'], expectedStatus: 0, expectedStderr: '' },
     { relPath: 'plugins/lark-channel/bin/dsh-supervised-growth-setup.js', args: ['--help'], expectedStatus: 0, expectedStderr: '' },
     { relPath: 'plugins/plugin-control-plane/bin/dsh-plugin-control.js', args: ['--invalid-flag'], expectedStatus: 1, expectedStderr: 'plugin-control-plane' },
     { relPath: 'plugins/plugin-control-plane/bin/dsh-live-qualification-authority.js', args: ['--invalid-flag'], expectedStatus: 1, expectedStderr: 'live qualification authority refused the request' },
@@ -36,7 +36,7 @@ describe('CLI SQLite ExperimentalWarning suppression across plugin & install ent
     { relPath: 'plugins/assistant-actions/lib/broker-cli.js', args: ['--invalid-flag'], expectedStatus: 1, expectedStderr: 'assistant-actions broker: command failed or invalid arguments' },
     { relPath: 'plugins/assistant-isolation/lib/cli.js', args: ['--invalid-flag'], expectedStatus: 1, expectedStderr: 'unknown command' },
     { relPath: 'scripts/install/local-source-cache-copy.mjs', args: ['--invalid-flag'], expectedStatus: 1, expectedStderr: 'invalid private backup invocation' },
-    { relPath: 'scripts/install/lifecycle-profile.mjs', args: [], expectedStatus: 2, expectedStderr: 'dsh-enhanced lifecycle: usage:' },
+    { relPath: 'scripts/install/lifecycle-profile.mjs', args: [], expectedStatus: 2, expectedStderr: 'dsh-ray lifecycle: usage:' },
     { relPath: 'scripts/install/upgrade-program.mjs', args: ['--invalid-flag'], expectedStatus: 1, expectedStderr: 'Program upgrade: unknown option --invalid-flag' },
     { relPath: 'scripts/install/local-source-maintenance.mjs', args: ['unknown-op', '/does/not/exist.json'], expectedStatus: 1, expectedStderr: 'ENOENT' },
   ]

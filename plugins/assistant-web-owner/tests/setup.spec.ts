@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { isSeq, parseDocument } from 'yaml'
-import { pairPrincipalLocally } from '@dsh-enhanced/assistant-delivery'
+import { pairPrincipalLocally } from '@dsh-ray/assistant-delivery'
 import { configureWebOwner, prepareWebOwnerProfile, type WebOwnerSetupInput } from '../src/setup.js'
 
 const roots: string[] = []
@@ -29,7 +29,7 @@ async function fixture() {
     exported.add(node)
     return exported.toString()
   }))
-  const effective = bundles.join('\n') + '\n- id: dsh-enhanced-assistant-goals\n  name: "@dsh-enhanced/assistant-goals"\n- id: dsh-enhanced-assistant-web-owner\n  name: "@dsh-enhanced/assistant-web-owner"\n'
+  const effective = bundles.join('\n') + '\n- id: dsh-ray-assistant-goals\n  name: "@dsh-ray/assistant-goals"\n- id: dsh-ray-assistant-web-owner\n  name: "@dsh-ray/assistant-web-owner"\n'
   return { input, effective, path: join(directory, 'cordis.patch.yml') }
 }
 function ownerRows(path: string): unknown[] {
@@ -46,7 +46,7 @@ describe('local Web owner profile setup', () => {
     expect(plan.patch).toContain('!!js')
     expect(plan.patch).toContain('personalMemory:')
     expect(plan.patch).toContain('assistantAutomations:')
-    expect(plan.patch).toContain('dsh-enhanced-foreground-capability-*')
+    expect(plan.patch).toContain('dsh-ray-foreground-capability-*')
     expect(plan.patch).toContain('web/web/local/operator')
     expect(plan.patch).toContain('# Preserve me')
     expect(plan.patch).toContain(`defaultWorkspace: ${input.workspace}`)
@@ -76,7 +76,7 @@ describe('local Web owner profile setup', () => {
     const configured = prepareWebOwnerProfile(input, '[]', effective).patch
     const doc = parseDocument(configured)
     const rows = doc.toJS() as Array<{ id: string }>
-    const i = rows.findIndex(row => row.id === 'dsh-enhanced-personal-assistant')
+    const i = rows.findIndex(row => row.id === 'dsh-ray-personal-assistant')
     doc.addIn([i, 'config', 'assistantPolicy', 'rules'], { id: 'custom-deny', effect: 'deny' })
     const custom = doc.toString()
     expect(prepareWebOwnerProfile(input, custom, custom).patch).toContain('custom-deny')
@@ -86,9 +86,9 @@ describe('local Web owner profile setup', () => {
   })
   test('rejects duplicate, missing or disabled bundles before writing or pairing', async () => {
     const { input, effective, path } = await fixture()
-    await expect(configureWebOwner(input, effective + '\n- id: dsh-enhanced-assistant-goals\n')).rejects.toThrow('duplicate')
+    await expect(configureWebOwner(input, effective + '\n- id: dsh-ray-assistant-goals\n')).rejects.toThrow('duplicate')
     await expect(configureWebOwner(input, '[]')).rejects.toThrow('install')
-    const disabled = effective.replace('id: dsh-enhanced-assistant-goals', 'id: dsh-enhanced-assistant-goals\n  disabled: true')
+    const disabled = effective.replace('id: dsh-ray-assistant-goals', 'id: dsh-ray-assistant-goals\n  disabled: true')
     await expect(configureWebOwner(input, disabled)).rejects.toThrow('disabled')
     expect(await readFile(path, 'utf8').catch(() => undefined)).toBeUndefined()
   })
@@ -115,22 +115,22 @@ describe('local Web owner profile setup', () => {
     const fakeDshGlobal = join(fakeHome, '.dsh'); await mkdir(fakeDshGlobal, { recursive: true })
     const withGlobalDefaults = effective
       .replace(
-        '- id: dsh-enhanced-assistant-goals\n  name: "@dsh-enhanced/assistant-goals"\n',
-        `- id: dsh-enhanced-assistant-goals\n  name: "@dsh-enhanced/assistant-goals"\n  config:\n    databasePath: ${join(fakeDshGlobal, 'assistant-goals.sqlite')}\n`,
+        '- id: dsh-ray-assistant-goals\n  name: "@dsh-ray/assistant-goals"\n',
+        `- id: dsh-ray-assistant-goals\n  name: "@dsh-ray/assistant-goals"\n  config:\n    databasePath: ${join(fakeDshGlobal, 'assistant-goals.sqlite')}\n`,
       ) + [
-      '- id: dsh-enhanced-assistant-proactive',
-      '  name: "@dsh-enhanced/assistant-proactive"',
+      '- id: dsh-ray-assistant-proactive',
+      '  name: "@dsh-ray/assistant-proactive"',
       '  config:',
       `    databasePath: ${join(fakeDshGlobal, 'assistant-proactive.sqlite')}`,
-      '- id: dsh-enhanced-assistant-dreaming',
-      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '- id: dsh-ray-assistant-dreaming',
+      '  name: "@dsh-ray/assistant-dreaming"',
       '  config: {}',
-      '- id: dsh-enhanced-assistant-memory-learning',
-      '  name: "@dsh-enhanced/assistant-memory-learning"',
+      '- id: dsh-ray-assistant-memory-learning',
+      '  name: "@dsh-ray/assistant-memory-learning"',
       '  disabled: true',
       '  config: {}',
-      '- id: dsh-enhanced-assistant-growth-driver',
-      '  name: "@dsh-enhanced/assistant-growth-driver"',
+      '- id: dsh-ray-assistant-growth-driver',
+      '  name: "@dsh-ray/assistant-growth-driver"',
       '  config:',
       '    usageLearning:',
       '      enabled: true',
@@ -144,12 +144,12 @@ describe('local Web owner profile setup', () => {
       const plan = prepareWebOwnerProfile(input, '[]', withGlobalDefaults)
       const rows = parseDocument(plan.patch, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }).toJS() as Array<{ id: string; config?: Record<string, any> }>
       const cfg = (id: string) => rows.find(r => r.id === id)?.config
-      expect(cfg('dsh-enhanced-assistant-goals')?.databasePath).toBe(join(input.dshHome, 'assistant-goals', 'web.sqlite'))
-      expect(cfg('dsh-enhanced-assistant-proactive')?.databasePath).toBe(join(input.dshHome, 'assistant-proactive', 'web.sqlite'))
-      expect(cfg('dsh-enhanced-assistant-dreaming')).toEqual({ databasePath: join(input.dshHome, 'assistant-dreaming', 'web.sqlite') })
-      expect(cfg('dsh-enhanced-assistant-dreaming')?.enabled).toBeUndefined()
-      expect(rows.some(r => r.id === 'dsh-enhanced-assistant-memory-learning')).toBe(false)
-      expect(cfg('dsh-enhanced-assistant-growth-driver')?.usageLearning?.databasePath).toBe(join(input.dshHome, 'assistant-growth-driver', 'web-usage.sqlite'))
+      expect(cfg('dsh-ray-assistant-goals')?.databasePath).toBe(join(input.dshHome, 'assistant-goals', 'web.sqlite'))
+      expect(cfg('dsh-ray-assistant-proactive')?.databasePath).toBe(join(input.dshHome, 'assistant-proactive', 'web.sqlite'))
+      expect(cfg('dsh-ray-assistant-dreaming')).toEqual({ databasePath: join(input.dshHome, 'assistant-dreaming', 'web.sqlite') })
+      expect(cfg('dsh-ray-assistant-dreaming')?.enabled).toBeUndefined()
+      expect(rows.some(r => r.id === 'dsh-ray-assistant-memory-learning')).toBe(false)
+      expect(cfg('dsh-ray-assistant-growth-driver')?.usageLearning?.databasePath).toBe(join(input.dshHome, 'assistant-growth-driver', 'web-usage.sqlite'))
 
       // Byte-idempotent on second pass against the configured output.
       expect(prepareWebOwnerProfile(input, plan.patch, plan.patch).patch).toBe(plan.patch)
@@ -159,7 +159,7 @@ describe('local Web owner profile setup', () => {
       expect(() => prepareWebOwnerProfile(input, '[]', withGlobalDefaults)).toThrow(/offline migration/u)
 
       // Fails closed if explicit databasePath escapes $DSH_HOME.
-      const escapedPatch = `- id: dsh-enhanced-assistant-proactive\n  config:\n    databasePath: /outside/proactive.sqlite\n`
+      const escapedPatch = `- id: dsh-ray-assistant-proactive\n  config:\n    databasePath: /outside/proactive.sqlite\n`
       expect(() => prepareWebOwnerProfile(input, escapedPatch, withGlobalDefaults.replace(join(fakeDshGlobal, 'assistant-goals.sqlite'), join(input.dshHome, 'goals.sqlite'))))
         .toThrow(/within DSH_HOME/u)
     } finally {
@@ -176,38 +176,38 @@ describe('local Web owner profile setup', () => {
     process.env.HOME = fakeHome
     try {
       const assocNoDbEffective = effective + [
-        '- id: dsh-enhanced-assistant-association',
-        '  name: "@dsh-enhanced/assistant-association"',
+        '- id: dsh-ray-assistant-association',
+        '  name: "@dsh-ray/assistant-association"',
         '  config:',
         '    enabled: true',
         '',
       ].join('\n')
       const planMissing = prepareWebOwnerProfile(input, '[]', assocNoDbEffective)
       const rowsMissing = parseDocument(planMissing.patch, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }).toJS() as Array<{ id: string; config?: Record<string, any> }>
-      expect(rowsMissing.find(r => r.id === 'dsh-enhanced-assistant-association')?.config?.databasePath)
+      expect(rowsMissing.find(r => r.id === 'dsh-ray-assistant-association')?.config?.databasePath)
         .toBe(join(input.dshHome, 'assistant-association', 'web.sqlite'))
       expect(prepareWebOwnerProfile(input, planMissing.patch, planMissing.patch).patch).toBe(planMissing.patch)
 
       const assocGlobalEffective = effective + [
-        '- id: dsh-enhanced-assistant-association',
-        '  name: "@dsh-enhanced/assistant-association"',
+        '- id: dsh-ray-assistant-association',
+        '  name: "@dsh-ray/assistant-association"',
         '  config:',
         `    databasePath: ${join(fakeDshGlobal, 'assistant-association.sqlite')}`,
         '',
       ].join('\n')
       const planGlobal = prepareWebOwnerProfile(input, '[]', assocGlobalEffective)
       const rowsGlobal = parseDocument(planGlobal.patch, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }).toJS() as Array<{ id: string; config?: Record<string, any> }>
-      expect(rowsGlobal.find(r => r.id === 'dsh-enhanced-assistant-association')?.config?.databasePath)
+      expect(rowsGlobal.find(r => r.id === 'dsh-ray-assistant-association')?.config?.databasePath)
         .toBe(join(input.dshHome, 'assistant-association', 'web.sqlite'))
 
       const explicitValidPath = join(input.dshHome, 'custom-assoc', 'custom.sqlite')
-      const explicitSource = `- id: dsh-enhanced-assistant-association\n  name: "@dsh-enhanced/assistant-association"\n  config:\n    databasePath: ${explicitValidPath}\n`
+      const explicitSource = `- id: dsh-ray-assistant-association\n  name: "@dsh-ray/assistant-association"\n  config:\n    databasePath: ${explicitValidPath}\n`
       const planExplicit = prepareWebOwnerProfile(input, explicitSource, assocNoDbEffective)
       const rowsExplicit = parseDocument(planExplicit.patch, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }).toJS() as Array<{ id: string; config?: Record<string, any> }>
-      expect(rowsExplicit.find(r => r.id === 'dsh-enhanced-assistant-association')?.config?.databasePath).toBe(explicitValidPath)
+      expect(rowsExplicit.find(r => r.id === 'dsh-ray-assistant-association')?.config?.databasePath).toBe(explicitValidPath)
       expect(prepareWebOwnerProfile(input, planExplicit.patch, planExplicit.patch).patch).toBe(planExplicit.patch)
 
-      const escapedPatch = `- id: dsh-enhanced-assistant-association\n  config:\n    databasePath: /outside/assistant-association.sqlite\n`
+      const escapedPatch = `- id: dsh-ray-assistant-association\n  config:\n    databasePath: /outside/assistant-association.sqlite\n`
       expect(() => prepareWebOwnerProfile(input, escapedPatch, assocNoDbEffective)).toThrow(/within DSH_HOME/u)
     } finally {
       if (savedHome === undefined) delete process.env.HOME
@@ -225,8 +225,8 @@ describe('local Web owner profile setup', () => {
       const require = createRequire(join(packageRoot, 'package.json'))
       const nodeModules = join(tmp, 'node_modules')
       mkdirSync(join(nodeModules, '@deepseek-ai'), { recursive: true })
-      mkdirSync(join(nodeModules, '@dsh-enhanced'), { recursive: true })
-      for (const pkg of ['yaml', 'zod', '@deepseek-ai/schemastery', '@dsh-enhanced/assistant-delivery']) {
+      mkdirSync(join(nodeModules, '@dsh-ray'), { recursive: true })
+      for (const pkg of ['yaml', 'zod', '@deepseek-ai/schemastery', '@dsh-ray/assistant-delivery']) {
         symlinkSync(realpathSync(dirname(require.resolve(`${pkg}/package.json`))), join(nodeModules, pkg))
       }
       const stdout = execFileSync(process.execPath, [join(tmp, 'bin', 'dsh-web-owner-setup.js'), '--help'], {

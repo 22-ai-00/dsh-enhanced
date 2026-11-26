@@ -2,7 +2,7 @@ import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { GoalExecutionRuntime } from '../src/execution.ts'
 
 type Handler = (payload: any, next: () => Promise<any>) => Promise<any>

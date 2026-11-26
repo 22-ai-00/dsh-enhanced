@@ -644,9 +644,9 @@ describe('Codex private Responses transport', () => {
     expect(second.routing).toEqual(first.routing)
     expect(second.body.prompt_cache_key).toBe(first.body.prompt_cache_key)
     expect(first.routing).toEqual({
-      sessionId: 'dshc_743037ea2fbb87c80d4be6676b1e09c6',
-      threadId: 'dshth_7ddcf9fb51c8ac2a4de6f28cf4826914',
-      promptCacheKey: 'pck_fc12a1e4f3e2da0191777fe6',
+      sessionId: 'dshc_969a9f39e2500e30b0e1c1d123e4a896',
+      threadId: 'dshth_eb7af23ddc23b8c194e763dfffefc1ad',
+      promptCacheKey: 'pck_5b48b4220ad49247b0eee572',
     })
     expect(JSON.stringify([first.body, first.routing, second.body, second.routing]))
       .not.toContain(rawSessionId)

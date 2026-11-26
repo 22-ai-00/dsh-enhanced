@@ -6,7 +6,7 @@ import {
 import type { Config as ConfigType } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-preference-learning'
+export const name = 'dsh-ray-preference-learning'
 export const inject = ['assistantPolicy', 'systemPrompt']
 export { Config, PreferenceLearningService, version }
 export type { ConfigType as PreferenceLearningConfig }
@@ -15,7 +15,7 @@ export {
   PreferenceLearningError,
   canonicalPreferenceHostScope,
 } from './service.js'
-export { isTrustedPreferenceMemoryPromotionProducer } from '@dsh-enhanced/assistant-growth-contract'
+export { isTrustedPreferenceMemoryPromotionProducer } from '@dsh-ray/assistant-growth-contract'
 export type {
   PreferenceHostActivationCandidate,
   PreferenceHostOwnerFence,

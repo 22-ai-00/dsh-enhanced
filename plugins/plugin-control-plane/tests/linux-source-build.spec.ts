@@ -6,9 +6,9 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
-import type { LinuxRepositoryRunner, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRepositoryRunner, LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { DatabaseSync } from 'node:sqlite'
-import { LinuxRepositoryRunner as ActualLinuxRepositoryRunner, linuxJobResourceReservation, linuxRuntimeDigest, type LinuxRepositoryExecutionContract } from '@dsh-enhanced/assistant-isolation'
+import { LinuxRepositoryRunner as ActualLinuxRepositoryRunner, linuxJobResourceReservation, linuxRuntimeDigest, type LinuxRepositoryExecutionContract } from '@dsh-ray/assistant-isolation'
 import { runLinuxPreparedChecks, LINUX_PREPARED_SOURCE_BUILD_SCRIPT, LINUX_SOURCE_PACK_PATH } from '../src/linux-source-build.js'
 import { PREPARED_SOURCE_BUILD_SCRIPT, validateSourceBuildConfig, type LinuxSourceBuildConfig } from '../src/source-build.js'
 
@@ -49,8 +49,8 @@ vi.mock('node:child_process', async importOriginal => {
     return child
   } }
 })
-vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
-  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+vi.mock('@dsh-ray/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-ray/assistant-isolation')>()
   return { ...actual, verifyLinuxRuntime: vi.fn(async (value: LinuxRuntime) => value) }
 })
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex')
@@ -82,7 +82,7 @@ test('validates Linux, Mac and Docker configurations independently without a run
   expect(() => validateSourceBuildConfig({ dockerPath: '/usr/bin/docker', image: 'sha256:' + 'a'.repeat(64),
     timeoutMs: 60000, memoryMiB: 512, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 4096 } as unknown as Parameters<typeof validateSourceBuildConfig>[0])).toThrow()
   const source = await readFile(new URL('../src/source-build.ts', import.meta.url), 'utf8')
-  for (const line of source.split('\n').filter(line => line.includes("from '@dsh-enhanced/assistant-isolation'"))) expect(line).toMatch(/^import type /u)
+  for (const line of source.split('\n').filter(line => line.includes("from '@dsh-ray/assistant-isolation'"))) expect(line).toMatch(/^import type /u)
 })
 
 test('retains the complete repository script, fixed baseline and native binary transport', () => {

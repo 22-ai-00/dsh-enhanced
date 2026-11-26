@@ -7,7 +7,7 @@
 // gated by DSH_ISOLATION_TEST_NATIVE_RUNTIME, which must point to a JSON file
 // containing a prepared descriptor: { runtime, cgroupRoots } (or { linux: {...} }).
 import { readFileSync } from 'node:fs'
-import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
 
 const hex = (letter: string): string => letter.repeat(64)
 

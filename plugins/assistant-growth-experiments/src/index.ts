@@ -6,7 +6,7 @@ import {
 } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-growth-experiments'
+export const name = 'dsh-ray-assistant-growth-experiments'
 export const inject = ['assistantAutomations', 'assistantDelivery']
 export { AssistantGrowthExperimentsService, Config, version }
 export type { AssistantGrowthExperimentsConfig }

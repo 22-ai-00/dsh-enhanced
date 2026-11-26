@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { isMap, isSeq, parseDocument, stringify } from 'yaml'
 import { prepareAutonomyProfile, preflightAutonomyProfile, validateAutonomyOptions } from '../src/autonomy.ts'
@@ -16,9 +16,9 @@ import { inspectAutonomyProfile, probeAutonomyProfileRuntime } from '../src/doct
 // Real profile lock/CAS, YAML and Delivery pairing; resource preparation/probe
 // are explicitly recorded stubs. This does not prove Linux isolation readiness.
 const resource = vi.hoisted(() => ({ freeze: vi.fn(), prepare: vi.fn(), read: vi.fn(), discover: vi.fn(), probe: vi.fn(), docker: vi.fn(), verify: vi.fn() }))
-vi.mock('@dsh-enhanced/assistant-isolation/native-resources', () => ({ freezeLinuxRuntimeSource: resource.freeze,
+vi.mock('@dsh-ray/assistant-isolation/native-resources', () => ({ freezeLinuxRuntimeSource: resource.freeze,
   prepareLinuxRuntime: resource.prepare, readLinuxRuntime: resource.read, discoverLinuxCgroupRoots: resource.discover, probeLinuxIsolationRuntime: resource.probe }))
-vi.mock('@dsh-enhanced/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-enhanced/assistant-isolation')>(), verifyLinuxRuntime: resource.verify }))
+vi.mock('@dsh-ray/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-ray/assistant-isolation')>(), verifyLinuxRuntime: resource.verify }))
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 beforeEach(() => { for (const stub of Object.values(resource)) stub.mockReset() })
@@ -99,7 +99,7 @@ test('native source, backend, grant and runtime/state drift fail before pairing 
   const document = parseDocument(prepareWebOwnerProfile(f.input, '[]', f.effective).patch)
   if (!isSeq(document.contents)) throw new Error('fixture expected rows')
   // A legacy Docker profile is present on disk but is never rewritten in place.
-  const legacyRow = parseDocument(`- id: dsh-enhanced-assistant-isolation\n  name: '@dsh-enhanced/assistant-isolation'\n  config: { image: 'sha256:${'e'.repeat(64)}' }\n`)
+  const legacyRow = parseDocument(`- id: dsh-ray-assistant-isolation\n  name: '@dsh-ray/assistant-isolation'\n  config: { image: 'sha256:${'e'.repeat(64)}' }\n`)
   if (!isSeq(legacyRow.contents)) throw new Error('fixture expected legacy row')
   document.contents.add(legacyRow.contents.items[0]!)
   const preexisting = document.toString()
@@ -126,7 +126,7 @@ test('native static preflight rejects invalid grant and overlapping roots before
   await writeFile(f.patchPath,bad)
   await expect(configureWebOwner(f.input,bad)).rejects.toThrow(/managed isolation grant differs/u)
   expect(resource.freeze).not.toHaveBeenCalled(); expect(existsSync(f.databasePath)).toBe(false)
-  const overlap = stringify([{id:'dsh-enhanced-assistant-isolation',config:{stateRoot:join(f.input.dshHome,'rsi-linux-runtimes')}}])
+  const overlap = stringify([{id:'dsh-ray-assistant-isolation',config:{stateRoot:join(f.input.dshHome,'rsi-linux-runtimes')}}])
   expect(() => preflightAutonomyProfile({ ...f.input,isolation:f.input.isolation! },overlap,f.effective)).toThrow(/overlaps Linux runtime/u)
 })
 

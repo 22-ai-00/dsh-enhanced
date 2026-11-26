@@ -3,8 +3,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantGoalsService, GoalTaskContext } from '@dsh-enhanced/assistant-goals'
+import type { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
+import type { AssistantGoalsService, GoalTaskContext } from '@dsh-ray/assistant-goals'
 import { isBoundaryMatch, stepAcState, type EntityAutomaton } from './aho-corasick.js'
 import { extractEntities } from './entities.js'
 import { MAX_WEAK_USE_TEXT_CHARS } from './hebbian.js'
@@ -35,7 +35,7 @@ const HUMAN_TASK_SOURCE_KINDS = new Set([
   'user',
   'delivery',
   'assistant-automations',
-  'plugin:@dsh-enhanced/assistant-automations',
+  'plugin:@dsh-ray/assistant-automations',
 ])
 
 export interface ClaimedUserCue {
@@ -866,7 +866,7 @@ export function resolveTaskId(
   const sourceKind = state.claimedUserMessage?.sourceKind ?? latestHuman?.source?.kind
   if (
     sourceKind === 'assistant-automations' ||
-    sourceKind === 'plugin:@dsh-enhanced/assistant-automations'
+    sourceKind === 'plugin:@dsh-ray/assistant-automations'
   ) {
     return {
       taskId: `automation-run:${sessionId}:turn:${turnNumber}`,

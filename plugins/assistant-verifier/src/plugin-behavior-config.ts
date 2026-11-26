@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, resolve, sep } from 'node:path'
-import type { NativeMacRuntime, NativeMacVerifierRunnerConfig, LinuxVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
+import type { NativeMacRuntime, NativeMacVerifierRunnerConfig, LinuxVerifierRunnerConfig } from '@dsh-ray/assistant-isolation'
 import type { LinuxPluginBehaviorRuntime } from './linux-behavior-runtime.js'
 
 export const NATIVE_BEHAVIOR_BOUNDARY = 'macos-seatbelt-single-process-v1'

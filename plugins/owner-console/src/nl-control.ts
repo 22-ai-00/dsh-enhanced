@@ -145,7 +145,7 @@ function formatPluginList(entries: readonly AssistantVersionPluginEntry[], limit
   return shown.join('、')
 }
 
-/** Browser-safe Markdown summary formatter for `AssistantVersionReport` (`dsh-rsi/version/v1`). */
+/** Browser-safe Markdown summary formatter for `AssistantVersionReport` (`dsh-ray/version/v1`). */
 export function formatOwnerConsoleVersionSummary(report: AssistantVersionReport): string {
   const s = report.selfIteration
   const dataStateText = s.dataState === 'no-data'

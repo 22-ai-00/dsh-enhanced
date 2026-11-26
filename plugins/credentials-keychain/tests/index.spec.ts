@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,9 +15,9 @@ import plugin, {
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
 
-describe('dsh-enhanced-credentials-keychain entrypoint', () => {
+describe('dsh-ray-credentials-keychain entrypoint', () => {
   test('exports stable identity, injection, service, and config', () => {
-    expect(name).toBe('dsh-enhanced-credentials-keychain')
+    expect(name).toBe('dsh-ray-credentials-keychain')
     expect(version).toBe(manifest.version)
     expect(inject).toEqual(['assistantPolicy'])
     expect(supportedCredentialProviders).toContain('linux-protected-file')

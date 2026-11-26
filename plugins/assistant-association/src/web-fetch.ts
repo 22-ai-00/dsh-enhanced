@@ -35,7 +35,7 @@ export const CREDENTIAL_HEADER_NAMES: ReadonlySet<string> = new Set([
 export const READ_ONLY_WEB_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   accept: 'text/html,application/xhtml+xml,text/plain,text/markdown,application/json;q=0.9',
   'accept-encoding': 'identity',
-  'user-agent': 'dsh-enhanced-web-learning/1.0',
+  'user-agent': 'dsh-ray-web-learning/1.0',
 })
 
 export const ALLOWED_WEB_LEARNING_ENV_KEYS = ['PATH', 'LANG', 'LC_ALL', 'TZ'] as const

@@ -10,7 +10,7 @@ import { canonicalGrowthJson, growthObjectDigest, pluginRevisionVerificationSign
   type PluginRevisionParentBinding,
   type PluginRevisionVerificationCertificate, type PluginRevisionVerificationRequest,
   type PluginRevisionVerificationResult, type RevisionAcceptanceAuthorityRef,
-  type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import { CreationReviewStore } from './creation-review-store.js'
 import { CASE_RULES, COMPARISON_RULES, REVIEW_RULES, RULES_VERSION, SCHEMA_RULES,
   compareCase, compileCreationReviewConfig, linuxPreparedBuildEvidenceDigest, parseCases, parseReview,
@@ -133,7 +133,7 @@ export interface PreparedRevisionPort {
   withPreparedInstructionRevisionFence?<T>(input: { planId: string; planDigest: string; artifactSha256: string;
     instructionDigest: string; parentDigest: string }, callback: () => T): T
   inspectPreparedRevisionLinuxBuild?(planId: string, signal: AbortSignal): Promise<{
-    runtime: import('@dsh-enhanced/assistant-isolation').LinuxRuntime; evidenceDigest: string
+    runtime: import('@dsh-ray/assistant-isolation').LinuxRuntime; evidenceDigest: string
   }>
   inspectPreparedRevisionReviewContext(planId: string, signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }>
 }
@@ -323,7 +323,7 @@ export class RevisionReviewRuntime {
         signal.throwIfAborted()
         if (build.evidenceDigest !== buildEvidenceDigest) throw new Error('Linux build evidence snapshot changed')
         const [{ linuxRuntimeDigest }, { linuxPluginBehaviorRuntimeDigest, readLinuxPluginBehaviorPreparation }] = await Promise.all([
-          import('@dsh-enhanced/assistant-isolation'), import('./linux-behavior-runtime.js'),
+          import('@dsh-ray/assistant-isolation'), import('./linux-behavior-runtime.js'),
         ])
         const preparation = await readLinuxPluginBehaviorPreparation({ runtime: build.runtime,
           root: dirname(config.runner.runtime.runtime.root.path), signal })

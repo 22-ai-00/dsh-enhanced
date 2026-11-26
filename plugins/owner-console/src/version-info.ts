@@ -266,8 +266,8 @@ function addVerifierVariants(set: Set<string>, basePath: string): void {
 }
 
 function normalizePluginPackageName(id: string, name: string): string | undefined {
-  if (name.startsWith('@dsh-enhanced/')) return name
-  if (id.startsWith('dsh-enhanced-')) return `@dsh-enhanced/${id.slice('dsh-enhanced-'.length)}`
+  if (name.startsWith('@dsh-ray/')) return name
+  if (id.startsWith('dsh-ray-')) return `@dsh-ray/${id.slice('dsh-ray-'.length)}`
   return undefined
 }
 
@@ -604,7 +604,7 @@ function parseJsonObject(raw: unknown): Record<string, unknown> {
 function readOptionalCliVersion(): string | undefined {
   try {
     const req = createRequire(import.meta.url)
-    const resolved = req.resolve('@dsh-enhanced/dsh-rsi-cli/package.json')
+    const resolved = req.resolve('dsh-ray/package.json')
     const parsed = JSON.parse(readFileSync(resolved, 'utf8')) as { version?: unknown }
     return boundNonEmptyString(parsed.version, 128)
   } catch {
@@ -644,7 +644,7 @@ function inspectUpgradeHistoryAndBackups(
 
   let selfUpgrades: number | null = null
   let latestUpgrade: Record<string, unknown> | undefined
-  const historyPath = join(boundary.canonicalDshHome, '.dsh-enhanced', 'upgrade-history.jsonl')
+  const historyPath = join(boundary.canonicalDshHome, '.dsh-ray', 'upgrade-history.jsonl')
   if (existsSync(historyPath)) {
     try {
       const st = lstatSync(historyPath)
@@ -682,7 +682,7 @@ function inspectUpgradeHistoryAndBackups(
   }
 
   let backupSnapshotsCount: number | null = null
-  const backupsRoot = join(boundary.canonicalDshHome, '.dsh-rsi-upgrade-backups')
+  const backupsRoot = join(boundary.canonicalDshHome, '.dsh-ray-upgrade-backups')
   if (existsSync(backupsRoot)) {
     try {
       const st = lstatSync(backupsRoot)
@@ -698,7 +698,7 @@ function inspectUpgradeHistoryAndBackups(
         }
       }
     } catch (error) {
-      diagnostics.push(`failed to inspect .dsh-rsi-upgrade-backups: ${error instanceof Error ? error.message : String(error)}`)
+      diagnostics.push(`failed to inspect .dsh-ray-upgrade-backups: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -711,7 +711,7 @@ function inspectUpgradeHistoryAndBackups(
 
 function normalizePluginKey(name: string): string {
   const trimmed = name.trim()
-  return trimmed.startsWith('@dsh-enhanced/') ? trimmed.slice('@dsh-enhanced/'.length) : trimmed
+  return trimmed.startsWith('@dsh-ray/') ? trimmed.slice('@dsh-ray/'.length) : trimmed
 }
 
 function inspectProfileInstallKind(
@@ -719,10 +719,10 @@ function inspectProfileInstallKind(
   boundary: SqlitePathBoundary | null,
   packageName: string,
 ): 'npm' | 'local' | undefined {
-  if (!profileDir || !boundary || !packageName.startsWith('@dsh-enhanced/')) return undefined
-  const slug = packageName.slice('@dsh-enhanced/'.length)
+  if (!profileDir || !boundary || !packageName.startsWith('@dsh-ray/')) return undefined
+  const slug = packageName.slice('@dsh-ray/'.length)
   if (!VALID_PROFILE_NAME_RE.test(slug)) return undefined
-  const modPath = join(profileDir, 'node_modules', '@dsh-enhanced', slug)
+  const modPath = join(profileDir, 'node_modules', '@dsh-ray', slug)
   const pnpmStoreRoot = resolve(profileDir, 'node_modules', '.pnpm')
   try {
     if (!existsSync(modPath)) return undefined
@@ -784,7 +784,7 @@ function safeCallHealth(host: Context, serviceName: string, methodName = 'health
 }
 
 /**
- * Collect read-only `dsh-rsi/version/v1` version, plugin inventory, and self-iteration statistics.
+ * Collect read-only `dsh-ray/version/v1` version, plugin inventory, and self-iteration statistics.
  * Never constructs plugin SQLite store classes and never mutates any SQLite schema or file.
  */
 export async function collectOwnerConsoleVersionInfo(
@@ -865,7 +865,7 @@ export async function collectOwnerConsoleVersionInfo(
     const nextTier: 0 | 1 | 2 | 3 | 4 = boundedVersion !== null ? (patch.versionTier ?? 1) : 0
     const existing = evolvedMap.get(key)
     if (existing) {
-      if (trimmed.startsWith('@dsh-enhanced/') && !existing.name.startsWith('@dsh-enhanced/')) {
+      if (trimmed.startsWith('@dsh-ray/') && !existing.name.startsWith('@dsh-ray/')) {
         existing.name = boundedName
       }
       if (patch.fromAdoptionJournal) existing.fromAdoptionJournal = true
@@ -920,9 +920,9 @@ export async function collectOwnerConsoleVersionInfo(
   if (boundary) {
     // 1. plugin-control-plane (control.sqlite, creation-adoptions.sqlite, revision-adoptions.sqlite)
     const cpPaths = new Set<string>(patchDbMap.controlPlane)
-    const cpDirect = findLoaderPathProp(host, boundary, '@dsh-enhanced/plugin-control-plane', 'databasePath')
+    const cpDirect = findLoaderPathProp(host, boundary, '@dsh-ray/plugin-control-plane', 'databasePath')
     if (cpDirect) cpPaths.add(cpDirect)
-    const cpStateDir = findLoaderPathProp(host, boundary, '@dsh-enhanced/plugin-control-plane', 'statePath')
+    const cpStateDir = findLoaderPathProp(host, boundary, '@dsh-ray/plugin-control-plane', 'statePath')
     if (cpStateDir) {
       cpPaths.add(join(cpStateDir, 'control.sqlite'))
       cpPaths.add(join(cpStateDir, 'creation-adoptions.sqlite'))
@@ -1418,7 +1418,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 2. assistant-evolution
     const evoSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.evolution, '@dsh-enhanced/assistant-evolution', 'assistant-evolution', ['evolution.sqlite', 'state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.evolution, '@dsh-ray/assistant-evolution', 'assistant-evolution', ['evolution.sqlite', 'state.sqlite'])) {
       withReadOnlySqlite(p, boundary, evoSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const props = queryCount(db, realTarget, countedTables, 'evolution_proposals', 'SELECT COUNT(*) AS c FROM evolution_proposals')
         if (props !== undefined) candidatesGenerated = addCounter(candidatesGenerated, props)
@@ -1439,7 +1439,7 @@ export async function collectOwnerConsoleVersionInfo(
       boundary,
       targetProfiles,
       patchDbMap.association,
-      '@dsh-enhanced/assistant-association',
+      '@dsh-ray/assistant-association',
       'assistant-association',
       ['association.sqlite', 'state.sqlite'],
       undefined,
@@ -1488,7 +1488,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 4. assistant-evaluation
     const evalSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.evaluation, '@dsh-enhanced/assistant-evaluation', 'assistant-evaluation', ['evaluation.sqlite', 'state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.evaluation, '@dsh-ray/assistant-evaluation', 'assistant-evaluation', ['evaluation.sqlite', 'state.sqlite'])) {
       withReadOnlySqlite(p, boundary, evalSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const tuned = queryCount(
           db, realTarget, countedTables, 'evaluation_attention_tuning_events',
@@ -1518,7 +1518,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 5. assistant-work-items
     const wiSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.workItems, '@dsh-enhanced/assistant-work-items', 'assistant-work-items', ['state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.workItems, '@dsh-ray/assistant-work-items', 'assistant-work-items', ['state.sqlite'])) {
       withReadOnlySqlite(p, boundary, wiSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const total = queryCount(db, realTarget, countedTables, 'work_item', 'SELECT COUNT(*) AS c FROM work_item')
         if (total !== undefined) workItemsTotal = addCounter(workItemsTotal, total)
@@ -1543,7 +1543,7 @@ export async function collectOwnerConsoleVersionInfo(
     // 6. assistant-growth-driver
     const gdSeen = new Set<string>()
     const gdPaths = new Set<string>(
-      candidateDbPaths(host, boundary, targetProfiles, patchDbMap.growthDriver, '@dsh-enhanced/assistant-growth-driver', 'assistant-growth-driver', ['usage.sqlite', 'state.sqlite'], 'usageLearning'),
+      candidateDbPaths(host, boundary, targetProfiles, patchDbMap.growthDriver, '@dsh-ray/assistant-growth-driver', 'assistant-growth-driver', ['usage.sqlite', 'state.sqlite'], 'usageLearning'),
     )
     for (const prof of targetProfiles) {
       gdPaths.add(join(boundary.canonicalDshHome, 'assistant-growth-driver', `${prof}-usage.sqlite`))
@@ -1560,7 +1560,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 7. assistant-dreaming
     const dreamSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.dreaming, '@dsh-enhanced/assistant-dreaming', 'assistant-dreaming', ['state.sqlite', 'dreaming.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.dreaming, '@dsh-ray/assistant-dreaming', 'assistant-dreaming', ['state.sqlite', 'dreaming.sqlite'])) {
       withReadOnlySqlite(p, boundary, dreamSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const runs = queryCount(db, realTarget, countedTables, 'dream_runs', 'SELECT COUNT(*) AS c FROM dream_runs')
         if (runs !== undefined) dreamingRuns = addCounter(dreamingRuns, runs)
@@ -1569,7 +1569,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 8. assistant-recovery
     const recSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.recovery, '@dsh-enhanced/assistant-recovery', 'assistant-recovery', ['state.sqlite', 'recovery.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.recovery, '@dsh-ray/assistant-recovery', 'assistant-recovery', ['state.sqlite', 'recovery.sqlite'])) {
       withReadOnlySqlite(p, boundary, recSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const runs = queryCount(db, realTarget, countedTables, 'recovery_runs', 'SELECT COUNT(*) AS c FROM recovery_runs')
         if (runs !== undefined) recoveryRuns = addCounter(recoveryRuns, runs)
@@ -1583,7 +1583,7 @@ export async function collectOwnerConsoleVersionInfo(
       boundary,
       targetProfiles,
       patchDbMap.goals,
-      '@dsh-enhanced/assistant-goals',
+      '@dsh-ray/assistant-goals',
       'assistant-goals',
       ['state.sqlite', 'goals.sqlite'],
       undefined,
@@ -1605,7 +1605,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 10. assistant-verifier (+ all 6 sidecar review DBs)
     const verSeen = new Set<string>()
-    const baseVerPaths = candidateDbPaths(host, boundary, targetProfiles, patchDbMap.verifier, '@dsh-enhanced/assistant-verifier', 'assistant-verifier', ['verification.sqlite', 'state.sqlite'])
+    const baseVerPaths = candidateDbPaths(host, boundary, targetProfiles, patchDbMap.verifier, '@dsh-ray/assistant-verifier', 'assistant-verifier', ['verification.sqlite', 'state.sqlite'])
     const verifierPaths = new Set<string>()
     for (const vp of baseVerPaths) {
       addVerifierVariants(verifierPaths, vp)
@@ -1662,7 +1662,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 11. assistant-memory-learning
     const mlSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.memoryLearning, '@dsh-enhanced/assistant-memory-learning', 'assistant-memory-learning', ['learning.sqlite', 'state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.memoryLearning, '@dsh-ray/assistant-memory-learning', 'assistant-memory-learning', ['learning.sqlite', 'state.sqlite'])) {
       withReadOnlySqlite(p, boundary, mlSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const totalJobs = queryCount(db, realTarget, countedTables, 'jobs', 'SELECT COUNT(*) AS c FROM jobs')
         if (totalJobs !== undefined) candidatesGenerated = addCounter(candidatesGenerated, totalJobs)
@@ -1677,8 +1677,8 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 12. personal-memory (also check personal-assistant personalMemory.databasePath)
     const pmSeen = new Set<string>()
-    const pmPaths = new Set<string>(candidateDbPaths(host, boundary, targetProfiles, patchDbMap.memory, '@dsh-enhanced/personal-memory', 'personal-memory', ['memory.sqlite', 'state.sqlite']))
-    const paPmPath = findLoaderPathProp(host, boundary, '@dsh-enhanced/personal-assistant', 'databasePath', 'personalMemory')
+    const pmPaths = new Set<string>(candidateDbPaths(host, boundary, targetProfiles, patchDbMap.memory, '@dsh-ray/personal-memory', 'personal-memory', ['memory.sqlite', 'state.sqlite']))
+    const paPmPath = findLoaderPathProp(host, boundary, '@dsh-ray/personal-assistant', 'databasePath', 'personalMemory')
     if (paPmPath) pmPaths.add(paPmPath)
     for (const p of pmPaths) {
       withReadOnlySqlite(p, boundary, pmSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
@@ -1693,7 +1693,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 13. preference-learning
     const plSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.preference, '@dsh-enhanced/preference-learning', 'preference-learning', ['preferences.sqlite', 'state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.preference, '@dsh-ray/preference-learning', 'preference-learning', ['preferences.sqlite', 'state.sqlite'])) {
       withReadOnlySqlite(p, boundary, plSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const hyps = queryCount(db, realTarget, countedTables, 'preference_hypotheses', 'SELECT COUNT(*) AS c FROM preference_hypotheses')
         if (hyps !== undefined) candidatesGenerated = addCounter(candidatesGenerated, hyps)
@@ -1744,7 +1744,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 14. assistant-growth-experiments
     const geSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.growthExperiments, '@dsh-enhanced/assistant-growth-experiments', 'assistant-growth-experiments', ['growth.sqlite', 'state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.growthExperiments, '@dsh-ray/assistant-growth-experiments', 'assistant-growth-experiments', ['growth.sqlite', 'state.sqlite'])) {
       withReadOnlySqlite(p, boundary, geSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const wTotal = queryCount(db, realTarget, countedTables, 'workflow_candidates', 'SELECT COUNT(*) AS c FROM workflow_candidates')
         if (wTotal !== undefined) candidatesGenerated = addCounter(candidatesGenerated, wTotal)
@@ -1771,7 +1771,7 @@ export async function collectOwnerConsoleVersionInfo(
     // 15. assistant-skills
     const skSeen = new Set<string>()
     for (const p of candidateDbPaths(
-      host, boundary, targetProfiles, patchDbMap.skills, '@dsh-enhanced/assistant-skills', 'assistant-skills',
+      host, boundary, targetProfiles, patchDbMap.skills, '@dsh-ray/assistant-skills', 'assistant-skills',
       ['skills.sqlite', 'state.sqlite'], undefined, ['assistant-skills.sqlite'],
     )) {
       withReadOnlySqlite(p, boundary, skSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
@@ -1945,10 +1945,10 @@ export async function collectOwnerConsoleVersionInfo(
   let pluginSourceAvailable = false
 
   const readDiskPackageVersion = (profileDir: string | null, pkgName: string): string | null => {
-    if (!profileDir || !pkgName.startsWith('@dsh-enhanced/')) return null
-    const slug = pkgName.slice('@dsh-enhanced/'.length)
+    if (!profileDir || !pkgName.startsWith('@dsh-ray/')) return null
+    const slug = pkgName.slice('@dsh-ray/'.length)
     if (!VALID_PROFILE_NAME_RE.test(slug)) return null
-    const pkgJsonPath = join(profileDir, 'node_modules', '@dsh-enhanced', slug, 'package.json')
+    const pkgJsonPath = join(profileDir, 'node_modules', '@dsh-ray', slug, 'package.json')
     try {
       const st = lstatSync(pkgJsonPath)
       if (!st.isFile() || st.isSymbolicLink()) return null
@@ -2045,7 +2045,7 @@ export async function collectOwnerConsoleVersionInfo(
       scanDirs.push({ profDir: resolve(resolved.profileDir), profName: resolved.profileName })
     }
     for (const { profDir, profName } of scanDirs) {
-      const scopeDir = join(profDir, 'node_modules', '@dsh-enhanced')
+      const scopeDir = join(profDir, 'node_modules', '@dsh-ray')
       const pnpmStoreRoot = resolve(profDir, 'node_modules', '.pnpm')
       try {
         if (!existsSync(scopeDir) || lstatSync(scopeDir).isSymbolicLink()) continue
@@ -2228,11 +2228,11 @@ export async function collectOwnerConsoleVersionInfo(
 
   return Object.freeze({
     schemaVersion: 1 as const,
-    protocol: 'dsh-rsi/version/v1' as const,
+    protocol: 'dsh-ray/version/v1' as const,
     generatedAt,
     dshHome: boundedDshHome,
     assistant: Object.freeze({
-      name: 'dsh-enhanced' as const,
+      name: 'dsh-ray' as const,
       version: boundedAssistantVersion,
       ...(cliVersion === undefined ? {} : { cliVersion }),
     }),

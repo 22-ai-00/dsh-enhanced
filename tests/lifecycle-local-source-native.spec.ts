@@ -10,7 +10,7 @@ import { lifecycleProfileTest } from '../scripts/install/lifecycle-profile.mjs'
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root,{recursive:true,force:true}))) })
 const digest = 'a'.repeat(64), logicalHome = '/srv/native-local-home', profile = 'assistant'
-const stage = `${logicalHome}.dsh-enhanced-transaction/staged-home`
+const stage = `${logicalHome}.dsh-ray-transaction/staged-home`
 const resourceKinds = ['rsi-sources','rsi-local-cohorts','rsi-builds','rsi-release-builds','rsi-authorities','rsi-authority-runtimes']
 function selection(backend: 'docker' | 'linux-native') {
   return {mode:'pre-owner',backend,sourceDigest:digest,
@@ -28,7 +28,7 @@ function nativeProof(originalBackend: 'docker' | 'linux-native') {
 }
 function manifest(originalBackend: 'docker' | 'linux-native' = 'docker') {
   return {version:5,homePath:logicalHome,profile,operation:'upgrade',state:'validated',localSourceMaintenance:{
-    protocol:'dsh-enhanced/pre-owner-source-maintenance/v3',installer:{root:'/srv/reviewed-installer',dev:'1',ino:'2',digest,entries:3},
+    protocol:'dsh-ray/pre-owner-source-maintenance/v3',installer:{root:'/srv/reviewed-installer',dev:'1',ino:'2',digest,entries:3},
     preparationRoot:'/srv/native-preparation',preparationDigest:digest,original:selection(originalBackend),candidate:selection('linux-native'),candidateBackend:'linux-native',nativeResources:nativeProof(originalBackend),
     bwrapExecutable:'/usr/bin/bwrap',driverDigest:digest}}
 }
@@ -66,8 +66,8 @@ test('v3 rejects incomplete or legacy-mixed candidate evidence and fake composit
     missingBackend,missingResources,{...proof,original:legacyOriginal},{...proof,candidateBackend:'docker'},
     {...proof,nativeResources:null},{...proof,candidate:null},{...proof,candidate:{verified:true}},
     {...proof,nativeResources:{verified:true}},
-    {...proof,protocol:'dsh-enhanced/pre-owner-source-maintenance/v1'},
-    {...proof,protocol:'dsh-enhanced/pre-owner-source-maintenance/v2',extension:'memory-learning',expectedCandidateSemanticDigest:digest},
+    {...proof,protocol:'dsh-ray/pre-owner-source-maintenance/v1'},
+    {...proof,protocol:'dsh-ray/pre-owner-source-maintenance/v2',extension:'memory-learning',expectedCandidateSemanticDigest:digest},
     {...proof,extension:'other',expectedCandidateSemanticDigest:digest},
     {...proof,extension:'memory-learning'},
   ]) expect(lifecycleProfileTest.validLocalSourceManifest({...value,localSourceMaintenance:changed})).toBe(false)

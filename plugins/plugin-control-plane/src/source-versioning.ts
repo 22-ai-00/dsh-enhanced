@@ -54,7 +54,7 @@ function parseManifest(bytes: Buffer, label: string): Record<string, unknown> {
 }
 
 function assertBaseManifest(manifest: Record<string, unknown>, name: string): string {
-  if (manifest.name !== `@dsh-enhanced/${name}` || manifest.version === undefined || typeof manifest.version !== 'string'
+  if (manifest.name !== `@dsh-ray/${name}` || manifest.version === undefined || typeof manifest.version !== 'string'
     || !('dsh' in manifest) || (manifest.dsh === null || typeof manifest.dsh !== 'object' || Array.isArray(manifest.dsh))
     || (manifest.dsh as { bundle?: unknown }).bundle === null || typeof (manifest.dsh as { bundle?: unknown }).bundle !== 'object'
     || Array.isArray((manifest.dsh as { bundle?: unknown }).bundle)

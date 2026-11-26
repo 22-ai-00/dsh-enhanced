@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { posix } from 'node:path'
-import { validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
 import type { GoalScope } from './types.js'
 
 export interface OwnerVerifiedArtifactsInput {

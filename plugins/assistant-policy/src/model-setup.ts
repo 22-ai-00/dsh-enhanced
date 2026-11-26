@@ -64,7 +64,7 @@ export interface ModelSetupResult {
 export const DEEPSEEK_OFFICIAL_ROUTE = 'deepseek-official'
 export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
 export const DEFAULT_CUSTOM_API: ModelApiProtocol = 'openai-completions'
-export const DEFAULT_KEY_ENV_VAR = 'DSH_ENHANCED_MODEL_API_KEY'
+export const DEFAULT_KEY_ENV_VAR = 'DSH_RAY_MODEL_API_KEY'
 
 // Agent routes are DSH providers backed by a local coding agent (ACP), not by an
 // API key. Their bundle row must be enabled separately from default selection.
@@ -82,16 +82,16 @@ export interface AgentRouteDefinition {
 export const AGENT_ROUTES: Readonly<Record<string, AgentRouteDefinition>> = Object.freeze({
   'traex-agent': {
     model: 'default',
-    rowId: 'dsh-enhanced-traex-acp-provider',
-    packageName: '@dsh-enhanced/traex-acp-provider',
+    rowId: 'dsh-ray-traex-acp-provider',
+    packageName: '@dsh-ray/traex-acp-provider',
     enableKey: 'enabled',
     commandKey: 'command',
     requiredConfig: [{ key: 'cwd', value: "dshHomePath('assistant-workspace')", jsExpression: true }],
   },
   'agy-agent': {
     model: 'default',
-    rowId: 'dsh-enhanced-traex-acp-provider',
-    packageName: '@dsh-enhanced/traex-acp-provider',
+    rowId: 'dsh-ray-traex-acp-provider',
+    packageName: '@dsh-ray/traex-acp-provider',
     enableKey: 'agyEnabled',
     commandKey: 'agyCommand',
     requiredConfig: [{ key: 'cwd', value: "dshHomePath('assistant-workspace')", jsExpression: true }],

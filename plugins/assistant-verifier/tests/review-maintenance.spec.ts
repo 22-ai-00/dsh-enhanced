@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
-import { canonicalGrowthJson } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson } from '@dsh-ray/assistant-growth-contract'
 import { CreationReviewStore, lineageHash, reviewPublicIdentity } from '../src/review-maintenance.ts'
 import { stableIdentity, validateIdentity, validateLane } from '../src/review-authority-lineage.ts'
 import { compileCreationReviewConfig, compileLegacyCreationReviewIdentity,

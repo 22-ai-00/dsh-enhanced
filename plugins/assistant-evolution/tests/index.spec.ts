@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,9 +14,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 }
 const bundle = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
 
-describe('dsh-enhanced-assistant-evolution entrypoint', () => {
+describe('dsh-ray-assistant-evolution entrypoint', () => {
   test('exports the service contract but not the internal store or guidance builder', () => {
-    expect(entrypoint.name).toBe('dsh-enhanced-assistant-evolution')
+    expect(entrypoint.name).toBe('dsh-ray-assistant-evolution')
     expect(entrypoint.version).toBe(manifest.version)
     expect(entrypoint.AssistantEvolutionService).toBeTypeOf('function')
     expect((entrypoint as Record<string, unknown>)['EvolutionStore']).toBeUndefined()
@@ -36,9 +36,9 @@ describe('dsh-enhanced-assistant-evolution entrypoint', () => {
     expect(bundle).toContain('autonomousRollback: true')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
     expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.2.2-rc.5 <0.3.0')
-    expect(manifest.peerDependencies['@dsh-enhanced/assistant-policy']).toBe('>=0.1.0 <0.2.0')
-    expect(manifest.peerDependencies['@dsh-enhanced/assistant-evaluation']).toBe('>0.1.7 <0.2.0')
-    expect(manifest.peerDependencies['@dsh-enhanced/assistant-automations']).toBe('>0.1.7 <0.2.0')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-policy']).toBe('>=0.1.0 <0.2.0')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-evaluation']).toBe('>0.1.7 <0.2.0')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-automations']).toBe('>0.1.7 <0.2.0')
   })
 
   test('loads through apply when assistant-policy is already composed', async () => {

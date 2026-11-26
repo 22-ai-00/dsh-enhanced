@@ -2,9 +2,9 @@ import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import { type Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { LarkChannelService } from '@dsh-enhanced/lark-channel'
+import { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { LarkChannelService } from '@dsh-ray/lark-channel'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,7 +16,7 @@ import type {
   LarkSendOptions,
   LarkTransport,
   LarkTransportHandlers,
-} from '@dsh-enhanced/lark-channel'
+} from '@dsh-ray/lark-channel'
 
 const roots: string[] = []
 afterEach(async () => Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))))

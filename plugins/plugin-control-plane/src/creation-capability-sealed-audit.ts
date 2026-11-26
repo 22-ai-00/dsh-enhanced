@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import { canonicalGrowthJson } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson } from '@dsh-ray/assistant-growth-contract'
 
 // Kept free of journal imports: CreationCapabilityJournal reads this audit to count inherited usage.
 export const SEALED_ADOPTION_HANDOFF_PROTOCOL = 'dsh-sealed-creation-adoption-handoff/v1' as const

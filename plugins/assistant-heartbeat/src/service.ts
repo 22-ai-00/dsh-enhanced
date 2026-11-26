@@ -4,8 +4,8 @@ import type {
   AssistantAutomationsService,
   AutomationRecord,
   SystemAutomationReconcileInput,
-} from '@dsh-enhanced/assistant-automations'
-import type { AssistantPolicyService, PolicyDecision } from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-automations'
+import type { AssistantPolicyService, PolicyDecision } from '@dsh-ray/assistant-policy'
 import {
   ConfigSchema,
   heartbeatDefinition,

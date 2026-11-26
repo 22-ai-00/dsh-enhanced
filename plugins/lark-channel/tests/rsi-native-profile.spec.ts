@@ -4,15 +4,15 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
-import { normalizeConfig as normalizeGrowthConfig } from '@dsh-enhanced/assistant-growth-driver'
-import { loadTrustConfig, normalizeControlPlaneConfig, runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
-import { validateLearningConfig } from '@dsh-enhanced/assistant-memory-learning'
-import { Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { Config as AutomationsConfig } from '@dsh-enhanced/assistant-automations'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
+import { normalizeConfig as normalizeGrowthConfig } from '@dsh-ray/assistant-growth-driver'
+import { loadTrustConfig, normalizeControlPlaneConfig, runtimeConfigDigest } from '@dsh-ray/plugin-control-plane'
+import { validateLearningConfig } from '@dsh-ray/assistant-memory-learning'
+import { Config as PolicyConfig } from '@dsh-ray/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { Config as AutomationsConfig } from '@dsh-ray/assistant-automations'
 import { MemoryLearningRuntime, type LearningPorts } from '../../assistant-memory-learning/lib/runtime.js'
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.ts'
 import { compileNativeRsiProfile, type NativeRsiProfileInput } from '../src/rsi-native-profile.ts'
@@ -34,7 +34,7 @@ async function fixture(): Promise<NativeRsiProfileInput> {
   const owner = { id: 'binding', conversation, principal, workspace, agentPreset: 'primary', sessionId: 'session',
     generation: 1, policyRef: 'owner-policy', status: 'active' as const, createdAt: 1, updatedAt: 1, version: 1,
     owner: { id: 'principal-record', principal, role: 'owner' as const, status: 'active' as const, createdAt: 1, updatedAt: 1, version: 1 } }
-  const row = (name: string, config: object, extra = {}) => ({ id: `dsh-enhanced-${name}`, name: `@dsh-enhanced/${name}`, config, ...extra })
+  const row = (name: string, config: object, extra = {}) => ({ id: `dsh-ray-${name}`, name: `@dsh-ray/${name}`, config, ...extra })
   const targetEffective = stringify([
     row('personal-assistant', { assistantPolicy: { databasePath: join(root, 'policy.sqlite'), budgets: [], rules: [] },
       assistantAutomations: { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'),
@@ -43,7 +43,7 @@ async function fixture(): Promise<NativeRsiProfileInput> {
     row('assistant-delivery', { defaultWorkspace: workspace, defaultAgentPreset: 'primary', ownerRoutes: [] }),
     row('assistant-verifier', { databasePath: join(root, 'verifier.sqlite') }),
     row('assistant-growth-driver', { provider: 'owner-provider', model: 'owner-model' }),
-    { id: 'dsh-enhanced-assistant-memory-learning', name: '@dsh-enhanced/assistant-memory-learning', disabled: true },
+    { id: 'dsh-ray-assistant-memory-learning', name: '@dsh-ray/assistant-memory-learning', disabled: true },
     row('plugin-control-plane', {}), row('lark-channel', { enabled: true }),
   ])
   const now = Date.now()
@@ -72,14 +72,14 @@ describe('native owner learning profile', () => {
   test('accepts the published growth default without config while retaining strict explicit config checks', async () => {
     const input = await fixture()
     const rows = parse(input.targetEffective) as Array<{ id: string; config?: any }>
-    const growth = rows.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')!
-    const personal = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+    const growth = rows.find(row => row.id === 'dsh-ray-assistant-growth-driver')!
+    const personal = rows.find(row => row.id === 'dsh-ray-personal-assistant')!
     delete growth.config
     personal.config.ownerUnknownOption = { retained: true }
     const defaultInput = { ...input, targetEffective: stringify(rows) }
     const compiled = compileNativeRsiProfile(defaultInput)
     const patch = parse(compiled.targetPatch) as Array<{ id: string; config: any }>
-    const get = (name: string) => patch.find(row => row.id === `dsh-enhanced-${name}`)!.config
+    const get = (name: string) => patch.find(row => row.id === `dsh-ray-${name}`)!.config
     expect(compiled.manifest.growthDriver).not.toHaveProperty('provider')
     expect(compiled.manifest.growthDriver).not.toHaveProperty('model')
     expect(get('assistant-growth-driver').budgetId).toBe(compiled.manifest.growthDriver.budgetId)
@@ -126,8 +126,8 @@ describe('native owner learning profile', () => {
     const first = compileNativeRsiProfile(input)
     const rows = parse(first.targetPatch) as Array<{ id: string; config: any }>
     const effectiveRows = parse(input.targetEffective) as Array<{ id: string; config: any }>
-    const get = (name: string) => (rows.find(row => row.id === `dsh-enhanced-${name}`)
-      ?? effectiveRows.find(row => row.id === `dsh-enhanced-${name}`))!.config
+    const get = (name: string) => (rows.find(row => row.id === `dsh-ray-${name}`)
+      ?? effectiveRows.find(row => row.id === `dsh-ray-${name}`))!.config
     expect(first.manifest).toMatchObject({ schemaVersion: 1, kind: 'native-plugin-learning', now: input.now, expiresAt: input.expiresAt })
     expect(first.manifest.growthDriver.pluginSourceProposals).toMatchObject({ allowModification: false, allowCreation: true, allowRevision: true })
     expect(get('assistant-growth-driver')).toMatchObject({ provider: 'owner-provider', model: 'owner-model' })
@@ -174,10 +174,10 @@ describe('native owner learning profile', () => {
     await writeFile(first.manifest.controlPlane.trustPath, JSON.stringify(first.trust), { mode: 0o600 })
     expect((await loadTrustConfig(first.manifest.controlPlane.trustPath)).hostAttestor).toBeUndefined()
     const targets = first.manifest.controlPlane.runtimeObserver!.targets
-    expect(targets.map(target => target.entryId)).toContain('dsh-enhanced-assistant-memory-learning')
-    expect(targets.find(target => target.entryId === 'dsh-enhanced-lark-channel')?.services).toEqual(['larkChannel'])
-    expect(targets.find(target => target.entryId === 'dsh-enhanced-personal-assistant')?.services).toContain('assistantAutomations')
-    for (const target of targets) expect(target.configDigest).toBe(runtimeConfigDigest(get(target.entryId.slice('dsh-enhanced-'.length))))
+    expect(targets.map(target => target.entryId)).toContain('dsh-ray-assistant-memory-learning')
+    expect(targets.find(target => target.entryId === 'dsh-ray-lark-channel')?.services).toEqual(['larkChannel'])
+    expect(targets.find(target => target.entryId === 'dsh-ray-personal-assistant')?.services).toContain('assistantAutomations')
+    for (const target of targets) expect(target.configDigest).toBe(runtimeConfigDigest(get(target.entryId.slice('dsh-ray-'.length))))
     expect(compileNativeRsiProfile({ ...input, targetPatch: first.targetPatch }).targetPatch).toBe(first.targetPatch)
   })
 
@@ -186,8 +186,8 @@ describe('native owner learning profile', () => {
     const optedOut = compileNativeRsiProfile({ ...input, enableRevision: false })
     const rows = parse(optedOut.targetPatch) as Array<{ id: string; config: any }>
     const effectiveRows = parse(input.targetEffective) as Array<{ id: string; config: any }>
-    const get = (name: string) => (rows.find(row => row.id === `dsh-enhanced-${name}`)
-      ?? effectiveRows.find(row => row.id === `dsh-enhanced-${name}`))!.config
+    const get = (name: string) => (rows.find(row => row.id === `dsh-ray-${name}`)
+      ?? effectiveRows.find(row => row.id === `dsh-ray-${name}`))!.config
     expect(optedOut.manifest.pluginRevision).toBeUndefined()
     expect(optedOut.manifest.growthDriver.pluginSourceProposals?.allowRevision).toBe(false)
     expect(get('plugin-control-plane').sourceJobs.allowedModes).toEqual(['create'])
@@ -223,12 +223,12 @@ describe('native owner learning profile', () => {
   test('compiles the fresh ordinary-use evaluator, flagged memory grants and final observation digests', async () => {
     const input = await fixture()
     const rows = parse(input.targetEffective) as Array<{ id: string; name?: string; config?: Record<string, any> }>
-    rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config = {
-      ...rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config,
+    rows.find(row => row.id === 'dsh-ray-assistant-delivery')!.config = {
+      ...rows.find(row => row.id === 'dsh-ray-assistant-delivery')!.config,
       agentProvider: 'deepseek-official', agentModel: 'deepseek-v4-flash',
     }
-    rows.push({ id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive' })
-    rows.push({ id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items',
+    rows.push({ id: 'dsh-ray-assistant-proactive', name: '@dsh-ray/assistant-proactive' })
+    rows.push({ id: 'dsh-ray-assistant-work-items', name: '@dsh-ray/assistant-work-items',
       config: { enabled: true, mode: 'observe', intakeLedger: { enabled: true } } })
     const compiled = compileNativeRsiProfile({ ...input, targetEffective: stringify(rows), enableOrdinaryUseLearning: true })
     expect(compiled.manifest.ordinaryUseLearning).toEqual({ intakeEvaluation: { enabled: true,
@@ -238,19 +238,19 @@ describe('native owner learning profile', () => {
       reviews: { workItemExperiences: true }, adoption: { workItemExperiences: true, kinds: ['fact', 'experience'] } })
     const patch = parse(compiled.targetPatch) as Array<{ id: string; config: Record<string, any> }>
     const configOf = (id: string) => patch.find(row => row.id === id)!.config
-    expect(configOf('dsh-enhanced-assistant-proactive').intakeEvaluation).toEqual(compiled.manifest.ordinaryUseLearning!.intakeEvaluation)
-    expect(configOf('dsh-enhanced-assistant-work-items').intakeLedger).toMatchObject({ enabled: true, evaluation: { enabled: true } })
-    expect(configOf('dsh-enhanced-assistant-verifier').memoryReviews.workItemExperiences).toBe(true)
-    expect(configOf('dsh-enhanced-personal-assistant').personalMemory.automaticLearning.workItemExperiences).toBe(true)
-    expect(configOf('dsh-enhanced-assistant-memory-learning').workItemExperiences).toBe(true)
+    expect(configOf('dsh-ray-assistant-proactive').intakeEvaluation).toEqual(compiled.manifest.ordinaryUseLearning!.intakeEvaluation)
+    expect(configOf('dsh-ray-assistant-work-items').intakeLedger).toMatchObject({ enabled: true, evaluation: { enabled: true } })
+    expect(configOf('dsh-ray-assistant-verifier').memoryReviews.workItemExperiences).toBe(true)
+    expect(configOf('dsh-ray-personal-assistant').personalMemory.automaticLearning.workItemExperiences).toBe(true)
+    expect(configOf('dsh-ray-assistant-memory-learning').workItemExperiences).toBe(true)
     const targets = compiled.manifest.controlPlane.runtimeObserver!.targets
-    for (const id of ['dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items']) {
+    for (const id of ['dsh-ray-assistant-proactive', 'dsh-ray-assistant-work-items']) {
       expect(targets.find(target => target.entryId === id)?.configDigest).toBe(runtimeConfigDigest(configOf(id)))
     }
-    expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-proactive')?.services).toEqual(['assistantProactive'])
-    expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-work-items')?.services).toEqual(['assistantWorkItems'])
+    expect(targets.find(target => target.entryId === 'dsh-ray-assistant-proactive')?.services).toEqual(['assistantProactive'])
+    expect(targets.find(target => target.entryId === 'dsh-ray-assistant-work-items')?.services).toEqual(['assistantWorkItems'])
     expect(compileNativeRsiProfile({ ...input, targetEffective: stringify(rows), enableOrdinaryUseLearning: true })).toEqual(compiled)
-    rows.find(row => row.id === 'dsh-enhanced-assistant-proactive')!.config = {
+    rows.find(row => row.id === 'dsh-ray-assistant-proactive')!.config = {
       intakeEvaluation: { enabled: true, rules: [{ ruleId: 'owner-rule', ceiling: 'notify' }],
         provider: 'owner-provider', model: 'owner-model' },
     }
@@ -262,8 +262,8 @@ describe('native owner learning profile', () => {
     const input = await fixture()
     expect(() => compileNativeRsiProfile({ ...input, owner: { ...input.owner, workspace: '/tmp/other' } })).toThrow('owner')
     const rows = parse(input.targetEffective) as Array<{ id: string; config: any; disabled?: boolean }>
-    rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.config = { authorityId: 'foreign' }
-    rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.disabled = false
+    rows.find(row => row.id === 'dsh-ray-assistant-memory-learning')!.config = { authorityId: 'foreign' }
+    rows.find(row => row.id === 'dsh-ray-assistant-memory-learning')!.disabled = false
     expect(() => compileNativeRsiProfile({ ...input, targetEffective: stringify(rows) })).toThrow('existing memory learner grant differs')
     const nativeCreation = input.creationBuild
     expect(() => compileNativeRsiProfile({ ...input, creationBuild: { ...nativeCreation,
@@ -273,7 +273,7 @@ describe('native owner learning profile', () => {
   test('registers a native memory scan against the generated Policy and Automations config', async () => {
     const input = await fixture(), compiled = compileNativeRsiProfile(input)
     const rows = parse(compiled.targetPatch) as Array<{ id: string; config: any }>
-    const personal = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config
+    const personal = rows.find(row => row.id === 'dsh-ray-personal-assistant')!.config
     const ctx = new Context()
     const policy = new AssistantPolicyService(ctx, PolicyConfig(personal.assistantPolicy))
     const automations = new AssistantAutomationsService(ctx, AutomationsConfig(personal.assistantAutomations))
@@ -321,15 +321,15 @@ describe('native owner learning profile', () => {
   test('upgradeExistingOwner upgrades owner-owned native grants and ordinary-use settings while failing closed on foreign owners', async () => {
     const input = await fixture()
     const rows = parse(input.targetEffective) as Array<{ id: string; name?: string; config?: Record<string, any> }>
-    rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config = {
-      ...rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config,
+    rows.find(row => row.id === 'dsh-ray-assistant-delivery')!.config = {
+      ...rows.find(row => row.id === 'dsh-ray-assistant-delivery')!.config,
       agentProvider: 'deepseek-official',
       agentModel: 'deepseek-v4-flash',
     }
-    rows.push({ id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive' })
+    rows.push({ id: 'dsh-ray-assistant-proactive', name: '@dsh-ray/assistant-proactive' })
     rows.push({
-      id: 'dsh-enhanced-assistant-work-items',
-      name: '@dsh-enhanced/assistant-work-items',
+      id: 'dsh-ray-assistant-work-items',
+      name: '@dsh-ray/assistant-work-items',
       config: { enabled: true, mode: 'observe', intakeLedger: { enabled: true } },
     })
     const initialEffective = stringify(rows)
@@ -383,7 +383,7 @@ describe('native owner learning profile', () => {
 
     // Even when memory-learning was temporarily disabled via /autonomy disable (disabled: true + config), upgradeExistingOwner succeeds for same owner
     const disabledEffectiveRows = parse(upgradedEffective) as Array<{ id: string; disabled?: boolean; config?: Record<string, any> }>
-    disabledEffectiveRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.disabled = true
+    disabledEffectiveRows.find(row => row.id === 'dsh-ray-assistant-memory-learning')!.disabled = true
     const afterDisableUpgrade = compileNativeRsiProfile({
       ...input,
       targetPatch: initial.targetPatch,
@@ -392,11 +392,11 @@ describe('native owner learning profile', () => {
       upgradeExistingOwner: true,
     })
     const finalRows = parse(afterDisableUpgrade.targetPatch) as Array<{ id: string; disabled?: boolean }>
-    expect(finalRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')?.disabled).toBe(false)
+    expect(finalRows.find(row => row.id === 'dsh-ray-assistant-memory-learning')?.disabled).toBe(false)
 
     // Foreign owner grant still fails closed even when upgradeExistingOwner: true
     const foreignRows = parse(upgradedEffective) as Array<{ id: string; config?: Record<string, any> }>
-    foreignRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.config!.authorityId = 'foreign-authority'
+    foreignRows.find(row => row.id === 'dsh-ray-assistant-memory-learning')!.config!.authorityId = 'foreign-authority'
     expect(() => compileNativeRsiProfile({
       ...input,
       targetPatch: initial.targetPatch,
@@ -415,7 +415,7 @@ describe('native owner learning profile', () => {
     })
     for (const grantKey of ['creationVerifications', 'revisionVerifications', 'revisionRegressions'] as const) {
       const forgedAuthId = structuredClone(upgradedRevisionEffective)
-      const cp = forgedAuthId.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config!
+      const cp = forgedAuthId.find(row => row.id === 'dsh-ray-plugin-control-plane')!.config!
       cp[grantKey].authority.authorityId = `FOREIGN-${grantKey}`
       expect(() => compileNativeRsiProfile({
         ...input,
@@ -427,7 +427,7 @@ describe('native owner learning profile', () => {
       })).toThrow(`existing ${grantKey} grant differs`)
 
       const forgedNestedOwner = structuredClone(upgradedRevisionEffective)
-      const cpNested = forgedNestedOwner.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config!
+      const cpNested = forgedNestedOwner.find(row => row.id === 'dsh-ray-plugin-control-plane')!.config!
       cpNested[grantKey].authority.owner = { authorityId: 'FOREIGN-OWNER' }
       cpNested[grantKey].publicKey = 'FOREIGN-PUBLIC-KEY'
       expect(() => compileNativeRsiProfile({
@@ -440,7 +440,7 @@ describe('native owner learning profile', () => {
       })).toThrow(`existing ${grantKey} grant differs`)
 
       const forgedKeyOnly = structuredClone(upgradedRevisionEffective)
-      forgedKeyOnly.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config![grantKey].publicKey = 'FOREIGN-PUBLIC-KEY'
+      forgedKeyOnly.find(row => row.id === 'dsh-ray-plugin-control-plane')!.config![grantKey].publicKey = 'FOREIGN-PUBLIC-KEY'
       expect(() => compileNativeRsiProfile({
         ...input,
         targetPatch: upgraded.targetPatch,
@@ -451,7 +451,7 @@ describe('native owner learning profile', () => {
       })).toThrow(`existing ${grantKey} grant differs`)
 
       const nonObjectGrant = structuredClone(upgradedRevisionEffective)
-      nonObjectGrant.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config![grantKey] = 'invalid'
+      nonObjectGrant.find(row => row.id === 'dsh-ray-plugin-control-plane')!.config![grantKey] = 'invalid'
       expect(() => compileNativeRsiProfile({
         ...input,
         targetPatch: upgraded.targetPatch,

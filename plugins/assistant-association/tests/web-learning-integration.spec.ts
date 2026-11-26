@@ -12,8 +12,8 @@ import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-ses
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
-import { AssistantDeliveryService, type OwnerRouteAuthority } from '@dsh-enhanced/assistant-delivery'
-import { AssistantPolicyService, type PolicyRule } from '@dsh-enhanced/assistant-policy'
+import { AssistantDeliveryService, type OwnerRouteAuthority } from '@dsh-ray/assistant-delivery'
+import { AssistantPolicyService, type PolicyRule } from '@dsh-ray/assistant-policy'
 import {
   AssistantAssociationService,
   WEB_LEARNING_SOURCE_PLUGIN,
@@ -648,7 +648,7 @@ describe('assistant-association S4 Cordis/Service integration', () => {
     cleanups.push(async () => {
       await rm(dshHome, { recursive: true, force: true })
     })
-    await mkdir(join(dshHome, 'profiles', 'desktop', 'node_modules', '@dsh-enhanced', 'assistant-association'), {
+    await mkdir(join(dshHome, 'profiles', 'desktop', 'node_modules', '@dsh-ray', 'assistant-association'), {
       recursive: true,
     })
     await writeFile(join(dshHome, 'profiles', 'desktop', 'package.json'), '{"private":true}\n')
@@ -804,7 +804,7 @@ describe('assistant-association S4 Cordis/Service integration', () => {
 
     // Live growth-report (collectGrowthReport) reads real Schema v4 SQLite DB!
     const growthReportModuleUrl = new URL(
-      '../../../packages/dsh-rsi-cli/src/growth-report.ts',
+      '../../../packages/dsh-ray/src/growth-report.ts',
       import.meta.url,
     ).href
     const { collectGrowthReport, formatGrowthReport } = (await import(growthReportModuleUrl)) as {

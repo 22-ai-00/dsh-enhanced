@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { externalEventDigest, parseExternalEventEnvelope, type ExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import { externalEventDigest, parseExternalEventEnvelope, type ExternalEventEnvelope } from '@dsh-ray/assistant-automations/external-event'
 import type { GoalExecutionRun, GoalRecord, GoalScope } from './types.js'
 import type { GoalWakeIntent } from './wake-store.js'
 import type { GoalWakeRuntime } from './wake.js'

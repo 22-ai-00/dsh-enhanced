@@ -20,7 +20,7 @@ import { assertOwnerReviewGrantHandoffApi, preflightOwnerReviewGrantHandoffs, st
 import { composeOwnerRepairProfiles, ownerProviderEditEquivalent, ownerRepairPatchEquivalent,
   ownerRepairSnapshotEquivalent } from './owner-source-repair.mjs'
 
-const protocol = 'dsh-enhanced/host-owner-program-update/v1'
+const protocol = 'dsh-ray/host-owner-program-update/v1'
 const hash = value => createHash('sha256').update(value).digest('hex')
 const json = value => `${JSON.stringify(value, null, 2)}\n`
 const hex = /^[a-f0-9]{64}$/u
@@ -136,7 +136,7 @@ async function apiFor(installer) {
     optional(name)))))
   const req = createRequire(join(installer.root, 'package.json'))
   const controlPath = await realpath(createRequire(join(installer.root, 'plugins', 'lark-channel', 'package.json'))
-    .resolve('@dsh-enhanced/plugin-control-plane'))
+    .resolve('@dsh-ray/plugin-control-plane'))
   if (!inside(installer.root, controlPath) || !inside(installer.root,
     await realpath(req.resolve('yaml/package.json')))) fail('reviewed installer dependency escaped')
   return { ...api, control: await import(pathToFileURL(controlPath).href), yaml: req('yaml'),
@@ -147,7 +147,7 @@ async function apiFor(installer) {
 async function reviewMaintenance(installer) {
   const lark = createRequire(join(installer.root, 'plugins', 'lark-channel', 'package.json'))
   let path
-  try { path = await realpath(lark.resolve('@dsh-enhanced/assistant-verifier/review-maintenance')) } catch (error) {
+  try { path = await realpath(lark.resolve('@dsh-ray/assistant-verifier/review-maintenance')) } catch (error) {
     if (['MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED', 'ENOENT'].includes(error?.code)) return {}
     throw error
   }
@@ -279,7 +279,7 @@ export function assertOwnerProgramManifestPreserved(rebasedBefore, after, contro
     fail('runtime observer identity changed')
   }
   for (let index = 0; index < beforeTargets.length; index++) {
-    if (beforeTargets[index].entryId === 'dsh-enhanced-assistant-verifier') {
+    if (beforeTargets[index].entryId === 'dsh-ray-assistant-verifier') {
       if (!hex.test(afterTargets[index].configDigest)) fail('new verifier observer digest is invalid')
       beforeTargets[index].configDigest = afterTargets[index].configDigest
     }
@@ -308,7 +308,7 @@ async function verifyOriginalInstalledPlan(api, input) {
   const profilePath = join(homePath, 'profiles', profile)
   await api.verifyRsiLocalInstalledPackagesFresh({ cohort, profilePath, bundles: ['lark-channel'] })
   const profileRequire = createRequire(join(profilePath, 'package.json'))
-  const packageManifestPath = await realpath(profileRequire.resolve('@dsh-enhanced/lark-channel/package.json'))
+  const packageManifestPath = await realpath(profileRequire.resolve('@dsh-ray/lark-channel/package.json'))
   const packageRoot = dirname(packageManifestPath)
   if (!inside(profilePath, packageRoot)) fail('original owner compiler escaped verified cohort')
   const compilerPath = join(packageRoot, 'lib', 'rsi-profile.js')
@@ -439,10 +439,10 @@ export async function assertOwnerProgramBusinessDataCopied(api, owner, stage) {
       } else scan(pair.value, document, ancestors)
     }
   }
-  const ownerRows = new Set(['dsh-enhanced-assistant-delivery', 'dsh-enhanced-personal-assistant',
-    'dsh-enhanced-assistant-verifier', 'dsh-enhanced-assistant-growth-driver',
-    'dsh-enhanced-assistant-memory-learning', 'dsh-enhanced-assistant-policy',
-    'dsh-enhanced-assistant-automations', 'dsh-enhanced-plugin-control-plane'])
+  const ownerRows = new Set(['dsh-ray-assistant-delivery', 'dsh-ray-personal-assistant',
+    'dsh-ray-assistant-verifier', 'dsh-ray-assistant-growth-driver',
+    'dsh-ray-assistant-memory-learning', 'dsh-ray-assistant-policy',
+    'dsh-ray-assistant-automations', 'dsh-ray-plugin-control-plane'])
   for (const source of Object.values(owner.original.effective)) {
     const document = api.yaml.parseDocument(source, { uniqueKeys: true })
     if (document.errors.length || !api.yaml.isSeq(document.contents)) fail('original effective profile is invalid')
@@ -509,9 +509,9 @@ function assertOwner(ownerUpdate, homePath, installer, hostPlan = ownerUpdate?.h
     || ownerUpdate.hostPlanDigest !== hash(JSON.stringify(hostPlan))) fail('owner program proof binding differs')
 }
 
-const deliveryId = 'dsh-enhanced-assistant-delivery'
-const personalId = 'dsh-enhanced-personal-assistant'
-const controlPlaneId = 'dsh-enhanced-plugin-control-plane'
+const deliveryId = 'dsh-ray-assistant-delivery'
+const personalId = 'dsh-ray-personal-assistant'
+const controlPlaneId = 'dsh-ray-plugin-control-plane'
 const restartRuleId = 'rsi-owner-maintenance-restart'
 const restartKeys = ['allowedTools', 'databasePath', 'maxModelRequests', 'maxToolCalls',
   'ownerRouteId', 'taskTimeoutMs']
@@ -1584,7 +1584,7 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   const manifest = hostProfiles.manifest
   const rebasedManifest = structuredClone(manifest)
   const oldControlPlane = structuredClone(manifest.controlPlane)
-  const oldVerifier = patchConfig(api, hostProfiles.targetPatch, 'dsh-enhanced-assistant-verifier')
+  const oldVerifier = patchConfig(api, hostProfiles.targetPatch, 'dsh-ray-assistant-verifier')
   const previousRevision = original.manifest.pluginRevision
   if (!same(oldVerifier.sourceReviews, manifest.sourceReviews)
     || !same(oldVerifier.creationReviews, original.manifest.pluginCreation.reviews)
@@ -1689,18 +1689,18 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   }
   const preDigestControlPlane = structuredClone(manifest.controlPlane)
   let targetPatch = replacePatchConfig(api, hostProfiles.targetPatch,
-    'dsh-enhanced-plugin-control-plane', oldControlPlane, manifest.controlPlane)
-  targetPatch = replacePatchConfig(api, targetPatch, 'dsh-enhanced-assistant-verifier', oldVerifier,
+    'dsh-ray-plugin-control-plane', oldControlPlane, manifest.controlPlane)
+  targetPatch = replacePatchConfig(api, targetPatch, 'dsh-ray-assistant-verifier', oldVerifier,
     { ...oldVerifier, creationReviews: manifest.pluginCreation.reviews,
       ...(freshRevision ? { revisionReviews: manifest.pluginRevision.reviews,
         revisionRegressions: manifest.pluginRevision.regressions } : {}) })
   targetPatch = compileOwnerProgramRestartConfig(api, targetPatch, manifest, restartConfig, homePath, original)
   for (const target of manifest.controlPlane.runtimeObserver.targets) {
-    if (target.entryId === 'dsh-enhanced-assistant-verifier') target.configDigest =
+    if (target.entryId === 'dsh-ray-assistant-verifier') target.configDigest =
       api.control.runtimeConfigDigest(patchConfig(api, targetPatch, target.entryId))
   }
   assertOwnerProgramRestartManifestPreserved(rebasedManifest, manifest, restartConfig, targetPatch, api)
-  targetPatch = replacePatchConfig(api, targetPatch, 'dsh-enhanced-plugin-control-plane',
+  targetPatch = replacePatchConfig(api, targetPatch, 'dsh-ray-plugin-control-plane',
     preDigestControlPlane, manifest.controlPlane)
   if (rebase.oldHostRoot !== hostPlan.candidateRuntime.root && targetPatch.includes(rebase.oldHostRoot)) fail('owner patch retains an old Host path')
   const patchMap = { [profile]: targetPatch, [coordinator]: hostProfiles.coordinatorPatch }

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
-import type { AutomationDefinition } from '@dsh-enhanced/assistant-automations'
+import type { AutomationDefinition } from '@dsh-ray/assistant-automations'
 
 export interface HeartbeatConfig {
   id: string

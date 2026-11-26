@@ -151,7 +151,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
           profilePath: join(ws.dshHome, 'profiles', 'web'),
           stagingDir: join(ws.stateDir, 'staging'),
           entryId: 'delivery',
-          package: '@dsh-enhanced/assistant-delivery',
+          package: '@dsh-ray/assistant-delivery',
         },
       })).rejects.toThrow(/denied/i)
 
@@ -168,7 +168,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
           profilePath: 'relative/profile',
           stagingDir: join(ws.stateDir, 'staging'),
           entryId: 'cand',
-          package: '@dsh-enhanced/custom-cand',
+          package: '@dsh-ray/custom-cand',
         },
       })).rejects.toThrow(/absolute/i)
     }, 15_000)
@@ -183,7 +183,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
       expect(() => delivery.createInProcessReloadRuntime(ctx, {
         profilePath: profileDir,
         entryId: 'pcp',
-        package: '@dsh-enhanced/plugin-control-plane',
+        package: '@dsh-ray/plugin-control-plane',
         stagingDir: join(ws.stateDir, 'staging'),
         hostGeneration: () => 1,
       })).toThrow(/denied|process restart/i)
@@ -193,7 +193,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
       const runtime = delivery.createInProcessReloadRuntime(ctx, {
         profilePath: profileDir,
         entryId: 'cand-1',
-        package: '@dsh-enhanced/cand-1',
+        package: '@dsh-ray/cand-1',
         stagingDir: join(ws.stateDir, 'staging'),
         hostGeneration: () => 1,
       })
@@ -204,7 +204,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         previousInProcessGeneration: 1,
         mode: 'config-only',
         target: {
-          package: '@dsh-enhanced/cand-1',
+          package: '@dsh-ray/cand-1',
           version: '0.1.0',
           artifactDigest: validDigest,
           patchDigest: validDigest,
@@ -219,7 +219,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         previousInProcessGeneration: 1,
         mode: 'config-only',
         target: {
-          package: '@dsh-enhanced/cand-1',
+          package: '@dsh-ray/cand-1',
           version: '0.1.0',
           artifactDigest: validDigest,
           patchDigest: validDigest,
@@ -234,7 +234,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         previousInProcessGeneration: 1,
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/cand-1',
+          package: '@dsh-ray/cand-1',
           version: '0.1.0',
           artifactDigest: validDigest,
           patchDigest: validDigest,
@@ -253,12 +253,12 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
       const v2Dir = join(ws.root, 'bundles', 'v2')
       await mkdir(profileDir, { recursive: true, mode: 0o700 })
       await writeBundlePackage(v1Dir, {
-        name: '@dsh-enhanced/m-1',
+        name: '@dsh-ray/m-1',
         version: '0.1.0',
         body: 'export const name = "m-1"; export function apply() {}',
       })
       await writeBundlePackage(v2Dir, {
-        name: '@dsh-enhanced/m-1',
+        name: '@dsh-ray/m-1',
         version: '0.2.0',
         body: 'export const name = "m-1"; export function apply() {}',
       })
@@ -277,7 +277,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
       const runtime = delivery.createInProcessReloadRuntime(ctx, {
         profilePath: profileDir,
         entryId: 'm-1',
-        package: '@dsh-enhanced/m-1',
+        package: '@dsh-ray/m-1',
         stagingDir: join(ws.stateDir, 'staging'),
         hostGeneration: () => 2,
       })
@@ -291,7 +291,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         previousInProcessGeneration: 1,
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/m-1',
+          package: '@dsh-ray/m-1',
           version: '0.2.0',
           artifactDigest: v2Digest,
           patchDigest: v2PatchDigest,
@@ -307,7 +307,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         previousInProcessGeneration: 1,
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/m-1',
+          package: '@dsh-ray/m-1',
           version: '0.2.0',
           artifactDigest: sha256Hex('wrong-artifact-digest'),
           patchDigest: v2PatchDigest,
@@ -323,7 +323,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         previousInProcessGeneration: 1,
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/m-1',
+          package: '@dsh-ray/m-1',
           version: '0.2.0',
           artifactDigest: v2Digest,
           patchDigest: sha256Hex('wrong-patch-digest'),
@@ -336,7 +336,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
       const unmountedRuntime = delivery.createInProcessReloadRuntime(ctx, {
         profilePath: profileDir,
         entryId: 'nonexistent-entry',
-        package: '@dsh-enhanced/m-1',
+        package: '@dsh-ray/m-1',
         stagingDir: join(ws.stateDir, 'staging'),
         hostGeneration: () => 2,
       })
@@ -346,7 +346,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         previousInProcessGeneration: 1,
         mode: 'config-only',
         target: {
-          package: '@dsh-enhanced/m-1',
+          package: '@dsh-ray/m-1',
           version: '0.1.0',
           artifactDigest: v2Digest,
           patchDigest: v2PatchDigest,
@@ -366,12 +366,12 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
       await mkdir(profileDir, { recursive: true, mode: 0o700 })
 
       await writeBundlePackage(v1Dir, {
-        name: '@dsh-enhanced/inj-cand',
+        name: '@dsh-ray/inj-cand',
         version: '0.1.0',
         body: 'export const name = "inj-cand"; export function apply(ctx) { ctx.provide("injSvc", () => "v1-ok") }',
       })
       await writeBundlePackage(v2BadInjDir, {
-        name: '@dsh-enhanced/inj-cand',
+        name: '@dsh-ray/inj-cand',
         version: '0.2.0',
         body: 'export const name = "inj-cand"; export const inject = ["missingPeerService"]; export function apply(ctx) { ctx.provide("injSvc", () => "v2-never") }',
       })
@@ -391,7 +391,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
       const runtime = delivery.createInProcessReloadRuntime(ctx, {
         profilePath: profileDir,
         entryId: 'inj-cand',
-        package: '@dsh-enhanced/inj-cand',
+        package: '@dsh-ray/inj-cand',
         stagingDir: join(ws.stateDir, 'staging'),
         hostGeneration: () => 1,
       })
@@ -404,7 +404,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         previousInProcessGeneration: 1,
         mode: 'artifact-replace',
         target: {
-          package: '@dsh-enhanced/inj-cand',
+          package: '@dsh-ray/inj-cand',
           version: '0.2.0',
           artifactDigest: v2Digest,
           patchDigest: v2PatchDigest,
@@ -429,7 +429,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
       const runtime = delivery.createInProcessReloadRuntime(ctx, {
         profilePath: join(ws.dshHome, 'profiles', 'web'),
         entryId: 'cand-1',
-        package: '@dsh-enhanced/cand-1',
+        package: '@dsh-ray/cand-1',
         stagingDir: join(ws.stateDir, 'staging'),
         hostGeneration: () => 1,
         isActive: () => false,
@@ -440,7 +440,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         previousInProcessGeneration: 1,
         mode: 'config-only',
         target: {
-          package: '@dsh-enhanced/cand-1',
+          package: '@dsh-ray/cand-1',
           version: '0.1.0',
           artifactDigest: sha256Hex('a'),
           patchDigest: sha256Hex('p'),
@@ -556,7 +556,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         'validateSourceCreationFiles',
       )
 
-      const validPatch = '- insert:\n  - id: dsh-enhanced-demo-1\n    name: "@dsh-enhanced/demo-1"\n    config: {}\n'
+      const validPatch = '- insert:\n  - id: dsh-ray-demo-1\n    name: "@dsh-ray/demo-1"\n    config: {}\n'
       const validSrc = 'export const name = "demo-1"; export function apply() {}'
 
       expect(() => validateFiles([
@@ -570,7 +570,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         {
           path: 'package.json',
           content: JSON.stringify({
-            name: '@dsh-enhanced/demo-1',
+            name: '@dsh-ray/demo-1',
             version: '0.1.0',
             main: './lib/index.js',
             dependencies: { lodash: '^4.17.21' },
@@ -585,7 +585,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         {
           path: 'package.json',
           content: JSON.stringify({
-            name: '@dsh-enhanced/demo-1',
+            name: '@dsh-ray/demo-1',
             version: '0.1.0',
             main: './lib/index.js',
             dsh: { pluginKind: 'kernel', bundle: { patch: './cordis.patch.yml' } },
@@ -600,7 +600,7 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         {
           path: 'package.json',
           content: JSON.stringify({
-            name: '@dsh-enhanced/demo-1',
+            name: '@dsh-ray/demo-1',
             version: '0.1.0',
             main: './lib/index.js',
             dsh: { pluginKind: 'service', bundle: { patch: './cordis.patch.yml' } },
@@ -617,19 +617,19 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
         'validateCandidateCordisPatch',
       )
 
-      const base = '- insert:\n  - id: dsh-enhanced-cand-x\n    name: "@dsh-enhanced/cand-x"\n    config: {}\n'
+      const base = '- insert:\n  - id: dsh-ray-cand-x\n    name: "@dsh-ray/cand-x"\n    config: {}\n'
       expect(() => validatePatch('cand-x', base, '')).toThrow()
-      expect(() => validatePatch('cand-x', base, '- insert:\n\t- id: dsh-enhanced-cand-x\n')).toThrow()
-      expect(() => validatePatch('cand-x', base, '---\n- insert:\n  - id: dsh-enhanced-cand-x\n')).toThrow()
-      expect(() => validatePatch('cand-x', base, '- insert:\n  - id: dsh-enhanced-cand-x\n    name: !!js/function "() => {}"\n')).toThrow()
-      expect(() => validatePatch('cand-x', base, '- insert:\n  - id: dsh-enhanced-cand-x\n    name: "@dsh-enhanced/cand-x"\n    autoload: true\n')).toThrow()
-      expect(() => validatePatch('cand-x', base, '- insert:\n  - id: dsh-enhanced-other\n    name: "@dsh-enhanced/cand-x"\n')).toThrow()
+      expect(() => validatePatch('cand-x', base, '- insert:\n\t- id: dsh-ray-cand-x\n')).toThrow()
+      expect(() => validatePatch('cand-x', base, '---\n- insert:\n  - id: dsh-ray-cand-x\n')).toThrow()
+      expect(() => validatePatch('cand-x', base, '- insert:\n  - id: dsh-ray-cand-x\n    name: !!js/function "() => {}"\n')).toThrow()
+      expect(() => validatePatch('cand-x', base, '- insert:\n  - id: dsh-ray-cand-x\n    name: "@dsh-ray/cand-x"\n    autoload: true\n')).toThrow()
+      expect(() => validatePatch('cand-x', base, '- insert:\n  - id: dsh-ray-other\n    name: "@dsh-ray/cand-x"\n')).toThrow()
 
       const thirtyThreeInject = Array.from({ length: 33 }, (_, idx) => `svc_${idx}`).join(', ')
       expect(() => validatePatch(
         'cand-x',
         base,
-        `- insert:\n  - id: dsh-enhanced-cand-x\n    name: "@dsh-enhanced/cand-x"\n    inject: [${thirtyThreeInject}]\n`,
+        `- insert:\n  - id: dsh-ray-cand-x\n    name: "@dsh-ray/cand-x"\n    inject: [${thirtyThreeInject}]\n`,
       )).toThrow()
     })
 
@@ -652,13 +652,13 @@ describe('Tier 2 — F12–F14: inProcessReload, Evolution & R3 Defaults Boundar
 
       expect(() => validateBinding({
         grant: validGrant,
-        packageName: '@dsh-enhanced/evolved-alpha',
+        packageName: '@dsh-ray/evolved-alpha',
         allowWithoutGrowthRun: false,
       })).toThrow()
 
       expect(() => validateBinding({
         grant: validGrant,
-        packageName: '@dsh-enhanced/evolved-alpha',
+        packageName: '@dsh-ray/evolved-alpha',
         growthRun: {
           runId: 'gr-1',
           revisionAcceptance: { namePrefix: 'other-' },

@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest'
 
-vi.mock('@dsh-enhanced/assistant-delivery', async importOriginal => {
-  const original = await importOriginal<typeof import('@dsh-enhanced/assistant-delivery')>()
+vi.mock('@dsh-ray/assistant-delivery', async importOriginal => {
+  const original = await importOriginal<typeof import('@dsh-ray/assistant-delivery')>()
   return { ...original, inspectActiveWebOwnerBindingLocally: undefined }
 })
 

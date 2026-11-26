@@ -2,7 +2,7 @@ import { EventTriggersService } from '../../plugins/event-triggers/lib/index.js'
 import { appendFileSync } from 'node:fs'
 import { repositoryFixtureSnapshot } from './repo-verified-delivery-fixture.mjs'
 
-export const name = 'dsh-enhanced-event-triggers'
+export const name = 'dsh-ray-event-triggers'
 export const inject = ['assistantPolicy', 'assistantAutomations', 'assistantDelivery', 'credentialsKeychain']
 export default { name, inject, apply }
 

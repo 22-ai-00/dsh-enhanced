@@ -167,7 +167,7 @@ export async function makeBridgeHarness(options: {
 
   const config = { includeRawEvents: false, stream: agentStream, ...options.config } as AcpConfig
   harness.acpFiber = await ctx.plugin({
-    name: 'dsh-enhanced-acp-lifecycle-test',
+    name: 'dsh-ray-acp-lifecycle-test',
     inject: [...AcpPlugin.inject],
     apply: (inner: Context) => { AcpPlugin.apply(inner, config) },
   })

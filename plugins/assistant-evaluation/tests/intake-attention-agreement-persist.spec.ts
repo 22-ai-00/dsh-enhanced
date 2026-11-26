@@ -11,8 +11,8 @@ import { createIntakeAttentionAgreementSnapshot } from '../src/intake-attention-
 import { EvaluationStore } from '../src/store.ts'
 import { AssistantWorkItemsService } from '../../assistant-work-items/lib/index.js'
 import type { Config as WorkItemsConfig } from '../../assistant-work-items/lib/config.js'
-import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
-import type { AcceptanceHandle, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-ray/assistant-verifier'
+import type { AcceptanceHandle, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration } from '@dsh-ray/assistant-verifier'
 
 const scope = { workspace: '/work/agree', preset: 'primary' }
 const otherScope = { workspace: '/work/other', preset: 'primary' }

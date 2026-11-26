@@ -3,8 +3,8 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
-import { deliverySchemaVersion, ensurePrincipalLocally } from '@dsh-enhanced/assistant-delivery'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
+import { deliverySchemaVersion, ensurePrincipalLocally } from '@dsh-ray/assistant-delivery'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parseDocument, stringify } from 'yaml'
 import { formatAutonomyReadiness, inspectAutonomyOwner, inspectAutonomyProfile, inspectAutonomyReadiness, runAutonomyDoctor } from '../src/doctor.js'
@@ -33,9 +33,9 @@ function fixture() {
     versions: { node: 'v22.23.2', pnpm: '11.7.0', typescript: '5.9.3', cordis: '4.0.5', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } }
   const cgroupRoots: LinuxCgroupRoots = { mode: 'v1', cpu: '/sys/fs/cgroup/cpu/uid-1000', memory: '/sys/fs/cgroup/memory/uid-1000', pids: '/sys/fs/cgroup/pids/uid-1000', freezer: '/sys/fs/cgroup/freezer/uid-1000' }
   const source = stringify([
-    { id: 'dsh-enhanced-assistant-isolation', name: '@dsh-enhanced/assistant-isolation', config: { stateRoot: join(home, 'isolation'), backend: 'linux-native', linux: { runtime, cgroupRoots }, grants: [grant] } },
-    { id: 'dsh-enhanced-assistant-web-owner', name: '@dsh-enhanced/assistant-web-owner', config: { workspace, preset: 'standard', principal: { account: 'web', tenant: 'local', user: 'operator' } } },
-    { id: 'dsh-enhanced-assistant-delivery', name: '@dsh-enhanced/assistant-delivery', config: { databasePath } },
+    { id: 'dsh-ray-assistant-isolation', name: '@dsh-ray/assistant-isolation', config: { stateRoot: join(home, 'isolation'), backend: 'linux-native', linux: { runtime, cgroupRoots }, grants: [grant] } },
+    { id: 'dsh-ray-assistant-web-owner', name: '@dsh-ray/assistant-web-owner', config: { workspace, preset: 'standard', principal: { account: 'web', tenant: 'local', user: 'operator' } } },
+    { id: 'dsh-ray-assistant-delivery', name: '@dsh-ray/assistant-delivery', config: { databasePath } },
   ])
   return { home, source, databasePath, grant, runtime, cgroupRoots }
 }
@@ -148,7 +148,7 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     const { home, source } = fixture()
     const invalid = [
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'disabled'], true),
-      (doc: ReturnType<typeof parseDocument>) => doc.add({ id: 'shadow', name: '@dsh-enhanced/assistant-isolation' }),
+      (doc: ReturnType<typeof parseDocument>) => doc.add({ id: 'shadow', name: '@dsh-ray/assistant-isolation' }),
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'config', 'image'], 'latest'),
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'config', 'dockerPath'], '/usr/../bin/docker'),
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'config', 'backend'], 'docker'),
@@ -181,14 +181,14 @@ describe('autonomy doctor profile and persisted owner checks', () => {
  * never activates a Host, calls a model or reads a database for this section.
  */
 const readinessBundles = `
-- id: dsh-enhanced-personal-assistant
-  name: '@dsh-enhanced/personal-assistant'
+- id: dsh-ray-personal-assistant
+  name: '@dsh-ray/personal-assistant'
   config:
     personalMemory:
       automaticLearning:
         workItemExperiences: true
-- id: dsh-enhanced-assistant-work-items
-  name: '@dsh-enhanced/assistant-work-items'
+- id: dsh-ray-assistant-work-items
+  name: '@dsh-ray/assistant-work-items'
   config:
     enabled: true
     mode: observe
@@ -196,38 +196,38 @@ const readinessBundles = `
       enabled: true
       evaluation:
         enabled: true
-- id: dsh-enhanced-assistant-delivery
-  name: '@dsh-enhanced/assistant-delivery'
+- id: dsh-ray-assistant-delivery
+  name: '@dsh-ray/assistant-delivery'
   config:
     schedulerEnabled: true
-- id: dsh-enhanced-assistant-evaluation
-  name: '@dsh-enhanced/assistant-evaluation'
+- id: dsh-ray-assistant-evaluation
+  name: '@dsh-ray/assistant-evaluation'
   config:
     notificationOutcomesEnabled: true
-- id: dsh-enhanced-assistant-verifier
-  name: '@dsh-enhanced/assistant-verifier'
+- id: dsh-ray-assistant-verifier
+  name: '@dsh-ray/assistant-verifier'
   config:
     memoryReviews:
       workItemExperiences: true
-- id: dsh-enhanced-event-triggers
-  name: '@dsh-enhanced/event-triggers'
+- id: dsh-ray-event-triggers
+  name: '@dsh-ray/event-triggers'
   config:
     pollerEnabled: true
     triggers:
       - id: daily
-- id: dsh-enhanced-assistant-memory-learning
-  name: '@dsh-enhanced/assistant-memory-learning'
+- id: dsh-ray-assistant-memory-learning
+  name: '@dsh-ray/assistant-memory-learning'
   config:
     workItemExperiences: true
-- id: dsh-enhanced-assistant-growth-driver
-  name: '@dsh-enhanced/assistant-growth-driver'
+- id: dsh-ray-assistant-growth-driver
+  name: '@dsh-ray/assistant-growth-driver'
   config:
     enabled: true
     usageLearning:
       enabled: true
       workItemFailures: true
-- id: dsh-enhanced-assistant-proactive
-  name: '@dsh-enhanced/assistant-proactive'
+- id: dsh-ray-assistant-proactive
+  name: '@dsh-ray/assistant-proactive'
   config:
     intakeEvaluation:
       enabled: true
@@ -236,8 +236,8 @@ const readinessBundles = `
           ceiling: digest
       provider: deepseek-official
       model: deepseek-v4-flash
-- id: dsh-enhanced-plugin-control-plane
-  name: '@dsh-enhanced/plugin-control-plane'
+- id: dsh-ray-plugin-control-plane
+  name: '@dsh-ray/plugin-control-plane'
   config:
     creationCapabilities:
       authorityId: create
@@ -265,7 +265,7 @@ function readinessCheck(report: ReturnType<typeof inspectAutonomyReadiness>, id:
 describe('autonomy doctor static readiness snapshot', () => {
   it('reports a fully assembled ordinary-use profile as ready with deterministic text and JSON', () => {
     const report = inspectAutonomyReadiness(readinessBundles, 'web')
-    expect(report).toMatchObject({ protocol: 'dsh-enhanced/autonomy-readiness/v1', profile: 'web',
+    expect(report).toMatchObject({ protocol: 'dsh-ray/autonomy-readiness/v1', profile: 'web',
       scope: 'ordinary-use-learning', ready: true, runtime: { observed: false } })
     expect(report.checks.map(check => [check.id, check.status])).toEqual([
       ['bundles', 'ready'],
@@ -314,8 +314,8 @@ describe('autonomy doctor static readiness snapshot', () => {
 
   it('reports missing rings fail-closed instead of throwing', () => {
     const partial = `
-- id: dsh-enhanced-assistant-delivery
-  name: '@dsh-enhanced/assistant-delivery'
+- id: dsh-ray-assistant-delivery
+  name: '@dsh-ray/assistant-delivery'
   config:
     schedulerEnabled: true
 `
@@ -354,8 +354,8 @@ describe('autonomy doctor static readiness snapshot', () => {
     expect(readinessCheck(revision, 'revision-adoption').reasons.map(reason => reason.code))
       .toContain('revision-capabilities-not-configured')
 
-    const disabled = readinessBundles.replace("- id: dsh-enhanced-event-triggers\n  name: '@dsh-enhanced/event-triggers'",
-      "- id: dsh-enhanced-event-triggers\n  name: '@dsh-enhanced/event-triggers'\n  disabled: true")
+    const disabled = readinessBundles.replace("- id: dsh-ray-event-triggers\n  name: '@dsh-ray/event-triggers'",
+      "- id: dsh-ray-event-triggers\n  name: '@dsh-ray/event-triggers'\n  disabled: true")
     const poller = inspectAutonomyReadiness(disabled, 'web')
     expect(readinessCheck(poller, 'event-poller').reasons.map(reason => reason.code)).toContain('event-triggers-unavailable')
     expect(readinessCheck(poller, 'bundles').reasons.map(reason => reason.code)).toContain('bundle-disabled:event-triggers')
@@ -390,11 +390,11 @@ describe('autonomy doctor static readiness snapshot', () => {
       await runAutonomyDoctor(['--readiness', '--dsh-home', root, '--profile', 'web'])
       const readyOutput = chunks.join('')
       expect(readyOutput).toContain('Autonomy readiness')
-      expect(JSON.parse(readyOutput.trim().split('\n').at(-1)!)).toMatchObject({ protocol: 'dsh-enhanced/autonomy-readiness/v1', ready: true })
+      expect(JSON.parse(readyOutput.trim().split('\n').at(-1)!)).toMatchObject({ protocol: 'dsh-ray/autonomy-readiness/v1', ready: true })
       expect(process.exitCode ?? 0).toBe(0)
 
       chunks.length = 0
-      writeFileSync(dumpPath, "- id: dsh-enhanced-assistant-delivery\n  name: '@dsh-enhanced/assistant-delivery'\n  config: {}\n")
+      writeFileSync(dumpPath, "- id: dsh-ray-assistant-delivery\n  name: '@dsh-ray/assistant-delivery'\n  config: {}\n")
       await runAutonomyDoctor(['--readiness', '--dsh-home', root, '--profile', 'web'])
       const blocked = JSON.parse(chunks.join('').trim().split('\n').at(-1)!) as { ready: boolean; checks: Array<{ id: string }> }
       expect(blocked.ready).toBe(false)
@@ -413,8 +413,8 @@ describe('autonomy doctor static readiness snapshot', () => {
   it('inspects dreaming fail-closed completeness, goals/proactive preparation and $DSH_HOME SQLite path leaks', () => {
     const home = '/srv/dsh-home'
     const incompleteDreaming = `${readinessBundles}
-- id: dsh-enhanced-assistant-dreaming
-  name: '@dsh-enhanced/assistant-dreaming'
+- id: dsh-ray-assistant-dreaming
+  name: '@dsh-ray/assistant-dreaming'
   config:
     enabled: true
     retired: true
@@ -433,8 +433,8 @@ describe('autonomy doctor static readiness snapshot', () => {
     ]))
 
     const completeOptional = `${readinessBundles}
-- id: dsh-enhanced-assistant-dreaming
-  name: '@dsh-enhanced/assistant-dreaming'
+- id: dsh-ray-assistant-dreaming
+  name: '@dsh-ray/assistant-dreaming'
   config:
     enabled: true
     retired: false
@@ -449,8 +449,8 @@ describe('autonomy doctor static readiness snapshot', () => {
     model: deepseek-chat
     budgetId: dreaming-1
     budgetAmount: 10
-- id: dsh-enhanced-assistant-goals
-  name: '@dsh-enhanced/assistant-goals'
+- id: dsh-ray-assistant-goals
+  name: '@dsh-ray/assistant-goals'
   config:
     databasePath: ${home}/assistant-goals/web.sqlite
     eventWaits: true
@@ -475,8 +475,8 @@ describe('autonomy doctor static readiness snapshot', () => {
     process.env.HOME = '/tmp/fake-user-home-for-doctor'
     try {
       const leaking = `${readinessBundles}
-- id: dsh-enhanced-assistant-goals
-  name: '@dsh-enhanced/assistant-goals'
+- id: dsh-ray-assistant-goals
+  name: '@dsh-ray/assistant-goals'
   config:
     databasePath: /tmp/fake-user-home-for-doctor/.dsh/assistant-goals.sqlite
 `
@@ -489,7 +489,7 @@ describe('autonomy doctor static readiness snapshot', () => {
     }
   })
 
-  it('falls back to verified $DSH_HOME/.dsh-rsi-host.json when PATH lacks dsh', async () => {
+  it('falls back to verified $DSH_HOME/.dsh-ray-host.json when PATH lacks dsh', async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'autonomy-doctor-bound-'))); roots.push(home)
     const cacheRoot = realpathSync(mkdtempSync(join(tmpdir(), 'autonomy-doctor-cache-'))); roots.push(cacheRoot)
     const hostRoot = join(cacheRoot, '0.2.2-rc.5', 'node_modules', '@deepseek-ai', 'dsh')
@@ -505,13 +505,13 @@ describe('autonomy doctor static readiness snapshot', () => {
     chmodSync(join(hostRoot, 'bin', 'dsh.js'), 0o755)
     writeFileSync(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.5' }))
     symlinkSync('../@deepseek-ai/dsh/bin/dsh.js', join(binDir, 'dsh'))
-    writeFileSync(join(home, '.dsh-rsi-host.json'), JSON.stringify({
+    writeFileSync(join(home, '.dsh-ray-host.json'), JSON.stringify({
       schemaVersion: 1,
       cacheRoot,
       version: '0.2.2-rc.5',
       receiptDigest: 'b'.repeat(64),
     }), { mode: 0o600 })
-    chmodSync(join(home, '.dsh-rsi-host.json'), 0o600)
+    chmodSync(join(home, '.dsh-ray-host.json'), 0o600)
 
     const savedPath = process.env.PATH
     const savedFixture = process.env.BOUND_READINESS_FIXTURE

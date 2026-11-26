@@ -31,7 +31,7 @@ async function credentialHandle(value, handleId) {
   if (value.id !== handleId || !identifier(value.id) || !Array.isArray(value.consumers) || !Array.isArray(value.purposes)
     || !value.consumers.every(identifier) || !value.purposes.every(identifier) || new Set(value.consumers).size !== value.consumers.length
     || new Set(value.purposes).size !== value.purposes.length || !integer(value.maxLeaseMs, 30_000, 86_400_000)
-    || !value.consumers.includes('dsh-enhanced-assistant-actions') || !value.consumers.includes('dsh-enhanced-event-triggers')
+    || !value.consumers.includes('dsh-ray-assistant-actions') || !value.consumers.includes('dsh-ray-event-triggers')
     || !value.purposes.includes('github.commit') || !value.purposes.includes('github.observe')) fail('credential handle is not authorized for live delivery and observation')
   let reference
   if (value.provider === 'environment') {

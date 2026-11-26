@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
-import { consumeLinuxRepositoryAdmissionRefusal, verifyLinuxRuntime, linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
-import type { LinuxRepositoryRunner } from '@dsh-enhanced/assistant-isolation'
+import { consumeLinuxRepositoryAdmissionRefusal, verifyLinuxRuntime, linuxRuntimeDigest } from '@dsh-ray/assistant-isolation'
+import type { LinuxRepositoryRunner } from '@dsh-ray/assistant-isolation'
 import { ControlPlaneCliError } from './errors.js'
 import { checkedSourceSnapshot, runLocalBuffer, runLocalCommand } from './source-workspace.js'
 import { PREPARED_SOURCE_BUILD_SCRIPT, sourceTree, validateSourceBuildConfig, verifySourcePreparation,

@@ -90,8 +90,8 @@ async function adapter(path: string, input: Readonly<{ model: NativeModelConfig 
 }
 
 const strategyRuntimePackages = [...runtimePackages, '@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver',
-  '@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-session-persistence', '@deepseek-ai/dsh-session-persistence-jsonl', '@dsh-enhanced/assistant-delivery',
-  '@dsh-enhanced/assistant-policy', '@dsh-enhanced/assistant-goals', '@dsh-enhanced/assistant-isolation', '@dsh-enhanced/assistant-verifier'] as const
+  '@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-session-persistence', '@deepseek-ai/dsh-session-persistence-jsonl', '@dsh-ray/assistant-delivery',
+  '@dsh-ray/assistant-policy', '@dsh-ray/assistant-goals', '@dsh-ray/assistant-isolation', '@dsh-ray/assistant-verifier'] as const
 
 async function strategyModules() {
   try { return await Promise.all([import('./strategy-config.js'), import('./strategy-corpus.js'), import('./strategy-executor.js'), import('./strategy-plan.js'), import('./strategy-projection.js'), import('./strategy-corpus-v2.js')]) } catch {
@@ -161,9 +161,9 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
       const configured = configPath === undefined ? undefined : await config(configPath)
       const provider = (configured as { model?: { provider?: unknown } } | undefined)?.model?.provider
       const providerPackages = provider === 'deepseek-goal-metered'
-        ? ['@dsh-enhanced/assistant-deepseek-budget', '@deepseek-ai/dsh-credentials']
+        ? ['@dsh-ray/assistant-deepseek-budget', '@deepseek-ai/dsh-credentials']
         : provider === 'traex-agent'
-          ? ['@dsh-enhanced/traex-acp-provider']
+          ? ['@dsh-ray/traex-acp-provider']
           : []
       const selectedPackages = [...strategyRuntimePackages, ...providerPackages]
       const packages = selectedPackages.map(name => {
@@ -179,7 +179,7 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
         const input = await strategyConfig(configured)
         let isolationReady = false
         try {
-          const resources = await import('@dsh-enhanced/assistant-isolation/native-resources')
+          const resources = await import('@dsh-ray/assistant-isolation/native-resources')
           await resources.probeLinuxIsolationRuntime({ runtime: input.runtime, cgroupRoots: input.cgroupRoots })
           isolationReady = true
         } catch { /* Keep diagnostics non-sensitive and do not attempt installation or runtime preparation. */ }
@@ -189,7 +189,7 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
       }
     } else {
       if (!nativeSuiteNames.includes(suite)) throw new BenchmarkError('invalid native suite')
-      const names = [...runtimePackages, ...(suite === 'memory-v1' || suite === 'memory-v2' ? ['@dsh-enhanced/personal-memory', '@dsh-enhanced/assistant-policy'] : [])]
+      const names = [...runtimePackages, ...(suite === 'memory-v1' || suite === 'memory-v2' ? ['@dsh-ray/personal-memory', '@dsh-ray/assistant-policy'] : [])]
       const packages = names.map(name => {
         try { require.resolve(name); return { name, available: true } } catch { return { name, available: false } }
       })

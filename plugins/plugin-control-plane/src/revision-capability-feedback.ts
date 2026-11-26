@@ -5,10 +5,10 @@
  * consulted. Parent and candidate windows are paired before/after the revision
  * adoption: equal-length, adjacent at the candidate adoption instant.
  */
-import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantEvaluationService, EvaluationCanonicalLearningEvidenceTuple, TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
+import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-ray/assistant-delivery'
+import type { AssistantEvaluationService, EvaluationCanonicalLearningEvidenceTuple, TrustedTaskLearningProjectionReceipt } from '@dsh-ray/assistant-evaluation'
 import { evaluateRevisionBenefit, revisionBenefitContractDigest, validateRevisionBenefitWindowStats,
-  type RevisionBenefitContract, type RevisionBenefitEvaluation, type RevisionBenefitWindowStats } from '@dsh-enhanced/assistant-growth-contract'
+  type RevisionBenefitContract, type RevisionBenefitEvaluation, type RevisionBenefitWindowStats } from '@dsh-ray/assistant-growth-contract'
 import { controlPlaneDigest } from './store.js'
 import type { CreationCapabilityOwner } from './creation-capability-types.js'
 import type { RevisionCapabilityBenefitSample, RevisionCapabilityCallEvidence,

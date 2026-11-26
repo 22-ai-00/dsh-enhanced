@@ -7,8 +7,8 @@ import { canonicalGrowthJson, growthObjectDigest, pluginRevisionVerificationSign
   sourceGrowthEvidenceDigest, sourceGrowthRunDigest, verifyPluginRevisionRegressionCertificate,
   type PluginCreationVerificationCertificate, type PluginCreationVerificationLinuxExecution,
   type PluginRevisionVerificationCertificate,
-  type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import { linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+  type SourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
+import { linuxRuntimeDigest, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { afterEach, expect, test, vi } from 'vitest'
 import { CreationReviewStore } from '../src/creation-review-store.ts'
 import { CreationReviewRuntime, compileCreationReviewConfig, projectCreationSchemas,

@@ -3,7 +3,7 @@ import { EventTriggersService, Config } from './service.js'
 import { normalizeEventTriggersConfig } from './config.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-event-triggers'
+export const name = 'dsh-ray-event-triggers'
 export { Config, EventTriggersService, version }
 export * from './config.js'
 export * from './service.js'

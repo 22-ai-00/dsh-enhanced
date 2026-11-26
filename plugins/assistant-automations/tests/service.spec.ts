@@ -2,7 +2,7 @@ import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import { type Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import { AssistantPolicyService, type ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService, type ApprovalDispatchRoute } from '@dsh-ray/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -85,7 +85,7 @@ async function harness(allow = true, options: {
   const prepareAgentApproval = vi.fn(() => options.deliveryRoute === false
     ? (() => { throw new Error('disabled') })()
     : options.deliveryRoute ?? {
-        routeVersion: 2 as const, sourceId: 'dsh-enhanced-assistant-automations',
+        routeVersion: 2 as const, sourceId: 'dsh-ray-assistant-automations',
         bindingId: 'binding-owner', bindingVersion: 3, bindingGeneration: 2,
         workspace: '/work/alpha', principal: 'lark/main/tenant/owner',
         principalRecordId: 'principal-owner', principalVersion: 4,
@@ -155,7 +155,7 @@ describe('assistant automations Cordis service', () => {
       } as never,
     })
     expect(fixture.prepareAgentApproval).toHaveBeenCalledWith(current, {
-      sourceId: 'dsh-enhanced-assistant-automations',
+      sourceId: 'dsh-ray-assistant-automations',
     })
     fixture.service.decideProposal({ proposalId: proposal.proposalId, principal: 'lark/main/tenant/owner',
       expectedVersion: 1, decision: 'approved', reason: 'reviewed' })
@@ -186,7 +186,7 @@ describe('assistant automations Cordis service', () => {
     await routed.ctx.fiber.restart()
 
     const mismatched = await harness(true, { deliveryRoute: {
-      routeVersion: 2, sourceId: 'dsh-enhanced-assistant-automations',
+      routeVersion: 2, sourceId: 'dsh-ray-assistant-automations',
       bindingId: 'binding-owner', bindingVersion: 3, bindingGeneration: 2,
       workspace: '/work/other', principal: 'lark/main/tenant/owner',
       principalRecordId: 'principal-owner', principalVersion: 4,

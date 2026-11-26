@@ -5,10 +5,10 @@ import { connect as netConnect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { parseExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { parseExternalEventEnvelope } from '@dsh-ray/assistant-automations/external-event'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { CredentialsKeychainService } from '@dsh-ray/credentials-keychain'
 import { afterEach, describe, expect, test } from 'vitest'
 import { EVENT_OBSERVER_EXECUTOR } from '../src/observer.ts'
 import { EventTriggersService } from '../src/service.ts'
@@ -74,7 +74,7 @@ async function createWebhookListenerHarness(options: {
     },
     {
       id: 'cred-use', effect: 'allow',
-      subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' },
+      subject: { kind: 'background', id: 'dsh-ray-event-triggers' },
       actions: ['credential.use'], resource: { kind: 'credential', id: '*' },
       context: { initiators: ['background'] },
       ...(options.credentialLease === undefined ? {} : { lease: options.credentialLease }),
@@ -112,7 +112,7 @@ async function createWebhookListenerHarness(options: {
         handles: [
           {
             id: 'hook-secret', provider: 'environment', environmentName: 'WEBHOOK_SECRET',
-            consumers: ['dsh-enhanced-event-triggers'], purposes: ['verify-webhook'], maxLeaseMs: 30_000,
+            consumers: ['dsh-ray-event-triggers'], purposes: ['verify-webhook'], maxLeaseMs: 30_000,
           },
         ],
       }, { env: { WEBHOOK_SECRET: 'super-secret-value-never-leak' } })
@@ -122,7 +122,7 @@ async function createWebhookListenerHarness(options: {
   let now = options.initialNow ?? 100_000
   let service!: EventTriggersService
   await ctx.plugin({
-    name: 'dsh-enhanced-event-triggers',
+    name: 'dsh-ray-event-triggers',
     apply(runtime: Context) {
       service = new EventTriggersService(runtime, {
         databasePath: join(root, 'events.sqlite'),
@@ -333,7 +333,7 @@ describe('built-in webhook HTTP listener', () => {
           databasePath: join(root, 'credentials.sqlite'),
           handles: [{
             id: 'hook-secret', provider: 'environment', environmentName: 'WEBHOOK_SECRET',
-            consumers: ['dsh-enhanced-event-triggers'], purposes: ['verify-webhook'], maxLeaseMs: 30_000,
+            consumers: ['dsh-ray-event-triggers'], purposes: ['verify-webhook'], maxLeaseMs: 30_000,
           }],
         }, { env: { WEBHOOK_SECRET: 's' } })
       },
@@ -360,7 +360,7 @@ describe('built-in webhook HTTP listener', () => {
           databasePath: join(root, 'credentials2.sqlite'),
           handles: [{
             id: 'hook-secret', provider: 'environment', environmentName: 'WEBHOOK_SECRET',
-            consumers: ['dsh-enhanced-event-triggers'], purposes: ['verify-webhook'], maxLeaseMs: 30_000,
+            consumers: ['dsh-ray-event-triggers'], purposes: ['verify-webhook'], maxLeaseMs: 30_000,
           }],
         }, { env: { WEBHOOK_SECRET: 's' } })
       },

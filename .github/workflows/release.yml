@@ -82,25 +82,45 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
-          registry-url: https://registry.npmjs.org
 
       - name: Verify release tag and pending versions
         run: node ./scripts/release-version.mjs verify-tag "${RELEASE_TAG}"
 
       - name: Verify npm credentials
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ -n "${NODE_AUTH_TOKEN:-}" ]]; then
-            npm whoami --registry=https://registry.npmjs.org
-          elif [[ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
-            echo 'NODE_AUTH_TOKEN is not set; using GitHub OIDC trusted publishing.'
-          else
-            echo 'Neither NPM_TOKEN nor GitHub OIDC (ACTIONS_ID_TOKEN_REQUEST_URL) is available.' >&2
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo 'GitHub OIDC trusted publishing is unavailable (missing ACTIONS_ID_TOKEN_REQUEST_URL or ACTIONS_ID_TOKEN_REQUEST_TOKEN; ensure permissions.id-token: write and environment: npm-release).' >&2
             exit 1
           fi
+          if [[ -n "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo 'NODE_AUTH_TOKEN must be unset when using GitHub OIDC trusted publishing.' >&2
+            exit 1
+          fi
+          node -e '
+            const { execFileSync } = require("node:child_process");
+            const parse = (v) => v.trim().replace(/^v/, "").split(".").map(Number);
+            const gte = (a, b) => {
+              for (let i = 0; i < 3; i += 1) {
+                if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+              }
+              return true;
+            };
+            const nodeVer = process.versions.node;
+            const npmVer = execFileSync("npm", ["--version"], { encoding: "utf8" }).trim();
+            const pnpmVer = execFileSync("pnpm", ["--version"], { encoding: "utf8" }).trim();
+            if (!gte(parse(nodeVer), [24, 9, 0])) {
+              throw new Error(`Node >=24.9.0 is required for OIDC publishing (got ${nodeVer})`);
+            }
+            if (!gte(parse(npmVer), [11, 5, 1])) {
+              throw new Error(`npm >=11.5.1 is required for OIDC publishing (got ${npmVer})`);
+            }
+            if (pnpmVer !== "11.7.0") {
+              throw new Error(`pnpm 11.7.0 is required for OIDC publishing (got ${pnpmVer})`);
+            }
+            console.log(`GitHub OIDC trusted publishing ready (Node v${nodeVer}, npm ${npmVer}, pnpm ${pnpmVer}).`);
+          '
 
       - name: Verify CI gate and build release packages
         shell: bash
@@ -119,7 +139,7 @@ jobs:
               Accept: "application/vnd.github+json",
               Authorization: `Bearer ${token}`,
               "X-GitHub-Api-Version": "2022-11-28",
-              "User-Agent": "dsh-enhanced-release-ci-gate",
+              "User-Agent": "dsh-ray-release-ci-gate",
             };
             const requiredLanes = [
               "linux-packages",
@@ -215,19 +235,19 @@ jobs:
 
       - name: Publish packages
         shell: bash
-        env:
-          NPM_TOKEN_SECRET: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ -n "${NPM_TOKEN_SECRET:-}" ]]; then
-            export NODE_AUTH_TOKEN="${NPM_TOKEN_SECRET}"
-          else
-            unset NODE_AUTH_TOKEN || true
-            if [[ -n "${NPM_CONFIG_USERCONFIG:-}" && -f "${NPM_CONFIG_USERCONFIG}" ]]; then
-              grep -v '_authToken=' "${NPM_CONFIG_USERCONFIG}" > "${NPM_CONFIG_USERCONFIG}.tmp" || true
-              mv "${NPM_CONFIG_USERCONFIG}.tmp" "${NPM_CONFIG_USERCONFIG}"
-            fi
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo 'GitHub OIDC trusted publishing is unavailable (missing ACTIONS_ID_TOKEN_REQUEST_URL or ACTIONS_ID_TOKEN_REQUEST_TOKEN).' >&2
+            exit 1
           fi
+          unset NODE_AUTH_TOKEN || true
+          for npmrc_path in "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}" "$HOME/.npmrc"; do
+            if [[ -n "${npmrc_path}" && -f "${npmrc_path}" ]]; then
+              grep -Ev '(^|:)_authToken=|//registry\.npmjs\.org/:_authToken=' "${npmrc_path}" > "${npmrc_path}.tmp" || true
+              mv "${npmrc_path}.tmp" "${npmrc_path}"
+            fi
+          done
           pnpm release:publish
 
   verify-npm:

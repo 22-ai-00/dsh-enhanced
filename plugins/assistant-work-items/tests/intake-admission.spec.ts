@@ -1,6 +1,6 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import { createHash } from 'node:crypto'
-import { createTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import { createTaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
 import { once } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'

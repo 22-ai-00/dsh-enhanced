@@ -3,8 +3,8 @@ import * as yaml from 'yaml'
 import { buildLocalSourcePreviewOverlay, assertLocalSourcePreviewDerivation } from '../scripts/install/local-source-preview.mjs'
 
 const baseline = (providers?: string[]) => yaml.stringify([
-  { id: 'dsh-enhanced-lark-channel', name: '@dsh-enhanced/lark-channel', config: { enabled: true, account: 'owner' } },
-  { id: 'dsh-enhanced-assistant-health', name: '@dsh-enhanced/assistant-health', config: {
+  { id: 'dsh-ray-lark-channel', name: '@dsh-ray/lark-channel', config: { enabled: true, account: 'owner' } },
+  { id: 'dsh-ray-assistant-health', name: '@dsh-ray/assistant-health', config: {
     marker: 'keep', ...(providers === undefined ? {} : { requiredProviders: providers }),
   } },
   { id: 'other', config: { enabled: true } },
@@ -52,13 +52,13 @@ describe('pre-owner local source preview', () => {
   test.each([
     baseline().replace('enabled: true', 'enabled: !!js true'),
     baseline().replace('enabled: true', 'enabled: false'),
-    baseline() + '- id: dsh-enhanced-lark-channel\n',
-    baseline() + '- id: dsh-enhanced-assistant-health\n',
+    baseline() + '- id: dsh-ray-lark-channel\n',
+    baseline() + '- id: dsh-ray-assistant-health\n',
     baseline(['larkChannel']).replace('- larkChannel', '- !!js larkChannel'),
-    baseline().replace('@dsh-enhanced/lark-channel', '@dsh-enhanced/other'),
-    baseline().replace('@dsh-enhanced/assistant-health', '@dsh-enhanced/other'),
-    baseline() + '- id: duplicate-module\n  name: "@dsh-enhanced/lark-channel"\n',
-    baseline() + '- id: duplicate-module\n  name: "@dsh-enhanced/assistant-health"\n',
+    baseline().replace('@dsh-ray/lark-channel', '@dsh-ray/other'),
+    baseline().replace('@dsh-ray/assistant-health', '@dsh-ray/other'),
+    baseline() + '- id: duplicate-module\n  name: "@dsh-ray/lark-channel"\n',
+    baseline() + '- id: duplicate-module\n  name: "@dsh-ray/assistant-health"\n',
   ])('rejects ambiguous or dynamic input', source => {
     expect(() => buildLocalSourcePreviewOverlay(source, yaml)).toThrow()
   })

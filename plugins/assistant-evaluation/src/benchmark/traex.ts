@@ -31,8 +31,8 @@ interface TraexRuntime {
   normalizeConfig: (input?: unknown) => TraexNormalizedConfig
 }
 
-const packageName = '@dsh-enhanced/traex-acp-provider'
-const routeCapabilitiesPackage = '@dsh-enhanced/llm-route-capabilities'
+const packageName = '@dsh-ray/traex-acp-provider'
+const routeCapabilitiesPackage = '@dsh-ray/llm-route-capabilities'
 const provider = 'traex-agent'
 // The one route/model pair already proven against the real local TraeX login state (WP14).
 const models = Object.freeze(['gpt-5.6-terra'])

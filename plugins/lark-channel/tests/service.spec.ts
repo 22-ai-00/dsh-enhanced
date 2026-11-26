@@ -4,7 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, test, vi } from 'vitest'
 import { signLarkApprovalAction } from '../src/approval.ts'
 import { LarkChannelService, writeLarkLifecycleMarker } from '../src/service.ts'
-import { DeliveryAdapterRegistryStoppedError, type DeliveryAdapter, type DeliveryAdapterContext } from '@dsh-enhanced/assistant-delivery'
+import { DeliveryAdapterRegistryStoppedError, type DeliveryAdapter, type DeliveryAdapterContext } from '@dsh-ray/assistant-delivery'
 import type { LarkTransport, LarkTransportHandlers } from '../src/types.ts'
 
 function transport(): LarkTransport {
@@ -313,7 +313,7 @@ describe('Lark Cordis service', () => {
     const withSecret = vi.fn(async <T>(caller: Context, request: { handleId: string; purpose: string },
       callback: (value: string, signal: AbortSignal, lease: { id: string; handleId: string; consumer: string;
         purpose: string; expiresAt: number }) => Promise<T>) => {
-      expect(caller.fiber.name).toBe('dsh-enhanced-lark-channel')
+      expect(caller.fiber.name).toBe('dsh-ray-lark-channel')
       expect(request).toMatchObject({ handleId: 'lark-app-secret', purpose: 'connect' })
       return callback('leased-secret', new AbortController().signal, { id: 'lease-1', handleId: 'lark-app-secret',
         consumer: caller.fiber.name, purpose: 'connect', expiresAt: Date.now() + 3_600_000 })
@@ -322,7 +322,7 @@ describe('Lark Cordis service', () => {
     const channel = transport()
     let service!: LarkChannelService
     const Plugin = {
-      name: 'dsh-enhanced-lark-channel', inject: ['assistantDelivery'],
+      name: 'dsh-ray-lark-channel', inject: ['assistantDelivery'],
       apply(scoped: Context) {
         service = new LarkChannelService(scoped, { enabled: true, account: 'primary', tenant: 'tenant-a',
           appId: 'cli_0123456789abcdef', credentialHandle: 'lark-app-secret', credentialLeaseMs: 3_600_000 },
@@ -373,7 +373,7 @@ describe('Lark Cordis service', () => {
     ctx.provide('credentialsKeychain', { withSecret })
     let service!: LarkChannelService
     const Plugin = {
-      name: 'dsh-enhanced-lark-channel', inject: ['assistantDelivery', 'credentialsKeychain'],
+      name: 'dsh-ray-lark-channel', inject: ['assistantDelivery', 'credentialsKeychain'],
       apply(scoped: Context) {
         service = new LarkChannelService(scoped, {
           enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',

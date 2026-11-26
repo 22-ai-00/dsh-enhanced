@@ -28,10 +28,10 @@ describe('frozen local profile dependency installation', () => {
           await mkdir(profilePath,{recursive:true,mode:0o700})
           await writeFile(workspace,'# owner configuration\npackages: [.]\nautoInstallPeers: false\nnodeLinker: hoisted\n',{flag:'wx',mode:0o600})
         } else {
-          expect(args).toEqual(['plugin','--profile',f.profile,'add',cohort.packages.find(pkg => pkg.name === '@dsh-enhanced/target')!.tarball])
+          expect(args).toEqual(['plugin','--profile',f.profile,'add',cohort.packages.find(pkg => pkg.name === '@dsh-ray/target')!.tarball])
           if (environment.pnpm_config_force === 'true') await rm(join(profilePath,'node_modules'),{recursive:true,force:true})
           await installFixture(f,cohort,['target','shared-lib','optional-plugin'],`home/profiles/${f.profile}`)
-          if (corrupt && !(repairable && environment.pnpm_config_force === 'true')) await writeFile(join(profilePath,'node_modules','@dsh-enhanced','target','lib','index.js'),'changed after package install\n')
+          if (corrupt && !(repairable && environment.pnpm_config_force === 'true')) await writeFile(join(profilePath,'node_modules','@dsh-ray','target','lib','index.js'),'changed after package install\n')
         }
         return ''
       })
@@ -58,11 +58,11 @@ describe('frozen local profile dependency installation', () => {
   })
   test('scopes overrides to runtime edges and preserves unrelated settings and comments', () => {
     const cohort = {version:'0.1.48',packages:[
-      {name:'@dsh-enhanced/personal-assistant',runtimeDependencies:['@dsh-enhanced/assistant-policy'],tarball:'/private/personal.tgz'},
-      {name:'@dsh-enhanced/assistant-policy',runtimeDependencies:[],tarball:'/private/with spaces/policy.tgz'},
+      {name:'@dsh-ray/personal-assistant',runtimeDependencies:['@dsh-ray/assistant-policy'],tarball:'/private/personal.tgz'},
+      {name:'@dsh-ray/assistant-policy',runtimeDependencies:[],tarball:'/private/with spaces/policy.tgz'},
     ]} as unknown as RsiLocalCohort
     const overrides = rsiLocalDependencyOverrides(cohort)
-    expect(overrides).toEqual({'@dsh-enhanced/personal-assistant@0.1.48>@dsh-enhanced/assistant-policy':'file:/private/with spaces/policy.tgz'})
+    expect(overrides).toEqual({'@dsh-ray/personal-assistant@0.1.48>@dsh-ray/assistant-policy':'file:/private/with spaces/policy.tgz'})
     const original = '# owner settings\npackages: [.]\nautoInstallPeers: false\nnodeLinker: hoisted\noverrides:\n  another-package: 1.2.3\n'
     const merged = mergeRsiLocalOverrides(original,overrides)
     expect(merged).toContain('# owner settings')
@@ -236,7 +236,7 @@ test('native pnpm peer overrides preserve one module identity and do not install
   try {
     const cohort = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }, f.ports)
     const profilePath = join(f.root, 'native-pnpm'); await mkdir(profilePath)
-    const target = cohort.packages.find(item => item.name === '@dsh-enhanced/target')!
+    const target = cohort.packages.find(item => item.name === '@dsh-ray/target')!
     await writeFile(join(profilePath, 'package.json'), JSON.stringify({ private: true,
       dependencies: { [target.name]: `file:${target.tarball}` } }))
     const peers = await rsiLocalPeerOverrides({ cohort, bundles: ['target'] })
@@ -251,13 +251,13 @@ test('native pnpm peer overrides preserve one module identity and do not install
     await verifyRsiLocalInstalledPackages({ cohort, profilePath })
     const targetPath = createRequire(join(profilePath, 'package.json')).resolve(`${target.name}/package.json`)
     const targetRequire = createRequire(targetPath)
-    const provider = targetRequire.resolve('@dsh-enhanced/shared-lib/package.json')
-    const consumer = targetRequire.resolve('@dsh-enhanced/optional-plugin/package.json')
-    const peer = createRequire(consumer).resolve('@dsh-enhanced/shared-lib/package.json')
+    const provider = targetRequire.resolve('@dsh-ray/shared-lib/package.json')
+    const consumer = targetRequire.resolve('@dsh-ray/optional-plugin/package.json')
+    const peer = createRequire(consumer).resolve('@dsh-ray/shared-lib/package.json')
     expect(await realpath(peer)).toBe(await realpath(provider))
     for (const absent of ['assistant-policy', 'peer-only', 'assistant-automations', 'plugin-control-plane']) {
       let resolved: string | undefined
-      try { resolved = targetRequire.resolve(`@dsh-enhanced/${absent}/package.json`) } catch { /* absent everywhere */ }
+      try { resolved = targetRequire.resolve(`@dsh-ray/${absent}/package.json`) } catch { /* absent everywhere */ }
       // NODE_PATH may expose this repository's unrelated packages to Node.
       // They must not have been installed into the disposable profile.
       expect(resolved?.startsWith(`${profilePath}/`) ?? false).toBe(false)
@@ -271,7 +271,7 @@ test('native pnpm peer overrides preserve one module identity and do not install
     const retryProfile = join(f.home, 'profiles', 'retry'); await mkdir(retryProfile)
     await writeFile(join(retryProfile, 'pnpm-workspace.yaml'), known)
     await preflightRsiLocalProfile({ dshHome: f.home, profile: 'retry', cohort, bundles: ['target'] })
-    const drift = known + "  '@dsh-enhanced/target@0.1.48>@dsh-enhanced/assistant-policy': file:/unknown.tgz\n"
+    const drift = known + "  '@dsh-ray/target@0.1.48>@dsh-ray/assistant-policy': file:/unknown.tgz\n"
     await writeFile(join(retryProfile, 'pnpm-workspace.yaml'), drift)
     await expect(preflightRsiLocalProfile({ dshHome: f.home, profile: 'retry', cohort, bundles: ['target'] })).rejects.toThrow('frozen internal override')
     expect(await readFile(join(cohort.root, 'receipt.json'), 'utf8')).toBe(before)
@@ -284,7 +284,7 @@ test('explicit fresh manifest initialization uses native install before add and 
     const cohort = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }, f.ports)
     const profilePath = join(f.home, 'profiles', f.profile), workspacePath = join(profilePath, 'pnpm-workspace.yaml')
     await mkdir(profilePath, { recursive: true, mode: 0o700 })
-    const manifest = JSON.stringify({ private: true, dsh: { profile: { bundles: ['@dsh-enhanced/target'] } } })
+    const manifest = JSON.stringify({ private: true, dsh: { profile: { bundles: ['@dsh-ray/target'] } } })
     await writeFile(join(profilePath, 'package.json'), manifest, { mode: 0o600 })
     let workspace = mergeRsiLocalOverrides('packages: [.]\n', {
       ...rsiLocalDependencyOverrides(cohort, ['target']), ...await rsiLocalPeerOverrides({ cohort, bundles: ['target'] }),

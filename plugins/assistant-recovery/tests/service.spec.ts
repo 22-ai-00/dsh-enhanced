@@ -8,7 +8,7 @@ import type {
   HostAutomationDefinition,
   HostAutomationExecutor,
   SystemAutomationReconcileInput,
-} from '@dsh-enhanced/assistant-automations'
+} from '@dsh-ray/assistant-automations'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RECOVERY_CATALOG_DIGEST } from '../src/catalog.ts'
 import type { Config, RecoveryJobConfig } from '../src/config.ts'
@@ -507,7 +507,7 @@ describe('AssistantRecoveryService', () => {
     expect(automations.record).toMatchObject({ status: 'paused' })
     expect(automations.pauses).toHaveLength(1)
     expect(automations.pauses[0]).toMatchObject({
-      owner: 'dsh-enhanced-assistant-recovery',
+      owner: 'dsh-ray-assistant-recovery',
       automationId: recoveryAutomationId('supervised-growth'),
       definitionHash: expect.stringMatching(/^[a-f\d]{64}$/u),
       expectedVersion: expect.any(Number),

@@ -1,4 +1,4 @@
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { describe, expect, it } from 'vitest'
 import { memoryDevelopmentCases, memoryDevelopmentCorpus, memoryDevelopmentCorpusV2, memoryDevelopmentDataset, memoryDevelopmentDatasetV2, memoryDevelopmentPrompt, memoryDevelopmentTask, judgeMemoryDevelopmentResponse } from '../../src/benchmark/memory-corpus.ts'
 

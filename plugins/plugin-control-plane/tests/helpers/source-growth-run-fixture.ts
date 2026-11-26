@@ -1,4 +1,4 @@
-import type { SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import type { SourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import type { AnyOwnerTaskFailureReference } from '../../src/owner-task-gap-types.js'
 import { controlPlaneDigest } from '../../src/store.js'
 

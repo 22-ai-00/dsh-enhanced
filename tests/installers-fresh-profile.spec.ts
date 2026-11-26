@@ -25,7 +25,7 @@ afterEach(async () => {
 
 describe('fresh local installer profile', () => {
   test('composes the safe core scenario and mounts capability discovery without materializing channel state', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-enhanced-fresh-installer-'))
+    const root = await mkdtemp(join(tmpdir(), 'dsh-ray-fresh-installer-'))
     temporaryRoots.push(root)
     const dshHome = join(root, 'dsh-home')
     const fakeBin = join(root, 'bin')
@@ -38,7 +38,7 @@ if [[ "\${1:-}" == 'build' ]]; then exit 0; fi
 exec env PATH="$REAL_PATH" pnpm "$@"
 `)
     await writeExecutable(join(fakeBin, 'npm'), '#!/bin/bash\nexit 0\n')
-    await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
+    await writeExecutable(join(fakeBin, 'dsh-ray'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
 set -euo pipefail
 if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
@@ -70,8 +70,8 @@ for ((index = 1; index <= $#; index += 1)); do
 done
 profile_patch="$DSH_HOME/profiles/$profile/cordis.patch.yml"
 cat <<'PROFILE'
-- id: dsh-enhanced-personal-assistant
-  name: '@dsh-enhanced/personal-assistant'
+- id: dsh-ray-personal-assistant
+  name: '@dsh-ray/personal-assistant'
   config:
     assistantPolicy:
       databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
@@ -98,7 +98,7 @@ PROFILE
     const testEnvironment = {
       PATH: `${fakeBin}:${pathWithoutTraex}`,
       DSH_HOME: dshHome,
-      DSH_ENHANCED_WEB_PORT: '43191',
+      DSH_RAY_WEB_PORT: '43191',
       REAL_PATH: pathWithoutTraex,
     }
     const result = spawnSync('/bin/bash', installerArguments, {
@@ -111,22 +111,22 @@ PROFILE
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'plugin-control-plane'))
     const profilePatch = await readFile(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
     expect(profilePatch).toContain('Fresh DSH profile override')
-    expect(profilePatch).not.toContain('dsh-enhanced-lark-channel')
+    expect(profilePatch).not.toContain('dsh-ray-lark-channel')
     const effective = spawnSync(join(fakeBin, 'dsh'), ['--profile', 'web', '--dump-config'], {
       cwd: repoRoot,
       encoding: 'utf8',
       env: testEnvironment,
     })
     expect(effective.status, effective.stderr).toBe(0)
-    expect(effective.stdout).toContain('dsh-enhanced-personal-assistant')
-    expect(effective.stdout).not.toContain('dsh-enhanced-assistant-delivery')
+    expect(effective.stdout).toContain('dsh-ray-personal-assistant')
+    expect(effective.stdout).not.toContain('dsh-ray-assistant-delivery')
     expect(effective.stdout).toContain('personalMemory:')
     expect(effective.stdout).toContain('personalWiki:')
     expect(effective.stdout).toContain('assistantAutomations:')
   }, 30_000)
 
   test('repeats a full local web install without replacing owner config, goals, sessions, or permission budgets', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-enhanced-repeat-installer-'))
+    const root = await mkdtemp(join(tmpdir(), 'dsh-ray-repeat-installer-'))
     temporaryRoots.push(root)
     const dshHome = join(root, 'dsh-home')
     const fakeBin = join(root, 'bin')
@@ -134,7 +134,7 @@ PROFILE
     await mkdir(fakeBin, { recursive: true })
     await nativeWebSetupPackage(profileDirectory, 'export async function runWebOwnerSetup() {}\n')
     await mkdir(join(profileDirectory, 'node_modules', '.bin'), { recursive: true })
-    await symlink(join(profileDirectory, 'node_modules', '@dsh-enhanced', 'assistant-web-owner', 'bin', 'dsh-web-owner-setup.js'),
+    await symlink(join(profileDirectory, 'node_modules', '@dsh-ray', 'assistant-web-owner', 'bin', 'dsh-web-owner-setup.js'),
       join(profileDirectory, 'node_modules', '.bin', 'dsh-web-owner-setup'))
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
 set -euo pipefail
@@ -143,7 +143,7 @@ if [[ "\${1:-}" == 'install' || "\${1:-}" == 'build' ]]; then exit 0; fi
 exec env PATH="$REAL_PATH" pnpm "$@"
 `)
     await writeExecutable(join(fakeBin, 'npm'), '#!/bin/bash\nexit 0\n')
-    await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
+    await writeExecutable(join(fakeBin, 'dsh-ray'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
     const dshPath = await nativeInstallerHost(root, `#!/bin/bash
 set -euo pipefail
 if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
@@ -166,7 +166,7 @@ try { manifest = JSON.parse(readFileSync(path, 'utf8')) } catch {}
 manifest.dependencies ??= {}
 manifest.dsh ??= {}; manifest.dsh.profile ??= {}; manifest.dsh.profile.bundles ??= []
 for (const target of targets) {
-  const name = '@dsh-enhanced/' + basename(target)
+  const name = '@dsh-ray/' + basename(target)
   manifest.dependencies[name] = 'file:' + target
   if (!manifest.dsh.profile.bundles.includes(name)) manifest.dsh.profile.bundles.push(name)
   const packageRoot = join(dirname(path), 'node_modules', name)
@@ -194,7 +194,7 @@ exit 2
     const environment = {
       PATH: `${fakeBin}:${pathWithoutTraex}`,
       DSH_HOME: dshHome,
-      DSH_ENHANCED_WEB_PORT: '43192',
+      DSH_RAY_WEB_PORT: '43192',
       REAL_PATH: pathWithoutTraex,
     }
     const arguments_ = [localInstaller, '--dsh-version', '0.2.2-rc.5', '--scenario', 'web', '--lark', 'skip', '--no-service']
@@ -205,7 +205,7 @@ exit 2
     const settingsPath = join(dshHome, 'settings.yaml')
     const goalPath = join(dshHome, 'assistant-goals', 'web.sqlite')
     const sessionPath = join(dshHome, 'sessions', 'owner-session.jsonl')
-    const ownerPatch = `- id: dsh-enhanced-personal-assistant
+    const ownerPatch = `- id: dsh-ray-personal-assistant
   config:
     assistantPolicy:
       rules:
@@ -240,8 +240,8 @@ PRAGMA user_version = 3;`)
     expect(second.status, second.stderr).toBe(0)
     const manifest = JSON.parse(await readFile(join(profileDirectory, 'package.json'), 'utf8'))
     const desiredBundles = [
-      '@dsh-enhanced/personal-assistant', '@dsh-enhanced/plugin-control-plane', '@dsh-enhanced/assistant-delivery',
-      '@dsh-enhanced/assistant-goals', '@dsh-enhanced/assistant-web-owner',
+      '@dsh-ray/personal-assistant', '@dsh-ray/plugin-control-plane', '@dsh-ray/assistant-delivery',
+      '@dsh-ray/assistant-goals', '@dsh-ray/assistant-web-owner',
     ]
     for (const name of desiredBundles) {
       expect(manifest.dsh.profile.bundles.filter((value: string) => value === name)).toHaveLength(1)

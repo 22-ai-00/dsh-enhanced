@@ -16,9 +16,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
   version: string
 }
 
-describe('dsh-enhanced-assistant-web-owner', () => {
+describe('dsh-ray-assistant-web-owner', () => {
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-assistant-web-owner')
+    expect(name).toBe('dsh-ray-assistant-web-owner')
     expect(version).toBe(manifest.version)
   })
 
@@ -26,7 +26,7 @@ describe('dsh-enhanced-assistant-web-owner', () => {
     const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
     expect(patch).toContain("id: session-controller")
     expect(patch).toContain('disabled: true')
-    expect(patch).toContain("name: '@dsh-enhanced/assistant-web-owner'")
+    expect(patch).toContain("name: '@dsh-ray/assistant-web-owner'")
   })
 
   it('resolves the Host controller through a global dsh symlink canonical entrypoint', async () => {
@@ -106,7 +106,7 @@ describe('dsh-enhanced-assistant-web-owner', () => {
         dsh: { client: { platform: string; external: string[]; inject: string[] } }
         exports: Record<string, unknown>
       }
-      expect(ownerRegistration.id).toBe('@dsh-enhanced/assistant-web-owner')
+      expect(ownerRegistration.id).toBe('@dsh-ray/assistant-web-owner')
       expect(upstreamRegistration.id).toBe('@deepseek-ai/dsh-api-session-controller')
       expect(ownerRegistration.factory.toString()).toContain('deliveryNotices/list')
       expect(ownerRegistration.factory.toString()).toContain('deliveryNotices/ack')

@@ -11,9 +11,9 @@ import type { CodingToolProbe, OwnerConsoleAssistantOverview, OwnerConsoleStatus
 function makeRemote() {
   let defaultProvider = 'traex-agent'
   const buildStatus = (): OwnerConsoleStatus => ({
-    feishu: { mode: 'env', installed: true, entry: 'dsh-enhanced-lark-channel', enabled: true, appIdConfigured: true, connected: true, connection: 'connected' },
-    traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: 'traex' },
-    agy: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: 'agy' },
+    feishu: { mode: 'env', installed: true, entry: 'dsh-ray-lark-channel', enabled: true, appIdConfigured: true, connected: true, connection: 'connected' },
+    traex: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: true, command: 'traex' },
+    agy: { entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: 'agy' },
     defaultModel: { entry: 'agent-default-model', available: true, provider: defaultProvider, model: 'default' },
     llmProviders: [
       { id: 'traex-agent', name: 'TraeX Agent' },
@@ -28,11 +28,11 @@ function makeRemote() {
     ],
     evaluation: { intakeAgreement: 'available' },
     bundles: [
-      { name: '@dsh-enhanced/traex-acp-provider', version: '0.1.73', enabled: true, installed: true, removable: true, rows: [] },
-      { name: '@dsh-enhanced/assistant-dreaming', version: '0.1.73', enabled: true, installed: true, removable: true, rows: [] },
+      { name: '@dsh-ray/traex-acp-provider', version: '0.1.73', enabled: true, installed: true, removable: true, rows: [] },
+      { name: '@dsh-ray/assistant-dreaming', version: '0.1.73', enabled: true, installed: true, removable: true, rows: [] },
     ],
     plugins: [
-      { entryId: 'dsh-enhanced-traex-acp-provider', moduleName: '@dsh-enhanced/traex-acp-provider', enabled: true, fiberPhase: 'active' },
+      { entryId: 'dsh-ray-traex-acp-provider', moduleName: '@dsh-ray/traex-acp-provider', enabled: true, fiberPhase: 'active' },
     ],
   })
   const overview: OwnerConsoleAssistantOverview = {
@@ -95,13 +95,13 @@ function makeRemote() {
     },
   }))
   const actDreamingIdea = vi.fn(async (ideaId: string, action: string) => ({
-    ok: true as const, value: { applied: true, entry: 'dsh-enhanced-assistant-dreaming', note: `${ideaId}:${action}` },
+    ok: true as const, value: { applied: true, entry: 'dsh-ray-assistant-dreaming', note: `${ideaId}:${action}` },
   }))
   const actAttentionQuestion = vi.fn(async (_w: string, _p: string, _l: string, _s: string, qid: string, choice: string) => ({
-    ok: true as const, value: { applied: true, entry: 'dsh-enhanced-assistant-proactive', note: `${qid}:${choice}` },
+    ok: true as const, value: { applied: true, entry: 'dsh-ray-assistant-proactive', note: `${qid}:${choice}` },
   }))
   const actProactiveDraft = vi.fn(async (id: string, action: string) => ({
-    ok: true as const, value: { applied: true, entry: 'dsh-enhanced-assistant-proactive', note: `${id}:${action}` },
+    ok: true as const, value: { applied: true, entry: 'dsh-ray-assistant-proactive', note: `${id}:${action}` },
   }))
 
   const remote: ConsoleRemote = {
@@ -215,12 +215,12 @@ describe('owner console upstream DSH settings slot components', () => {
     expect(probeCodingTool).toHaveBeenCalledWith('agy', 'agy', true)
 
     const slugs = [
-      '@dsh-enhanced/traex-acp-provider',
-      '@dsh-enhanced/lark-channel',
-      '@dsh-enhanced/assistant-proactive',
-      '@dsh-enhanced/assistant-dreaming',
-      '@dsh-enhanced/assistant-growth-driver',
-      '@dsh-enhanced/assistant-memory-learning',
+      '@dsh-ray/traex-acp-provider',
+      '@dsh-ray/lark-channel',
+      '@dsh-ray/assistant-proactive',
+      '@dsh-ray/assistant-dreaming',
+      '@dsh-ray/assistant-growth-driver',
+      '@dsh-ray/assistant-memory-learning',
     ]
     for (const packageName of slugs) {
       await act(async () => {

@@ -312,7 +312,7 @@ describe('文鳐 settings entry', () => {
   it('opens the configuration console from the gear and returns to chat', async () => {
     const fake = harness()
     const status = {
-      feishu: { mode: 'env', installed: true, entry: 'dsh-enhanced-lark-channel', connection: 'connected', appIdConfigured: false },
+      feishu: { mode: 'env', installed: true, entry: 'dsh-ray-lark-channel', connection: 'connected', appIdConfigured: false },
       traex: { installed: false, enabled: false, command: '' },
       host: { settings: true, pluginManager: true, bundles: 'ok', plugins: 'ok' },
       dependencies: [],
@@ -1279,10 +1279,10 @@ describe('文鳐 dedicated assistant dialog & slot compatibility', () => {
   it('dispatches /version, /autonomy version, and concise NL version/iteration queries locally without calling SessionFace.prompt and preserves draft on error', async () => {
     const sampleReport = {
       schemaVersion: 1 as const,
-      protocol: 'dsh-rsi/version/v1' as const,
+      protocol: 'dsh-ray/version/v1' as const,
       generatedAt: 1_800_000_000_000,
       dshHome: '/tmp/dsh-test',
-      assistant: { name: 'dsh-enhanced' as const, version: '0.1.83', cliVersion: '0.1.83' },
+      assistant: { name: 'dsh-ray' as const, version: '0.1.83', cliVersion: '0.1.83' },
       host: { packageName: '@deepseek-ai/dsh' as const, boundVersion: '0.2.2-rc.5', boundStatus: 'ready', runningVersion: '0.2.2-rc.5' },
       profile: 'web',
       profiles: ['web'],
@@ -1291,7 +1291,7 @@ describe('文鳐 dedicated assistant dialog & slot compatibility', () => {
         coreCount: 1,
         evolvedCount: 1,
         activeEvolvedCount: 1,
-        core: [{ name: '@dsh-enhanced/owner-console', version: '0.1.83', kind: 'core' as const, installKind: 'npm' as const, enabled: true }],
+        core: [{ name: '@dsh-ray/owner-console', version: '0.1.83', kind: 'core' as const, installKind: 'npm' as const, enabled: true }],
         evolved: [{ name: 'daily-brief', version: '1.0.0', kind: 'evolved' as const, installKind: 'adopted' as const, enabled: true }],
       },
       selfIteration: {

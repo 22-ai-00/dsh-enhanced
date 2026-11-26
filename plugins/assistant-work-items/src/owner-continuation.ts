@@ -1,4 +1,4 @@
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { truncateUtf8 } from './config.js'
 import type { WorkItemContinuation } from './continuation.js'
 import type { ContinuationSource } from './continuation-contract.js'

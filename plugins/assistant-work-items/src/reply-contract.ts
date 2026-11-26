@@ -1,4 +1,4 @@
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { NormalizedConfig } from './config.js'
 import type { WorkItemReplySource } from './peers.js'
 import type { WorkItemRecord } from './types.js'

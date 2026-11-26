@@ -1,4 +1,4 @@
-# @dsh-enhanced/hello
+# @dsh-ray/hello
 
 最小 DSH bundle 示例：加载时写入一条日志，用来验证安装、patch 和构建链路。
 
@@ -13,7 +13,7 @@ dsh --profile web --dump-config
 dsh web
 ```
 
-发布后可把本地路径换成 `@dsh-enhanced/hello`。
+发布后可把本地路径换成 `@dsh-ray/hello`。
 
 ## 权限与数据
 

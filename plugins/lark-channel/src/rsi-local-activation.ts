@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { ControlPlaneDatabaseError, ControlPlaneStore, controlPlaneDigest, hostMaintenanceCanonical, hostMaintenanceDigest,
   signSourceMaintenanceRecord, sourceBaselineChain, sourceMaintenanceDigest, verifySourceMaintenanceRecords,
-  type SourceMaintenanceAnchor, type SourceMaintenanceRecord } from '@dsh-enhanced/plugin-control-plane'
+  type SourceMaintenanceAnchor, type SourceMaintenanceRecord } from '@dsh-ray/plugin-control-plane'
 import { rsiBuildResources as io } from './rsi-build.js'
 import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'

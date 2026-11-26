@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-growth-driver
+# @dsh-ray/assistant-growth-driver
 
 默认开启的有界后台成长驱动（当未声明 `scope` / `repository` / `usageLearning` 路径与预算等宿主外部资源时自动处于安全休眠待命，可通过显式 `enabled: false` 级联关闭）。在宿主机配置好对应资源后，可通过 `usageLearning` 让真实前台任务结果自动触发持久成长作业、消费后台失败反馈，或由 Host 显式唤醒。Agent 回顾 owner 的已验收成功、沉淀 pending 技能候选；源码轨可准备已有 gap 对应的插件修改、创建与修订提案。在配套 Control Plane、有限授权和独立验收配置齐备时，工具创建轨已接通持久构建、独立行为验收和受限动态采用。技能候选仍须另经独立验证与重复成功门；修改、修订和持续观察各有自己的授权与验收条件，不能由一次 `reviewed` 推定完成。`reviewed` 仅表示本次成长复盘结束，不代表完整长期成长闭环已验收。
 
@@ -15,7 +15,7 @@
 先装好 `assistant-delivery`、`assistant-goals`、`assistant-skills`、`assistant-policy` 和所用模型 adapter，再安装本包。模型供应完全由 owner 配置的 provider/model 与对应 adapter 决定：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-growth-driver
+dsh plugin --profile web add @dsh-ray/assistant-growth-driver
 dsh --profile web --dump-config
 ```
 
@@ -65,7 +65,7 @@ dsh --profile web --dump-config
    `resource: {kind: tool, id: run_code}`）。RSI 生成 profile 目前只给 `growth_*` / `plugin_source_*`
    建规则，**本切片不生成该规则、也不改 assistant-policy**；缺失时 `run_code` 按 default-deny 失败
    关闭（计入 `health().run.usage.ptc.failedRunCodeCalls`），wake 不会伪造成功。
-候选生成入口在创建 Agent 之前先做 provenance 校验：普通 owner 任务证据（`assistant-delivery/owner-foreground-learning/v1`、`assistant-delivery/work-item-engineering-context/v1`）结构上不属于 benchmark 数据，允许生成；任何 benchmark 派生的候选调用必须显式携带其 `BenchmarkPlan` 并通过 `@dsh-enhanced/assistant-evaluation/benchmark` 的 `assertCandidateGenerationInput`（holdout/非 development 计划在读取或写入前拒绝）。来源不明的任务证据 fail closed 且零候选写入，不是静默跳过。已知边界：普通证据的“非 holdout”依赖 Host-trust 的 Delivery 任务协议白名单（协议字符串是包内字面量，不可由模型或任务内容控制；未来新增的普通任务生产者若换了协议会 fail closed，需要显式加入白名单）；默认无 `benchmarkPlan` 时普通证据不触发 benchmark 守卫（goal/skill 复盘路径没有反馈、也不携带 benchmark 数据）；一旦调用方同时传入 `benchmarkPlan`，守卫仍会执行（无论 feedback 是否存在）；benchmark 守卫按需动态 import evaluation（optional peer），import 失败同样 fail closed 并给出可读 reason。
+候选生成入口在创建 Agent 之前先做 provenance 校验：普通 owner 任务证据（`assistant-delivery/owner-foreground-learning/v1`、`assistant-delivery/work-item-engineering-context/v1`）结构上不属于 benchmark 数据，允许生成；任何 benchmark 派生的候选调用必须显式携带其 `BenchmarkPlan` 并通过 `@dsh-ray/assistant-evaluation/benchmark` 的 `assertCandidateGenerationInput`（holdout/非 development 计划在读取或写入前拒绝）。来源不明的任务证据 fail closed 且零候选写入，不是静默跳过。已知边界：普通证据的“非 holdout”依赖 Host-trust 的 Delivery 任务协议白名单（协议字符串是包内字面量，不可由模型或任务内容控制；未来新增的普通任务生产者若换了协议会 fail closed，需要显式加入白名单）；默认无 `benchmarkPlan` 时普通证据不触发 benchmark 守卫（goal/skill 复盘路径没有反馈、也不携带 benchmark 数据）；一旦调用方同时传入 `benchmarkPlan`，守卫仍会执行（无论 feedback 是否存在）；benchmark 守卫按需动态 import evaluation（optional peer），import 失败同样 fail closed 并给出可读 reason。
 4. WorkItem author lane（`usageLearning.workItemFailures`）暂不支持 PTC：其冻结预授权只含
    `plugin_source_*` 工具（创建走廊 4 个，修订走廊 6 个），保留传输不在其中。driver 在创建 Agent
    前直接拒绝（`PTC presentation is not supported for the WorkItem author lane yet`）；启用该
@@ -128,8 +128,8 @@ devDependency 或锁文件变更）。聚焦测试用最小 fake `ctx.ptcRuntime
 
 ```yaml
 - insert:
-    - id: dsh-enhanced-assistant-growth-driver
-      name: '@dsh-enhanced/assistant-growth-driver'
+    - id: dsh-ray-assistant-growth-driver
+      name: '@dsh-ray/assistant-growth-driver'
       config:
         enabled: true
         intervalMs: 3600000
@@ -154,7 +154,7 @@ devDependency 或锁文件变更）。聚焦测试用最小 fake `ctx.ptcRuntime
 
 owner-anchored 轨不需要额外 policy 规则：它不挂模型 Agent，唯一写动作是 Host-only 的 Delivery 提交口（系统 authority，非模型面）。产出的 paused automation 需 owner 在 automations 既有审批面处理——**批准 resume 前必须先把占位 cron 显式改成真实 schedule**，否则批准会落 `conflicted` 且行保持 paused（这是 store 层硬门，不是 UI 提示）。
 
-后台 Agent 以 `background` initiator 绑定 owner principal；policy 默认空规则全拒，需在 `dsh-enhanced-assistant-policy` 的 `rules` 中补两条最小 allow（主体 id 是 scope 的 preset，workspace/principal 必须与 scope 精确一致）：
+后台 Agent 以 `background` initiator 绑定 owner principal；policy 默认空规则全拒，需在 `dsh-ray-assistant-policy` 的 `rules` 中补两条最小 allow（主体 id 是 scope 的 preset，workspace/principal 必须与 scope 精确一致）：
 
 ```yaml
 rules:
@@ -190,7 +190,7 @@ rules:
 pluginSourceProposals:
   enabled: true
   preparationMode: durable # 删除或设为 inline 时保持当前同步构建行为
-  repository: /abs/path/to/dsh-enhanced
+  repository: /abs/path/to/dsh-ray
   maxPlansPerWake: 1
   isolatedBuildTimeoutMs: 180000
   offline: true
@@ -275,7 +275,7 @@ CP 免费 readiness 必须明确返回工程来源协议、source-run v2（或 v
 
 **走廊冻结（创建 vs 修订）**：WorkItem 离开 pending 队列时由确定性规则冻结本作业的走廊——仅当 `usageLearning.workItemRevisionAuthorities` 已配置、修订 peer 全部在线、且确定性匹配器在 objective 文本中恰好命中一个同 owner 已采用能力名（零命中、多命中、歧义或离线一律 fail-closed）时走 `revise-created`（source-run v3，binding 固化 revision pins 与目标），否则保持既有 `create` 走廊（source-run v2）。走廊冻结后单 wake 单走廊：创建 wake 的 config 维持 `allowRevision: false`，修订 wake 移除创建缝（`plugin_source_create` 不可见）并放行修订面；`allowModification` 在两种后台走廊中恒为 false。
 
-后台 source 工具还要求当前 Policy 的 WorkItem Growth 预授权能力。仅实际发布的 `dsh-enhanced-assistant-growth-driver` plugin Fiber 可注册本 Agent realm 的准确工具定义（创建走廊 4 个、修订走廊 6 个，`assistant-policy` 按 Fiber 白名单双重限制）；注册初始不可用，真实持久化 v2/v3 source-run 返回并匹配 session、occurrence、来源、工具摘要及预算后才启用。每次执行重核当前 owner/source、Policy、期限和工具次数，关闭或取消立即撤销；此许可仅跳过这些工具的逐次审批，不绕过 Policy 的 execute 规则、预算或急停。前台 v1 仍保留既有审批流程，后续普通任务调用新工具也沿用其真实前台权限/审批通道。
+后台 source 工具还要求当前 Policy 的 WorkItem Growth 预授权能力。仅实际发布的 `dsh-ray-assistant-growth-driver` plugin Fiber 可注册本 Agent realm 的准确工具定义（创建走廊 4 个、修订走廊 6 个，`assistant-policy` 按 Fiber 白名单双重限制）；注册初始不可用，真实持久化 v2/v3 source-run 返回并匹配 session、occurrence、来源、工具摘要及预算后才启用。每次执行重核当前 owner/source、Policy、期限和工具次数，关闭或取消立即撤销；此许可仅跳过这些工具的逐次审批，不绕过 Policy 的 execute 规则、预算或急停。前台 v1 仍保留既有审批流程，后续普通任务调用新工具也沿用其真实前台权限/审批通道。
 
 source-run v2 producer 将持久 binding 深冻结后，在真实 UsageStore writer frame 内交给同步 CP consumer；禁止 thenable、同实例写方法重入及上游回读。running/reviewed 才可提供通用 producer 授权；unknown 保留原作业且不重派、不重扣，不能借其创建新作业或签新采用授权。旧 v1 协议与校验保留。本轮包内 fixture 不证明真实跨包工程创建/采用/后续工具调用链，完整组合与长期真实收益仍需独立验收。
 

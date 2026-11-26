@@ -10,20 +10,20 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
   version: string
 }
 
-describe('dsh-enhanced-plugin-control-plane', () => {
+describe('dsh-ray-plugin-control-plane', () => {
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-plugin-control-plane')
+    expect(name).toBe('dsh-ray-plugin-control-plane')
     expect(version).toBe(manifest.version)
   })
 
   it('only returns exact, integrity-pinned catalog candidates for a capability', () => {
     const catalog = parseCatalog({ schemaVersion: 1, entries: [{
-      id: 'memory-wiki-bridge', capabilities: ['memory knowledge promotion'], package: '@dsh-enhanced/memory-wiki-bridge',
+      id: 'memory-wiki-bridge', capabilities: ['memory knowledge promotion'], package: '@dsh-ray/memory-wiki-bridge',
       version: '0.1.3', integrity: 'sha512-aGVsbG8=', authorities: ['filesystem: dsh home only'], dshBaseline: '0.1.0-rc.8',
     }] })
     expect(discover(catalog, 'knowledge promotion')).toHaveLength(1)
     expect(() => parseCatalog({ schemaVersion: 1, entries: [{
-      id: 'unsafe', capabilities: ['unsafe'], package: '@dsh-enhanced/unsafe', version: '^0.1.0',
+      id: 'unsafe', capabilities: ['unsafe'], package: '@dsh-ray/unsafe', version: '^0.1.0',
       integrity: 'sha512-aGVsbG8=', authorities: ['none'], dshBaseline: '0.1.0-rc.8',
     }] })).toThrow('exact version')
   })
@@ -35,8 +35,8 @@ describe('dsh-enhanced-plugin-control-plane', () => {
       const lark = discover(exampleIntegrityPinnedCatalog, 'lark')
       expect(lark).toHaveLength(1)
       expect(lark[0]).toMatchObject({ id: 'lark-assistant', requires: [
-        { package: '@dsh-enhanced/assistant-delivery', version: '0.1.3' },
-        { package: '@dsh-enhanced/credentials-keychain', version: '0.1.3' },
+        { package: '@dsh-ray/assistant-delivery', version: '0.1.3' },
+        { package: '@dsh-ray/credentials-keychain', version: '0.1.3' },
       ] })
       expect(lark[0]?.integrity).toMatch(/^sha512-/u)
     } finally {
@@ -46,19 +46,19 @@ describe('dsh-enhanced-plugin-control-plane', () => {
 
   it('rejects duplicate bundles in a multi-bundle candidate', () => {
     expect(() => parseCatalog({ schemaVersion: 1, entries: [{
-      id: 'duplicate', capabilities: ['test'], package: '@dsh-enhanced/assistant-health', version: '0.1.3',
+      id: 'duplicate', capabilities: ['test'], package: '@dsh-ray/assistant-health', version: '0.1.3',
       integrity: 'sha512-aGVsbG8=', authorities: ['none'], dshBaseline: '0.1.0-rc.8',
-      requires: [{ package: '@dsh-enhanced/assistant-health', version: '0.1.3', integrity: 'sha512-aGVsbG8=' }],
+      requires: [{ package: '@dsh-ray/assistant-health', version: '0.1.3', integrity: 'sha512-aGVsbG8=' }],
     }] })).toThrow('duplicate package')
   })
 
   it('round-trips a canonical local registry artifact while preserving historical entries', () => {
     const registryPath = '/var/lib/dsh-registry'; const locator = pathToFileURL(registryPath).href
-    const reference = pathToFileURL(join(registryPath, 'packages', encodeURIComponent('@dsh-enhanced/local'), '1.2.3', 'package.tgz')).href
+    const reference = pathToFileURL(join(registryPath, 'packages', encodeURIComponent('@dsh-ray/local'), '1.2.3', 'package.tgz')).href
     const catalog = parseCatalog({ schemaVersion: 1, entries: [
-      { id: 'historical', capabilities: ['old'], package: '@dsh-enhanced/historical', version: '1.0.0',
+      { id: 'historical', capabilities: ['old'], package: '@dsh-ray/historical', version: '1.0.0',
         integrity: 'sha512-aGVsbG8=', authorities: ['none'], dshBaseline: '0.1.0-rc.8' },
-      { id: 'local', capabilities: ['local'], package: '@dsh-enhanced/local', version: '1.2.3',
+      { id: 'local', capabilities: ['local'], package: '@dsh-ray/local', version: '1.2.3',
         integrity: 'sha512-aGVsbG8=', registry: { id: 'owner-local', locator, reference },
         authorities: ['none'], dshBaseline: '0.1.0-rc.8' },
     ] })
@@ -68,12 +68,12 @@ describe('dsh-enhanced-plugin-control-plane', () => {
   })
 
   it('rejects local registry references that are non-canonical or escape the immutable package location', () => {
-    const base = { id: 'local', capabilities: ['local'], package: '@dsh-enhanced/local', version: '1.2.3',
+    const base = { id: 'local', capabilities: ['local'], package: '@dsh-ray/local', version: '1.2.3',
       integrity: 'sha512-aGVsbG8=', authorities: ['none'], dshBaseline: '0.1.0-rc.8' }
     const locator = 'file:///var/lib/dsh-registry'
     for (const reference of [
       'file:../escape.tgz',
-      'file:///var/lib/dsh-registry/packages/%40dsh-enhanced%2Flocal/1.2.3/../escape.tgz',
+      'file:///var/lib/dsh-registry/packages/%40dsh-ray%2Flocal/1.2.3/../escape.tgz',
       'file:///tmp/package.tgz',
       'https://registry.example.invalid/package.tgz',
     ]) expect(() => parseCatalog({ schemaVersion: 1, entries: [{ ...base, registry: { id: 'owner-local', locator, reference } }] })).toThrow()

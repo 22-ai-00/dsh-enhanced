@@ -75,10 +75,10 @@ describe('owner console coding tools (TraeX & Antigravity) and default model rou
   it('reads agy, defaultModel, and llmProviders in status() cleanly', async () => {
     const { ctx, service } = await mountService({
       entries: [
-        { ns: 'dsh-enhanced-traex-acp-provider', value: { enabled: false, command: '/bin/traex', agyEnabled: true, agyCommand: '/opt/agy' } },
+        { ns: 'dsh-ray-traex-acp-provider', value: { enabled: false, command: '/bin/traex', agyEnabled: true, agyCommand: '/opt/agy' } },
         { ns: 'agent-default-model', value: { provider: 'agy-agent', model: 'gemini-4-carbon', reasoningEffort: 'high' } },
       ],
-      installedBundles: ['@dsh-enhanced/traex-acp-provider'],
+      installedBundles: ['@dsh-ray/traex-acp-provider'],
       providers: [{ id: 'agy-agent', name: 'Antigravity Agent (local ACP)' }, { id: 'deepseek-official', name: 'DeepSeek' }],
       agentDefaultModel: {
         currentSelection: () => ({ provider: 'agy-agent', model: 'gemini-4-carbon', reasoningEffort: 'high' }),
@@ -87,10 +87,10 @@ describe('owner console coding tools (TraeX & Antigravity) and default model rou
     try {
       const status = OwnerConsoleStatusSchema.parse(await service.status())
       expect(status.traex).toEqual({
-        entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: false, command: '/bin/traex',
+        entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: false, command: '/bin/traex',
       })
       expect(status.agy).toEqual({
-        entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: '/opt/agy',
+        entry: 'dsh-ray-traex-acp-provider', installed: true, enabled: true, command: '/opt/agy',
       })
       expect(status.defaultModel).toEqual({
         entry: 'agent-default-model', available: true, provider: 'agy-agent', model: 'gemini-4-carbon', reasoningEffort: 'high',
@@ -106,13 +106,13 @@ describe('owner console coding tools (TraeX & Antigravity) and default model rou
 
   it('toggles agyEnabled and agyCommand via configureAgy without disturbing traex', async () => {
     const { ctx, service, settings } = await mountService({
-      entries: [{ ns: 'dsh-enhanced-traex-acp-provider', value: { enabled: true, command: 'traex', agyEnabled: false, agyCommand: 'agy' } }],
+      entries: [{ ns: 'dsh-ray-traex-acp-provider', value: { enabled: true, command: 'traex', agyEnabled: false, agyCommand: 'agy' } }],
       withLoader: true,
     })
     try {
       const enabled = WRITE_RESULT.parse(await service.configureAgy(true, '/usr/local/bin/agy'))
       expect(enabled.applied).toBe(true)
-      expect(settings.mutate).toHaveBeenCalledWith('dsh-enhanced-traex-acp-provider', [
+      expect(settings.mutate).toHaveBeenCalledWith('dsh-ray-traex-acp-provider', [
         { op: 'set', path: ['agyEnabled'], value: true },
         { op: 'set', path: ['agyCommand'], value: '/usr/local/bin/agy' },
       ], 4)
@@ -132,7 +132,7 @@ describe('owner console coding tools (TraeX & Antigravity) and default model rou
   it('switches default model route and auto-enables inactive ACP route via volatile config', async () => {
     const { ctx, service, settings } = await mountService({
       entries: [
-        { ns: 'dsh-enhanced-traex-acp-provider', value: { enabled: false, command: 'traex', agyEnabled: false, agyCommand: 'agy' } },
+        { ns: 'dsh-ray-traex-acp-provider', value: { enabled: false, command: 'traex', agyEnabled: false, agyCommand: 'agy' } },
         { ns: 'agent-default-model', value: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'medium' } },
       ],
       withLoader: true,
@@ -164,7 +164,7 @@ describe('owner console coding tools (TraeX & Antigravity) and default model rou
     const saveSelection = vi.fn(async () => undefined)
     const { ctx, service } = await mountService({
       entries: [
-        { ns: 'dsh-enhanced-traex-acp-provider', value: { enabled: true, command: '/bin/traex', agyEnabled: true, agyCommand: '/bin/agy' } },
+        { ns: 'dsh-ray-traex-acp-provider', value: { enabled: true, command: '/bin/traex', agyEnabled: true, agyCommand: '/bin/agy' } },
       ],
       agentDefaultModel: { saveSelection },
     })
@@ -208,8 +208,8 @@ describe('owner console coding tools (TraeX & Antigravity) and default model rou
     }
 
     const { ctx, service } = await mountService({
-      entries: [{ ns: 'dsh-enhanced-traex-acp-provider', value: { enabled: true, command: 'traex', agyEnabled: true, agyCommand: 'agy' } }],
-      installedBundles: ['@dsh-enhanced/traex-acp-provider'],
+      entries: [{ ns: 'dsh-ray-traex-acp-provider', value: { enabled: true, command: 'traex', agyEnabled: true, agyCommand: 'agy' } }],
+      installedBundles: ['@dsh-ray/traex-acp-provider'],
       providers: [{ id: 'traex-agent' }, { id: 'agy-agent' }],
       execFn,
       now: () => clock,

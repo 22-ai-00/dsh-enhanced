@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 
-export const name = 'dsh-enhanced-repo-autonomy-real-observer'
+export const name = 'dsh-ray-repo-autonomy-real-observer'
 export const inject = ['agents']
 
 function fail(message) { throw new Error(`repo autonomy observer: ${message}`) }

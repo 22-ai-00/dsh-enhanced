@@ -6,22 +6,22 @@
  * registered and the capability fails closed.
  *
  * This module intentionally carries no runtime import of
- * @dsh-enhanced/plugin-control-plane (an optional peer): every field here is a
+ * @dsh-ray/plugin-control-plane (an optional peer): every field here is a
  * structural subset, so the driver still builds and loads without that package.
  */
-import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import type { OwnerForegroundLearningTask } from '@dsh-ray/assistant-delivery'
 import type { WorkItemCreationReadiness } from './work-item-source.js'
 import type { CreationAcceptanceAuthorityRef, RevisionAcceptanceAuthorityRef, RevisionRegressionAcceptanceAuthorityRef,
-  AnySourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  AnySourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 
 /**
  * Local mirror of the control-plane protected-plugin denylist
- * (see @dsh-enhanced/assistant-growth-contract, the single source of truth consumed by
+ * (see @dsh-ray/assistant-growth-contract, the single source of truth consumed by
  * both defence layers). It is the growth-side SECOND layer of defence; the
  * control plane re-checks the identical set inside prepareModifySourcePlan.
  */
 export { MODEL_PROPOSAL_PROTECTED_PLUGINS as GROWTH_PROTECTED_PLUGIN_DENYLIST,
-  assertProtectedSetsConsistent as assertGrowthProtectedSetsConsistent } from '@dsh-enhanced/assistant-growth-contract'
+  assertProtectedSetsConsistent as assertGrowthProtectedSetsConsistent } from '@dsh-ray/assistant-growth-contract'
 
 /** Projection of an pre-existing control-plane capability gap safe to surface to the model. */
 export interface GrowthSourceGap {

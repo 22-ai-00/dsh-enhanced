@@ -28,7 +28,7 @@ const evidence = { schemaVersion: 1, kind: 'npm-publish-preparation-readback', s
   limits: ['Historical published tarballs only; no publish sender was invoked and no token was read.',
     'Prepared payload compatibility does not prove npm acceptance, production publication or Host activation.'] }
 try {
-  for (const packageName of ['@dsh-enhanced/plugin-control-plane', '@dsh-enhanced/personal-memory']) {
+  for (const packageName of ['@dsh-ray/plugin-control-plane', '@dsh-ray/personal-memory']) {
     const approved = baseline.registry.results.find(item => item.name === packageName && item.version === '0.1.32' && item.ok)
     if (!approved) throw new Error('Missing committed integrity baseline')
     const fetched = await fetchRegistryArtifact({ registry, packageName, version: approved.version,

@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, realpathSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,7 +14,7 @@ afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { for
 const version = '0.1.65'
 function manifests(): Record<string, string> {
   return {
-    'package.json': JSON.stringify({ name: 'dsh-enhanced', version, packageManager: 'pnpm@11.7.0', scripts: { install: 'touch FORBIDDEN' } }),
+    'package.json': JSON.stringify({ name: 'dsh-ray', version, packageManager: 'pnpm@11.7.0', scripts: { install: 'touch FORBIDDEN' } }),
     'pnpm-workspace.yaml': 'packages:\n  - packages/*\n',
     'packages/fixture/package.json': JSON.stringify({ name: '@fixture/one', version }),
     'pnpm-lock.yaml': "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      '@fixture/one':\n        specifier: workspace:*\n        version: link:packages/fixture\n  packages/fixture: {}\n",
@@ -34,7 +34,7 @@ const sourceOf = (files = manifests()): FrozenLinuxRuntimeSource => ({ version, 
   manifests: Object.entries(files).map(([path, bytes]) => ({ path, bytes: Buffer.from(bytes) })) })
 
 test('public subentry imports independently without loading the activating package index', async () => {
-  const module = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  const module = await import('@dsh-ray/assistant-isolation/native-resources')
   expect(module.freezeLinuxRuntimeSource).toBeTypeOf('function')
   expect(module.probeLinuxIsolationRuntime).toBeTypeOf('function')
   expect(module).not.toHaveProperty('default')
@@ -75,7 +75,7 @@ test('selection version, exact commit and cancellation reject without preparing 
 test('copied manifests cannot drift through caller buffers and inventory cannot omit or duplicate paths', () => {
   const source = sourceOf(), copy = copyLinuxRuntimeManifests(source)
   source.manifests[0]!.bytes.fill(0)
-  expect(JSON.parse(copy.get('package.json')!.toString()).name).toBe('dsh-enhanced')
+  expect(JSON.parse(copy.get('package.json')!.toString()).name).toBe('dsh-ray')
   const original = sourceOf()
   expect(() => copyLinuxRuntimeManifests({ ...original, manifests: [...original.manifests, original.manifests[0]!] })).toThrow('inventory')
   expect(() => copyLinuxRuntimeManifests({ ...original, manifests: original.manifests.filter(entry => entry.path !== 'packages/fixture/package.json') })).toThrow(/inventory|link escapes/u)
@@ -268,13 +268,39 @@ test('accepts current repository pnpm-workspace.yaml and preserves exact bytes',
 test.runIf(hasRepoGit)('freezes real repository HEAD manifests without drifting out of sync', async () => {
   const headPackage = JSON.parse(execFileSync('/usr/bin/git', ['show', 'HEAD:package.json'], {
     cwd: repoRoot, encoding: 'utf8', stdio: 'pipe',
-  })) as { version: string }
+  })) as { name: string; version: string }
+  const workingPackage = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8')) as { name: string; version: string }
+  let targetRepo = repoRoot
+  let targetVersion = headPackage.version
+  if (headPackage.name !== workingPackage.name) {
+    // Uncommitted package-name transition: snapshot current working-tree manifests into a temporary git HEAD.
+    const snapshotRoot = await mkdtemp(join(await realpath(tmpdir()), 'native-resources-head-'))
+    roots.push(snapshotRoot)
+    const filesToCopy = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml']
+    for (const parent of ['plugins', 'packages']) {
+      for (const entry of await readdir(join(repoRoot, parent), { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+        const rel = join(parent, entry.name, 'package.json')
+        if (existsSync(join(repoRoot, rel))) filesToCopy.push(rel)
+      }
+    }
+    for (const rel of filesToCopy) {
+      await mkdir(dirname(join(snapshotRoot, rel)), { recursive: true })
+      await writeFile(join(snapshotRoot, rel), await readFile(join(repoRoot, rel)))
+    }
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', ...args], { cwd: snapshotRoot, encoding: 'utf8', stdio: 'pipe' })
+    git('init', '--initial-branch=main')
+    git('add', '.')
+    git('commit', '-m', 'snapshot')
+    targetRepo = snapshotRoot
+    targetVersion = workingPackage.version
+  }
   const frozen = await freezeLinuxRuntimeSource({
     kind: 'local-head',
-    repository: repoRoot,
-    version: headPackage.version,
+    repository: targetRepo,
+    version: targetVersion,
   })
-  expect(frozen.version).toBe(headPackage.version)
+  expect(frozen.version).toBe(targetVersion)
   expect(frozen.sourceCommit).toMatch(/^[a-f0-9]{40}$/u)
   expect(frozen.manifests.some(entry => entry.path === 'pnpm-workspace.yaml')).toBe(true)
   expect(frozen.manifests.some(entry => entry.path === 'pnpm-lock.yaml')).toBe(true)

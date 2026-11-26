@@ -5,7 +5,7 @@
  * Stage 1 prompts never leak Stage 2+ prompts, oracle answers, or private verification vectors.
  */
 import { createHash } from 'node:crypto'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import {
   frozenJson,
   groundedAcceptanceDigest,

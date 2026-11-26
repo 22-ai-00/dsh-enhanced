@@ -24,7 +24,7 @@ async function fixture() {
   await mkdir(homePath, { mode: 0o700 }); await mkdir(transactionRoot, { mode: 0o700 })
   const transaction = await lstat(transactionRoot)
   const plan = { schemaVersion: 1, status: 'update', canonicalHome: homePath,
-    bindingPath: join(homePath, '.dsh-rsi-host.json'), originalBindingSource: binding(originalRuntime),
+    bindingPath: join(homePath, '.dsh-ray-host.json'), originalBindingSource: binding(originalRuntime),
     originalBindingDigest: hash(binding(originalRuntime)), originalRuntime, candidateRuntime,
     candidateBindingSource: binding(candidateRuntime) }
   const services = [profile, coordinatorProfile].map((name, index) => ({
@@ -35,7 +35,7 @@ async function fixture() {
     path: join(root, service.unit), before, after, beforeDigest: hash(before), afterDigest: hash(after),
     pathEnvironment: 'PATH=/usr/bin' }))
   const ownerUpdate = { coordinatorProfile, hostPlan: plan, original: { source: { records: [] as string[] } } }
-  const localSource = { protocol: 'dsh-enhanced/host-owner-program-update/v1', homePath, profile, ownerUpdate }
+  const localSource = { protocol: 'dsh-ray/host-owner-program-update/v1', homePath, profile, ownerUpdate }
   const originalReadiness = { schemaVersion: 1, services: services.map(service => ({
     unit: service.unit, profile: service.profile, invocationId: service.invocationId,
     mainPid: service.mainPid, hostReady: false,
@@ -63,7 +63,7 @@ function genericManifest(program: Awaited<ReturnType<typeof fixture>>['manifest'
   generic.unitUniverse = generic.unitUniverse.slice(0, 1)
   generic.hostMigration.units = generic.hostMigration.units.slice(0, 1).map(unit => ({
     ...unit, after: unit.before, afterDigest: unit.beforeDigest }))
-  generic.hostMigration.localSource = { protocol: 'dsh-enhanced/host-local-source-update/v1',
+  generic.hostMigration.localSource = { protocol: 'dsh-ray/host-local-source-update/v1',
     homePath: generic.homePath, profile: generic.profile } as typeof generic.hostMigration.localSource
   delete (generic.hostMigration as { originalReadiness?: unknown }).originalReadiness
   return generic

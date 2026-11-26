@@ -15,7 +15,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type { AgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
+import type { AgentLoopRequestAttestor } from '@dsh-ray/llm-route-capabilities'
 import {
   buildAgyArgs,
   discoverTraexAcpModels,

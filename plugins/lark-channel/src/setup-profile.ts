@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, join, normalize, win32 } from 'node:path'
-import { externalPrincipalId } from '@dsh-enhanced/assistant-delivery'
+import { externalPrincipalId } from '@dsh-ray/assistant-delivery'
 import {
   isMap,
   isScalar,
@@ -51,7 +51,7 @@ const presetIdPattern = /^[a-z0-9][a-z0-9-]*$/u
 // every preset/workspace because both are user-selectable and can change
 // independently; it still applies only to human foreground Agent operations.
 const TOOL_WILDCARD = '*'
-const FOREGROUND_CAPABILITY_RULE_ID = `dsh-enhanced-foreground-capability-${TOOL_WILDCARD}`
+const FOREGROUND_CAPABILITY_RULE_ID = `dsh-ray-foreground-capability-${TOOL_WILDCARD}`
 
 // No capability is denied at this setup layer. Explicit Policy denies retain
 // precedence over the wildcard grants, while tool execution additionally stays
@@ -78,14 +78,14 @@ const managedToolRuleSuffixes = [
   TOOL_WILDCARD, ...deniedExternalTools, ...retiredToolRuleIds,
 ] as const
 const managedApprovalSources = [
-  'dsh-enhanced-personal-memory',
-  'dsh-enhanced-personal-wiki',
-  'dsh-enhanced-assistant-automations',
-  'dsh-enhanced-assistant-evolution',
+  'dsh-ray-personal-memory',
+  'dsh-ray-personal-wiki',
+  'dsh-ray-assistant-automations',
+  'dsh-ray-assistant-evolution',
 ] as const
 const managedProfileRows = [
-  { id: 'dsh-enhanced-lark-channel', packageName: '@dsh-enhanced/lark-channel' },
-  { id: 'dsh-enhanced-credentials-keychain', packageName: '@dsh-enhanced/credentials-keychain' },
+  { id: 'dsh-ray-lark-channel', packageName: '@dsh-ray/lark-channel' },
+  { id: 'dsh-ray-credentials-keychain', packageName: '@dsh-ray/credentials-keychain' },
 ] as const
 
 interface AgentIdentity {
@@ -225,9 +225,9 @@ function legacyIdentitySuffix(identity: AgentIdentity): string {
 }
 
 function configuredAgentIdentity(rows: YAMLSeq, dshHome: string): { preset: string; workspace: string } {
-  const delivery = findRow(rows, 'dsh-enhanced-assistant-delivery')
+  const delivery = findRow(rows, 'dsh-ray-assistant-delivery')
   if (delivery === undefined) {
-    throw new Error('lark-channel setup: dsh-enhanced-assistant-delivery profile row is required')
+    throw new Error('lark-channel setup: dsh-ray-assistant-delivery profile row is required')
   }
   const config = asMap(delivery.get('config', true) as Node, 'assistant-delivery config')
   const preset = config.get('defaultAgentPreset')
@@ -338,7 +338,7 @@ function isManagedForegroundRuleId(id: string): boolean {
 }
 
 function isReservedForegroundRuleId(id: string): boolean {
-  return id.startsWith('dsh-enhanced-foreground-capability-')
+  return id.startsWith('dsh-ray-foreground-capability-')
     || id.startsWith('lark-foreground-capability-')
     || id.startsWith('lark-foreground-tool-')
 }
@@ -607,7 +607,7 @@ function managedFixedRuleMatches(item: YAMLMap, managedId: ManagedFixedRuleId): 
   }
   if (managedId.kind === 'credential') {
     return subject.get('kind') === 'background'
-      && subject.get('id') === 'dsh-enhanced-lark-channel'
+      && subject.get('id') === 'dsh-ray-lark-channel'
       && sequenceEquals(item.get('actions', true) as Node | undefined, ['credential.use'])
       && resource.get('kind') === 'credential'
       && resource.get('id') === `lark-app-secret-${managedId.account}`
@@ -723,7 +723,7 @@ function managedCredentialHandleMatches(item: YAMLMap): boolean {
   const provider = item.get('provider')
   const commonShape = sequenceEquals(
     item.get('consumers', true) as Node | undefined,
-    ['dsh-enhanced-lark-channel'],
+    ['dsh-ray-lark-channel'],
   )
     && sequenceEquals(item.get('purposes', true) as Node | undefined, ['connect'])
     && item.get('maxLeaseMs') === 86_400_000
@@ -746,7 +746,7 @@ function sweepRetiredManagedCredentialHandles(
   rows: YAMLSeq,
   currentAccount: string | undefined,
 ): void {
-  const credentialsRow = findRow(rows, 'dsh-enhanced-credentials-keychain')
+  const credentialsRow = findRow(rows, 'dsh-ray-credentials-keychain')
   if (credentialsRow === undefined) return
   const credentials = asMap(credentialsRow.get('config', true) as Node, 'credentials-keychain config')
   const handles = credentials.get('handles', true) as Node | undefined
@@ -779,7 +779,7 @@ function sweepRetiredManagedCredentialHandles(
     }
     if (sequenceIncludes(
       item.get('consumers', true) as Node | undefined,
-      'dsh-enhanced-lark-channel',
+      'dsh-ray-lark-channel',
     )) {
       throw new Error(
         `lark-channel setup: retired credential handle ${id} is ambiguous; refusing to remove it`,
@@ -1023,9 +1023,9 @@ export function refreshLarkAgentPolicyPatch(input: LarkAgentPolicyRefreshInput):
   }
   const rows = asSequence(document.contents, 'profile patch')
   assertManagedProfileRowIntegrity(rows)
-  const personalAssistant = findRow(rows, 'dsh-enhanced-personal-assistant')
+  const personalAssistant = findRow(rows, 'dsh-ray-personal-assistant')
   if (personalAssistant === undefined) {
-    throw new Error('lark-channel setup: dsh-enhanced-personal-assistant profile override is required')
+    throw new Error('lark-channel setup: dsh-ray-personal-assistant profile override is required')
   }
   const personalConfig = asMap(personalAssistant.get('config', true) as Node, 'personal-assistant config')
   const policy = asMap(personalConfig.get('assistantPolicy', true) as Node, 'assistantPolicy config')
@@ -1042,7 +1042,7 @@ export function refreshLarkAgentPolicyPatch(input: LarkAgentPolicyRefreshInput):
   removeManagedForegroundRules(rules, input.agentTools === 'enable')
   if (input.agentTools === 'enable') upsertForegroundCapabilityRule(document, rules)
 
-  const lark = findRow(rows, 'dsh-enhanced-lark-channel')
+  const lark = findRow(rows, 'dsh-ray-lark-channel')
   if (lark === undefined) {
     removeAllManagedExternalAgentRules(rules)
     sweepRetiredManagedFixedRules(rules, undefined)
@@ -1147,7 +1147,7 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   }
   const rows = asSequence(document.contents, 'profile patch')
   assertManagedProfileRowIntegrity(rows)
-  const existingLarkRow = findRow(rows, 'dsh-enhanced-lark-channel')
+  const existingLarkRow = findRow(rows, 'dsh-ray-lark-channel')
   let previousAccount: string | undefined
   let existingAppConfigured = false
   if (existingLarkRow !== undefined) {
@@ -1162,9 +1162,9 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
       previousAccount = requireAccount(existingAccount)
     }
   }
-  const personalAssistant = findRow(rows, 'dsh-enhanced-personal-assistant')
+  const personalAssistant = findRow(rows, 'dsh-ray-personal-assistant')
   if (personalAssistant === undefined) {
-    throw new Error('lark-channel setup: dsh-enhanced-personal-assistant profile override is required')
+    throw new Error('lark-channel setup: dsh-ray-personal-assistant profile override is required')
   }
   const personalConfig = asMap(personalAssistant.get('config', true) as Node, 'personal-assistant config')
   const policy = asMap(personalConfig.get('assistantPolicy', true) as Node, 'assistantPolicy config')
@@ -1233,7 +1233,7 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   upsertById(document, rules, {
     id: `lark-channel-credential-${account}`,
     effect: 'allow',
-    subject: { kind: 'background', id: 'dsh-enhanced-lark-channel' },
+    subject: { kind: 'background', id: 'dsh-ray-lark-channel' },
     actions: ['credential.use'],
     resource: { kind: 'credential', id: credentialHandle },
     context: { initiators: ['background'] },
@@ -1302,7 +1302,7 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
     })
   }
 
-  const credentialsRow = ensureRow(document, rows, 'dsh-enhanced-credentials-keychain')
+  const credentialsRow = ensureRow(document, rows, 'dsh-ray-credentials-keychain')
   const credentials = asMap(credentialsRow.get('config', true) as Node, 'credentials-keychain config')
   setDefaults(credentials, {
     databasePath: join(input.dshHome, 'credentials-keychain/ledger.sqlite'),
@@ -1319,7 +1319,7 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   sweepRetiredManagedCredentialHandles(rows, account)
   const commonHandle = {
     id: credentialHandle,
-    consumers: ['dsh-enhanced-lark-channel'],
+    consumers: ['dsh-ray-lark-channel'],
     purposes: ['connect'],
     maxLeaseMs: 86_400_000,
   }
@@ -1341,7 +1341,7 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
     })
   }
 
-  const larkRow = ensureRow(document, rows, 'dsh-enhanced-lark-channel')
+  const larkRow = ensureRow(document, rows, 'dsh-ray-lark-channel')
   const channel = asMap(larkRow.get('config', true) as Node, 'lark-channel config')
   channel.delete('appSecretEnv')
   const channelConfig = {

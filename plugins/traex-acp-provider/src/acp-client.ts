@@ -686,7 +686,7 @@ export async function* runTraexAcpText(
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {},
         clientInfo: {
-          name: 'dsh-enhanced-traex-acp-provider',
+          name: 'dsh-ray-traex-acp-provider',
           title: spec.clientTitle,
           version,
         },

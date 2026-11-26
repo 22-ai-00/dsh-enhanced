@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { describe, expect, it } from 'vitest'
 import {
   HOLDOUT_PROTOCOL_V1, holdoutAuthorityKeyId, holdoutEnvelopeDigest, holdoutInputBytes, holdoutUnsignedCanonicalJson, holdoutVerdictsDigest,

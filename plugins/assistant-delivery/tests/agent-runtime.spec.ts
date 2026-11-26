@@ -43,13 +43,13 @@ import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { defineTool, type ToolExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import ApprovalService, { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
-import { approvalReviewerOf, AssistantPolicyService, type PolicyRule, type PolicyBudgetConfig } from '@dsh-enhanced/assistant-policy'
-import { AssistantAutomationsService, type AutomationProposalResult } from '@dsh-enhanced/assistant-automations'
-import { AssistantEvaluationService, TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-enhanced/assistant-evaluation'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { installStrategyBenchmarkMeter } from '@dsh-enhanced/assistant-evaluation/benchmark/strategy'
-import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
-import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import { approvalReviewerOf, AssistantPolicyService, type PolicyRule, type PolicyBudgetConfig } from '@dsh-ray/assistant-policy'
+import { AssistantAutomationsService, type AutomationProposalResult } from '@dsh-ray/assistant-automations'
+import { AssistantEvaluationService, TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-ray/assistant-evaluation'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import { installStrategyBenchmarkMeter } from '@dsh-ray/assistant-evaluation/benchmark/strategy'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-ray/assistant-verifier'
+import { registerLlmRouteCapability } from '@dsh-ray/llm-route-capabilities'
 import AssistantGoalsPlugin, { AssistantGoalsService } from '../../assistant-goals/lib/index.js'
 import { PersonalMemoryService } from '../../personal-memory/lib/index.js'
 import { MemoryStore } from '../../personal-memory/lib/store.js'
@@ -7128,13 +7128,13 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.service.acceptInbound(message('evt-version-slash', '/version', 'command'))
     await drive(fixture.service)
     const slashReply = fixture.sends.at(-1)?.text ?? ''
-    expect(slashReply).toContain('助手版本：dsh-enhanced v')
+    expect(slashReply).toContain('助手版本：dsh-ray v')
     expect(slashReply).toContain('自迭代演进统计')
     expect(slashReply).not.toContain('自迭代控制服务尚未启用')
 
     await fixture.service.acceptInbound(message('evt-version-autonomy', '/autonomy version', 'command'))
     await drive(fixture.service)
-    expect(fixture.sends.at(-1)?.text).toContain('助手版本：dsh-enhanced v')
+    expect(fixture.sends.at(-1)?.text).toContain('助手版本：dsh-ray v')
     expect(fixture.sends.at(-1)?.text).not.toContain('/autonomy enable')
 
     await fixture.service.acceptInbound(message('evt-version-nl', '自己迭代了多少次？', 'text'))
@@ -7153,7 +7153,7 @@ describe('real native Delivery Agent runtime', () => {
       text: '/version',
     })
     await drive(fixture.service)
-    expect(fixture.sends.at(-1)?.text).toContain('助手版本：dsh-enhanced v')
+    expect(fixture.sends.at(-1)?.text).toContain('助手版本：dsh-ray v')
 
     // Extra args & command attachments are rejected cleanly
     await fixture.service.acceptInbound(message('evt-version-args', '/version foo', 'command'))
@@ -7207,12 +7207,12 @@ describe('real native Delivery Agent runtime', () => {
 
     const versionInfo = vi.fn(async () => ({
       schemaVersion: 1 as const,
-      protocol: 'dsh-rsi/version/v1' as const,
+      protocol: 'dsh-ray/version/v1' as const,
       generatedAt: Date.now(),
-      assistant: { name: 'dsh-enhanced' as const, version: '0.1.83', cliVersion: '0.1.83' },
+      assistant: { name: 'dsh-ray' as const, version: '0.1.83', cliVersion: '0.1.83' },
       host: { packageName: '@deepseek-ai/dsh' as const, boundVersion: '0.2.2-rc.5', boundStatus: 'ready', runningVersion: '0.2.2-rc.5' },
       profile: 'web',
-      plugins: { state: 'ok' as const, coreCount: 12, evolvedCount: 1, activeEvolvedCount: 1, core: [], evolved: [{ name: '@dsh-enhanced/evolved-demo', version: '0.1.0', kind: 'evolved' as const, installKind: 'adopted' as const, enabled: true }] },
+      plugins: { state: 'ok' as const, coreCount: 12, evolvedCount: 1, activeEvolvedCount: 1, core: [], evolved: [{ name: '@dsh-ray/evolved-demo', version: '0.1.0', kind: 'evolved' as const, installKind: 'adopted' as const, enabled: true }] },
       selfIteration: {
         dataState: 'data' as const,
         totalIterations: 7,
@@ -7248,13 +7248,13 @@ describe('real native Delivery Agent runtime', () => {
     expect(versionInfo).toHaveBeenCalledOnce()
     const delegatedReply = fixture.sends.at(-1)?.text ?? ''
     expect(delegatedReply).toContain('累计自迭代次数：7')
-    expect(delegatedReply).toContain('@dsh-enhanced/evolved-demo')
+    expect(delegatedReply).toContain('@dsh-ray/evolved-demo')
 
     // Fallback cleanly if ownerConsole.versionInfo throws
     versionInfo.mockRejectedValueOnce(new Error('console busy'))
     await fixture.service.acceptInbound(message('evt-version-fallback', '/version', 'command'))
     await drive(fixture.service)
-    expect(fixture.sends.at(-1)?.text).toContain('助手版本：dsh-enhanced v')
+    expect(fixture.sends.at(-1)?.text).toContain('助手版本：dsh-ray v')
     expect(fixture.sends.at(-1)?.text).not.toContain('自迭代控制服务尚未启用')
     expect(fixture.llm.requests).toEqual([])
     expect(resume).not.toHaveBeenCalled()
@@ -7272,21 +7272,21 @@ describe('real native Delivery Agent runtime', () => {
     // Missing selfIteration/plugins/assistant/host despite matching protocol string
     const versionInfo = vi.fn(async () => ({
       schemaVersion: 1,
-      protocol: 'dsh-rsi/version/v1',
+      protocol: 'dsh-ray/version/v1',
     }))
     fixture.ctx.provide('ownerConsole' as never, { versionInfo } as never)
 
     const report = await fixture.service.dispatchVersionQuery()
     expect(versionInfo).toHaveBeenCalledOnce()
     expect(report.schemaVersion).toBe(1)
-    expect(report.protocol).toBe('dsh-rsi/version/v1')
+    expect(report.protocol).toBe('dsh-ray/version/v1')
     expect(report.selfIteration.dataState).toBe('no-data')
     expect(report.diagnostics).toContain('ownerConsole.versionInfo returned unexpected payload; used standalone delivery collector')
 
     await fixture.service.acceptInbound(message('evt-version-malformed', '/version', 'command'))
     await drive(fixture.service)
     const reply = fixture.sends.at(-1)?.text ?? ''
-    expect(reply).toContain('助手版本：dsh-enhanced v')
+    expect(reply).toContain('助手版本：dsh-ray v')
     expect(reply).toContain('自迭代演进统计')
     expect(reply).not.toContain('自迭代控制服务尚未启用')
     expect(fixture.llm.requests).toEqual([])
@@ -13393,8 +13393,8 @@ test('cold owner resume reads rejected and expired durable proposals into the na
   let memoryRoute: ReturnType<AssistantDeliveryService['prepareAgentApproval']> | undefined
   let wikiRoute: ReturnType<AssistantDeliveryService['prepareAgentApproval']> | undefined
   fixture.ctx.on('agent/pre-step', async ({ agent }, next) => {
-    memoryRoute ??= fixture.service.prepareAgentApproval(agent, { sourceId: 'dsh-enhanced-personal-memory' })
-    wikiRoute ??= fixture.service.prepareAgentApproval(agent, { sourceId: 'dsh-enhanced-personal-wiki' })
+    memoryRoute ??= fixture.service.prepareAgentApproval(agent, { sourceId: 'dsh-ray-personal-memory' })
+    wikiRoute ??= fixture.service.prepareAgentApproval(agent, { sourceId: 'dsh-ray-personal-wiki' })
     return await next()
   })
   try {
@@ -13468,7 +13468,7 @@ test('a live tool proposal installs status context and later Policy decision ref
   fixture.presetExecute.mockImplementation(async () => {
     call += 1
     if (call === 1) {
-      const route = fixture.service.prepareAgentApproval(activeAgent, { sourceId: 'dsh-enhanced-personal-memory' })
+      const route = fixture.service.prepareAgentApproval(activeAgent, { sourceId: 'dsh-ray-personal-memory' })
       const proposal = fixture.ctx.assistantPolicy.propose({ idempotencyKey: 'live-step-proposal', requester: 'agent:primary',
         principal: route.principal, action: 'memory.add', resource: { kind: 'memory', id: `memory-${'b'.repeat(32)}` },
         summary: 'private live summary', diff: '+ private live diff', ttlMs: 60_000, dispatch: route })

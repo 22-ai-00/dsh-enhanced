@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-work-items
+# @dsh-ray/assistant-work-items
 
 把外部信号沉淀为**有界、可恢复、可审计**的工作项账本，并用一次原生 automation occurrence 驱动 agent 认领、汇报和 owner 通知。本插件不创建第二套 agent loop、timer、outbox、预算系统、设置面板或 session store：调度复用 `assistant-automations` 的稳定 occurrence，执行复用原生 DSH Agent run，通知复用 `assistant-delivery.enqueueBackground()`，授权复用 `assistant-policy` 的默认拒绝。
 
@@ -8,13 +8,13 @@
 
 ## 安装与启用
 
-本插件要求宿主已提供 `ctx.assistantPolicy`（patch 中 `inject: [assistantPolicy]`），运行中的 profile 还需有 agent loop、LLM、session 和 tools 服务。要让 queued 工作项真正被执行，还需要 `@dsh-enhanced/assistant-automations`；要让终态报告送达 owner，还需要 `@dsh-enhanced/assistant-delivery` 和已配置的 owner route。
+本插件要求宿主已提供 `ctx.assistantPolicy`（patch 中 `inject: [assistantPolicy]`），运行中的 profile 还需有 agent loop、LLM、session 和 tools 服务。要让 queued 工作项真正被执行，还需要 `@dsh-ray/assistant-automations`；要让终态报告送达 owner，还需要 `@dsh-ray/assistant-delivery` 和已配置的 owner route。
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-policy
-dsh plugin --profile web add @dsh-enhanced/assistant-automations
-dsh plugin --profile web add @dsh-enhanced/assistant-delivery
-dsh plugin --profile web add @dsh-enhanced/assistant-work-items
+dsh plugin --profile web add @dsh-ray/assistant-policy
+dsh plugin --profile web add @dsh-ray/assistant-automations
+dsh plugin --profile web add @dsh-ray/assistant-delivery
+dsh plugin --profile web add @dsh-ray/assistant-work-items
 dsh --profile web --dump-config
 ```
 
@@ -116,8 +116,8 @@ budgetAmount: 1
 然后开启本插件：
 
 ```yaml
-- id: dsh-enhanced-assistant-work-items
-  name: '@dsh-enhanced/assistant-work-items'
+- id: dsh-ray-assistant-work-items
+  name: '@dsh-ray/assistant-work-items'
   config:
     enabled: true
     mode: active
@@ -401,14 +401,14 @@ host-only `admitDecision(decision)`（service 与 `WorkItemAdmission` 同名方�
 
 ### 可信 Evaluation 导出（第四个 trusted producer）
 
-已结算的结果修订（`evidenceState != 'pending'`）会投影到 `@dsh-enhanced/assistant-evaluation` 的 trusted lane，作为该账本与交付/自动化的 latter 之外的**证据**，而不是目标判断：
+已结算的结果修订（`evidenceState != 'pending'`）会投影到 `@dsh-ray/assistant-evaluation` 的 trusted lane，作为该账本与交付/自动化的 latter 之外的**证据**，而不是目标判断：
 
 - 每个结算修订最多投影一条 Evaluation 记录，幂等键为确定性的 `work-items/<itemId>/<revision>/<evidenceState>`；相同重放安全，内容变化由 Evaluation 以 `idempotency-conflict` 失败关闭。
 - `evidenceState: observed` → `executionStatus: succeeded` 且 `evaluator.version: settlement-v1`；`unverified` / `not-applicable` → `executionStatus: unknown` 且 `unverified-v1`。投影的 `objectiveStatus` 与 `deliveryStatus` 在类型和运行时都只能是 `unknown`：work-item 结算永远不能把自身升级为目标达成证据，也不会因报告过 `ready` 而被 Evaluation 当作 achieved。
 - 复用与 verifier 相同的私有 producer registration seam：`assistantEvaluation` 通过 `ctx` 发现本服务的 `trustedWorkItemProducerGeneration()` 与 `registerTrustedWorkItemEvaluationSink(registration)`，并校验 protocol（`assistant-work-items/evaluation/v1`）、generation、ownership 和单注册不变量；本插件不直接写 Evaluation 数据库。
 - `assistant-evaluation` 是可选 peer：缺席时结算行保持 `pending`，不阻塞 claim/report；绑定后下一次 drain 会补导既有 pending 行。
 - 有界且诚实降级：每 sweep 最多 10 条，失败最多重试 5 次后标记 `export-attempts-exhausted`；部署没有精确 workspace+preset scope 时标记 `skipped`（`owner-route-unavailable`）；observe 模式不导出。状态写入 `work_item_outcome.evaluation_*`（schema v5 引入，后续版本保持），`health().evaluation` 与 `stats()` 暴露 `evaluationPending/exported/skipped`。
-- 依赖方向：本插件只以 **type-only import** 引用 `@dsh-enhanced/assistant-evaluation` 的 claims/registration 契约类型，并把该包声明为 optional peer + devDependency；Evaluation 保持 producer-agnostic，不依赖任何 producer 运行时。
+- 依赖方向：本插件只以 **type-only import** 引用 `@dsh-ray/assistant-evaluation` 的 claims/registration 契约类型，并把该包声明为 optional peer + devDependency；Evaluation 保持 producer-agnostic，不依赖任何 producer 运行时。
 
 #### 工作项执行指标（metrics）
 

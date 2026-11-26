@@ -1,22 +1,22 @@
 import { createRequire } from 'node:module'
-import { nativeMacRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
+import { nativeMacRuntimeDigest } from '@dsh-ray/assistant-isolation'
 import { canonicalGrowthJson, type PluginCreationVerificationCertificate,
-  type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginRevisionVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import type { CreationCapabilityConfig } from './creation-capability-types.js'
 
 // Verifier is optional for a plain Control Plane deployment. Only explicit
 // Linux adoption loads these synchronous, resource-free validation modules.
 // The supported Node baseline can require ESM without top-level await.
 const requireVerifier = createRequire(import.meta.url)
-const linuxRuntimeModule = () => requireVerifier('@dsh-enhanced/assistant-verifier/linux-behavior-runtime') as
-  typeof import('@dsh-enhanced/assistant-verifier/linux-behavior-runtime')
+const linuxRuntimeModule = () => requireVerifier('@dsh-ray/assistant-verifier/linux-behavior-runtime') as
+  typeof import('@dsh-ray/assistant-verifier/linux-behavior-runtime')
 
 export function validateLinuxCreationCapabilityRunner(value: unknown): void {
   if (!value || typeof value !== 'object' || Object.getOwnPropertyDescriptor(value, 'backend')?.value !== 'linux-native') {
     throw new Error('created capability requires explicit Linux runner configuration')
   }
-  const { validateCreationBehaviorDeploymentConfig } = requireVerifier('@dsh-enhanced/assistant-verifier/plugin-behavior-config') as
-    typeof import('@dsh-enhanced/assistant-verifier/plugin-behavior-config')
+  const { validateCreationBehaviorDeploymentConfig } = requireVerifier('@dsh-ray/assistant-verifier/plugin-behavior-config') as
+    typeof import('@dsh-ray/assistant-verifier/plugin-behavior-config')
   const checked = validateCreationBehaviorDeploymentConfig(value)
   if (!('backend' in checked) || checked.backend !== 'linux-native') throw new Error('created capability Linux runner changed')
   linuxRuntimeModule().validateLinuxPluginBehaviorRuntime(checked.runtime)
@@ -65,7 +65,7 @@ export async function verifyRevisionCapabilityExecution(certificate: PluginRevis
   const remaining = pinnedRunner.expiresAt - Date.now()
   if (remaining <= 0) throw new Error('revision capability Linux runner expired')
   const bounded = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, Math.min(120_000, remaining)))])
-  const { verifyLinuxPluginBehaviorAdoptionRuntime } = await import('@dsh-enhanced/assistant-verifier/linux-behavior-runtime')
+  const { verifyLinuxPluginBehaviorAdoptionRuntime } = await import('@dsh-ray/assistant-verifier/linux-behavior-runtime')
   bounded.throwIfAborted()
   await verifyLinuxPluginBehaviorAdoptionRuntime({ runtime: pinnedRunner.runtime,
     buildRuntimeDigest: pinnedCertificate.execution.buildRuntimeDigest,
@@ -95,7 +95,7 @@ export async function verifyCreationCapabilityExecution(certificate: PluginCreat
   const remaining = pinnedRunner.expiresAt - Date.now()
   if (remaining <= 0) throw new Error('created capability Linux runner expired')
   const bounded = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, Math.min(120_000, remaining)))])
-  const { verifyLinuxPluginBehaviorAdoptionRuntime } = await import('@dsh-enhanced/assistant-verifier/linux-behavior-runtime')
+  const { verifyLinuxPluginBehaviorAdoptionRuntime } = await import('@dsh-ray/assistant-verifier/linux-behavior-runtime')
   bounded.throwIfAborted()
   await verifyLinuxPluginBehaviorAdoptionRuntime({ runtime: pinnedRunner.runtime,
     buildRuntimeDigest: pinnedCertificate.execution.buildRuntimeDigest,

@@ -3,10 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { parseExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { parseExternalEventEnvelope } from '@dsh-ray/assistant-automations/external-event'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { CredentialsKeychainService } from '@dsh-ray/credentials-keychain'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { EVENT_OBSERVER_EXECUTOR } from '../src/observer.ts'
 import { EventTriggersService } from '../src/service.ts'
@@ -146,7 +146,7 @@ describe('task-system, calendar, and email service composition + durable cursor 
           { id: 'obs-tasks', effect: 'allow', subject: { kind: 'background', id: 'event-triggers:tasks-src', workspace: root, principal: 'owner:one' }, actions: ['observe'], resource: { kind: 'network', id: 'https://tasks.example.com/items' }, context: { initiators: ['background'] }, budget: { id: 'source-obs', amount: 1 } },
           { id: 'obs-cal', effect: 'allow', subject: { kind: 'background', id: 'event-triggers:cal-src', workspace: root, principal: 'owner:one' }, actions: ['observe'], resource: { kind: 'network', id: 'https://cal.example.com/events' }, context: { initiators: ['background'] }, budget: { id: 'source-obs', amount: 1 } },
           { id: 'obs-mail', effect: 'allow', subject: { kind: 'background', id: 'event-triggers:mail-src', workspace: root, principal: 'owner:one' }, actions: ['observe'], resource: { kind: 'network', id: 'https://mail.example.com/jmap' }, context: { initiators: ['background'] }, budget: { id: 'source-obs', amount: 1 } },
-          { id: 'cred-use', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: '*' }, context: { initiators: ['background'] } },
+          { id: 'cred-use', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: '*' }, context: { initiators: ['background'] } },
           { id: 'ingest', effect: 'allow', subject: { kind: 'external', id: '*', workspace: root }, actions: ['ingest'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['external'] } },
         ],
       })
@@ -160,16 +160,16 @@ describe('task-system, calendar, and email service composition + durable cursor 
           new CredentialsKeychainService(runtime, {
             databasePath: join(root, 'credentials.sqlite'),
             handles: [
-              { id: 'task-cred', provider: 'environment', environmentName: 'TASK_TOK', consumers: ['dsh-enhanced-event-triggers'], purposes: ['task-system.observe'], maxLeaseMs: 30_000 },
-              { id: 'cal-cred', provider: 'environment', environmentName: 'CAL_TOK', consumers: ['dsh-enhanced-event-triggers'], purposes: ['calendar.observe'], maxLeaseMs: 30_000 },
-              { id: 'mail-cred', provider: 'environment', environmentName: 'MAIL_TOK', consumers: ['dsh-enhanced-event-triggers'], purposes: ['email.observe'], maxLeaseMs: 30_000 },
+              { id: 'task-cred', provider: 'environment', environmentName: 'TASK_TOK', consumers: ['dsh-ray-event-triggers'], purposes: ['task-system.observe'], maxLeaseMs: 30_000 },
+              { id: 'cal-cred', provider: 'environment', environmentName: 'CAL_TOK', consumers: ['dsh-ray-event-triggers'], purposes: ['calendar.observe'], maxLeaseMs: 30_000 },
+              { id: 'mail-cred', provider: 'environment', environmentName: 'MAIL_TOK', consumers: ['dsh-ray-event-triggers'], purposes: ['email.observe'], maxLeaseMs: 30_000 },
             ],
           }, { env: { TASK_TOK: 'secret-task-tok', CAL_TOK: 'secret-cal-tok', MAIL_TOK: 'secret-mail-tok' } })
         },
       })
       let service!: EventTriggersService
       await ctx.plugin({
-        name: 'dsh-enhanced-event-triggers',
+        name: 'dsh-ray-event-triggers',
         apply(runtime: Context) {
           service = new EventTriggersService(runtime, buildConfig(), {
             now: nowFn,
@@ -202,7 +202,7 @@ describe('task-system, calendar, and email service composition + durable cursor 
     const { validateGoalEventWaitIntent } = await import(goalWaitStoreModule) as {
       validateGoalEventWaitIntent: (value: unknown) => unknown
     }
-    const { acceptanceDigest } = await import('@dsh-enhanced/task-acceptance-contract')
+    const { acceptanceDigest } = await import('@dsh-ray/task-acceptance-contract')
     const objective = 'Follow up when mail source changes'
     const defDigest = acceptanceDigest({ objective })
     expect(() => validateGoalEventWaitIntent({

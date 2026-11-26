@@ -54,7 +54,7 @@ export function readLocalCandidateSourceBuild(api, input) {
     : api.readRsiBuildEnvironment(input)
 }
 const resourceKinds = ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes']
-const nativeProtocol = 'dsh-enhanced/pre-owner-source-maintenance/v3'
+const nativeProtocol = 'dsh-ray/pre-owner-source-maintenance/v3'
 export const localSourceResourceKinds = backend => {
   if (!['docker', 'linux-native'].includes(backend)) fail('unknown source resource backend')
   return resourceKinds.map(kind => backend === 'linux-native' && kind === 'rsi-builds' ? 'rsi-linux-runtimes' : kind)
@@ -78,8 +78,8 @@ export async function localSourceResourceBackend({ homePath, profile }) {
 const ownerFields = new Set(['sourceJobs', 'sourceApprovals', 'sourceReleases', 'sourceReleaseExecution',
   'sourceAdoptions', 'sourceBuild', 'runtimeObserver', 'foregroundDeployments', 'taskObservations', 'adoptionCoordinator',
   'memoryReviews', 'automaticLearning'])
-const learnerId = 'dsh-enhanced-assistant-memory-learning'
-const learnerName = '@dsh-enhanced/assistant-memory-learning'
+const learnerId = 'dsh-ray-assistant-memory-learning'
+const learnerName = '@dsh-ray/assistant-memory-learning'
 
 async function trustedDirectory(path) {
   if (!exactPath(path) || await realpath(path) !== path) fail(`non-canonical trusted path: ${path}`)
@@ -472,7 +472,7 @@ export async function assertLocalSourceNativeResources(input) {
   // original backup may authenticate against its already frozen source digest;
   // ordinary stage reads still compare to the live installation's Host anchor.
   const recoveringOriginal = proof?.protocol === nativeProtocol && selected === 'original' && expected
-    && physicalHome === join(`${homePath}.dsh-enhanced-transaction`, 'original-home') && !await optional(homePath)
+    && physicalHome === join(`${homePath}.dsh-ray-transaction`, 'original-home') && !await optional(homePath)
   if (recoveringOriginal && typeof api.readRsiSourceMaintenanceSnapshot !== 'function') {
     fail('reviewed installer cannot authenticate the frozen original source snapshot')
   }
@@ -569,7 +569,7 @@ export async function preflightLocalSourceMaintenance(input) {
   const extension = preparation.extension
   if (extension !== undefined && extension !== 'memory-learning') fail('unsupported prepared root extension')
   const initialRow = extension ? await memoryLearnerInitialRow(installer) : undefined
-  return { protocol: native ? nativeProtocol : extension ? 'dsh-enhanced/pre-owner-source-maintenance/v2' : 'dsh-enhanced/pre-owner-source-maintenance/v1',
+  return { protocol: native ? nativeProtocol : extension ? 'dsh-ray/pre-owner-source-maintenance/v2' : 'dsh-ray/pre-owner-source-maintenance/v1',
     ...(native ? { candidateBackend: 'linux-native', nativeResources: null } : {}),
     ...(extension ? { extension, expectedCandidateSemanticDigest: expectedMemoryLearningSemanticDigest(
       configs[input.profile], api.yaml, initialRow) } : {}),
@@ -617,7 +617,7 @@ export async function prepareLocalSourceStage(input) {
 export async function replaceLocalSourceAuthority(input) {
   const api = await load(input.proof.installer)
   const require = createRequire(join(input.stageHome, 'profiles', input.profile, 'package.json'))
-  const packageRoot = dirname(require.resolve('@dsh-enhanced/plugin-control-plane/package.json'))
+  const packageRoot = dirname(require.resolve('@dsh-ray/plugin-control-plane/package.json'))
   await api.replaceRsiAuthorityRuntimeInStage({ logicalHome: input.homePath, physicalHome: input.stageHome, profile: input.profile },
     { packageRoot: await realpath(packageRoot), nodePath: await realpath(process.execPath) })
 }
@@ -796,7 +796,7 @@ export async function installLocalSourceCandidatePackages(input) {
     || !Array.isArray(plan.bundles) || !plan.bundles.length || new Set(plan.bundles).size !== plan.bundles.length
     || !isDeepStrictEqual(plan.bundles, cohort.bundles)) fail('candidate package plan changed')
   const tarballs = plan.bundles.map(slug => {
-    const item = cohort.packages.find(pkg => pkg.name === `@dsh-enhanced/${slug}` && pkg.bundle)
+    const item = cohort.packages.find(pkg => pkg.name === `@dsh-ray/${slug}` && pkg.bundle)
     if (!item) fail('candidate bundle is outside cohort')
     return item.tarball
   })
@@ -807,7 +807,7 @@ export async function installLocalSourceCandidatePackages(input) {
   if (parsed.nodeLinker !== 'isolated'
     || !parsed.overrides || typeof parsed.overrides !== 'object' || Array.isArray(parsed.overrides)) fail('candidate workspace policy changed')
   for (const [key, value] of Object.entries(expected)) if (parsed.overrides[key] !== value) fail('candidate workspace override changed')
-  for (const key of Object.keys(parsed.overrides)) if (key.includes('@dsh-enhanced/') && !Object.hasOwn(expected, key)) fail('candidate workspace has unexpected internal override')
+  for (const key of Object.keys(parsed.overrides)) if (key.includes('@dsh-ray/') && !Object.hasOwn(expected, key)) fail('candidate workspace has unexpected internal override')
   if (api.mergeRsiLocalOverrides(workspace, expected, cohort.allowBuilds) !== workspace) fail('candidate workspace projection changed')
   const manifestPath = join(profilePath, 'package.json')
   if (await realpath(manifestPath) !== manifestPath) fail('candidate profile manifest is not physical')
@@ -864,7 +864,7 @@ async function main() {
   process.stdout.write(JSON.stringify(result))
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+  const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
   if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
     const originalEmitWarning = process.emitWarning
     const filteredEmitWarning = function emitWarning(warning, ...rest) {

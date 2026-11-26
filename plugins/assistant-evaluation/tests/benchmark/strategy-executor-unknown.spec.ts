@@ -15,8 +15,8 @@ import { nativeExecution } from './helpers/native-runtime.ts'
 
 // This test never starts an isolated process. Mount the plugin shape without
 // paying for a real runtime-tree verification; live runs keep the real module.
-vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
-  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+vi.mock('@dsh-ray/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-ray/assistant-isolation')>()
   if (process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME !== undefined) return actual
   const { syntheticIsolationModule } = await import('./helpers/synthetic-isolation.ts')
   return syntheticIsolationModule(actual)

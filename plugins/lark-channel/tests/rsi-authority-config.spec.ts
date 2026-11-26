@@ -5,7 +5,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { ControlPlaneStore, loadTrustConfig, validateLiveQualificationAuthorityConfig,
   validateSourceAdoptionAuthorityConfig, validateSourceApprovalAuthorityConfig,
   validateSourceReleaseAuthorityConfig, validateSystemdHostAuthorityConfig,
-  validateTaskObservationAuthorityConfig } from '@dsh-enhanced/plugin-control-plane'
+  validateTaskObservationAuthorityConfig } from '@dsh-ray/plugin-control-plane'
 import { compileRsiAuthorityConfigs } from '../src/rsi-authority-config.js'
 import { validateRsiAuthorities } from '../src/rsi-setup.js'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'

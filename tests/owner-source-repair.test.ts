@@ -25,7 +25,7 @@ const effective = `- id: permission
         sandbox: danger-full-access
     defaultPreset: auto
 - id: unrelated
-  name: '@dsh-enhanced/unrelated'
+  name: '@dsh-ray/unrelated'
   config:
     path: !!js dshHomePath('existing')
 `
@@ -173,7 +173,7 @@ test('permission selection rejects implicit, absent, duplicate, and unconfigured
   expect(() => selectOwnerRepairPermission({ ...input,
     targetEffective: effective.replace('- id: unrelated', effective.split('- id: unrelated')[0] + '- id: unrelated') })).toThrow('installed permission row differs')
   expect(() => selectOwnerRepairPermission({ ...input,
-    targetEffective: effective.replace('@deepseek-ai/dsh-permission-presets', '@dsh-enhanced/pretender') })).toThrow('installed permission row differs')
+    targetEffective: effective.replace('@deepseek-ai/dsh-permission-presets', '@dsh-ray/pretender') })).toThrow('installed permission row differs')
 })
 
 test('issuer state checks receipt-bound paths and rechecks SQLite sidecars before finalization', async () => {

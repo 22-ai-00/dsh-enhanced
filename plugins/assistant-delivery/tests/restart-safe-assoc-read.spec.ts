@@ -2,7 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -82,7 +82,7 @@ async function createRestartDeliveryHarness() {
 }
 
 describe('registerRestartSafeTool assoc_read allowlist', () => {
-  test('accepts live AssistantAssociationService and dsh-enhanced-assistant-association callers with idempotent disposer', async () => {
+  test('accepts live AssistantAssociationService and dsh-ray-assistant-association callers with idempotent disposer', async () => {
     const { ctx, delivery, viewer } = await createRestartDeliveryHarness()
     const assocRead = makeTool('assoc_read')
 
@@ -117,17 +117,17 @@ describe('registerRestartSafeTool assoc_read allowlist', () => {
     expect(delivery.isRestartSafeTool(viewer, 'assoc_read')).toBe(false)
     expect(() => activeDisposer()).not.toThrow()
 
-    // Also verifies module plugin name 'dsh-enhanced-assistant-association'.
+    // Also verifies module plugin name 'dsh-ray-assistant-association'.
     let moduleCallerCtx: Context | undefined
     const moduleFiber = await ctx.plugin({
-      name: 'dsh-enhanced-assistant-association',
+      name: 'dsh-ray-assistant-association',
       inject: ['tools'],
       apply(callerCtx: Context) {
         moduleCallerCtx = callerCtx
         callerCtx.tools.register(assocRead)
       },
     })
-    expect(moduleCallerCtx?.fiber.name).toBe('dsh-enhanced-assistant-association')
+    expect(moduleCallerCtx?.fiber.name).toBe('dsh-ray-assistant-association')
     expect(moduleCallerCtx?.fiber.state).toBe(2)
     const moduleDisposer = delivery.registerRestartSafeTool(moduleCallerCtx!, assocRead)
     expect(delivery.isRestartSafeTool(viewer, 'assoc_read')).toBe(true)
@@ -172,7 +172,7 @@ describe('registerRestartSafeTool assoc_read allowlist', () => {
     // Live trusted association fiber cannot register non-whitelisted tool names.
     let assocCtx: Context | undefined
     const assocFiber = await ctx.plugin({
-      name: 'dsh-enhanced-assistant-association',
+      name: 'dsh-ray-assistant-association',
       apply(callerCtx: Context) {
         assocCtx = callerCtx
       },

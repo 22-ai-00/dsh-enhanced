@@ -7,4 +7,4 @@ export {
   type LinuxCgroupRoots,
   type LinuxV1CgroupRoots,
   type LinuxV2CgroupRoots,
-} from '@dsh-enhanced/assistant-isolation/native-resources'
+} from '@dsh-ray/assistant-isolation/native-resources'

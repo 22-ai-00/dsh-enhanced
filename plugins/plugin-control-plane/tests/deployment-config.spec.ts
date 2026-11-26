@@ -10,8 +10,8 @@ import { validateSourceBuildConfig, type LinuxSourceBuildConfig } from '../src/s
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 
 const runners = vi.hoisted(() => ({ construct: vi.fn(), close: vi.fn(async () => undefined) }))
-vi.mock('@dsh-enhanced/assistant-isolation', async original => ({
-  ...await original<typeof import('@dsh-enhanced/assistant-isolation')>(),
+vi.mock('@dsh-ray/assistant-isolation', async original => ({
+  ...await original<typeof import('@dsh-ray/assistant-isolation')>(),
   LinuxRepositoryRunner: class {
     constructor(config: unknown) { runners.construct(config) }
     close = runners.close

@@ -30,7 +30,7 @@ export interface LarkBusinessSkillReconcileInput {
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const ownerPattern = /^ou_[A-Za-z0-9_-]{1,124}$/u
 const appIdPattern = /^cli_[0-9a-fA-F]{16}$/u
-const markerPrefix = '<!-- managed-by:@dsh-enhanced/lark-channel/business-skill:v1 '
+const markerPrefix = '<!-- managed-by:@dsh-ray/lark-channel/business-skill:v1 '
 
 function hasControlCharacter(value: string): boolean {
   return Array.from(value).some(char => {

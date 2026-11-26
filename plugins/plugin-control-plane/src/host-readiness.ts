@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 
-const marker = 'dsh-enhanced host ready: v1\n'
+const marker = 'dsh-ray host ready: v1\n'
 
 interface AppReady {
   onReady(listener: () => void): () => void

@@ -13,7 +13,7 @@ const template = Object.freeze({ protocol: 'assistant-skills/canary-admission-te
 test('repair authority creates a parent-agnostic template profile from the common scaffold', async () => {
   const root = await mkdtemp(join(tmpdir(), 'real-repair-authority-'))
   const home = join(root, 'home'), workspace = join(root, 'workspace')
-  const cli = join(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-skills/lib/holdout-cli.js')
+  const cli = join(home, 'profiles/web/node_modules/@dsh-ray/assistant-skills/lib/holdout-cli.js')
   const previousImage = process.env.DSH_HOLDOUT_TEST_IMAGE
   try {
     await mkdir(join(workspace), { recursive: true })

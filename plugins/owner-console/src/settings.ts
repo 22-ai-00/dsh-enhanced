@@ -152,7 +152,7 @@ export interface PluginManagerService {
   removeBundle(name: string): Promise<ChangeResultLike>
 }
 
-export const PROJECT_PACKAGE = /^@dsh-enhanced\/[a-z0-9][a-z0-9-]*$/u
+export const PROJECT_PACKAGE = /^@dsh-ray\/[a-z0-9][a-z0-9-]*$/u
 export const isProjectPackage = (value: unknown): value is string => typeof value === 'string' && PROJECT_PACKAGE.test(value)
 
 export interface LoaderEntry {
@@ -167,7 +167,7 @@ export function findEntry(descriptors: readonly SettingsDescriptor[], match: (ns
   return descriptors.find(entry => match(entry.ns))
 }
 
-export const isProjectBundle = (ns: string): boolean => ns.startsWith('dsh-enhanced-')
+export const isProjectBundle = (ns: string): boolean => ns.startsWith('dsh-ray-')
 
 /** Projects are owner-facing facts; never expose redacted secret values. */
 export function configFacts(value: unknown): Record<string, unknown> {

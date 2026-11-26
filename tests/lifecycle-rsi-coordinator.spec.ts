@@ -23,7 +23,7 @@ async function fixture() {
   cleanups.push(() => rm(home, { recursive: true, force: true }))
   const root = join(home, 'rsi-coordinators', coordinatorProfile)
   const scope = { ownerRouteId: 'owner-route', principalId: 'lark/account/tenant/owner', workspace: join(home, 'workspace'), preset: 'primary' }
-  const target = [{ id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {
+  const target = [{ id: 'dsh-ray-plugin-control-plane', name: '@dsh-ray/plugin-control-plane', config: {
     catalogPath: join(home, 'catalog.json'), trustPath: join(home, 'trust.json'),
     sourceJobs: { ...scope, budgetId: 'source', budgetAmount: 1 },
     sourceAdoptions: { profile: targetProfile, handoff: { coordinatorId: 'adoption-coordinator' } },
@@ -31,13 +31,13 @@ async function fixture() {
   const coordinator = [
     { id: 'tool-web', name: '@deepseek-ai/tool-web', config: {} },
     { id: 'agent-loop', name: '@deepseek-ai/agent-loop', config: { agents: [] } },
-    { id: 'dsh-enhanced-assistant-policy', name: '@dsh-enhanced/assistant-policy', config: {
+    { id: 'dsh-ray-assistant-policy', name: '@dsh-ray/assistant-policy', config: {
       databasePath: join(root, 'policy.sqlite'), budgets: [{ id: 'coordinator-budget', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'subject' }], rules: [],
     } },
-    { id: 'dsh-enhanced-assistant-automations', name: '@dsh-enhanced/assistant-automations', config: {
+    { id: 'dsh-ray-assistant-automations', name: '@dsh-ray/assistant-automations', config: {
       schedulerEnabled: true, allowUnbudgetedExecution: false, databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'),
     } },
-    { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {
+    { id: 'dsh-ray-plugin-control-plane', name: '@dsh-ray/plugin-control-plane', config: {
       catalogPath: join(home, 'catalog.json'), trustPath: join(home, 'trust.json'), statePath: root,
       adoptionCoordinator: { coordinatorId: 'adoption-coordinator', scope, timeoutMs: 30_000, budgetId: 'coordinator-budget', budgetAmount: 1 },
     } },
@@ -97,13 +97,13 @@ describe('validateRsiCoordinatorPair', () => {
     expect(result.coordinatorId).toBe('adoption-coordinator')
     const preview = parse(result.previewPatch) as Array<{ id: string, config: Record<string, any> }>
     expect(preview).toHaveLength(1)
-    expect(preview[0]!.id).toBe('dsh-enhanced-assistant-automations')
+    expect(preview[0]!.id).toBe('dsh-ray-assistant-automations')
     expect(preview[0]!.config).toEqual({ ...(coordinator[3]!.config as Record<string, any>), schedulerEnabled: false })
   })
 
   test('accepts disabled unrelated target rows and optional base rows', async () => {
     const { target, coordinator, options } = await fixture()
-    target.push({ id: 'owner-optional', name: '@dsh-enhanced/assistant-goals', disabled: true } as never)
+    target.push({ id: 'owner-optional', name: '@dsh-ray/assistant-goals', disabled: true } as never)
     ;(coordinator[0] as Record<string, unknown>).disabled = true
     await expect(validateRsiCoordinatorPair(stringify(target), stringify(coordinator), options)).resolves.toHaveProperty('coordinatorId')
     coordinator.shift()
@@ -140,7 +140,7 @@ describe('validateRsiCoordinatorPair', () => {
     ;(disabledTarget[0] as Record<string, unknown>).disabled = true
     await expect(validateRsiCoordinatorPair(stringify(disabledTarget), stringify(coordinator), options)).rejects.toThrow('target control plane')
     const renamedTarget = copy(target)
-    renamedTarget[0]!.name = '@dsh-enhanced/assistant-goals'
+    renamedTarget[0]!.name = '@dsh-ray/assistant-goals'
     await expect(validateRsiCoordinatorPair(stringify(renamedTarget), stringify(coordinator), options)).rejects.toThrow('target control plane')
   })
 
@@ -148,7 +148,7 @@ describe('validateRsiCoordinatorPair', () => {
     const { target, coordinator, options } = await fixture()
     const source = stringify(coordinator)
     const targetSource = stringify(target)
-    const extra = [...coordinator, { id: 'dsh-enhanced-lark-channel', name: '@dsh-enhanced/lark-channel', config: {} }]
+    const extra = [...coordinator, { id: 'dsh-ray-lark-channel', name: '@dsh-ray/lark-channel', config: {} }]
     await expect(validateRsiCoordinatorPair(targetSource, stringify(extra), options)).rejects.toThrow('forbidden row')
     const disabled = copy(coordinator)
     ;(disabled[3] as Record<string, unknown>).disabled = true

@@ -8,7 +8,7 @@ import { lifecycleProfileTest, restoreBoundOwnerSuccessorMasks } from '../script
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const homePath = '/private/home'
-const transactionRoot = `${homePath}.dsh-enhanced-transaction`
+const transactionRoot = `${homePath}.dsh-ray-transaction`
 const archiveRoot = `${transactionRoot}.owner-predecessor-11111111-1111-4111-8111-111111111111`
 const profile = 'assistant'
 const coordinatorProfile = `rsi-${profile}-${hash(profile).slice(0, 12)}`
@@ -19,7 +19,7 @@ const runtime = { version: '0.2.0-rc.2', root: '/private/hosts/0.2.0-rc.2',
 const binding = `${JSON.stringify({ schemaVersion: 1, cacheRoot: '/private/hosts',
   version: runtime.version, receiptDigest: runtime.receiptDigest })}\n`
 const plan = { schemaVersion: 1, status: 'current', canonicalHome: homePath,
-  bindingPath: `${homePath}/.dsh-rsi-host.json`, originalBindingSource: binding,
+  bindingPath: `${homePath}/.dsh-ray-host.json`, originalBindingSource: binding,
   originalBindingDigest: hash(binding), originalRuntime: runtime, candidateRuntime: runtime,
   candidateBindingSource: binding }
 const services = [profile, coordinatorProfile].map(name => ({
@@ -39,7 +39,7 @@ function manifest() {
     services, serviceMasks: masks, serviceStartBarriers: barriers,
     containmentMasks: [], containmentMaskIntents: [], containmentStartBarriers: [],
     hostMigration: { phase: 'starting', candidateEverStarted: true, plan,
-      localSource: { protocol: 'dsh-enhanced/host-owner-source-repair/v1', ownerRepairNext: {},
+      localSource: { protocol: 'dsh-ray/host-owner-source-repair/v1', ownerRepairNext: {},
         ownerRepair: { permissionPreset: 'danger-full-access' } } } }
 }
 
@@ -56,7 +56,7 @@ test('admits only the started, unaccepted same-Host owner repair and the same pr
     { ...current, hostMigration: { ...current.hostMigration,
       plan: { ...plan, status: 'update' } } },
     { ...current, hostMigration: { ...current.hostMigration,
-      localSource: { ...current.hostMigration.localSource, protocol: 'dsh-enhanced/host-local-source-update/v1' } } },
+      localSource: { ...current.hostMigration.localSource, protocol: 'dsh-ray/host-local-source-update/v1' } } },
     { ...current, hostMigration: { ...current.hostMigration,
       localSource: { ...current.hostMigration.localSource, ownerRepairNext: undefined } } },
     { ...current, containmentMasks: [{}] },

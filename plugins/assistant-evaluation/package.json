@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-evaluation",
+  "name": "@dsh-ray/assistant-evaluation",
   "version": "0.1.88",
   "description": "A bounded, append-only outcome evaluation ledger for the DSH personal assistant.",
   "license": "MIT",
@@ -68,7 +68,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-evaluation"
   },
   "keywords": [
@@ -101,18 +101,18 @@
     "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tool-goal": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-deepseek-budget": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-evolution": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-goals": ">0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-isolation": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-skills": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/llm-route-capabilities": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/personal-memory": ">=0.1.24 <0.2.0",
-    "@dsh-enhanced/traex-acp-provider": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-automations": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-deepseek-budget": ">=0.1.0 <0.2.0",
+    "@dsh-ray/assistant-delivery": ">0.1.24 <0.2.0",
+    "@dsh-ray/assistant-evolution": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-goals": ">0.1.24 <0.2.0",
+    "@dsh-ray/assistant-isolation": ">=0.1.0 <0.2.0",
+    "@dsh-ray/assistant-policy": ">=0.1.24 <0.2.0",
+    "@dsh-ray/assistant-skills": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-verifier": ">=0.1.0 <0.2.0",
+    "@dsh-ray/llm-route-capabilities": ">=0.1.33 <0.2.0",
+    "@dsh-ray/personal-memory": ">=0.1.24 <0.2.0",
+    "@dsh-ray/traex-acp-provider": ">=0.1.33 <0.2.0",
     "@deepseek-ai/cordis-plugin-loader": "^1.0.3"
   },
   "peerDependenciesMeta": {
@@ -143,19 +143,19 @@
     "@deepseek-ai/dsh-tools": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-automations": {
+    "@dsh-ray/assistant-automations": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-delivery": {
+    "@dsh-ray/assistant-delivery": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-evolution": {
+    "@dsh-ray/assistant-evolution": {
       "optional": true
     },
-    "@dsh-enhanced/personal-memory": {
+    "@dsh-ray/personal-memory": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-policy": {
+    "@dsh-ray/assistant-policy": {
       "optional": true
     },
     "@deepseek-ai/dsh-session-persistence-jsonl": {
@@ -176,25 +176,25 @@
     "@deepseek-ai/dsh-subagent": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-goals": {
+    "@dsh-ray/assistant-goals": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-isolation": {
+    "@dsh-ray/assistant-isolation": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-verifier": {
+    "@dsh-ray/assistant-verifier": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-deepseek-budget": {
+    "@dsh-ray/assistant-deepseek-budget": {
       "optional": true
     },
-    "@dsh-enhanced/traex-acp-provider": {
+    "@dsh-ray/traex-acp-provider": {
       "optional": true
     },
-    "@dsh-enhanced/llm-route-capabilities": {
+    "@dsh-ray/llm-route-capabilities": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-skills": {
+    "@dsh-ray/assistant-skills": {
       "optional": true
     },
     "@deepseek-ai/dsh-session-query": {
@@ -223,18 +223,18 @@
     "@deepseek-ai/dsh-tool-goal": "catalog:",
     "@deepseek-ai/dsh-tool-executor-native": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
-    "@dsh-enhanced/assistant-automations": "workspace:*",
-    "@dsh-enhanced/assistant-deepseek-budget": "workspace:*",
-    "@dsh-enhanced/assistant-delivery": "workspace:*",
-    "@dsh-enhanced/assistant-evolution": "workspace:*",
-    "@dsh-enhanced/assistant-goals": "workspace:*",
-    "@dsh-enhanced/assistant-isolation": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
-    "@dsh-enhanced/assistant-skills": "workspace:*",
-    "@dsh-enhanced/assistant-verifier": "workspace:*",
-    "@dsh-enhanced/llm-route-capabilities": "workspace:*",
-    "@dsh-enhanced/personal-memory": "workspace:*",
-    "@dsh-enhanced/traex-acp-provider": "workspace:*",
+    "@dsh-ray/assistant-automations": "workspace:*",
+    "@dsh-ray/assistant-deepseek-budget": "workspace:*",
+    "@dsh-ray/assistant-delivery": "workspace:*",
+    "@dsh-ray/assistant-evolution": "workspace:*",
+    "@dsh-ray/assistant-goals": "workspace:*",
+    "@dsh-ray/assistant-isolation": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
+    "@dsh-ray/assistant-skills": "workspace:*",
+    "@dsh-ray/assistant-verifier": "workspace:*",
+    "@dsh-ray/llm-route-capabilities": "workspace:*",
+    "@dsh-ray/personal-memory": "workspace:*",
+    "@dsh-ray/traex-acp-provider": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
@@ -242,6 +242,6 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
+    "@dsh-ray/task-acceptance-contract": "workspace:*"
   }
 }

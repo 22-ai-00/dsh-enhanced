@@ -5,7 +5,7 @@
  * session controls and presentation remain wired to native DSH services and
  * durable session events.
  *
- * @module @dsh-enhanced/acp
+ * @module @dsh-ray/acp
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -57,7 +57,7 @@ import {
 } from './control.ts'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-acp'
+export const name = 'dsh-ray-acp'
 export const inject = ['agentDefaultModel', 'agentPresets', 'agents', 'llm']
 export { version }
 
@@ -181,7 +181,7 @@ function onceAsync(action: () => Promise<void>): () => Promise<void> {
 /** Mount one ACP server over the host's native DSH agent composition. */
 export function apply(ctx: Context, config: AcpConfig = {}): void {
   if ((config.provider === undefined) !== (config.model === undefined)) {
-    throw new Error('dsh-enhanced-acp: provider and model must be configured together')
+    throw new Error('dsh-ray-acp: provider and model must be configured together')
   }
 
   const agents = ctx.agents
@@ -212,7 +212,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
 
   const notify = (notification: SessionNotification): void => {
     void conn.sessionUpdate(notification).catch((error: unknown) => {
-      logger.warn(`dsh-enhanced-acp: session/update failed: ${String(error)}`)
+      logger.warn(`dsh-ray-acp: session/update failed: ${String(error)}`)
     })
   }
 
@@ -249,7 +249,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
       try {
         await subagents.drainContinuableDescendants(records.map(record => record.agent))
       } catch (error: unknown) {
-        logger.warn(`dsh-enhanced-acp: continuable subagent teardown failed: ${String(error)}`)
+        logger.warn(`dsh-ray-acp: continuable subagent teardown failed: ${String(error)}`)
       }
     }
     const outcomes = await Promise.allSettled(records.map(record => record.dispose()))
@@ -342,7 +342,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
         if (sessions.get(sessionId) !== record) return
         notify({ sessionId, update: { sessionUpdate: 'config_option_update', configOptions } })
       }).catch((error: unknown) => {
-        logger.warn(`dsh-enhanced-acp: failed to refresh model catalog for ${sessionId}: ${String(error)}`)
+        logger.warn(`dsh-ray-acp: failed to refresh model catalog for ${sessionId}: ${String(error)}`)
       })
     }
   })
@@ -353,7 +353,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
       initialize(_params: InitializeRequest): Promise<InitializeResponse> {
         return Promise.resolve({
           protocolVersion: PROTOCOL_VERSION,
-          agentInfo: { name: 'dsh-enhanced-acp', version },
+          agentInfo: { name: 'dsh-ray-acp', version },
           agentCapabilities: {
             promptCapabilities: { image: false, audio: false, embeddedContext: false },
             sessionCapabilities: { close: {} },
@@ -552,12 +552,12 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
 
   void conn.closed
     .catch((error: unknown) => {
-      logger.warn(`dsh-enhanced-acp: connection closed with an error: ${String(error)}`)
+      logger.warn(`dsh-ray-acp: connection closed with an error: ${String(error)}`)
     })
     .then(quiesce)
     .catch((error: unknown) => {
-      logger.warn(`dsh-enhanced-acp: connection-close teardown failed: ${String(error)}`)
+      logger.warn(`dsh-ray-acp: connection-close teardown failed: ${String(error)}`)
     })
 
-  ctx.effect(() => quiesce, 'dsh-enhanced-acp.connection')
+  ctx.effect(() => quiesce, 'dsh-ray-acp.connection')
 }

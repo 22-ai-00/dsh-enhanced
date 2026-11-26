@@ -1,7 +1,7 @@
 import { resolve } from 'node:path'
-import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
-import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
+import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-ray/assistant-isolation'
+import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 import { afterEach, beforeEach, expect, test as nativeTest, vi } from 'vitest'
 import { creationCapabilityExecutionMatches, validateLinuxCreationCapabilityRunner,
   verifyCreationCapabilityExecution } from '../src/creation-capability-execution.js'
@@ -11,8 +11,8 @@ import type { CreationCapabilityConfig } from '../src/creation-capability-types.
 const test = nativeTest.runIf(process.platform === 'linux')
 
 const verifier = vi.hoisted(() => ({ verify: vi.fn() }))
-vi.mock('@dsh-enhanced/assistant-verifier/linux-behavior-runtime', async importOriginal => ({
-  ...await importOriginal<typeof import('@dsh-enhanced/assistant-verifier/linux-behavior-runtime')>(),
+vi.mock('@dsh-ray/assistant-verifier/linux-behavior-runtime', async importOriginal => ({
+  ...await importOriginal<typeof import('@dsh-ray/assistant-verifier/linux-behavior-runtime')>(),
   verifyLinuxPluginBehaviorAdoptionRuntime: verifier.verify,
 }))
 beforeEach(() => { verifier.verify.mockReset().mockResolvedValue(undefined) })

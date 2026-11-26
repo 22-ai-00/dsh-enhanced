@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-deepseek-budget",
+  "name": "@dsh-ray/assistant-deepseek-budget",
   "version": "0.1.88",
   "description": "A DeepSeek Harness plugin for Assistant Deepseek Budget.",
   "license": "MIT",
@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-deepseek-budget"
   },
   "keywords": [
@@ -58,7 +58,7 @@
     "@deepseek-ai/cordis": "^4.1.0",
     "@deepseek-ai/dsh-credentials": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-llm": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-enhanced/assistant-goals": ">=0.1.0 <0.2.0"
+    "@dsh-ray/assistant-goals": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -70,7 +70,7 @@
     "@deepseek-ai/dsh-llm": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-goals": {
+    "@dsh-ray/assistant-goals": {
       "optional": true
     }
   },
@@ -78,7 +78,7 @@
     "@deepseek-ai/cordis": "catalog:",
     "@deepseek-ai/dsh-credentials": "catalog:",
     "@deepseek-ai/dsh-llm": "catalog:",
-    "@dsh-enhanced/assistant-goals": "workspace:*",
+    "@dsh-ray/assistant-goals": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

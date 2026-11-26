@@ -2,7 +2,7 @@ import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { HoldoutEvidenceStore, type HoldoutEvidenceVerifier, type HoldoutHostEvidence } from '../../src/benchmark/holdout-evidence.ts'
 import {

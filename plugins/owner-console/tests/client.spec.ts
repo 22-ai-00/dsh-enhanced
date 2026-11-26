@@ -69,51 +69,51 @@ describe('owner console client', () => {
       .mockResolvedValueOnce(result({ applied: false, entry: 'spec', note: 'blocked', pendingBuilds: ['protobufjs@7.6.6'] }))
       .mockResolvedValueOnce(result({ applied: true, entry: 'spec', note: 'done' }))
     const confirm = vi.fn(() => true)
-    await expect(installWithApproval({ installProjectBundle: install }, '@dsh-enhanced/lark-channel', confirm))
+    await expect(installWithApproval({ installProjectBundle: install }, '@dsh-ray/lark-channel', confirm))
       .resolves.toMatchObject({ ok: true, value: { applied: true } })
     expect(confirm).toHaveBeenCalledExactlyOnceWith('安装需要允许这些依赖运行构建脚本：protobufjs@7.6.6。允许并重试？')
     expect(install.mock.calls).toEqual([
-      ['@dsh-enhanced/lark-channel', []],
-      ['@dsh-enhanced/lark-channel', ['protobufjs@7.6.6']],
+      ['@dsh-ray/lark-channel', []],
+      ['@dsh-ray/lark-channel', ['protobufjs@7.6.6']],
     ])
     // A declined confirmation or a failure that recorded no name never retries.
     const denied = vi.fn(async () => result({ applied: false, entry: 'spec', note: 'blocked', pendingBuilds: ['esbuild@1'] }))
-    await expect(installWithApproval({ installProjectBundle: denied }, '@dsh-enhanced/lark-channel', () => false))
+    await expect(installWithApproval({ installProjectBundle: denied }, '@dsh-ray/lark-channel', () => false))
       .resolves.toMatchObject({ ok: true, value: { applied: false } })
     expect(denied).toHaveBeenCalledOnce()
     const unrecorded = vi.fn(async () => result({ applied: false, entry: 'spec', note: 'blocked' }))
-    await installWithApproval({ installProjectBundle: unrecorded }, '@dsh-enhanced/lark-channel', () => true)
+    await installWithApproval({ installProjectBundle: unrecorded }, '@dsh-ray/lark-channel', () => true)
     expect(unrecorded).toHaveBeenCalledOnce()
     const applied = vi.fn(async () => result({ applied: true, entry: 'spec', note: 'done' }))
-    await installWithApproval({ installProjectBundle: applied }, '@dsh-enhanced/lark-channel', () => true)
+    await installWithApproval({ installProjectBundle: applied }, '@dsh-ray/lark-channel', () => true)
     expect(applied).toHaveBeenCalledOnce()
     const refused = vi.fn(async () => ({ ok: false as const }))
-    await expect(installWithApproval({ installProjectBundle: refused }, '@dsh-enhanced/lark-channel', () => true))
+    await expect(installWithApproval({ installProjectBundle: refused }, '@dsh-ray/lark-channel', () => true))
       .resolves.toEqual({ ok: false })
     expect(refused).toHaveBeenCalledOnce()
   })
 
   it('installs activation-critical companions before the requested bundle', async () => {
     const install = vi.fn(async (spec: string) => ({ ok: true as const, value: { applied: true, entry: spec, note: 'done' } }))
-    await expect(installWithCompanions({ installProjectBundle: install }, '@dsh-enhanced/lark-channel',
-      ['@dsh-enhanced/assistant-delivery'], () => true))
+    await expect(installWithCompanions({ installProjectBundle: install }, '@dsh-ray/lark-channel',
+      ['@dsh-ray/assistant-delivery'], () => true))
       .resolves.toMatchObject({ ok: true, value: { applied: true } })
     expect(install.mock.calls).toEqual([
-      ['@dsh-enhanced/assistant-delivery', []],
-      ['@dsh-enhanced/lark-channel', []],
+      ['@dsh-ray/assistant-delivery', []],
+      ['@dsh-ray/lark-channel', []],
     ])
     // A failed companion stops the chain; the requested bundle is never attempted.
-    const failing = vi.fn(async (spec: string) => spec === '@dsh-enhanced/assistant-delivery'
+    const failing = vi.fn(async (spec: string) => spec === '@dsh-ray/assistant-delivery'
       ? { ok: true as const, value: { applied: false, entry: spec, note: 'blocked' } }
       : { ok: true as const, value: { applied: true, entry: spec, note: 'done' } })
-    await expect(installWithCompanions({ installProjectBundle: failing }, '@dsh-enhanced/lark-channel',
-      ['@dsh-enhanced/assistant-delivery'], () => true))
+    await expect(installWithCompanions({ installProjectBundle: failing }, '@dsh-ray/lark-channel',
+      ['@dsh-ray/assistant-delivery'], () => true))
       .resolves.toMatchObject({ ok: true, value: { applied: false } })
     expect(failing).toHaveBeenCalledOnce()
     // No companions still installs exactly the requested bundle.
     const direct = vi.fn(async (spec: string) => ({ ok: true as const, value: { applied: true, entry: spec, note: 'done' } }))
-    await installWithCompanions({ installProjectBundle: direct }, '@dsh-enhanced/lark-channel', [], () => true)
-    expect(direct).toHaveBeenCalledExactlyOnceWith('@dsh-enhanced/lark-channel', [])
+    await installWithCompanions({ installProjectBundle: direct }, '@dsh-ray/lark-channel', [], () => true)
+    expect(direct).toHaveBeenCalledExactlyOnceWith('@dsh-ray/lark-channel', [])
   })
 
   it('surfaces the gateway failure code and message instead of one generic sentence', () => {
@@ -166,25 +166,25 @@ describe('owner console client', () => {
       { name: 'settings.section.icon', id: 'wenyao-assistant' },
       { name: 'settings.general.item', id: 'wenyao-coding-tool', order: 20 },
       { name: 'settings.models.footer', id: 'wenyao-coding-agents', order: 20 },
-      { name: 'settings.models.provider-card', key: 'dsh-enhanced-traex-acp-provider' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/traex-acp-provider' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/lark-channel' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-proactive' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-dreaming' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-growth-driver' },
-      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-memory-learning' },
+      { name: 'settings.models.provider-card', key: 'dsh-ray-traex-acp-provider' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/traex-acp-provider' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/lark-channel' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/assistant-proactive' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/assistant-dreaming' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/assistant-growth-driver' },
+      { name: 'plugins.bundle.config', key: '@dsh-ray/assistant-memory-learning' },
     ])
     for (const reg of registrations) expect(typeof reg.component).toBe('function')
     expect((registrations[3]!.options['label'] as () => string)()).toBe('文鳐助手')
     await release()
     expect(disposed).toEqual([
-      'plugins.bundle.config', '@dsh-enhanced/assistant-memory-learning',
-      'plugins.bundle.config', '@dsh-enhanced/assistant-growth-driver',
-      'plugins.bundle.config', '@dsh-enhanced/assistant-dreaming',
-      'plugins.bundle.config', '@dsh-enhanced/assistant-proactive',
-      'plugins.bundle.config', '@dsh-enhanced/lark-channel',
-      'plugins.bundle.config', '@dsh-enhanced/traex-acp-provider',
-      'settings.models.provider-card', 'dsh-enhanced-traex-acp-provider',
+      'plugins.bundle.config', '@dsh-ray/assistant-memory-learning',
+      'plugins.bundle.config', '@dsh-ray/assistant-growth-driver',
+      'plugins.bundle.config', '@dsh-ray/assistant-dreaming',
+      'plugins.bundle.config', '@dsh-ray/assistant-proactive',
+      'plugins.bundle.config', '@dsh-ray/lark-channel',
+      'plugins.bundle.config', '@dsh-ray/traex-acp-provider',
+      'settings.models.provider-card', 'dsh-ray-traex-acp-provider',
       'settings.models.footer', 'wenyao-coding-agents',
       'settings.general.item', 'wenyao-coding-tool',
       'settings.section.icon', 'wenyao-assistant',

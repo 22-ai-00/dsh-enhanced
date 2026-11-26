@@ -20,7 +20,7 @@ import {
   type PreferenceMemoryPromotionResultAck,
   type PreferenceMemoryPromotionSubmissionReceipt,
   type PreferenceMemoryPromotionTerminalStatus,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import {
   catalogSelection,
   preferenceCatalog,

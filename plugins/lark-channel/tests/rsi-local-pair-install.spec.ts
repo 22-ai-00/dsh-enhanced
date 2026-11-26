@@ -35,13 +35,13 @@ async function snapshot(root: string): Promise<Record<string, string>> {
 }
 async function unpack(cohort: RsiLocalCohort, root: string, bundles: readonly string[]): Promise<void> {
   await rm(join(root, 'node_modules'), { recursive: true, force: true })
-  const pending = bundles.map(slug => `@dsh-enhanced/${slug}`), seen = new Set<string>()
+  const pending = bundles.map(slug => `@dsh-ray/${slug}`), seen = new Set<string>()
   for (let index = 0; index < pending.length; index++) {
     const name = pending[index]!
     if (seen.has(name)) continue
     seen.add(name)
     const pkg = cohort.packages.find(item => item.name === name)!
-    const destination = join(root, 'node_modules', '@dsh-enhanced', name.split('/')[1]!)
+    const destination = join(root, 'node_modules', '@dsh-ray', name.split('/')[1]!)
     await mkdir(destination, { recursive: true, mode: 0o700 })
     execFileSync('/usr/bin/tar', ['-xzf', pkg.tarball, '--strip-components=1', '-C', destination])
     pending.push(...pkg.runtimeDependencies)
@@ -51,18 +51,18 @@ async function addSourcePackage(repository: string, slug: string, version: strin
   const library = slug === 'personal-memory' || slug === 'assistant-growth-contract'
   const root = join(repository, library ? 'packages' : 'plugins', slug)
   await mkdir(join(root, 'lib'), { recursive: true })
-  const pkg = { name: `@dsh-enhanced/${slug}`, version, type: 'module', main: './lib/index.js',
+  const pkg = { name: `@dsh-ray/${slug}`, version, type: 'module', main: './lib/index.js',
     exports: { '.': './lib/index.js', './package.json': './package.json' },
     ...(library ? {} : { dsh: { bundle: { patch: './cordis.patch.yml' } } }),
-    dependencies: Object.fromEntries(runtime.map(name => [`@dsh-enhanced/${name}`, 'workspace:*'])),
-    peerDependencies: Object.fromEntries(peer.map(name => [`@dsh-enhanced/${name}`, 'workspace:*'])),
-    peerDependenciesMeta: Object.fromEntries(peer.map(name => [`@dsh-enhanced/${name}`, { optional: true }])) }
+    dependencies: Object.fromEntries(runtime.map(name => [`@dsh-ray/${name}`, 'workspace:*'])),
+    peerDependencies: Object.fromEntries(peer.map(name => [`@dsh-ray/${name}`, 'workspace:*'])),
+    peerDependenciesMeta: Object.fromEntries(peer.map(name => [`@dsh-ray/${name}`, { optional: true }])) }
   await writeFile(join(root, 'package.json'), JSON.stringify(pkg, null, 2) + '\n')
   await writeFile(join(root, 'lib/index.js'), `export const identity = '${slug}'\n`)
   await writeFile(join(root, 'README.md'), `# ${slug}\n`)
   await writeFile(join(root, 'LICENSE'), 'MIT\n')
   if (!library) await writeFile(join(root, 'cordis.patch.yml'), slug === 'assistant-memory-learning'
-    ? "- insert:\n    - id: dsh-enhanced-assistant-memory-learning\n      name: '@dsh-enhanced/assistant-memory-learning'\n      disabled: true\n"
+    ? "- insert:\n    - id: dsh-ray-assistant-memory-learning\n      name: '@dsh-ray/assistant-memory-learning'\n      disabled: true\n"
     : '[]\n')
 }
 
@@ -90,7 +90,7 @@ async function fixture(sameVersion = false, peerGraph = false, memoryExtension =
     await mkdir(root, { recursive: true, mode: 0o700 })
     await unpack(original, root, bundles)
     const dependencies = Object.fromEntries(bundles.map(slug => {
-      const pkg = original.packages.find(item => item.name === `@dsh-enhanced/${slug}`)!
+      const pkg = original.packages.find(item => item.name === `@dsh-ray/${slug}`)!
       return [pkg.name, `file:${pkg.tarball}`]
     }))
     await writeFile(join(root, 'package.json'), JSON.stringify({ name: `profile-${name}`, private: true,
@@ -137,13 +137,13 @@ async function fixture(sameVersion = false, peerGraph = false, memoryExtension =
     expect(environment.pnpm_config_package_import_method).toBe('copy')
     if (args[3] === 'add') {
       const bundles = name === f.profile ? candidate.bundles : coordinatorBundles
-      expect(args.slice(4)).toEqual(bundles.map(slug => candidate.packages.find(pkg => pkg.name === `@dsh-enhanced/${slug}`)!.tarball))
+      expect(args.slice(4)).toEqual(bundles.map(slug => candidate.packages.find(pkg => pkg.name === `@dsh-ray/${slug}`)!.tarball))
       // A same-version add may preserve stale files; the existing installer must
       // verify those bytes and perform its bounded force retry.
       if (!(sameVersion && name === f.profile && environment.pnpm_config_force !== 'true')) await unpack(candidate, root, bundles)
       if (memoryExtension && name === f.profile) {
         const path = join(root, 'package.json'), manifest = JSON.parse(await readFile(path, 'utf8'))
-        const learner = candidate.packages.find(item => item.name === '@dsh-enhanced/assistant-memory-learning')!
+        const learner = candidate.packages.find(item => item.name === '@dsh-ray/assistant-memory-learning')!
         manifest.dependencies[learner.name] = `file:${learner.tarball}`
         if (!manifest.dsh.profile.bundles.includes(learner.name)) manifest.dsh.profile.bundles.push(learner.name)
         await writeFile(path, JSON.stringify(manifest))
@@ -163,12 +163,12 @@ describe('disposable Home paired package installation', () => {
   test('fresh verifier follows a replaced pnpm package link and rejects changed candidate bytes', async () => {
     const f = await fixture()
     const profilePath = join(f.home, 'profiles', f.profile)
-    const targetLink = join(profilePath, 'node_modules', '@dsh-enhanced', 'target')
+    const targetLink = join(profilePath, 'node_modules', '@dsh-ray', 'target')
     const oldPhysical = join(profilePath, 'old-target'), newPhysical = join(profilePath, 'new-target')
     await rename(targetLink, oldPhysical)
     await symlink(oldPhysical, targetLink)
     const requireProfile = createRequire(join(profilePath, 'package.json'))
-    expect(requireProfile.resolve('@dsh-enhanced/target/package.json')).toBe(join(oldPhysical, 'package.json'))
+    expect(requireProfile.resolve('@dsh-ray/target/package.json')).toBe(join(oldPhysical, 'package.json'))
     await unpack(f.candidate, profilePath, f.candidate.bundles)
     await rename(targetLink, newPhysical)
     await symlink(newPhysical, targetLink)
@@ -209,7 +209,7 @@ describe('disposable Home paired package installation', () => {
     expect(f.install.mock.calls.map(([input]) => input.bundles)).toEqual([f.candidate.bundles])
     expect(await readFile(join(target, 'cordis.patch.yml'))).toEqual(oldPatch)
     const manifest = JSON.parse(await readFile(join(target, 'package.json'), 'utf8'))
-    const learner = '@dsh-enhanced/assistant-memory-learning'
+    const learner = '@dsh-ray/assistant-memory-learning'
     expect(manifest.dependencies[learner]).toBe(`file:${f.candidate.packages.find(item => item.name === learner)!.tarball}`)
     expect(manifest.dsh.profile.bundles).toEqual([...oldManifest.dsh.profile.bundles, learner])
     expect(proof.files[join(target, 'package.json')]).toBe(hash(await readFile(join(target, 'package.json'))))
@@ -221,7 +221,7 @@ describe('disposable Home paired package installation', () => {
     await rm(f.receiptPath)
     await rm(join(f.home, 'profiles', f.coordinator), { recursive: true })
     const target = join(f.home, 'profiles', f.profile), patch = join(target, 'cordis.patch.yml')
-    await writeFile(patch, "- id: existing\n  config: !!js |\n    return '@dsh-enhanced/assistant-memory-learning'\n")
+    await writeFile(patch, "- id: existing\n  config: !!js |\n    return '@dsh-ray/assistant-memory-learning'\n")
     const before = await snapshot(target)
     await expect(stageRsiLocalSinglePackages({ ...f.input, rootExtension: 'memory-learning' }, f.ports))
       .rejects.toThrow(/already references/u)
@@ -295,12 +295,12 @@ describe('disposable Home paired package installation', () => {
   test.each(['coordinator-bytes', 'target-bytes', 'manifest-root', 'manifest-bundles', 'workspace', 'coordinator-receipt', 'receipt-extra-key', 'original-cohort'] as const)
     ('rejects %s before any write or install', async drift => {
       const f = await fixture(), target = join(f.home, 'profiles', f.profile), coordinator = join(f.home, 'profiles', f.coordinator)
-      if (drift === 'coordinator-bytes') await writeFile(join(coordinator, 'node_modules/@dsh-enhanced/assistant-policy/lib/index.js'), 'changed coordinator')
-      if (drift === 'target-bytes') await writeFile(join(target, 'node_modules/@dsh-enhanced/target/lib/index.js'), 'changed target')
+      if (drift === 'coordinator-bytes') await writeFile(join(coordinator, 'node_modules/@dsh-ray/assistant-policy/lib/index.js'), 'changed coordinator')
+      if (drift === 'target-bytes') await writeFile(join(target, 'node_modules/@dsh-ray/target/lib/index.js'), 'changed target')
       if (drift === 'manifest-root' || drift === 'manifest-bundles') {
         const path = join(coordinator, 'package.json'), manifest = JSON.parse(await readFile(path, 'utf8'))
-        if (drift === 'manifest-root') manifest.dependencies['@dsh-enhanced/assistant-policy'] = 'file:/foreign/policy.tgz'
-        else manifest.dsh.profile.bundles.push('@dsh-enhanced/target')
+        if (drift === 'manifest-root') manifest.dependencies['@dsh-ray/assistant-policy'] = 'file:/foreign/policy.tgz'
+        else manifest.dsh.profile.bundles.push('@dsh-ray/target')
         await writeFile(path, JSON.stringify(manifest))
       }
       if (drift === 'workspace') {
@@ -380,7 +380,7 @@ describe('disposable Home paired package installation', () => {
         }
         if (drift === 'owner-patch') await writeFile(join(root, 'cordis.patch.yml'), '# changed owner patch\n[]\n')
         if (drift === 'workspace') await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages: [.]\n')
-        if (drift === 'candidate-inventory') await writeFile(join(root, 'node_modules/@dsh-enhanced/target/lib/index.js'), 'changed after install')
+        if (drift === 'candidate-inventory') await writeFile(join(root, 'node_modules/@dsh-ray/target/lib/index.js'), 'changed after install')
         if (drift === 'missing-lock') await rm(join(root, 'pnpm-lock.yaml'))
       })
       await expect(stageRsiLocalPairPackages(f.input, f.ports)).rejects.toThrow()
@@ -415,14 +415,14 @@ test('migrates exact original peer pins and narrows the coordinator to its own c
     const workspace = parseDocument(await readFile(join(f.home, 'profiles', name, 'pnpm-workspace.yaml'), 'utf8')).toJS()
     expect(workspace.overrides).toEqual({ 'unrelated-package': '1.2.3',
       ...rsiLocalDependencyOverrides(f.candidate, bundles), ...await rsiLocalPeerOverrides({ cohort: f.candidate, bundles }) })
-    if (name === f.coordinator) expect(JSON.stringify(workspace.overrides)).not.toContain('@dsh-enhanced/target')
+    if (name === f.coordinator) expect(JSON.stringify(workspace.overrides)).not.toContain('@dsh-ray/target')
   }
 })
 
 test('rejects a changed original peer pin before either profile is written', async () => {
   const f = await fixture(false, true), workspace = join(f.home, 'profiles', f.profile, 'pnpm-workspace.yaml')
   const document = parseDocument(await readFile(workspace, 'utf8'))
-  document.setIn(['overrides', '@dsh-enhanced/optional-plugin@0.1.48>@dsh-enhanced/shared-lib'], 'file:/foreign/same-version.tgz')
+  document.setIn(['overrides', '@dsh-ray/optional-plugin@0.1.48>@dsh-ray/shared-lib'], 'file:/foreign/same-version.tgz')
   await writeFile(workspace, document.toString())
   const before = await snapshot(f.home)
   await expect(stageRsiLocalPairPackages(f.input, f.ports)).rejects.toThrow('override changed')
@@ -439,7 +439,7 @@ test('read-only profile plans match both installed projections without touching 
     const plan = await planRsiLocalProfilePackages({ source: await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8'),
       original: f.original, candidate: f.candidate, bundles, originalProfilePath: root })
     expect(plan.bundles).toEqual(bundles)
-    expect(plan.tarballs).toEqual(bundles.map(slug => f.candidate.packages.find(pkg => pkg.name === `@dsh-enhanced/${slug}`)!.tarball))
+    expect(plan.tarballs).toEqual(bundles.map(slug => f.candidate.packages.find(pkg => pkg.name === `@dsh-ray/${slug}`)!.tarball))
     plans.set(name, plan)
   }
   expect(f.command).not.toHaveBeenCalled()
@@ -467,11 +467,11 @@ test('read-only planner rejects installed manifest and old peer-pin drift withou
   const source = await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8')
   const input = { source, original: f.original, candidate: f.candidate, bundles: f.original.bundles, originalProfilePath: root }
   const document = parseDocument(source)
-  document.setIn(['overrides', '@dsh-enhanced/optional-plugin@0.1.48>@dsh-enhanced/shared-lib'], 'file:/foreign/drift.tgz')
+  document.setIn(['overrides', '@dsh-ray/optional-plugin@0.1.48>@dsh-ray/shared-lib'], 'file:/foreign/drift.tgz')
   const before = await snapshot(f.home)
   await expect(planRsiLocalProfilePackages({ ...input, source: document.toString() })).rejects.toThrow('override changed')
   expect(await snapshot(f.home)).toEqual(before)
-  const manifest = join(root, 'node_modules', '@dsh-enhanced', 'target', 'package.json')
+  const manifest = join(root, 'node_modules', '@dsh-ray', 'target', 'package.json')
   await writeFile(manifest, (await readFile(manifest, 'utf8')) + ' ')
   const drifted = await snapshot(f.home)
   await expect(planRsiLocalProfilePackages(input)).rejects.toThrow('installed package file differs')

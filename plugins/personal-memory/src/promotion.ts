@@ -16,7 +16,7 @@ import {
   type PreferenceMemoryPromotionResultAck,
   type PreferenceMemoryPromotionSubmissionReceipt,
   type PreferencePromotionSourceRegistrationOwner,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import type { MemoryMutation, MemoryOwnerNamespace } from './types.js'
 
 export interface PreferencePromotionBridgeHandlers {

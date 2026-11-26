@@ -18,7 +18,7 @@ function configRow(document, id) {
     if (isSeq(node)) for (const item of node.items) { const found = find(item); if (found) return found }
   }
   let row = find(document.contents)
-  if (!row) { row = document.createNode({ id, name: `@dsh-enhanced/${id.slice('dsh-enhanced-'.length)}` }); document.contents.add(row) }
+  if (!row) { row = document.createNode({ id, name: `@dsh-ray/${id.slice('dsh-ray-'.length)}` }); document.contents.add(row) }
   if (!isMap(row)) throw new Error(`external fixture invalid ${id}`)
   if (!isMap(row.get('config', true))) row.set('config', document.createNode({}))
   return row
@@ -130,8 +130,8 @@ export async function prepareExternalRepositoryFixture(home, patchPath, env, { s
   const keysRoot = join(actionsRoot, 'keys')
   await mkdir(keysRoot, { recursive: true, mode: 0o700 })
 
-  const assistantActionsLibDir = join(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-actions/lib')
-  const delivery = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-delivery/lib/index.js')).href)
+  const assistantActionsLibDir = join(home, 'profiles/web/node_modules/@dsh-ray/assistant-actions/lib')
+  const delivery = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-ray/assistant-delivery/lib/index.js')).href)
   const { ExternalBrokerCore } = await import(pathToFileURL(join(assistantActionsLibDir, 'broker-core.js')).href)
   const { startGitHubBrokerServer } = await import(pathToFileURL(join(assistantActionsLibDir, 'broker-server.js')).href)
   const { withBrokerGrantDigest } = await import(pathToFileURL(join(assistantActionsLibDir, 'broker-ledger.js')).href)
@@ -140,8 +140,8 @@ export async function prepareExternalRepositoryFixture(home, patchPath, env, { s
   if (!linuxPeerCredentialsAvailable()) throw new Error('external fixture requires real Linux SO_PEERCRED')
 
   const installed = parseDocument(await readFile(patchPath, 'utf8'))
-  const ownerConfig = configRow(installed, 'dsh-enhanced-assistant-web-owner').get('config', true).toJSON()
-  const deliveryConfig = configRow(installed, 'dsh-enhanced-assistant-delivery').get('config', true)
+  const ownerConfig = configRow(installed, 'dsh-ray-assistant-web-owner').get('config', true).toJSON()
+  const deliveryConfig = configRow(installed, 'dsh-ray-assistant-delivery').get('config', true)
   const principal = ownerConfig.principal
   if (!principal || ownerConfig.workspace !== workspace || typeof ownerConfig.preset !== 'string') {
     throw new Error('external fixture installed owner scope is unavailable')
@@ -300,7 +300,7 @@ export async function prepareExternalRepositoryFixture(home, patchPath, env, { s
 
       const { digest: _digest, ...unsigned } = authority
       const projection = createBrokerGrantProjection(unsigned)
-      configRow(installed, 'dsh-enhanced-assistant-actions').set('config', installed.createNode({
+      configRow(installed, 'dsh-ray-assistant-actions').set('config', installed.createNode({
         stateRoot: join(home, 'assistant-actions/web'),
         grants: [],
         externalGrants: [projection],
@@ -449,7 +449,7 @@ export async function prepareExternalRepositoryFixture(home, patchPath, env, { s
   try {
     const { digest: _digest, ...unsigned } = authority
     const projection = createBrokerGrantProjection(unsigned)
-    configRow(installed, 'dsh-enhanced-assistant-actions').set('config', installed.createNode({
+    configRow(installed, 'dsh-ray-assistant-actions').set('config', installed.createNode({
       stateRoot: join(home, 'assistant-actions/web'),
       grants: [],
       externalGrants: [projection],

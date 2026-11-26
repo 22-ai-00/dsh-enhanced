@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { controlPlaneDigest, runtimeConfigDigest, type RuntimeObserverConfig } from '@dsh-enhanced/plugin-control-plane'
+import { controlPlaneDigest, runtimeConfigDigest, type RuntimeObserverConfig } from '@dsh-ray/plugin-control-plane'
 import { rsiInstallPorts } from '../src/rsi-install.js'
 import { rsiBuildResources } from '../src/rsi-build.js'
 import type { RsiSetupManifest } from '../src/rsi-profile.js'
@@ -12,13 +12,13 @@ vi.mock('node:timers/promises', async original => ({
   ...await original<typeof import('node:timers/promises')>(),
   setTimeout: async (milliseconds: number) => { clock.now += milliseconds },
 }))
-vi.mock('@dsh-enhanced/assistant-automations', async original => ({
-  ...await original<typeof import('@dsh-enhanced/assistant-automations')>(),
+vi.mock('@dsh-ray/assistant-automations', async original => ({
+  ...await original<typeof import('@dsh-ray/assistant-automations')>(),
   listActiveAutomationsForReadiness: reads.active,
   listActiveAutomationsLocally: reads.offline,
 }))
-vi.mock('@dsh-enhanced/plugin-control-plane', async original => ({
-  ...await original<typeof import('@dsh-enhanced/plugin-control-plane')>(),
+vi.mock('@dsh-ray/plugin-control-plane', async original => ({
+  ...await original<typeof import('@dsh-ray/plugin-control-plane')>(),
   queryRuntimeObserver: reads.observer,
 }))
 

@@ -71,7 +71,7 @@ pnpm 的 `_tmp_<pid>_0` 目录会被回收，因此要指向稳定副本而不�
 
 Host/lifecycle 类根测试（`tests/host-lifecycle.test.ts`、`tests/host-rsi-update.test.ts`、`tests/rsi-scanner-owner-source.spec.ts`、`tests/lifecycle-scanner-namespace.spec.ts`）会调用 `scripts/install/lifecycle-profile.mjs` 的 `resolvedPnpmStorePath()`：它执行 `pnpm store path`，要求返回已存在、当前用户拥有、非 group/other 可写、且不在 `DSH_HOME` 内的 store 目录，随后在同一 store 上复核 `store-dir` 精确绑定。
 
-只把依赖装到自定义 `--store-dir` 而不让 `pnpm store path` 解析到它时，这些用例会以 `dsh-enhanced lifecycle: npm cohort pnpm store 不存在或不可解析；尚未创建事务或修改 DSH_HOME。`（后接 `bash failed with exit 1`）失败，看起来像实现缺陷。用环境变量把解析结果钉到已填充的 store；`pnpm_config_store_dir` 会被 pnpm 识别，`npm_config_store_dir` 不会改变 `pnpm store path` 的输出：
+只把依赖装到自定义 `--store-dir` 而不让 `pnpm store path` 解析到它时，这些用例会以 `dsh-ray lifecycle: npm cohort pnpm store 不存在或不可解析；尚未创建事务或修改 DSH_HOME。`（后接 `bash failed with exit 1`）失败，看起来像实现缺陷。用环境变量把解析结果钉到已填充的 store；`pnpm_config_store_dir` 会被 pnpm 识别，`npm_config_store_dir` 不会改变 `pnpm store path` 的输出：
 
 ```sh
 export pnpm_config_store_dir="$TASK_ROOT/store"

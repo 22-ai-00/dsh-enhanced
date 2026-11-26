@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
-import { loadDshRsiCli, loadPluginSetup } from './packages.ts'
+import { loadDshRayCli, loadPluginSetup } from './packages.ts'
 import { repoRoot, resolveTmpBase } from './workspace.ts'
 
 export interface CliExecResult {
@@ -31,13 +31,13 @@ async function withCliIoMutex<T>(task: () => Promise<T>): Promise<T> {
   }
 }
 
-export async function runDshRsiInProcess(
+export async function runDshRayInProcess(
   args: readonly string[],
   envOverrides: Record<string, string | undefined> = {},
   deps: Record<string, unknown> = {},
 ): Promise<CliExecResult> {
   return withCliIoMutex(async () => {
-    const cli = await loadDshRsiCli()
+    const cli = await loadDshRayCli()
     const main = cli.main as (
       argv: readonly string[],
       env?: NodeJS.ProcessEnv,

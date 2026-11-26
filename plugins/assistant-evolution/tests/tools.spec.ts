@@ -6,7 +6,7 @@ import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-ses
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolBatchInput } from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
-import { AssistantPolicyService, setApprovalReviewer } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService, setApprovalReviewer } from '@dsh-ray/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -101,7 +101,7 @@ async function harness(options: { autonomousRollback?: boolean } = {}) {
     prepareAgentApproval() {
       return {
         routeVersion: 2 as const,
-        sourceId: 'dsh-enhanced-assistant-evolution',
+        sourceId: 'dsh-ray-assistant-evolution',
         bindingId: 'tool-owner-binding',
         bindingVersion: 3,
         bindingGeneration: 2,

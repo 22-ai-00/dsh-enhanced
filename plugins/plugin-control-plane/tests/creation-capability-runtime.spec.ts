@@ -11,9 +11,9 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { anySourceGrowthRunDigest, canonicalGrowthJson, SourceGrowthRunUnavailableError, type WorkItemSourceGrowthRunBinding,
-  verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
-import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/plugin-behavior-runner'
+  verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
+import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-ray/assistant-isolation'
+import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-ray/assistant-verifier/plugin-behavior-runner'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import * as execution from '../src/creation-capability-execution.js'
 import { CreationCapabilityJournal } from '../src/creation-capability-journal.js'
@@ -1204,7 +1204,7 @@ test('source-creation validated service/channel/ui plugins pass real assistant-v
   await chmod(tempRoot, 0o700)
   try {
     const basePkg = (pluginName: string) => ({
-      name: `@dsh-enhanced/${pluginName}`, version: '0.1.0', description: 'test', license: 'MIT', type: 'module',
+      name: `@dsh-ray/${pluginName}`, version: '0.1.0', description: 'test', license: 'MIT', type: 'module',
       main: './lib/index.js', types: './lib/index.d.ts',
       exports: { '.': { types: './lib/index.d.ts', default: './lib/index.js' }, './cordis.patch.yml': './cordis.patch.yml', './package.json': './package.json' },
       files: ['lib', 'cordis.patch.yml', 'README.md', 'LICENSE'],
@@ -1225,7 +1225,7 @@ test('source-creation validated service/channel/ui plugins pass real assistant-v
         pluginName: 'tool-contract-svc',
         toolName: 'service_lifecycle_probe',
         toolArgs: { check: 'status' },
-        patchYaml: "- insert:\n    - id: dsh-enhanced-tool-contract-svc\n      name: '@dsh-enhanced/tool-contract-svc'\n      services:\n        - sampleSvc\n      provides:\n        - sampleSvc\n",
+        patchYaml: "- insert:\n    - id: dsh-ray-tool-contract-svc\n      name: '@dsh-ray/tool-contract-svc'\n      services:\n        - sampleSvc\n      provides:\n        - sampleSvc\n",
         pkgExtra: { dsh: { bundle: { patch: './cordis.patch.yml' }, kind: 'service' } },
         entries: {
           'package/lib/index.js': "export function apply(ctx) { ctx.provide('sampleSvc', { health: () => ({ ready: true }), ping: () => ({ ok: true }) }) }\n",
@@ -1236,7 +1236,7 @@ test('source-creation validated service/channel/ui plugins pass real assistant-v
         pluginName: 'tool-contract-chan',
         toolName: 'channel_readiness_probe',
         toolArgs: { check: 'adapters' },
-        patchYaml: "- insert:\n    - id: dsh-enhanced-tool-contract-chan\n      name: '@dsh-enhanced/tool-contract-chan'\n      inject: [assistantDelivery]\n      channel:\n        transport: webhook\n",
+        patchYaml: "- insert:\n    - id: dsh-ray-tool-contract-chan\n      name: '@dsh-ray/tool-contract-chan'\n      inject: [assistantDelivery]\n      channel:\n        transport: webhook\n",
         pkgExtra: { dsh: { bundle: { patch: './cordis.patch.yml' }, kind: 'channel', channel: { transport: 'webhook' } } },
         entries: {
           'package/lib/index.js': [
@@ -1256,7 +1256,7 @@ test('source-creation validated service/channel/ui plugins pass real assistant-v
         pluginName: 'tool-contract-ui',
         toolName: 'ui_declaration_probe',
         toolArgs: { check: 'contributions' },
-        patchYaml: "- insert:\n    - id: dsh-enhanced-tool-contract-ui\n      name: '@dsh-enhanced/tool-contract-ui'\n      inject: [typert]\n      ui:\n        panel: true\n      routes:\n        - /contract-ui\n      sections:\n        - id: main\n      settings:\n        theme: light\n",
+        patchYaml: "- insert:\n    - id: dsh-ray-tool-contract-ui\n      name: '@dsh-ray/tool-contract-ui'\n      inject: [typert]\n      ui:\n        panel: true\n      routes:\n        - /contract-ui\n      sections:\n        - id: main\n      settings:\n        theme: light\n",
         pkgExtra: {
           exports: { '.': { types: './lib/index.d.ts', default: './lib/index.js' }, './cordis.patch.yml': './cordis.patch.yml', './package.json': './package.json', './client': './lib/client.js' },
           dsh: { bundle: { patch: './cordis.patch.yml' }, kind: 'ui', ui: { panel: true }, client: { entry: './lib/client.js' } },
@@ -1267,7 +1267,7 @@ test('source-creation validated service/channel/ui plugins pass real assistant-v
             "export const inject = ['typert']",
             'export function apply(ctx) {',
             '  ctx.typert.register({',
-            "    package: '@dsh-enhanced/tool-contract-ui',",
+            "    package: '@dsh-ray/tool-contract-ui',",
             '    routes: [{ path: "/contract-ui" }],',
             '    sections: [{ id: "main" }],',
             '  })',
@@ -1281,7 +1281,7 @@ test('source-creation validated service/channel/ui plugins pass real assistant-v
       const base = basePkg(c.pluginName)
       const baseText = JSON.stringify(base, null, 2)
       const candText = JSON.stringify({ ...base, ...c.pkgExtra }, null, 2)
-      const basePatch = `- insert:\n    - id: dsh-enhanced-${c.pluginName}\n      name: '@dsh-enhanced/${c.pluginName}'\n`
+      const basePatch = `- insert:\n    - id: dsh-ray-${c.pluginName}\n      name: '@dsh-ray/${c.pluginName}'\n`
       validateCandidatePackageJson(c.pluginName, baseText, candText)
       validateCandidateCordisPatch(c.pluginName, basePatch, c.patchYaml)
       validateSourceCreationFiles([{ path: 'package.json', content: candText }, { path: 'cordis.patch.yml', content: c.patchYaml }])

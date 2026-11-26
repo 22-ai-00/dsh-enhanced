@@ -1,6 +1,6 @@
 /** Deterministic installation fixture; never evidence of model intelligence. */
 import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
-import { strategyDevelopmentCorpus } from '@dsh-enhanced/assistant-evaluation/benchmark/strategy'
+import { strategyDevelopmentCorpus } from '@dsh-ray/assistant-evaluation/benchmark/strategy'
 import { appendFileSync } from 'node:fs'
 const solutions = {
   'integer-sum': "awk '{for(i=1;i<=NF;i++)s+=$i}END{print s+0}'",

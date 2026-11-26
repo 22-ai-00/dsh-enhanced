@@ -141,7 +141,7 @@ try {
   // Catalog integrity and staging are fixture inputs. The existing store owns
   // the actual immutable plan, owner approval, durable requests and phase CAS.
   const candidateVersion = JSON.parse(await readFile(new URL('../../plugins/assistant-policy/package.json', import.meta.url), 'utf8')).version
-  const catalog = parseCatalog({ schemaVersion: 1, entries: [{ id: 'assistant-policy', package: '@dsh-enhanced/assistant-policy',
+  const catalog = parseCatalog({ schemaVersion: 1, entries: [{ id: 'assistant-policy', package: '@dsh-ray/assistant-policy',
     version: candidateVersion, integrity: `sha512-${Buffer.alloc(64).toString('base64')}`, dshBaseline: dshVersion,
     capabilities: ['policy'], authorities: ['filesystem: disposable policy fixture'] }] })
   const gap = store.recordGap({ idempotencyKey: 'fixture-gap', capability: 'policy', context: 'disposable readiness verification',
@@ -460,7 +460,7 @@ try {
   }
   evidence = { schemaVersion: 1, kind: runtimeEpochMode ? 'systemd-runtime-epoch-real-dsh-fixture'
     : rollbackAction ? 'systemd-rollback-real-dsh-fixture' : 'systemd-readiness-real-dsh-fixture', observedAt: new Date().toISOString(), dshVersion,
-    dshCliSha256: sha(await readFile(dsh)), candidatePackage: '@dsh-enhanced/assistant-policy',
+    dshCliSha256: sha(await readFile(dsh)), candidatePackage: '@dsh-ray/assistant-policy',
     candidateVersion, initialCandidateDisabled, rollbackAction, recoveryEvidence, runtimeEpochEvidence, controlBuild, peerPackages, lateReplay,
     runtimeDigests: { observer: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/runtime-observer.js', import.meta.url))),
       attestor: sha(await readFile(attestorSource)), deployedAttestor: executable.sha256, observerClient: readinessConfig.readiness.client.sha256, processHelper: processHelper.sha256,

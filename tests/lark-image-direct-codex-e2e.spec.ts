@@ -8,24 +8,24 @@ import {
   type SessionHeader,
   type SessionLogOffset,
 } from '@deepseek-ai/dsh-session'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { Buffer } from 'node:buffer'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
+import { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
 import {
   CodingSubscriptionAdapter,
   Config as CodingSubscriptionConfig,
 } from '../plugins/coding-subscription-provider/src/index.ts'
-import { LarkDeliveryAdapter } from '@dsh-enhanced/lark-channel'
+import { LarkDeliveryAdapter } from '@dsh-ray/lark-channel'
 import type {
   LarkMessage,
   LarkSendInput,
   LarkTransport,
   LarkTransportHandlers,
-} from '@dsh-enhanced/lark-channel'
+} from '@dsh-ray/lark-channel'
 
 const roots: string[] = []
 const onePixelPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='

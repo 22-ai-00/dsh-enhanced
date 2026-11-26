@@ -1,4 +1,4 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { describe, expect, test } from 'vitest'
 import type { SkillDefinition } from '../src/definition.ts'
 import { materializeCanaryAdmission, validateCanaryAdmissionTemplate } from '../src/repair-admission.ts'

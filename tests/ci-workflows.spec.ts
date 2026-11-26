@@ -43,9 +43,11 @@ function buildPackageDirMap(): Map<string, string> {
       const manifestPath = join(parentPath, entry.name, 'package.json')
       if (!existsSync(manifestPath)) continue
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { name?: string }
+      const packageDir = join(parent, entry.name)
       if (typeof manifest.name === 'string') {
-        packageDirs.set(manifest.name, join(parent, entry.name))
+        packageDirs.set(manifest.name, packageDir)
       }
+      packageDirs.set(`./${parent}/${entry.name}`, packageDir)
     }
   }
   return packageDirs
@@ -59,7 +61,7 @@ function collectReferencedRepoPaths(steps: WorkflowStep[] | undefined, packageDi
       const trimmed = line.trim()
       if (trimmed.length === 0 || trimmed.startsWith('#')) continue
 
-      const filterMatch = /--filter\s+(@[^\s]+)/u.exec(trimmed)
+      const filterMatch = /--filter\s+((?:@[a-z0-9-]+\/)?[a-z0-9-]+|\.\/(?:plugins|packages)\/[a-z0-9-]+)(?=\s|$)/u.exec(trimmed)
       if (filterMatch) {
         const packageName = filterMatch[1]!
         const packageDir = packageDirs.get(packageName)
@@ -104,7 +106,36 @@ describe('CI and Release workflows', () => {
     expect(record).toBeDefined()
 
     expect(publish?.environment).toBe('npm-release')
-    expect(publish?.permissions?.contents).toBe('read')
+    expect(publish?.permissions).toEqual({
+      contents: 'read',
+      actions: 'read',
+      'id-token': 'write',
+    })
+
+    expect(raw).toContain('dsh-ray-release-ci-gate')
+    expect(raw).not.toContain('secrets.NPM_TOKEN')
+    expect(raw).not.toContain('NPM_TOKEN')
+    expect(raw).not.toContain('dsh-enhanced')
+    expect(raw).not.toContain('dsh-rsi')
+
+    const verifyCredsStep = (publish?.steps ?? []).find((step) => step.name === 'Verify npm credentials')
+    expect(verifyCredsStep).toBeDefined()
+    const verifyCredsRun = verifyCredsStep?.run ?? ''
+    expect(verifyCredsRun).toContain('ACTIONS_ID_TOKEN_REQUEST_URL')
+    expect(verifyCredsRun).toContain('ACTIONS_ID_TOKEN_REQUEST_TOKEN')
+    expect(verifyCredsRun).toContain('NODE_AUTH_TOKEN')
+    expect(JSON.stringify(verifyCredsStep ?? {})).not.toContain('NPM_TOKEN')
+
+    const publishStep = (publish?.steps ?? []).find((step) => (step.run ?? '').includes('pnpm release:publish'))
+    expect(publishStep).toBeDefined()
+    const publishRun = publishStep?.run ?? ''
+    expect(publishRun).toContain('ACTIONS_ID_TOKEN_REQUEST_URL')
+    expect(publishRun).toContain('ACTIONS_ID_TOKEN_REQUEST_TOKEN')
+    expect(publishRun).toContain('unset NODE_AUTH_TOKEN')
+    expect(publishRun).toContain('_authToken=')
+    expect(publishRun.indexOf('unset NODE_AUTH_TOKEN')).toBeLessThan(publishRun.indexOf('pnpm release:publish'))
+    expect(publishRun.indexOf('_authToken=')).toBeLessThan(publishRun.indexOf('pnpm release:publish'))
+    expect(JSON.stringify(publishStep ?? {})).not.toContain('NPM_TOKEN')
 
     expect(verifyNpm?.needs).toBe('publish')
     expect(verifyNpm?.['runs-on']).toBe('ubuntu-24.04')
@@ -126,6 +157,9 @@ describe('CI and Release workflows', () => {
 
   test('ci.yml preserves job topology and expands macos-verify and windows-acp-smoke with valid on-disk paths', async () => {
     const raw = await readFile(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')
+    expect(raw).not.toContain('dsh-enhanced')
+    expect(raw).not.toContain('dsh-rsi')
+
     const workflow = parse(raw) as WorkflowDocument
 
     expect(workflow.on?.push?.branches).toEqual(['dev', 'main'])
@@ -155,14 +189,16 @@ describe('CI and Release workflows', () => {
     const macosCommands = (macos?.steps ?? []).map((step) => step.run ?? '').join('\n')
     expect(macosCommands).toContain('pnpm run validate && pnpm run lint')
     expect(macosCommands).toContain('pnpm run build')
-    expect(macosCommands).toContain('@dsh-enhanced/assistant-isolation')
+    expect(macosCommands).toContain('@dsh-ray/assistant-isolation')
     expect(macosCommands).toContain('tests/native-macos.spec.ts')
     expect(macosCommands).toContain('tests/native-verifier-runner.spec.ts')
-    expect(macosCommands).toContain('@dsh-enhanced/assistant-actions')
-    expect(macosCommands).toContain('@dsh-enhanced/dsh-rsi-cli')
-    expect(macosCommands).toContain('@dsh-enhanced/plugin-control-plane')
+    expect(macosCommands).toContain('@dsh-ray/assistant-actions')
+    expect(macosCommands).toContain('--filter ./packages/dsh-ray ')
+    expect(macosCommands).not.toContain('--filter dsh-ray ')
+    expect(macosCommands).not.toContain('@dsh-ray/dsh-ray')
+    expect(macosCommands).toContain('@dsh-ray/plugin-control-plane')
     expect(macosCommands).toContain('tests/runtime-observer.spec.ts')
-    expect(macosCommands).toContain('@dsh-enhanced/lark-channel')
+    expect(macosCommands).toContain('@dsh-ray/lark-channel')
     expect(macosCommands).toContain('tests/rsi-native-runtime-bootstrap.spec.ts')
     expect(macosCommands).toContain('tests/rsi-release-build.spec.ts')
     expect(macosCommands).toContain('tests/macos-launchd-lock.spec.ts')
@@ -174,14 +210,17 @@ describe('CI and Release workflows', () => {
     const windowsCommands = (windows?.steps ?? []).map((step) => step.run ?? '').join('\n')
     expect(windowsCommands).toContain('pnpm run validate')
     expect(windowsCommands).toContain('pnpm run build')
-    expect(windowsCommands).toContain('@dsh-enhanced/acp')
+    expect(windowsCommands).toContain('@dsh-ray/acp')
     expect(windowsCommands).toContain('plugins/acp/scripts/stdio-smoke.mjs')
-    expect(windowsCommands).toContain('@dsh-enhanced/dsh-rsi-cli')
-    expect(windowsCommands).toContain('@dsh-enhanced/assistant-isolation')
-    expect(windowsCommands).toContain('@dsh-enhanced/assistant-actions')
+    expect(windowsCommands).toContain('--filter ./packages/dsh-ray ')
+    expect(windowsCommands).not.toContain('--filter dsh-ray ')
+    expect(windowsCommands).not.toContain('@dsh-ray/dsh-ray')
+    expect(windowsCommands).toContain('@dsh-ray/assistant-isolation')
+    expect(windowsCommands).toContain('@dsh-ray/assistant-actions')
     expect(windowsCommands).toContain('tests/ci-workflows.spec.ts')
     expect(windowsCommands).toContain('tests/verify-npm-release.spec.ts')
     expect(windowsCommands).toContain('$LASTEXITCODE')
+    expect(windowsCommands).toMatch(/dsh-ray-acp-\$acpVersion\.tgz/u)
 
     const packageDirs = buildPackageDirMap()
     const macosPaths = collectReferencedRepoPaths(macos?.steps, packageDirs)
@@ -211,7 +250,7 @@ describe('CI and Release workflows', () => {
     }
 
     const requiredWindowsSpecs = [
-      join('packages', 'dsh-rsi-cli', 'tests', 'index.spec.ts'),
+      join('packages', 'dsh-ray', 'tests', 'index.spec.ts'),
       join('plugins', 'assistant-isolation', 'tests', 'cross-platform-config.spec.ts'),
       join('plugins', 'assistant-isolation', 'tests', 'windows-job-backend.spec.ts'),
       join('plugins', 'assistant-actions', 'tests', 'broker-protocol-v2.spec.ts'),

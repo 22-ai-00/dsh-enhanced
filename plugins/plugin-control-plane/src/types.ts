@@ -1,4 +1,4 @@
-import type { LinuxReceiptBinding } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxReceiptBinding } from '@dsh-ray/assistant-isolation'
 import type { CatalogEntry, CatalogPackage } from './catalog.js'
 import type { LiveQualificationTerms } from './live-qualification.js'
 import type { AdoptionHandoffTerms } from './adoption-handoff.js'

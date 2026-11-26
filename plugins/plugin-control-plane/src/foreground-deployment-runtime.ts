@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
-import type { ForegroundTaskObservationRegistration } from '@dsh-enhanced/assistant-delivery'
+import type { ForegroundTaskObservationRegistration } from '@dsh-ray/assistant-delivery'
 import { captureRetainedDeploymentReadiness, captureRuntimeEpochReadiness } from './deployment-readiness.js'
 import { type ForegroundDeploymentRecord } from './foreground-deployment.js'
 import { controlPlaneDigest, type ControlPlaneStore } from './store.js'

@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-evaluation
-      name: '@dsh-enhanced/assistant-evaluation'
+    - id: dsh-ray-assistant-evaluation
+      name: '@dsh-ray/assistant-evaluation'
       config:
         databasePath: !!js dshHomePath('assistant-evaluation/evaluation.sqlite')
         maxQueryLimit: 100

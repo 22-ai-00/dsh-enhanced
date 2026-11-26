@@ -25,35 +25,35 @@ const PROFILE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u
 const UPGRADE_CLI_TIMEOUT_MS = 120_000
 
 export const SELF_ITERATION_TOGGLE_ROWS = [
-  { rowId: 'dsh-enhanced-assistant-work-items', pkgName: '@dsh-enhanced/assistant-work-items' },
-  { rowId: 'dsh-enhanced-assistant-proactive', pkgName: '@dsh-enhanced/assistant-proactive' },
-  { rowId: 'dsh-enhanced-assistant-growth-driver', pkgName: '@dsh-enhanced/assistant-growth-driver' },
-  { rowId: 'dsh-enhanced-assistant-dreaming', pkgName: '@dsh-enhanced/assistant-dreaming' },
-  { rowId: 'dsh-enhanced-assistant-memory-learning', pkgName: '@dsh-enhanced/assistant-memory-learning' },
-  { rowId: 'dsh-enhanced-assistant-association', pkgName: '@dsh-enhanced/assistant-association' },
-  { rowId: 'dsh-enhanced-assistant-evaluation', pkgName: '@dsh-enhanced/assistant-evaluation' },
-  { rowId: 'dsh-enhanced-assistant-evolution', pkgName: '@dsh-enhanced/assistant-evolution' },
-  { rowId: 'dsh-enhanced-preference-learning', pkgName: '@dsh-enhanced/preference-learning' },
+  { rowId: 'dsh-ray-assistant-work-items', pkgName: '@dsh-ray/assistant-work-items' },
+  { rowId: 'dsh-ray-assistant-proactive', pkgName: '@dsh-ray/assistant-proactive' },
+  { rowId: 'dsh-ray-assistant-growth-driver', pkgName: '@dsh-ray/assistant-growth-driver' },
+  { rowId: 'dsh-ray-assistant-dreaming', pkgName: '@dsh-ray/assistant-dreaming' },
+  { rowId: 'dsh-ray-assistant-memory-learning', pkgName: '@dsh-ray/assistant-memory-learning' },
+  { rowId: 'dsh-ray-assistant-association', pkgName: '@dsh-ray/assistant-association' },
+  { rowId: 'dsh-ray-assistant-evaluation', pkgName: '@dsh-ray/assistant-evaluation' },
+  { rowId: 'dsh-ray-assistant-evolution', pkgName: '@dsh-ray/assistant-evolution' },
+  { rowId: 'dsh-ray-preference-learning', pkgName: '@dsh-ray/preference-learning' },
 ] as const
 
 export const PROTECTED_ROW_IDS = new Set([
-  'dsh-enhanced-assistant-web-owner',
-  'dsh-enhanced-owner-console',
-  'dsh-enhanced-lark-channel',
-  'dsh-enhanced-assistant-delivery',
-  'dsh-enhanced-personal-assistant',
-  'dsh-enhanced-assistant-policy',
-  'dsh-enhanced-assistant-goals',
+  'dsh-ray-assistant-web-owner',
+  'dsh-ray-owner-console',
+  'dsh-ray-lark-channel',
+  'dsh-ray-assistant-delivery',
+  'dsh-ray-personal-assistant',
+  'dsh-ray-assistant-policy',
+  'dsh-ray-assistant-goals',
 ])
 
 export const PROTECTED_PACKAGE_NAMES = new Set([
-  '@dsh-enhanced/assistant-web-owner',
-  '@dsh-enhanced/owner-console',
-  '@dsh-enhanced/lark-channel',
-  '@dsh-enhanced/assistant-delivery',
-  '@dsh-enhanced/personal-assistant',
-  '@dsh-enhanced/assistant-policy',
-  '@dsh-enhanced/assistant-goals',
+  '@dsh-ray/assistant-web-owner',
+  '@dsh-ray/owner-console',
+  '@dsh-ray/lark-channel',
+  '@dsh-ray/assistant-delivery',
+  '@dsh-ray/personal-assistant',
+  '@dsh-ray/assistant-policy',
+  '@dsh-ray/assistant-goals',
 ])
 
 const DREAMING_REQUIRED_STRING_FIELDS = ['provider', 'model', 'budgetId'] as const
@@ -334,7 +334,7 @@ async function readStatusForControl(host: AutonomyHostContext): Promise<OwnerCon
     if (bRes.status === 'fulfilled') {
       bundlesPhase = 'ok'
       bundles = bRes.value
-        .filter(b => b.name.startsWith('@dsh-enhanced/') && b.error?.code !== 'not-bundle')
+        .filter(b => b.name.startsWith('@dsh-ray/') && b.error?.code !== 'not-bundle')
         .map(b => Object.freeze({
           name: b.name,
           ...(b.version === undefined ? {} : { version: b.version }),
@@ -359,7 +359,7 @@ async function readStatusForControl(host: AutonomyHostContext): Promise<OwnerCon
     if (pRes.status === 'fulfilled') {
       pluginsPhase = 'ok'
       plugins = pRes.value
-        .filter(p => p.moduleName.startsWith('@dsh-enhanced/'))
+        .filter(p => p.moduleName.startsWith('@dsh-ray/'))
         .map(p => Object.freeze({
           entryId: p.entryId,
           moduleName: p.moduleName,
@@ -375,19 +375,19 @@ async function readStatusForControl(host: AutonomyHostContext): Promise<OwnerCon
   return Object.freeze({
     feishu: Object.freeze({
       mode: 'env' as const,
-      installed: bundles.some(b => b.name === '@dsh-enhanced/lark-channel' && b.installed),
-      enabled: bundles.some(b => b.name === '@dsh-enhanced/lark-channel' && b.enabled),
+      installed: bundles.some(b => b.name === '@dsh-ray/lark-channel' && b.installed),
+      enabled: bundles.some(b => b.name === '@dsh-ray/lark-channel' && b.enabled),
       appIdConfigured: false,
       connected: false,
       connection: 'absent' as const,
     }),
     traex: Object.freeze({
-      installed: bundles.some(b => b.name === '@dsh-enhanced/traex-acp-provider' && b.installed),
+      installed: bundles.some(b => b.name === '@dsh-ray/traex-acp-provider' && b.installed),
       enabled: false,
       command: '',
     }),
     agy: Object.freeze({
-      installed: bundles.some(b => b.name === '@dsh-enhanced/traex-acp-provider' && b.installed),
+      installed: bundles.some(b => b.name === '@dsh-ray/traex-acp-provider' && b.installed),
       enabled: false,
       command: '',
     }),
@@ -409,12 +409,12 @@ async function readStatusForControl(host: AutonomyHostContext): Promise<OwnerCon
   })
 }
 
-function discoverDshRsiExecutable(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
+function discoverDshRayExecutable(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
   const home = env['HOME']?.trim() || homedir()
   const dirs = platform === 'win32'
     ? (env['APPDATA'] ? [join(env['APPDATA'], 'npm')] : [])
     : [join(home, '.local', 'bin'), join(home, '.npm-global', 'bin'), join(home, 'Library', 'pnpm'), '/opt/homebrew/bin', '/usr/local/bin']
-  const names = platform === 'win32' ? ['dsh-rsi.cmd', 'dsh-rsi.exe'] : ['dsh-rsi']
+  const names = platform === 'win32' ? ['dsh-ray.cmd', 'dsh-ray.exe'] : ['dsh-ray']
   for (const dir of dirs) {
     for (const name of names) {
       const candidate = join(dir, name)
@@ -428,10 +428,10 @@ function discoverDshRsiExecutable(env: NodeJS.ProcessEnv, platform: NodeJS.Platf
       }
     }
   }
-  return 'dsh-rsi'
+  return 'dsh-ray'
 }
 
-async function execDshRsiUpgrade(
+async function execDshRayUpgrade(
   canonicalHome: string,
   profileName: string,
   confirmDshHomeStopped: boolean,
@@ -444,7 +444,7 @@ async function execDshRsiUpgrade(
 
   const execCommand = (bin: string) => new Promise<{ stdout: string; stderr: string; exitCode: number; errorCode?: string }>(resolveExec => {
     if (!isSingleLineCommand(bin)) {
-      resolveExec({ stdout: '', stderr: 'invalid dsh-rsi binary path', exitCode: 1, errorCode: 'EINVAL' })
+      resolveExec({ stdout: '', stderr: 'invalid dsh-ray binary path', exitCode: 1, errorCode: 'EINVAL' })
       return
     }
     nodeExecFile(bin, args, { env: safeEnv, timeout: UPGRADE_CLI_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
@@ -464,10 +464,10 @@ async function execDshRsiUpgrade(
     })
   })
 
-  let result = await execCommand('dsh-rsi')
+  let result = await execCommand('dsh-ray')
   if (result.errorCode === 'ENOENT' || result.errorCode === 'EACCES') {
-    const fallbackBin = discoverDshRsiExecutable(env, platform)
-    if (fallbackBin !== 'dsh-rsi') {
+    const fallbackBin = discoverDshRayExecutable(env, platform)
+    if (fallbackBin !== 'dsh-ray') {
       result = await execCommand(fallbackBin)
     }
   }
@@ -489,7 +489,7 @@ async function execDshRsiUpgrade(
   if (result.exitCode !== 0 || parsed?.['ok'] === false) {
     const errText = (typeof parsed?.['error'] === 'string' && parsed['error'].trim() !== '')
       ? parsed['error'].trim()
-      : (result.stderr.trim() || result.stdout.trim() || `dsh-rsi upgrade exited with ${result.exitCode}`)
+      : (result.stderr.trim() || result.stdout.trim() || `dsh-ray upgrade exited with ${result.exitCode}`)
     return { ok: false, error: errText }
   }
   return { ok: true, note: '已完成宿主与插件升级' }
@@ -545,26 +545,26 @@ export async function handleOwnerConsoleControlAction(
           row.delete('disabled')
           const cfg = readConfigMap(row, 'config')
           if (cfg !== undefined) {
-            if (spec.rowId === 'dsh-enhanced-assistant-dreaming') {
+            if (spec.rowId === 'dsh-ray-assistant-dreaming') {
               if (hasDreamingRequiredFields(cfg)) {
                 cfg.set('enabled', true)
               }
               if (cfg.has('retired')) {
                 cfg.delete('retired')
               }
-            } else if (cfg.get('enabled') === false || spec.rowId === 'dsh-enhanced-assistant-work-items') {
+            } else if (cfg.get('enabled') === false || spec.rowId === 'dsh-ray-assistant-work-items') {
               cfg.set('enabled', true)
             }
-          } else if (spec.rowId === 'dsh-enhanced-assistant-work-items') {
+          } else if (spec.rowId === 'dsh-ray-assistant-work-items') {
             const createdCfg = ensureConfigMap(doc, row, 'config')
             createdCfg.set('enabled', true)
           }
         } else {
           row.set('disabled', true)
           const cfg = readConfigMap(row, 'config')
-          if (cfg !== undefined && (cfg.has('enabled') || spec.rowId === 'dsh-enhanced-assistant-work-items')) {
+          if (cfg !== undefined && (cfg.has('enabled') || spec.rowId === 'dsh-ray-assistant-work-items')) {
             cfg.set('enabled', false)
-          } else if (spec.rowId === 'dsh-enhanced-assistant-work-items') {
+          } else if (spec.rowId === 'dsh-ray-assistant-work-items') {
             const createdCfg = ensureConfigMap(doc, row, 'config')
             createdCfg.set('enabled', false)
           }
@@ -575,16 +575,16 @@ export async function handleOwnerConsoleControlAction(
     }
 
     // Fresh/empty profile fixture (e.g. T1-F21-03): materialize primary self-iteration row cleanly.
-    if (findPatchRow(seq, 'dsh-enhanced-assistant-work-items') === undefined && affectedRowIds.length === 0) {
+    if (findPatchRow(seq, 'dsh-ray-assistant-work-items') === undefined && affectedRowIds.length === 0) {
       const created = doc.createNode({
-        id: 'dsh-enhanced-assistant-work-items',
-        name: '@dsh-enhanced/assistant-work-items',
+        id: 'dsh-ray-assistant-work-items',
+        name: '@dsh-ray/assistant-work-items',
         ...(enable ? {} : { disabled: true }),
         config: { enabled: enable },
       })
       seq.add(created)
-      affectedRowIds.push('dsh-enhanced-assistant-work-items')
-      targetPackages.add('@dsh-enhanced/assistant-work-items')
+      affectedRowIds.push('dsh-ray-assistant-work-items')
+      targetPackages.add('@dsh-ray/assistant-work-items')
     }
 
     try {
@@ -610,7 +610,7 @@ export async function handleOwnerConsoleControlAction(
   // action === 'upgradeAssistantAndRecover'
   if (detectFrozenSystemdProfile(canonicalHome, profileName, platform, env)) {
     return failControl(
-      'frozen-linux-systemd profile forbids in-process upgrade; run dsh-rsi upgrade out-of-band after stopping the service',
+      'frozen-linux-systemd profile forbids in-process upgrade; run dsh-ray upgrade out-of-band after stopping the service',
       action,
     )
   }
@@ -640,7 +640,7 @@ export async function handleOwnerConsoleControlAction(
     }
     if (upgRes.note) notes.push(upgRes.note)
   } else if (bound.status === 'ready') {
-    const upgRes = await execDshRsiUpgrade(
+    const upgRes = await execDshRayUpgrade(
       canonicalHome,
       profileName,
       request.confirmDshHomeStopped === true,

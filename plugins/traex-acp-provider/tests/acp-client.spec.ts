@@ -404,7 +404,7 @@ describe('TraeX ACP subprocess transport', () => {
         terminal: false,
       },
       clientInfo: {
-        name: 'dsh-enhanced-traex-acp-provider',
+        name: 'dsh-ray-traex-acp-provider',
         title: 'DSH TraeX ACP Provider',
         version,
       },

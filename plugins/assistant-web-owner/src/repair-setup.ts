@@ -5,7 +5,7 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isDeepStrictEqual } from 'node:util'
 import { isMap, isSeq, parseDocument, type YAMLMap, type YAMLSeq } from 'yaml'
-import * as Skills from '@dsh-enhanced/assistant-skills'
+import * as Skills from '@dsh-ray/assistant-skills'
 import { prepareWebOwnerProfile, type WebOwnerSetupInput } from './setup.js'
 
 function fail(reason: string): never { throw new Error(`repair setup: ${reason}`) }
@@ -47,8 +47,8 @@ export function prepareRepairAdmission(input: WebOwnerSetupInput, source: string
   const base = prepareWebOwnerProfile(input, source, effective)
   const task = parseRepairAdmissionTask(taskSource); const doc = parseDocument(base.patch)
   if (doc.errors.length || !isSeq(doc.contents)) fail('prepared patch is not a sequence')
-  const rows = doc.contents; const skills = config(rows, 'dsh-enhanced-assistant-skills'); const delivery = config(rows, 'dsh-enhanced-assistant-delivery')
-  const goals = config(rows, 'dsh-enhanced-assistant-goals'); const verifier = config(rows, 'dsh-enhanced-assistant-verifier')
+  const rows = doc.contents; const skills = config(rows, 'dsh-ray-assistant-skills'); const delivery = config(rows, 'dsh-ray-assistant-delivery')
+  const goals = config(rows, 'dsh-ray-assistant-goals'); const verifier = config(rows, 'dsh-ray-assistant-verifier')
   const current = owner(base.databasePath, input.profile)
   const principalId = `web/${input.profile}/local/operator`
   if (task.repairProfiles.some(({ scope }) => scope.principalId !== principalId || scope.principalRecordId !== current.id || scope.principalVersion !== current.version || scope.workspace !== input.workspace || scope.preset !== input.preset)) fail('repair profile scope does not match the current owner')
@@ -76,11 +76,11 @@ export function prepareRepairAdmission(input: WebOwnerSetupInput, source: string
   if (effectiveDoc.errors.length || !isSeq(effectiveDoc.contents)) fail('effective profile is not a sequence')
   const effectiveRows = effectiveDoc.contents.items
   const hasId = (item: unknown, id: string): item is YAMLMap => isMap(item) && (item as YAMLMap).get('id') === id
-  const localIsolation = rows.items.find(item => hasId(item, 'dsh-enhanced-assistant-isolation')) as YAMLMap | undefined
-  const inheritedIsolation = effectiveRows.find(item => hasId(item, 'dsh-enhanced-assistant-isolation')) as YAMLMap | undefined
+  const localIsolation = rows.items.find(item => hasId(item, 'dsh-ray-assistant-isolation')) as YAMLMap | undefined
+  const inheritedIsolation = effectiveRows.find(item => hasId(item, 'dsh-ray-assistant-isolation')) as YAMLMap | undefined
   if ((localIsolation || inheritedIsolation) && (localIsolation?.get('disabled') ?? inheritedIsolation?.get('disabled')) !== true) {
-    const skillsRow = rows.items.find(item => hasId(item, 'dsh-enhanced-assistant-skills')) as YAMLMap
-    const inherited = effectiveRows.find(item => hasId(item, 'dsh-enhanced-assistant-skills')) as YAMLMap | undefined
+    const skillsRow = rows.items.find(item => hasId(item, 'dsh-ray-assistant-skills')) as YAMLMap
+    const inherited = effectiveRows.find(item => hasId(item, 'dsh-ray-assistant-skills')) as YAMLMap | undefined
     const existing = skillsRow.get('inject', true) ?? inherited?.get('inject', true)
     const inject = existing === undefined ? doc.createNode([]) : existing.clone()
     if (isSeq(inject)) {

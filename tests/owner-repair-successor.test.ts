@@ -54,10 +54,10 @@ async function fixture({ badHostPublic = false } = {}) {
     dshHome: homePath, targetProfile: profile, installationId,
     authority: identities.host.authority, keyId: identities.host.keyId }
   const overlay = { ...overlayBody, signature: sign(null, Buffer.from(canonical(overlayBody)), hostPrivateKey).toString('base64') }
-  const sourceProof = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath, profile,
+  const sourceProof = { protocol: 'dsh-ray/host-owner-source-repair/v1', homePath, profile,
     ownerRepair: { homePath, profile, original: { resources } },
     ownerRepairNext: { overlay, overlayDigest: hash(canonical(overlay)) } }
-  const transactionPath = `${homePath}.dsh-enhanced-transaction`
+  const transactionPath = `${homePath}.dsh-ray-transaction`
   await mkdir(transactionPath, { mode: 0o700 })
   const backupPath = join(transactionPath, 'original-home')
   await cp(homePath, backupPath, { recursive: true })
@@ -82,7 +82,7 @@ async function fixture({ badHostPublic = false } = {}) {
   const preparationRoot = join(root, 'preparation'), planPath = join(root, 'plan.json')
   await mkdir(preparationRoot, { mode: 0o700 })
   await writeFile(planPath, '{"plan":true}\n', { mode: 0o600 })
-  const archivePath = `${homePath}.dsh-enhanced-transaction.owner-predecessor-${successorTransactionId}`
+  const archivePath = `${homePath}.dsh-ray-transaction.owner-predecessor-${successorTransactionId}`
   const request = { homePath, profile, oldManifestSource, currentCandidateIdentity, installer,
     preparationRoot, preparationDigest: 'c'.repeat(64), candidateSourceCommit: 'd'.repeat(40),
     permissionPreset: 'workspace-write', auxiliaryRoot: null, planPath,
@@ -90,7 +90,7 @@ async function fixture({ badHostPublic = false } = {}) {
   const accepted = (intentDigest: string, extra = {}) => JSON.stringify({ version: 4, operation: 'host-update', id: successorTransactionId,
     homePath, profile, state: 'committed', hostMigration: { phase: 'committed', candidateEverStarted: true,
       plan: { plan: true },
-      localSource: { protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath, profile,
+      localSource: { protocol: 'dsh-ray/host-owner-source-repair/v1', homePath, profile,
         preparationRoot, preparationDigest: request.preparationDigest, candidate: { sourceCommit: request.candidateSourceCommit },
         ownerRepair: { permissionPreset: request.permissionPreset,
           predecessor: { sourceProofDigest: hash(JSON.stringify(sourceProof)) } },
@@ -112,7 +112,7 @@ test('signs a private intent against all original identities and accepts equival
     .rejects.toThrow('pending successor')
   expect((await readOwnerRepairSuccessorIntent(setup)).digest).toBe(created.digest)
   expect((await createOwnerRepairSuccessorIntent(setup)).source).toBe(created.source)
-  const pending = await lstat(`${setup.homePath}.dsh-enhanced-owner-successor.json`)
+  const pending = await lstat(`${setup.homePath}.dsh-ray-owner-successor.json`)
   expect(pending.mode & 0o777).toBe(0o600)
 })
 
@@ -132,7 +132,7 @@ test('rejects another key, changed candidate request, plan bytes, and predecesso
 
 test('rejects tampered or unsafe pending files and an occupied archive path', async () => {
   const setup = await fixture()
-  const path = `${setup.homePath}.dsh-enhanced-owner-successor.json`
+  const path = `${setup.homePath}.dsh-ray-owner-successor.json`
   await createOwnerRepairSuccessorIntent(setup)
   const raw = await readFile(path, 'utf8')
   await writeFile(path, raw.replace('workspace-write', 'danger-full-access'))

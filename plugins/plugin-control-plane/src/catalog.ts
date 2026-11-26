@@ -1144,7 +1144,7 @@ export const exampleIntegrityPinnedCatalog: CapabilityCatalog = parseCatalog({
     {
       id: 'coding-subscription-provider',
       capabilities: ['coding agent', 'codex', 'claude code', 'cursor', 'grok'],
-      package: '@dsh-enhanced/coding-subscription-provider', version: '0.1.3',
+      package: '@dsh-ray/coding-subscription-provider', version: '0.1.3',
       integrity: 'sha512-LMyIzx2NJrK7+ExsoB049fkLi4rJncYBU8Mn56ssWNBoW+LqtuzlofymwBHL2In7UPwHG3V+7MxBE0MjkrWmlQ==',
       authorities: ['filesystem: local coding-client credentials', 'subprocess: locally installed coding clients', 'network: configured provider route'],
       dshBaseline: '0.1.0-rc.8',
@@ -1152,7 +1152,7 @@ export const exampleIntegrityPinnedCatalog: CapabilityCatalog = parseCatalog({
     {
       id: 'traex-acp-provider',
       capabilities: ['coding agent', 'traex', 'acp', 'reasoning effort'],
-      package: '@dsh-enhanced/traex-acp-provider', version: '0.1.3',
+      package: '@dsh-ray/traex-acp-provider', version: '0.1.3',
       integrity: 'sha512-qGoYNAcO/uNHw/WMzOTD6q3Z8hIC7HwMGrp996BrJGB5HpUayuz58oCjyYQQ+caREnb8vESS9DoaW5nOGpB9sA==',
       authorities: ['subprocess: local TraeX ACP client', 'network: TraeX-managed provider route'],
       dshBaseline: '0.1.0-rc.8',
@@ -1160,7 +1160,7 @@ export const exampleIntegrityPinnedCatalog: CapabilityCatalog = parseCatalog({
     {
       id: 'assistant-health',
       capabilities: ['health', 'readiness', 'liveness', 'diagnostics'],
-      package: '@dsh-enhanced/assistant-health', version: '0.1.3',
+      package: '@dsh-ray/assistant-health', version: '0.1.3',
       integrity: 'sha512-GcNqvjjSul+jrx52dFzxsKASPXUeMDi+ia40DXXI77rZQaqWc6O49iOPCXkrbo43pbsZmCY5cpjb1zLtWLkuQA==',
       authorities: ['read-only: mounted service health and diagnostics'],
       dshBaseline: '0.1.0-rc.8',
@@ -1168,7 +1168,7 @@ export const exampleIntegrityPinnedCatalog: CapabilityCatalog = parseCatalog({
     {
       id: 'assistant-heartbeat',
       capabilities: ['heartbeat', 'proactive check-in', 'active hours'],
-      package: '@dsh-enhanced/assistant-heartbeat', version: '0.1.3',
+      package: '@dsh-ray/assistant-heartbeat', version: '0.1.3',
       integrity: 'sha512-wXTOl2LAGg3fvnZ9rxiQTv6w8nxLsjODA74V5QipoYitm2hezx30obPQBWqEtpTym3dvC7AEVBTqgRLDWt+Ycw==',
       authorities: ['persistent schedule state', 'agent invocation during configured active hours'],
       dshBaseline: '0.1.0-rc.8',
@@ -1176,7 +1176,7 @@ export const exampleIntegrityPinnedCatalog: CapabilityCatalog = parseCatalog({
     {
       id: 'event-triggers',
       capabilities: ['events', 'webhook', 'file watch', 'https polling'],
-      package: '@dsh-enhanced/event-triggers', version: '0.1.3',
+      package: '@dsh-ray/event-triggers', version: '0.1.3',
       integrity: 'sha512-iMl6zwuYwFpqLq0nIGW59mcQlDvu8370ex9FRtTW7WwW5Ab40Hk7cbHTJ2UpZQj0yEBi0lraVD0t7boXopfigg==',
       authorities: ['filesystem: configured watched paths', 'network: configured HTTPS endpoints', 'network ingress: HMAC webhook endpoint'],
       dshBaseline: '0.1.0-rc.8',
@@ -1184,7 +1184,7 @@ export const exampleIntegrityPinnedCatalog: CapabilityCatalog = parseCatalog({
     {
       id: 'memory-wiki-bridge',
       capabilities: ['memory', 'wiki', 'knowledge promotion'],
-      package: '@dsh-enhanced/memory-wiki-bridge', version: '0.1.3',
+      package: '@dsh-ray/memory-wiki-bridge', version: '0.1.3',
       integrity: 'sha512-vvsh72xDsxcyUZHT67T/nJgtN+h2uiXVG3ez+BovzFR/owFtLWjELbFZeV2TVvQJARRizcdEFqq6mIawCOovZw==',
       authorities: ['filesystem: configured personal Wiki vault', 'persistent proposal state'],
       dshBaseline: '0.1.0-rc.8',
@@ -1192,11 +1192,11 @@ export const exampleIntegrityPinnedCatalog: CapabilityCatalog = parseCatalog({
     {
       id: 'lark-assistant',
       capabilities: ['lark', 'feishu', 'chat channel', 'resident assistant'],
-      package: '@dsh-enhanced/lark-channel', version: '0.1.3',
+      package: '@dsh-ray/lark-channel', version: '0.1.3',
       integrity: 'sha512-CWwxX1cW2PYldWz/p3+EMG1VRwu1EzKyFS984sMq/tzY0a1TGjgZsLNOn0EHq2hpwCBdZd861gnmmKTqF7nwng==',
       requires: [
-        { package: '@dsh-enhanced/assistant-delivery', version: '0.1.3', integrity: 'sha512-ZgPV8CYY0L5X7rUHG4b9/ulPlQi5PNnrDi8LPpTPj+y8Mc5oE7bbZQnKpniGkjEftmWK16GRlhx+A9Z00sYsTw==' },
-        { package: '@dsh-enhanced/credentials-keychain', version: '0.1.3', integrity: 'sha512-g8OOFqnDwd0/SRldZmWN6f6FScD1llN+jdjRu4lLmZ1xdQ6nOacEGvUK4l1rCa89xNWkJVFdgQLuOC/e2VbDXw==' },
+        { package: '@dsh-ray/assistant-delivery', version: '0.1.3', integrity: 'sha512-ZgPV8CYY0L5X7rUHG4b9/ulPlQi5PNnrDi8LPpTPj+y8Mc5oE7bbZQnKpniGkjEftmWK16GRlhx+A9Z00sYsTw==' },
+        { package: '@dsh-ray/credentials-keychain', version: '0.1.3', integrity: 'sha512-g8OOFqnDwd0/SRldZmWN6f6FScD1llN+jdjRu4lLmZ1xdQ6nOacEGvUK4l1rCa89xNWkJVFdgQLuOC/e2VbDXw==' },
       ],
       authorities: ['network: Lark WebSocket and API', 'credentials: OS keychain/secret store', 'resident process: current-user service'],
       dshBaseline: '0.1.0-rc.8',
@@ -1204,13 +1204,13 @@ export const exampleIntegrityPinnedCatalog: CapabilityCatalog = parseCatalog({
     {
       id: 'supervised-evolution',
       capabilities: ['supervised growth', 'evolution', 'behaviour guidance'],
-      package: '@dsh-enhanced/assistant-evolution', version: '0.1.3',
+      package: '@dsh-ray/assistant-evolution', version: '0.1.3',
       integrity: 'sha512-WeerqdqJuqUNqCPb/QtTuvF4amJ3YlS/mJ0QoUlqt5Bygso2nz6K4o2vDF4MaDaIhjpuCR0KTiqFLXXQHAEEEg==',
       requires: [
-        { package: '@dsh-enhanced/assistant-delivery', version: '0.1.3', integrity: 'sha512-ZgPV8CYY0L5X7rUHG4b9/ulPlQi5PNnrDi8LPpTPj+y8Mc5oE7bbZQnKpniGkjEftmWK16GRlhx+A9Z00sYsTw==' },
-        { package: '@dsh-enhanced/credentials-keychain', version: '0.1.3', integrity: 'sha512-g8OOFqnDwd0/SRldZmWN6f6FScD1llN+jdjRu4lLmZ1xdQ6nOacEGvUK4l1rCa89xNWkJVFdgQLuOC/e2VbDXw==' },
-        { package: '@dsh-enhanced/lark-channel', version: '0.1.3', integrity: 'sha512-CWwxX1cW2PYldWz/p3+EMG1VRwu1EzKyFS984sMq/tzY0a1TGjgZsLNOn0EHq2hpwCBdZd861gnmmKTqF7nwng==' },
-        { package: '@dsh-enhanced/traex-acp-provider', version: '0.1.3', integrity: 'sha512-qGoYNAcO/uNHw/WMzOTD6q3Z8hIC7HwMGrp996BrJGB5HpUayuz58oCjyYQQ+caREnb8vESS9DoaW5nOGpB9sA==' },
+        { package: '@dsh-ray/assistant-delivery', version: '0.1.3', integrity: 'sha512-ZgPV8CYY0L5X7rUHG4b9/ulPlQi5PNnrDi8LPpTPj+y8Mc5oE7bbZQnKpniGkjEftmWK16GRlhx+A9Z00sYsTw==' },
+        { package: '@dsh-ray/credentials-keychain', version: '0.1.3', integrity: 'sha512-g8OOFqnDwd0/SRldZmWN6f6FScD1llN+jdjRu4lLmZ1xdQ6nOacEGvUK4l1rCa89xNWkJVFdgQLuOC/e2VbDXw==' },
+        { package: '@dsh-ray/lark-channel', version: '0.1.3', integrity: 'sha512-CWwxX1cW2PYldWz/p3+EMG1VRwu1EzKyFS984sMq/tzY0a1TGjgZsLNOn0EHq2hpwCBdZd861gnmmKTqF7nwng==' },
+        { package: '@dsh-ray/traex-acp-provider', version: '0.1.3', integrity: 'sha512-qGoYNAcO/uNHw/WMzOTD6q3Z8hIC7HwMGrp996BrJGB5HpUayuz58oCjyYQQ+caREnb8vESS9DoaW5nOGpB9sA==' },
       ],
       authorities: ['network: Lark approval channel', 'credentials: OS keychain/secret store', 'subprocess: local TraeX ACP client', 'persistent guidance and approval state'],
       dshBaseline: '0.1.0-rc.8',

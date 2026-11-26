@@ -644,7 +644,7 @@ describe('atomic proposal recovery deadline', () => {
     notAfter: 160_000,
     dispatch: {
       routeVersion: 2 as const,
-      sourceId: 'dsh-enhanced-personal-wiki',
+      sourceId: 'dsh-ray-personal-wiki',
       bindingId: 'binding-owner',
       bindingVersion: 5,
       bindingGeneration: 2,
@@ -756,7 +756,7 @@ describe('atomic proposal recovery deadline', () => {
       idempotency_key: recoveryInput.idempotencyKey,
       not_after: recoveryInput.notAfter,
       abandoned_at: 160_000,
-      intent_hash: '68112ed3f1e5c8e25809b75d86ae893b90f9a61b4660f3ff27815779816d5d96',
+      intent_hash: 'edbc46cb95866942bf8b30581ecab28876d3a02a500431dccb3572917ac405ab',
     })
     expect(JSON.stringify(tombstone)).not.toContain(recoveryInput.diff)
     expect(() => second.propose({
@@ -805,7 +805,7 @@ describe('atomic proposal recovery deadline', () => {
     }],
     ['dispatch source', {
       ...recoveryInput,
-      dispatch: { ...recoveryInput.dispatch, sourceId: 'dsh-enhanced-personal-memory' },
+      dispatch: { ...recoveryInput.dispatch, sourceId: 'dsh-ray-personal-memory' },
     }],
     ['dispatch binding', {
       ...recoveryInput,

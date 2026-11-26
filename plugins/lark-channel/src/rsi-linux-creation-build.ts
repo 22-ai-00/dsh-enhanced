@@ -3,8 +3,8 @@ import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promise
 import { createRequire } from 'node:module'
 import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
-import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+import { linuxRuntimeDigest, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
+import type { LinuxPluginBehaviorRuntime } from '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 import { rsiBuildResources as io } from './rsi-build.js'
 import { discoverLinuxCgroupRoots, RsiLinuxCgroupUnavailableError, type LinuxCgroupRoots } from './rsi-linux-cgroup-roots.js'
 import { prepareLinuxRsiRepositoryRuntime, readLinuxRsiRepositoryRuntime,
@@ -61,7 +61,7 @@ interface Receipt extends LinuxRsiCreationBuildEnvironment {
 
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
-const PEER_SPECIFIER = '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+const PEER_SPECIFIER = '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 const SUBORDINATE_PATTERN = /^subordinate \S+ allocation is unavailable$/u
 // Sorted exact receipt content (everything except receiptDigest itself).
 const CONTENT_KEYS = ['backend', 'behavior', 'behaviorDigest', 'buildRuntimeDigest', 'cgroupRoots', 'dshHome',

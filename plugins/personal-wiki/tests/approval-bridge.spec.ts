@@ -9,7 +9,7 @@ import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-ses
 import {
   AssistantPolicyService,
   type ApprovalDispatchRoute,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   PERSONAL_WIKI_APPROVAL_SOURCE,

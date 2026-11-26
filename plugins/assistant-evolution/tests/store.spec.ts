@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, test } from 'vitest'
 import { EvolutionStore, EvolutionStoreError } from '../src/store.ts'
 import type { StoredRule } from '../src/types.ts'
@@ -68,7 +68,7 @@ const thresholds = {
 
 const v2Dispatch: ApprovalDispatchRouteV2 = {
   routeVersion: 2,
-  sourceId: 'dsh-enhanced-assistant-evolution',
+  sourceId: 'dsh-ray-assistant-evolution',
   bindingId: 'binding-owner-dm',
   bindingVersion: 13,
   bindingGeneration: 4,

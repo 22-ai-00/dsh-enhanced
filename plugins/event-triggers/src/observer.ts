@@ -6,10 +6,10 @@ import type {
   HostAutomationExecutionSpec,
   HostAutomationExecutorInput,
   HostAutomationExecutorResult,
-} from '@dsh-enhanced/assistant-automations'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
-import type { OwnerRouteValidationReceipt } from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-automations'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import type { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
+import type { OwnerRouteValidationReceipt } from '@dsh-ray/assistant-delivery'
 import type { GoalSourceClaim, EventTriggerStore } from './store.js'
 import type { ObserverLifetime } from './config.js'
 

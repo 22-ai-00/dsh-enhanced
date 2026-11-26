@@ -5,9 +5,9 @@ import plugin, { AssistantHeartbeatService, Config, name, version } from '../src
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
 
-describe('dsh-enhanced-assistant-heartbeat entrypoint', () => {
+describe('dsh-ray-assistant-heartbeat entrypoint', () => {
   test('exports stable identity, service, and validated config', () => {
-    expect(name).toBe('dsh-enhanced-assistant-heartbeat')
+    expect(name).toBe('dsh-ray-assistant-heartbeat')
     expect(version).toBe(manifest.version)
     expect(plugin).toBe(AssistantHeartbeatService)
     expect(Config).toBe(AssistantHeartbeatService.Config)

@@ -1,4 +1,4 @@
-import type { InboundEnvelope } from '@dsh-enhanced/assistant-delivery'
+import type { InboundEnvelope } from '@dsh-ray/assistant-delivery'
 import { larkProviderReplyThread, larkTopicThread, larkTopLevelSenderThread } from './group-thread.js'
 import type { LarkInboundConfig, LarkMessage } from './types.js'
 

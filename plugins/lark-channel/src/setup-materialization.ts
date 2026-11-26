@@ -20,14 +20,14 @@ interface ManagedProfileRows {
   rows: YAMLSeq
 }
 
-const PERSONAL_ASSISTANT_ROW = 'dsh-enhanced-personal-assistant'
-const PERSONAL_ASSISTANT_PACKAGE = '@dsh-enhanced/personal-assistant'
-const ASSISTANT_DELIVERY_ROW = 'dsh-enhanced-assistant-delivery'
-const ASSISTANT_DELIVERY_PACKAGE = '@dsh-enhanced/assistant-delivery'
-const LARK_CHANNEL_ROW = 'dsh-enhanced-lark-channel'
-const LARK_CHANNEL_PACKAGE = '@dsh-enhanced/lark-channel'
-const CREDENTIALS_KEYCHAIN_ROW = 'dsh-enhanced-credentials-keychain'
-const CREDENTIALS_KEYCHAIN_PACKAGE = '@dsh-enhanced/credentials-keychain'
+const PERSONAL_ASSISTANT_ROW = 'dsh-ray-personal-assistant'
+const PERSONAL_ASSISTANT_PACKAGE = '@dsh-ray/personal-assistant'
+const ASSISTANT_DELIVERY_ROW = 'dsh-ray-assistant-delivery'
+const ASSISTANT_DELIVERY_PACKAGE = '@dsh-ray/assistant-delivery'
+const LARK_CHANNEL_ROW = 'dsh-ray-lark-channel'
+const LARK_CHANNEL_PACKAGE = '@dsh-ray/lark-channel'
+const CREDENTIALS_KEYCHAIN_ROW = 'dsh-ray-credentials-keychain'
+const CREDENTIALS_KEYCHAIN_PACKAGE = '@dsh-ray/credentials-keychain'
 const presetIdPattern = /^[a-z0-9][a-z0-9-]*$/u
 const dshHomeWorkspacePattern = /^dshHomePath\((['"])assistant-workspace\1\)$/u
 

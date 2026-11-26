@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto'
 import type {
   AssistantAutomationsService,
   SystemOwnedAutomationHealthProjection,
-} from '@dsh-enhanced/assistant-automations'
+} from '@dsh-ray/assistant-automations'
 import {
   canonicalEvaluationHostScope,
   type AssistantEvaluationService,
-} from '@dsh-enhanced/assistant-evaluation'
+} from '@dsh-ray/assistant-evaluation'
 import {
   canonicalEvolutionHostScope,
   type AssistantEvolutionService,
@@ -14,16 +14,16 @@ import {
   type RuleCandidate,
   type StoredRule,
   toStrategyAdviceSignal,
-} from '@dsh-enhanced/assistant-evolution'
+} from '@dsh-ray/assistant-evolution'
 import type { AssistantGoalsAdvicePort } from './goals-port.js'
 import type {
   AssistantHealthReport,
   AssistantHealthService,
-} from '@dsh-enhanced/assistant-health'
+} from '@dsh-ray/assistant-health'
 import {
   canonicalPreferenceHostScope,
   type PreferenceLearningService,
-} from '@dsh-enhanced/preference-learning'
+} from '@dsh-ray/preference-learning'
 import type {
   RecoveryActionReceipt,
   RecoveryExecutionContext,
@@ -40,7 +40,7 @@ import {
   type RecoveryStepId,
 } from './types.js'
 
-export const RECOVERY_SYSTEM_OWNER = 'dsh-enhanced-assistant-recovery' as const
+export const RECOVERY_SYSTEM_OWNER = 'dsh-ray-assistant-recovery' as const
 
 /**
  * Evaluation owns the cross-ledger claim/settle receipt.  Keeping this

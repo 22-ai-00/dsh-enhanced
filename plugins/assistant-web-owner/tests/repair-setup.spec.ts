@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { configureRepairAdmission, parseRepairAdmissionTask, prepareRepairAdmission } from '../src/repair-setup.js'
 import { configureWebOwner, prepareWebOwnerProfile, type WebOwnerSetupInput } from '../src/setup.js'
-import { ensurePrincipalLocally } from '@dsh-enhanced/assistant-delivery'
+import { ensurePrincipalLocally } from '@dsh-ray/assistant-delivery'
 import { parseDocument } from 'yaml'
 
 const roots: string[] = []
@@ -43,15 +43,15 @@ async function configured() {
   await mkdir(input.workspace); await mkdir(join(home, 'profiles', 'web'), { recursive: true })
   const effectiveDoc = parseDocument('[]')
   for (const slug of ['personal-assistant', 'assistant-delivery']) { const doc = parseDocument(await readFile(new URL(`../../${slug}/cordis.patch.yml`, import.meta.url), 'utf8'), { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] }); const insert = (doc.contents as any).items.find((value: any) => value.get('insert', true))?.get('insert', true); effectiveDoc.add(insert.items[0]) }
-  for (const value of [{ id: 'dsh-enhanced-assistant-goals', config: { budgets: [{ id: 'repair-budget', limit: 2 }] } }, { id: 'dsh-enhanced-assistant-web-owner' }, { id: 'dsh-enhanced-assistant-skills', config: { databasePath: `${home}/skills.sqlite`, allowedTools: ['write'] } }, { id: 'dsh-enhanced-assistant-verifier', config: { profiles: [{ id: 'repair-outcome' }] } }, { id: 'dsh-enhanced-assistant-deepseek-budget', config: { id: 'repair-budget' } }]) effectiveDoc.add(value)
+  for (const value of [{ id: 'dsh-ray-assistant-goals', config: { budgets: [{ id: 'repair-budget', limit: 2 }] } }, { id: 'dsh-ray-assistant-web-owner' }, { id: 'dsh-ray-assistant-skills', config: { databasePath: `${home}/skills.sqlite`, allowedTools: ['write'] } }, { id: 'dsh-ray-assistant-verifier', config: { profiles: [{ id: 'repair-outcome' }] } }, { id: 'dsh-ray-assistant-deepseek-budget', config: { id: 'repair-budget' } }]) effectiveDoc.add(value)
   const effective = effectiveDoc.toString()
   const initial = prepareWebOwnerProfile(input, '[]', effective); await configureWebOwner(input, effective)
   const path = join(home, 'profiles', 'web', 'cordis.patch.yml'); const source = await readFile(path, 'utf8'); const owner = ensurePrincipalLocally({ databasePath: initial.databasePath, principal: { channel: 'web', account: 'web', tenant: 'local', user: 'operator' } })
-  const doc = parseDocument(source); const rows = doc.toJS() as any[]; const deliveryRow = rows.find(row => row.id === 'dsh-enhanced-assistant-delivery'); deliveryRow.config.databasePath = initial.databasePath; deliveryRow.config.spoolPath = join(home, 'assistant-delivery', 'spool'); deliveryRow.config.ownerRoutes = [{ id: 'owner-route', conversation: { channel: 'web', account: 'web', tenant: 'local', kind: 'dm', chat: 'x' }, principal: { channel: 'web', account: 'web', tenant: 'local', user: 'operator' }, workspace: input.workspace, agentPreset: input.preset, policyRef: 'owner-dm', minimumGeneration: 1 }]
-  const personalRow = rows.find(row => row.id === 'dsh-enhanced-personal-assistant'); personalRow.config.assistantPolicy.databasePath = join(home, 'personal-assistant', 'policy.sqlite'); personalRow.config.assistantPolicy.budgets = [{ id: 'repair-budget', metric: 'automation-runs', limit: 2, periodMs: 60_000, scope: 'workspace' }]
-  rows.push({ id: 'dsh-enhanced-assistant-skills', config: { databasePath: `${home}/skills.sqlite`, allowedTools: ['write'], preserved: 'keep' } })
-  const goals = rows.find(row => row.id === 'dsh-enhanced-assistant-goals'); goals.config = { executionBudget: { mode: 'calls', modelCalls: 4, toolCalls: 4, durationMs: 60_000, maxOutputTokensPerCall: 64, routes: [{ provider: 'fixture', model: 'fixture' }] } }
-  rows.push({ id: 'dsh-enhanced-assistant-verifier', config: { profiles: [{ id: 'repair-outcome' }] } }, { id: 'dsh-enhanced-assistant-deepseek-budget', config: { id: 'repair-budget' } })
+  const doc = parseDocument(source); const rows = doc.toJS() as any[]; const deliveryRow = rows.find(row => row.id === 'dsh-ray-assistant-delivery'); deliveryRow.config.databasePath = initial.databasePath; deliveryRow.config.spoolPath = join(home, 'assistant-delivery', 'spool'); deliveryRow.config.ownerRoutes = [{ id: 'owner-route', conversation: { channel: 'web', account: 'web', tenant: 'local', kind: 'dm', chat: 'x' }, principal: { channel: 'web', account: 'web', tenant: 'local', user: 'operator' }, workspace: input.workspace, agentPreset: input.preset, policyRef: 'owner-dm', minimumGeneration: 1 }]
+  const personalRow = rows.find(row => row.id === 'dsh-ray-personal-assistant'); personalRow.config.assistantPolicy.databasePath = join(home, 'personal-assistant', 'policy.sqlite'); personalRow.config.assistantPolicy.budgets = [{ id: 'repair-budget', metric: 'automation-runs', limit: 2, periodMs: 60_000, scope: 'workspace' }]
+  rows.push({ id: 'dsh-ray-assistant-skills', config: { databasePath: `${home}/skills.sqlite`, allowedTools: ['write'], preserved: 'keep' } })
+  const goals = rows.find(row => row.id === 'dsh-ray-assistant-goals'); goals.config = { executionBudget: { mode: 'calls', modelCalls: 4, toolCalls: 4, durationMs: 60_000, maxOutputTokensPerCall: 64, routes: [{ provider: 'fixture', model: 'fixture' }] } }
+  rows.push({ id: 'dsh-ray-assistant-verifier', config: { profiles: [{ id: 'repair-outcome' }] } }, { id: 'dsh-ray-assistant-deepseek-budget', config: { id: 'repair-budget' } })
   const publicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
   const scope = { principalId: 'web/web/local/operator', principalRecordId: owner.id, principalVersion: owner.version, workspace: input.workspace, preset: input.preset }
   const runtimeRoot = join(home, 'rsi-linux-runtimes', 'web', 'runtime')
@@ -72,7 +72,7 @@ async function configured() {
 test('real validators preserve config and accept an ordered two-profile chain', async () => {
   const f = await configured(); const admission = { ownerRouteId: 'owner-route', externalHoldouts: [f.holdout], repairProfiles: [f.profile('primary', ['followup']), f.profile('followup')] }
   const result = prepareRepairAdmission(f.input, f.source, f.effective, JSON.stringify(admission))
-  const skills = (parseDocument(result.patch).toJS() as any[]).find(row => row.id === 'dsh-enhanced-assistant-skills').config
+  const skills = (parseDocument(result.patch).toJS() as any[]).find(row => row.id === 'dsh-ray-assistant-skills').config
   expect(skills.preserved).toBe('keep'); expect(skills.repairProfiles.map((item: any) => item.id)).toEqual(['primary', 'followup'])
   expect(prepareRepairAdmission(f.input, result.patch, f.effective, JSON.stringify(admission)).patch).toBe(result.patch)
 })
@@ -84,21 +84,21 @@ test('rejects a foreign profile scope before producing a patch', async () => {
 
 test.each([{ inject: ['assistantVerifier'] }, { inject: { assistantVerifier: {} } }])('waits for configured Isolation and preserves existing injection %j', async ({ inject }) => {
   const f = await configured(), effective = parseDocument(f.effective).toJS() as any[]
-  effective.push({ id: 'dsh-enhanced-assistant-isolation', name: '@dsh-enhanced/assistant-isolation' })
-  effective.find(row => row.id === 'dsh-enhanced-assistant-skills').inject = inject
+  effective.push({ id: 'dsh-ray-assistant-isolation', name: '@dsh-ray/assistant-isolation' })
+  effective.find(row => row.id === 'dsh-ray-assistant-skills').inject = inject
   const admission = JSON.stringify({ ownerRouteId: 'owner-route', externalHoldouts: [f.holdout], repairProfiles: [f.profile('primary')] })
   const planned = prepareRepairAdmission(f.input, f.source, JSON.stringify(effective), admission)
-  const skills = (parseDocument(planned.patch).toJS() as any[]).find(row => row.id === 'dsh-enhanced-assistant-skills')
+  const skills = (parseDocument(planned.patch).toJS() as any[]).find(row => row.id === 'dsh-ray-assistant-skills')
   expect(skills.inject).toEqual(Array.isArray(inject) ? ['assistantVerifier', 'assistantIsolation'] : { assistantVerifier: {}, assistantIsolation: {} })
   expect(prepareRepairAdmission(f.input, planned.patch, JSON.stringify(effective), admission).patch).toBe(planned.patch)
 })
 
 test('does not add an unavailable dependency for disabled Isolation', async () => {
   const f = await configured(), effective = parseDocument(f.effective).toJS() as any[]
-  effective.push({ id: 'dsh-enhanced-assistant-isolation', disabled: true })
+  effective.push({ id: 'dsh-ray-assistant-isolation', disabled: true })
   const admission = JSON.stringify({ ownerRouteId: 'owner-route', externalHoldouts: [f.holdout], repairProfiles: [f.profile('primary')] })
   const result = prepareRepairAdmission(f.input, f.source, JSON.stringify(effective), admission)
-  expect((parseDocument(result.patch).toJS() as any[]).find(row => row.id === 'dsh-enhanced-assistant-skills').inject).toBeUndefined()
+  expect((parseDocument(result.patch).toJS() as any[]).find(row => row.id === 'dsh-ray-assistant-skills').inject).toBeUndefined()
 })
 
 test('rejects a missing exact profile owner without changing the database or patch', async () => {
@@ -121,7 +121,7 @@ test('rejects an unavailable model route and profile budgets exceeding calls lim
 
 test('accepts a TraeX calls budget without a DeepSeek budget bundle', async () => {
   const f = await configured(); const effective = parseDocument(f.effective).toJS() as any[]
-  const withoutDeepSeek = JSON.stringify(effective.filter(row => row.id !== 'dsh-enhanced-assistant-deepseek-budget'))
+  const withoutDeepSeek = JSON.stringify(effective.filter(row => row.id !== 'dsh-ray-assistant-deepseek-budget'))
   expect(() => prepareRepairAdmission(f.input, f.source, withoutDeepSeek, JSON.stringify({ ownerRouteId: 'owner-route', externalHoldouts: [f.holdout], repairProfiles: [f.profile('traex-calls')] }))).not.toThrow()
 })
 

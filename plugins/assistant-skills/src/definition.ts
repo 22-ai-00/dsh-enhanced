@@ -1,6 +1,6 @@
-import type { GoalScope, VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-export type { VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
+import type { GoalScope, VerifiedWorkflowSource } from '@dsh-ray/assistant-goals'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+export type { VerifiedWorkflowSource } from '@dsh-ray/assistant-goals'
 
 export type SkillScalar = string | number | boolean
 export type SkillInputType = 'string' | 'number' | 'boolean'

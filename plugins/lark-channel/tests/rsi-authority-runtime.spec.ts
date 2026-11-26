@@ -7,7 +7,7 @@ import { dirname, join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { parseDocument, stringify } from 'yaml'
-import { loadTrustConfig } from '@dsh-enhanced/plugin-control-plane'
+import { loadTrustConfig } from '@dsh-ray/plugin-control-plane'
 import { prepareRsiAuthorityRuntime, readRsiAuthorityRuntimeReceipt, replaceRsiAuthorityRuntimeInStage,
   RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES } from '../src/rsi-authority-runtime.js'
 import { rsiBuildResources as io } from '../src/rsi-build.js'
@@ -18,7 +18,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rsi-authority-runtime-'))); roots.push(root)
   const home = join(root, 'home # % spaced'), packageRoot = join(root, 'control-plane')
-  const installed = dirname(createRequire(import.meta.url).resolve('@dsh-enhanced/plugin-control-plane/package.json'))
+  const installed = dirname(createRequire(import.meta.url).resolve('@dsh-ray/plugin-control-plane/package.json'))
   await mkdir(home, { mode: 0o700 })
   await mkdir(join(packageRoot, 'bin'), { recursive: true, mode: 0o700 })
   await mkdir(join(packageRoot, 'lib'), { mode: 0o700 })
@@ -31,8 +31,8 @@ async function fixture() {
     'dsh-systemd-host-authority.js', 'dsh-systemd-host-attestor.js', 'dsh-local-release-adapter.js']) {
     await cp(join(installed, 'bin', name), join(packageRoot, 'bin', name))
   }
-  const contractRoot = await realpath(join(installed, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract'))
-  const contractTarget = join(packageRoot, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract')
+  const contractRoot = await realpath(join(installed, 'node_modules', '@dsh-ray', 'assistant-growth-contract'))
+  const contractTarget = join(packageRoot, 'node_modules', '@dsh-ray', 'assistant-growth-contract')
   await mkdir(join(contractTarget, 'lib'), { recursive: true, mode: 0o700 })
   await cp(join(contractRoot, 'package.json'), join(contractTarget, 'package.json'))
   for (const name of await readdir(join(contractRoot, 'lib'))) {
@@ -42,8 +42,8 @@ async function fixture() {
     input: { dshHome: home, profile: 'owner' } }
 }
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
-const CONTROL_PACKAGE = '@dsh-enhanced/plugin-control-plane'
-const CONTRACT_PACKAGE = '@dsh-enhanced/assistant-growth-contract'
+const CONTROL_PACKAGE = '@dsh-ray/plugin-control-plane'
+const CONTRACT_PACKAGE = '@dsh-ray/assistant-growth-contract'
 
 async function moveToLongSourcePath(f: Awaited<ReturnType<typeof fixture>>, length: number): Promise<string> {
   let packageRoot = join(f.root, 'long-source')
@@ -56,7 +56,7 @@ async function moveToLongSourcePath(f: Awaited<ReturnType<typeof fixture>>, leng
 async function managedHoistedProfile(f: Awaited<ReturnType<typeof fixture>>) {
   const profileRoot = join(f.home, 'profiles', 'owner')
   const modules = join(profileRoot, 'node_modules')
-  const namespace = join(modules, '@dsh-enhanced')
+  const namespace = join(modules, '@dsh-ray')
   const installed = join(namespace, 'plugin-control-plane')
   const contract = join(namespace, 'assistant-growth-contract')
   await mkdir(namespace, { recursive: true, mode: 0o700 })
@@ -73,7 +73,7 @@ async function managedHoistedProfile(f: Awaited<ReturnType<typeof fixture>>) {
     dependencies: { [CONTROL_PACKAGE]: version } }))
   await writeFile(join(profileRoot, 'pnpm-workspace.yaml'), stringify({ packages: ['.'],
     nodeLinker: 'hoisted', autoInstallPeers: false }))
-  const selected = `${version}(@dsh-enhanced/assistant-policy@${version})`
+  const selected = `${version}(@dsh-ray/assistant-policy@${version})`
   await mkdir(join(modules, '.pnpm'), { mode: 0o700 })
   const metadata = stringify({ nodeLinker: 'hoisted', packageManager: 'pnpm@11.7.0',
     layoutVersion: 5, virtualStoreDir: '.pnpm', hoistedLocations: {
@@ -95,7 +95,7 @@ async function managedHoistedProfile(f: Awaited<ReturnType<typeof fixture>>) {
 
 test('copied Linux authority modules load and invoke without the Mac isolation package', async () => {
   const f = await fixture()
-  expect(await readdir(join(f.packageRoot, 'node_modules', '@dsh-enhanced'))).toEqual(['assistant-growth-contract'])
+  expect(await readdir(join(f.packageRoot, 'node_modules', '@dsh-ray'))).toEqual(['assistant-growth-contract'])
   const isolated = { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', HOME: f.home }
   const sourceBuild = pathToFileURL(join(f.packageRoot, 'lib', 'source-build.js')).href
   const approval = pathToFileURL(join(f.packageRoot, 'lib', 'source-approval-authority.js')).href
@@ -266,11 +266,11 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     const controlManifestPath = join(f.packageRoot, 'package.json')
     const originalControlManifest = await readFile(controlManifestPath)
     const controlManifest = JSON.parse(originalControlManifest.toString('utf8')) as { dependencies: Record<string, string> }
-    delete controlManifest.dependencies['@dsh-enhanced/assistant-growth-contract']
+    delete controlManifest.dependencies['@dsh-ray/assistant-growth-contract']
     await writeFile(controlManifestPath, JSON.stringify(controlManifest))
     await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })).rejects.toThrow('not declared')
     await writeFile(controlManifestPath, originalControlManifest)
-    const contract = join('node_modules', '@dsh-enhanced', 'assistant-growth-contract')
+    const contract = join('node_modules', '@dsh-ray', 'assistant-growth-contract')
     const sourceManifest = join(f.packageRoot, contract, 'package.json')
     const originalManifest = await readFile(sourceManifest)
     await writeFile(sourceManifest, JSON.stringify({ ...JSON.parse(originalManifest.toString()), version: '0.0.0' }))
@@ -296,7 +296,7 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     await prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })
     const stageHome = join(f.root, 'stage-home'), previousHome = join(f.root, 'previous-home')
     await cp(f.home, stageHome, { recursive: true })
-    const installed = join(stageHome, 'profiles', 'owner', 'node_modules', '@dsh-enhanced', 'plugin-control-plane')
+    const installed = join(stageHome, 'profiles', 'owner', 'node_modules', '@dsh-ray', 'plugin-control-plane')
     await mkdir(dirname(installed), { recursive: true, mode: 0o700 })
     await cp(f.packageRoot, installed, { recursive: true })
     await replaceRsiAuthorityRuntimeInStage({ logicalHome: f.home, physicalHome: stageHome, profile: 'owner' },
@@ -309,7 +309,7 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     await rename(f.home, previousHome)
     await rename(stageHome, f.home)
     expect(await prepareRsiAuthorityRuntime(f.input, { packageRoot: join(f.home, 'profiles', 'owner',
-      'node_modules', '@dsh-enhanced', 'plugin-control-plane') })).toHaveProperty('root', f.final)
+      'node_modules', '@dsh-ray', 'plugin-control-plane') })).toHaveProperty('root', f.final)
   }, 120_000)
 
   test('stage replacement resolves a pnpm adjacent contract edge and replays after Home swap', async () => {
@@ -319,15 +319,15 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     await cp(f.home, stageHome, { recursive: true })
     const packageVersion = (JSON.parse(await readFile(join(f.packageRoot, 'package.json'), 'utf8')) as { version: string }).version
     const virtualRoot = join(stageHome, 'profiles', 'owner', 'node_modules', '.pnpm')
-    const namespace = join(virtualRoot, `@dsh-enhanced+plugin-control-plane@${packageVersion}`, 'node_modules', '@dsh-enhanced')
+    const namespace = join(virtualRoot, `@dsh-ray+plugin-control-plane@${packageVersion}`, 'node_modules', '@dsh-ray')
     const installed = join(namespace, 'plugin-control-plane')
     const contractEdge = join(namespace, 'assistant-growth-contract')
-    const contractTarget = join(virtualRoot, `@dsh-enhanced+assistant-growth-contract@${packageVersion}`, 'node_modules',
-      '@dsh-enhanced', 'assistant-growth-contract')
+    const contractTarget = join(virtualRoot, `@dsh-ray+assistant-growth-contract@${packageVersion}`, 'node_modules',
+      '@dsh-ray', 'assistant-growth-contract')
     await mkdir(namespace, { recursive: true, mode: 0o700 })
     await cp(f.packageRoot, installed, { recursive: true })
     await mkdir(dirname(contractTarget), { recursive: true, mode: 0o700 })
-    await cp(join(f.packageRoot, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract'),
+    await cp(join(f.packageRoot, 'node_modules', '@dsh-ray', 'assistant-growth-contract'),
       contractTarget, { recursive: true })
     await rm(join(installed, 'node_modules'), { recursive: true })
     await symlink(relative(dirname(contractEdge), contractTarget), contractEdge, 'dir')
@@ -336,7 +336,7 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     const receipt = JSON.parse(await readFile(join(stageHome, 'rsi-authority-runtimes', 'owner', 'receipt.json'), 'utf8')) as {
       entries: Array<{ path: string; sourcePath: string }>
     }
-    const contractSource = receipt.entries.find(entry => entry.path === 'node_modules/@dsh-enhanced/assistant-growth-contract/package.json')
+    const contractSource = receipt.entries.find(entry => entry.path === 'node_modules/@dsh-ray/assistant-growth-contract/package.json')
     expect(contractSource?.sourcePath).toBe(join(f.home, relative(stageHome, contractTarget), 'package.json'))
     expect(receipt.entries.some(entry => entry.sourcePath.startsWith(stageHome))).toBe(false)
     await rename(f.home, previousHome)
@@ -352,20 +352,20 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     expect(await prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed })).toEqual(initial)
     const stageHome = join(f.root, 'hoisted-stage-home'), previousHome = join(f.root, 'hoisted-previous-home')
     await cp(f.home, stageHome, { recursive: true })
-    const stagedPackage = join(stageHome, 'profiles', 'owner', 'node_modules', '@dsh-enhanced', 'plugin-control-plane')
+    const stagedPackage = join(stageHome, 'profiles', 'owner', 'node_modules', '@dsh-ray', 'plugin-control-plane')
     await replaceRsiAuthorityRuntimeInStage({ logicalHome: f.home, physicalHome: stageHome, profile: 'owner' },
       { packageRoot: stagedPackage })
     const receipt = JSON.parse(await readFile(join(stageHome, 'rsi-authority-runtimes', 'owner', 'receipt.json'), 'utf8')) as {
       entries: Array<{ path: string; sourcePath: string }>
     }
-    const contractSource = receipt.entries.find(entry => entry.path === 'node_modules/@dsh-enhanced/assistant-growth-contract/package.json')
-    expect(contractSource?.sourcePath).toBe(join(f.home, 'profiles', 'owner', 'node_modules', '@dsh-enhanced',
+    const contractSource = receipt.entries.find(entry => entry.path === 'node_modules/@dsh-ray/assistant-growth-contract/package.json')
+    expect(contractSource?.sourcePath).toBe(join(f.home, 'profiles', 'owner', 'node_modules', '@dsh-ray',
       'assistant-growth-contract', 'package.json'))
     expect(receipt.entries.some(entry => entry.sourcePath.startsWith(stageHome))).toBe(false)
     await rename(f.home, previousHome)
     await rename(stageHome, f.home)
     expect(await prepareRsiAuthorityRuntime(f.input, { packageRoot: join(f.home, 'profiles', 'owner',
-      'node_modules', '@dsh-enhanced', 'plugin-control-plane') })).toEqual(initial)
+      'node_modules', '@dsh-ray', 'plugin-control-plane') })).toEqual(initial)
   }, 120_000)
 
   test('managed hoisted proof rejects missing metadata, false locations, lock drift, versions and contract escape', async () => {
@@ -377,7 +377,7 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     await writeFile(managed.metadata, originalMetadata)
     const falseLocations = parseDocument(originalMetadata.toString('utf8'))
     falseLocations.setIn(['hoistedLocations', `${CONTRACT_PACKAGE}@${managed.version}`],
-      ['node_modules/@dsh-enhanced/another-contract'])
+      ['node_modules/@dsh-ray/another-contract'])
     await writeFile(managed.metadata, falseLocations.toString())
     await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed }))
       .rejects.toThrow('installed locations differ')
@@ -425,9 +425,9 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
 
   test('rejects contract resolution inherited from an ancestor node_modules', async () => {
     const f = await fixture()
-    const ancestorContract = join(f.root, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract')
+    const ancestorContract = join(f.root, 'node_modules', '@dsh-ray', 'assistant-growth-contract')
     await mkdir(dirname(ancestorContract), { recursive: true, mode: 0o700 })
-    await cp(join(f.packageRoot, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract'),
+    await cp(join(f.packageRoot, 'node_modules', '@dsh-ray', 'assistant-growth-contract'),
       ancestorContract, { recursive: true })
     await rm(join(f.packageRoot, 'node_modules'), { recursive: true })
     await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot }))
@@ -436,16 +436,16 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
 
   test('rejects a declared contract supplied only by a flat project peer', async () => {
     const f = await fixture()
-    const namespace = join(f.root, 'profile', 'node_modules', '@dsh-enhanced')
+    const namespace = join(f.root, 'profile', 'node_modules', '@dsh-ray')
     const installed = join(namespace, 'plugin-control-plane')
     const contract = join(namespace, 'assistant-growth-contract')
     await mkdir(namespace, { recursive: true, mode: 0o700 })
     await cp(f.packageRoot, installed, { recursive: true })
-    await cp(join(f.packageRoot, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract'),
+    await cp(join(f.packageRoot, 'node_modules', '@dsh-ray', 'assistant-growth-contract'),
       contract, { recursive: true })
     await rm(join(installed, 'node_modules'), { recursive: true })
     const manifest = JSON.parse(await readFile(join(installed, 'package.json'), 'utf8')) as { dependencies: Record<string, string> }
-    expect(manifest.dependencies['@dsh-enhanced/assistant-growth-contract']).toBeDefined()
+    expect(manifest.dependencies['@dsh-ray/assistant-growth-contract']).toBeDefined()
     await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: installed }))
       .rejects.toThrow('outside its dependency edge')
   }, 120_000)

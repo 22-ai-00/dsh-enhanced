@@ -4,8 +4,8 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { GoalScope } from '@dsh-enhanced/assistant-goals'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { GoalScope } from '@dsh-ray/assistant-goals'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type {
   SkillCompensationDirective,
   SkillCompensationKind,
@@ -76,7 +76,7 @@ export interface RecoveryCompensationExecutionRequest {
   readonly target: Readonly<Record<string, unknown>>
   readonly forwardActionId?: string
   readonly scope?: GoalScope
-  readonly sourcePlugin?: 'dsh-enhanced-assistant-skills'
+  readonly sourcePlugin?: 'dsh-ray-assistant-skills'
   readonly runId?: string
   readonly stepId?: string
   readonly preimage?: Readonly<Record<string, unknown>>
@@ -728,7 +728,7 @@ export async function compensateFailedSkillRun(input: {
                 target: { filePath: entry.filePath, resolvedPath: entry.resolvedPath },
                 forwardActionId: `${input.runId}:${step.id}`,
                 scope: input.scope,
-                sourcePlugin: 'dsh-enhanced-assistant-skills',
+                sourcePlugin: 'dsh-ray-assistant-skills',
                 runId: input.runId,
                 stepId: step.id,
                 preimage: { existed: false, filePath: entry.filePath, digest: entry.digest },
@@ -835,7 +835,7 @@ export async function compensateFailedSkillRun(input: {
           },
           forwardActionId: `${input.runId}:${step.id}`,
           scope: input.scope,
-          sourcePlugin: 'dsh-enhanced-assistant-skills',
+          sourcePlugin: 'dsh-ray-assistant-skills',
           runId: input.runId,
           stepId: step.id,
           ...(preimage === undefined

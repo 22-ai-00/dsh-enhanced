@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { vi } from 'vitest'
-import { linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
-import type { LinuxRepositoryRunner, LinuxRepositoryRunnerRequest } from '@dsh-enhanced/assistant-isolation'
-import type { LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { linuxRuntimeDigest } from '@dsh-ray/assistant-isolation'
+import type { LinuxRepositoryRunner, LinuxRepositoryRunnerRequest } from '@dsh-ray/assistant-isolation'
+import type { LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import type { LinuxSourceBuildConfig } from '../../src/source-build.js'
 
 export function linuxSourceConfig(): LinuxSourceBuildConfig {

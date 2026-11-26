@@ -120,7 +120,7 @@ test.each(['achieved', 'not-achieved'] as const)('independent signer freezes a f
     keyPath, statePath, controlDatabasePath,
     grant: { id: 'grant', expiresAt: batch.deadlineAt, maxQualifications: 1, owner: batch.owner,
       installationId: batch.installationId, ledger: { id: 'ledger', path: controlDatabasePath },
-      profilePath: batch.profilePath, packages: ['@dsh-enhanced/example'], terms: batch.terms,
+      profilePath: batch.profilePath, packages: ['@dsh-ray/example'], terms: batch.terms,
       receiptTtlMs: 10_000 },
   }
   const deployment = { task: { inboxId: batch.votes[0]!.inboxId,
@@ -136,7 +136,7 @@ test.each(['achieved', 'not-achieved'] as const)('independent signer freezes a f
   config.grant.terms = finalBatch.terms
   const context = { record: { batch: finalBatch, state: 'pending' as const },
     plan: { id: batch.planId, digest: batch.planDigest, status: 'awaiting-live-tasks',
-      activation: { id: batch.activationId, fence: batch.fence }, candidate: { id: 'example', package: '@dsh-enhanced/example' },
+      activation: { id: batch.activationId, fence: batch.fence }, candidate: { id: 'example', package: '@dsh-ray/example' },
       ledger: config.grant.ledger, dossier: { liveQualification: finalBatch.terms } },
     source: { owner: batch.owner }, deployments: [deployment] }
   vi.spyOn(store, 'readLiveQualificationContext').mockReturnValue(context as never)

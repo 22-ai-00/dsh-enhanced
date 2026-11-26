@@ -5,20 +5,20 @@ set -euo pipefail
 # `release:prepare`.
 # A remote `curl | bash` invocation therefore fetches every executable helper
 # from one tagged release and refuses changed payloads before it executes any.
-DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.88'
-DSH_ENHANCED_PINNED_COMMON_SHA256='5f1d177d6686ab4db09f45c78ba4d3b82f2254da6a7b7d8fcf7ca27ac9886aff'
-DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='07d5bebced820b49616e3d89eb38f12ac9bcbfb104355f821e342b9dcc5565e4'
-DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='80dbbbb391a7ee4c1449015dd1eb6c367bd356c88440996bf289e05953e93540'
-DSH_ENHANCED_PINNED_HOST_LIFECYCLE_SHA256='418870affbea0e60de3d85aa7de6d13c12ee6e7e39184455759eb19d60a48c20'
-DSH_ENHANCED_PINNED_HOST_PROFILE_UPDATE_SHA256='30af8334f9b418bf87b010b7bc5bb8c1cd92791c1e9c754b747b6590421cb29f'
-DSH_ENHANCED_PINNED_HOST_RSI_UPDATE_SHA256='e1f72bf9840fbe6621a698e8fda86fbde1b7954e01748890475d8317e3679c23'
-DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.2.2-rc.5 <0.3.0'
-DSH_ENHANCED_PINNED_HOST_VERSION='0.2.2-rc.5'
+DSH_RAY_PINNED_RELEASE_REF='v0.1.88'
+DSH_RAY_PINNED_COMMON_SHA256='5f1d177d6686ab4db09f45c78ba4d3b82f2254da6a7b7d8fcf7ca27ac9886aff'
+DSH_RAY_PINNED_LIFECYCLE_CONFIG_SHA256='07d5bebced820b49616e3d89eb38f12ac9bcbfb104355f821e342b9dcc5565e4'
+DSH_RAY_PINNED_LIFECYCLE_PROFILE_SHA256='80dbbbb391a7ee4c1449015dd1eb6c367bd356c88440996bf289e05953e93540'
+DSH_RAY_PINNED_HOST_LIFECYCLE_SHA256='418870affbea0e60de3d85aa7de6d13c12ee6e7e39184455759eb19d60a48c20'
+DSH_RAY_PINNED_HOST_PROFILE_UPDATE_SHA256='30af8334f9b418bf87b010b7bc5bb8c1cd92791c1e9c754b747b6590421cb29f'
+DSH_RAY_PINNED_HOST_RSI_UPDATE_SHA256='e1f72bf9840fbe6621a698e8fda86fbde1b7954e01748890475d8317e3679c23'
+DSH_RAY_PINNED_VERIFIED_HOST_RANGE='>=0.2.2-rc.5 <0.3.0'
+DSH_RAY_PINNED_HOST_VERSION='0.2.2-rc.5'
 
 # The local checkout and the remote fallback both use an exact supported Host.
 # The remote fallback intentionally stays on the released ref above until
 # release:prepare updates this ref and digest together.
-# Override with --plugin-version or DSH_ENHANCED_VERSION using an exact version
+# Override with --plugin-version or DSH_RAY_VERSION using an exact version
 # or dist-tag. The pinned ref, SHA-256, and host range above stay aligned with
 # the fixed release used by the remote fallback.
 
@@ -49,7 +49,7 @@ installer_stat() {
   if INSTALLER_STAT_RESULT="$(LC_ALL=C stat -f '%d:%i:%u:%Op:%l:%HT' "$target_path" 2>/dev/null)"; then
     return 0
   fi
-  printf 'dsh-enhanced installer: 无法安全检查临时路径 %s。\n' "$target_path" >&2
+  printf 'dsh-ray installer: 无法安全检查临时路径 %s。\n' "$target_path" >&2
   return 1
 }
 
@@ -62,7 +62,7 @@ parse_installer_stat() {
     || ! "$INSTALLER_STAT_UID" =~ ^[0-9]+$
     || ! "$INSTALLER_STAT_MODE" =~ ^[0-7]{3,7}$
     || ! "$INSTALLER_STAT_LINKS" =~ ^[0-9]+$ ]]; then
-    printf 'dsh-enhanced installer: 无法解析临时路径元数据；拒绝继续。\n' >&2
+    printf 'dsh-ray installer: 无法解析临时路径元数据；拒绝继续。\n' >&2
     return 1
   fi
   # GNU %a already omits the type bits. BSD %Op includes them, so mask both
@@ -91,22 +91,22 @@ validate_temporary_ancestor() {
   installer_stat "$ancestor_path" || return $?
   parse_installer_stat "$INSTALLER_STAT_RESULT" || return $?
   if ! installer_stat_is_directory; then
-    printf 'dsh-enhanced installer: 临时目录祖先不是目录：%s。\n' "$ancestor_path" >&2
+    printf 'dsh-ray installer: 临时目录祖先不是目录：%s。\n' "$ancestor_path" >&2
     return 1
   fi
   if [[ "$ancestor_path" == "$system_temp_path" ]]; then
     if [[ "$INSTALLER_STAT_UID" != '0' || "$INSTALLER_STAT_MODE_VALUE" -ne 1023 ]]; then
-      printf 'dsh-enhanced installer: 系统临时目录必须由 root 拥有且权限为 01777：%s。\n' "$ancestor_path" >&2
+      printf 'dsh-ray installer: 系统临时目录必须由 root 拥有且权限为 01777：%s。\n' "$ancestor_path" >&2
       return 1
     fi
     return 0
   fi
   if [[ "$INSTALLER_STAT_UID" != '0' && "$INSTALLER_STAT_UID" != "$INSTALLER_CURRENT_UID" ]]; then
-    printf 'dsh-enhanced installer: 临时目录祖先所有者不受信任：%s。\n' "$ancestor_path" >&2
+    printf 'dsh-ray installer: 临时目录祖先所有者不受信任：%s。\n' "$ancestor_path" >&2
     return 1
   fi
   if (( (INSTALLER_STAT_MODE_VALUE & 0022) != 0 )); then
-    printf 'dsh-enhanced installer: 临时目录祖先可被其他用户写入：%s。\n' "$ancestor_path" >&2
+    printf 'dsh-ray installer: 临时目录祖先可被其他用户写入：%s。\n' "$ancestor_path" >&2
     return 1
   fi
 }
@@ -119,7 +119,7 @@ validate_temporary_parent() {
   local parent_identity
 
   if [[ "$parent_path" != /* || -L "$parent_path" ]]; then
-    printf 'dsh-enhanced installer: TMPDIR 必须是绝对、非符号链接路径。\n' >&2
+    printf 'dsh-ray installer: TMPDIR 必须是绝对、非符号链接路径。\n' >&2
     return 1
   fi
   ancestor_path="$parent_path"
@@ -128,7 +128,7 @@ validate_temporary_parent() {
     if [[ "$ancestor_path" == "$parent_path" ]]; then
       parent_identity="$INSTALLER_LAST_IDENTITY"
       if [[ "$parent_path" != "$system_temp_path" && "$INSTALLER_STAT_UID" != "$INSTALLER_CURRENT_UID" ]]; then
-        printf 'dsh-enhanced installer: TMPDIR 必须由当前用户拥有：%s。\n' "$parent_path" >&2
+        printf 'dsh-ray installer: TMPDIR 必须由当前用户拥有：%s。\n' "$parent_path" >&2
         return 1
       fi
     fi
@@ -137,7 +137,7 @@ validate_temporary_parent() {
   done
   INSTALLER_LAST_IDENTITY="$parent_identity"
   if [[ -n "$expected_identity" && "$INSTALLER_LAST_IDENTITY" != "$expected_identity" ]]; then
-    printf 'dsh-enhanced installer: TMPDIR 在安装期间被替换；拒绝继续。\n' >&2
+    printf 'dsh-ray installer: TMPDIR 在安装期间被替换；拒绝继续。\n' >&2
     return 1
   fi
 }
@@ -166,7 +166,7 @@ validate_root_owned_directory_aliases() {
   case "$logical_path" in
     /*) ;;
     *)
-      printf 'dsh-enhanced installer: TMPDIR 必须是绝对路径。\n' >&2
+      printf 'dsh-ray installer: TMPDIR 必须是绝对路径。\n' >&2
       return 1
       ;;
   esac
@@ -202,28 +202,28 @@ validate_root_owned_directory_aliases() {
       if installer_stat "$candidate"; then
         parse_installer_stat "$INSTALLER_STAT_RESULT" || return 1
       else
-        printf 'dsh-enhanced installer: 无法检查 TMPDIR 符号链接：%s。\n' "$candidate" >&2
+        printf 'dsh-ray installer: 无法检查 TMPDIR 符号链接：%s。\n' "$candidate" >&2
         return 1
       fi
       if [[ "$INSTALLER_STAT_UID" != '0' ]]; then
-        printf 'dsh-enhanced installer: TMPDIR 经过非 root 拥有的符号链接，不受信任：%s。\n' "$candidate" >&2
+        printf 'dsh-ray installer: TMPDIR 经过非 root 拥有的符号链接，不受信任：%s。\n' "$candidate" >&2
         return 1
       fi
       symlink_hops=$((symlink_hops + 1))
       if [[ "$symlink_hops" -gt 40 ]]; then
-        printf 'dsh-enhanced installer: TMPDIR 符号链接层数过多或存在循环：%s。\n' "$logical_path" >&2
+        printf 'dsh-ray installer: TMPDIR 符号链接层数过多或存在循环：%s。\n' "$logical_path" >&2
         return 1
       fi
       link_target="$(readlink "$candidate")" || {
-        printf 'dsh-enhanced installer: TMPDIR 符号链接无法解析：%s。\n' "$candidate" >&2
+        printf 'dsh-ray installer: TMPDIR 符号链接无法解析：%s。\n' "$candidate" >&2
         return 1
       }
       link_dir="$(cd -P "$candidate" 2>/dev/null && pwd -P)" || {
-        printf 'dsh-enhanced installer: TMPDIR 符号链接无法解析：%s。\n' "$candidate" >&2
+        printf 'dsh-ray installer: TMPDIR 符号链接无法解析：%s。\n' "$candidate" >&2
         return 1
       }
       if [[ ! -d "$link_dir" ]]; then
-        printf 'dsh-enhanced installer: TMPDIR 符号链接未指向目录：%s。\n' "$candidate" >&2
+        printf 'dsh-ray installer: TMPDIR 符号链接未指向目录：%s。\n' "$candidate" >&2
         return 1
       fi
       hop_tokens=()
@@ -260,18 +260,18 @@ select_temporary_parent() {
   local system_temp_path
 
   if [[ "$requested_parent" != /* ]]; then
-    printf 'dsh-enhanced installer: TMPDIR 必须是绝对路径。\n' >&2
+    printf 'dsh-ray installer: TMPDIR 必须是绝对路径。\n' >&2
     return 1
   fi
   while [[ "$requested_parent" != '/' && "$requested_parent" == */ ]]; do
     requested_parent="${requested_parent%/}"
   done
   canonical_parent="$(cd -P "$requested_parent" 2>/dev/null && pwd -P)" || {
-    printf 'dsh-enhanced installer: TMPDIR 不存在或不可访问：%s。\n' "$requested_parent" >&2
+    printf 'dsh-ray installer: TMPDIR 不存在或不可访问：%s。\n' "$requested_parent" >&2
     return 1
   }
   system_temp_path="$(cd -P /tmp 2>/dev/null && pwd -P)" || {
-    printf 'dsh-enhanced installer: 无法解析系统临时目录 /tmp。\n' >&2
+    printf 'dsh-ray installer: 无法解析系统临时目录 /tmp。\n' >&2
     return 1
   }
   validate_root_owned_directory_aliases "$requested_parent" || return 1
@@ -286,42 +286,42 @@ validate_temporary_directory() {
   local expected_mode="${2:-}"
   local canonical_directory
   if [[ -z "$TEMPORARY_DIRECTORY" || -L "$TEMPORARY_DIRECTORY" ]]; then
-    printf 'dsh-enhanced installer: 临时工作目录路径不安全；拒绝继续。\n' >&2
+    printf 'dsh-ray installer: 临时工作目录路径不安全；拒绝继续。\n' >&2
     return 1
   fi
   if [[ "$TEMPORARY_PARENT" == '/' ]]; then
-    if [[ "$TEMPORARY_DIRECTORY" != /dsh-enhanced-install.* ]]; then
-      printf 'dsh-enhanced installer: 临时工作目录不在已验证的 TMPDIR 中；拒绝继续。\n' >&2
+    if [[ "$TEMPORARY_DIRECTORY" != /dsh-ray-install.* ]]; then
+      printf 'dsh-ray installer: 临时工作目录不在已验证的 TMPDIR 中；拒绝继续。\n' >&2
       return 1
     fi
-  elif [[ "$TEMPORARY_DIRECTORY" != "$TEMPORARY_PARENT"/dsh-enhanced-install.* ]]; then
-    printf 'dsh-enhanced installer: 临时工作目录不在已验证的 TMPDIR 中；拒绝继续。\n' >&2
+  elif [[ "$TEMPORARY_DIRECTORY" != "$TEMPORARY_PARENT"/dsh-ray-install.* ]]; then
+    printf 'dsh-ray installer: 临时工作目录不在已验证的 TMPDIR 中；拒绝继续。\n' >&2
     return 1
   fi
   canonical_directory="$(cd -P "$TEMPORARY_DIRECTORY" 2>/dev/null && pwd -P)" || {
-    printf 'dsh-enhanced installer: 临时工作目录不可访问；拒绝继续。\n' >&2
+    printf 'dsh-ray installer: 临时工作目录不可访问；拒绝继续。\n' >&2
     return 1
   }
   if [[ "$canonical_directory" != "$TEMPORARY_DIRECTORY" ]]; then
-    printf 'dsh-enhanced installer: 临时工作目录不是 canonical 路径；拒绝继续。\n' >&2
+    printf 'dsh-ray installer: 临时工作目录不是 canonical 路径；拒绝继续。\n' >&2
     return 1
   fi
   installer_stat "$TEMPORARY_DIRECTORY" || return $?
   parse_installer_stat "$INSTALLER_STAT_RESULT" || return $?
   if ! installer_stat_is_directory || [[ "$INSTALLER_STAT_UID" != "$INSTALLER_CURRENT_UID" ]]; then
-    printf 'dsh-enhanced installer: 临时工作目录类型或所有者不安全；拒绝继续。\n' >&2
+    printf 'dsh-ray installer: 临时工作目录类型或所有者不安全；拒绝继续。\n' >&2
     return 1
   fi
   if (( (INSTALLER_STAT_MODE_VALUE & 0077) != 0 )); then
-    printf 'dsh-enhanced installer: 临时工作目录不能向 group/other 开放。\n' >&2
+    printf 'dsh-ray installer: 临时工作目录不能向 group/other 开放。\n' >&2
     return 1
   fi
   if [[ -n "$expected_mode" && "$INSTALLER_STAT_MODE_VALUE" -ne "$expected_mode" ]]; then
-    printf 'dsh-enhanced installer: 临时工作目录权限在安装期间发生变化；拒绝继续。\n' >&2
+    printf 'dsh-ray installer: 临时工作目录权限在安装期间发生变化；拒绝继续。\n' >&2
     return 1
   fi
   if [[ -n "$expected_identity" && "$INSTALLER_LAST_IDENTITY" != "$expected_identity" ]]; then
-    printf 'dsh-enhanced installer: 临时工作目录在安装期间被替换；拒绝继续。\n' >&2
+    printf 'dsh-ray installer: 临时工作目录在安装期间被替换；拒绝继续。\n' >&2
     return 1
   fi
 }
@@ -331,7 +331,7 @@ validate_installer_asset_path() {
   local expected_identity="${2:-}"
   local expected_mode="${3:-}"
   if [[ -L "$asset_path" ]]; then
-    printf 'dsh-enhanced installer: 临时安装资产不能是符号链接：%s。\n' "$asset_path" >&2
+    printf 'dsh-ray installer: 临时安装资产不能是符号链接：%s。\n' "$asset_path" >&2
     return 1
   fi
   installer_stat "$asset_path" || return $?
@@ -339,19 +339,19 @@ validate_installer_asset_path() {
   if ! installer_stat_is_regular_file \
     || [[ "$INSTALLER_STAT_UID" != "$INSTALLER_CURRENT_UID" ]] \
     || [[ "$INSTALLER_STAT_LINKS" != '1' ]]; then
-    printf 'dsh-enhanced installer: 临时安装资产必须是当前用户拥有的普通单链接文件：%s。\n' "$asset_path" >&2
+    printf 'dsh-ray installer: 临时安装资产必须是当前用户拥有的普通单链接文件：%s。\n' "$asset_path" >&2
     return 1
   fi
   if (( (INSTALLER_STAT_MODE_VALUE & 0077) != 0 )); then
-    printf 'dsh-enhanced installer: 临时安装资产不能向 group/other 开放：%s。\n' "$asset_path" >&2
+    printf 'dsh-ray installer: 临时安装资产不能向 group/other 开放：%s。\n' "$asset_path" >&2
     return 1
   fi
   if [[ -n "$expected_mode" && "$INSTALLER_STAT_MODE_VALUE" -ne "$expected_mode" ]]; then
-    printf 'dsh-enhanced installer: 临时安装资产权限不安全：%s。\n' "$asset_path" >&2
+    printf 'dsh-ray installer: 临时安装资产权限不安全：%s。\n' "$asset_path" >&2
     return 1
   fi
   if [[ -n "$expected_identity" && "$INSTALLER_LAST_IDENTITY" != "$expected_identity" ]]; then
-    printf 'dsh-enhanced installer: 临时安装资产在校验期间被替换：%s。\n' "$asset_path" >&2
+    printf 'dsh-ray installer: 临时安装资产在校验期间被替换：%s。\n' "$asset_path" >&2
     return 1
   fi
 }
@@ -386,7 +386,7 @@ get_installer_asset_identity() {
 cleanup_installer_library() {
   if [[ -n "$TEMPORARY_DIRECTORY" ]]; then
     if ! validate_temporary_directory "$TEMPORARY_DIRECTORY_IDENTITY"; then
-      printf 'dsh-enhanced installer: 临时工作目录身份已变化；跳过不安全的清理。\n' >&2
+      printf 'dsh-ray installer: 临时工作目录身份已变化；跳过不安全的清理。\n' >&2
       return
     fi
     chmod u+w "$TEMPORARY_DIRECTORY" 2>/dev/null || true
@@ -408,7 +408,7 @@ download_installer_asset() {
   local asset_destination="$TEMPORARY_DIRECTORY/$asset_name.download"
   validate_temporary_directory "$TEMPORARY_DIRECTORY_IDENTITY" 448 || return $?
   if [[ -e "$asset_destination" || -L "$asset_destination" ]]; then
-    printf 'dsh-enhanced installer: 临时安装资产路径已存在：%s。\n' "$asset_destination" >&2
+    printf 'dsh-ray installer: 临时安装资产路径已存在：%s。\n' "$asset_destination" >&2
     return 1
   fi
   if command -v curl >/dev/null 2>&1; then
@@ -416,7 +416,7 @@ download_installer_asset() {
   elif command -v wget >/dev/null 2>&1; then
     wget -q "$INSTALL_BASE_URL/$asset_name" -O "$asset_destination"
   else
-    printf 'dsh-enhanced installer: 远程安装需要 curl 或 wget。\n' >&2
+    printf 'dsh-ray installer: 远程安装需要 curl 或 wget。\n' >&2
     return 1
   fi
   validate_temporary_directory "$TEMPORARY_DIRECTORY_IDENTITY" 448 || return $?
@@ -431,7 +431,7 @@ installer_asset_sha256() {
   elif command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$asset_path" | awk '{print $1}'
   else
-    printf 'dsh-enhanced installer: 无法验证远程安装器；需要 sha256sum 或 shasum。\n' >&2
+    printf 'dsh-ray installer: 无法验证远程安装器；需要 sha256sum 或 shasum。\n' >&2
     return 1
   fi
 }
@@ -447,7 +447,7 @@ verify_installer_asset() {
   validate_temporary_directory "$TEMPORARY_DIRECTORY_IDENTITY" 448 || return $?
   validate_installer_asset_path "$TEMPORARY_DIRECTORY/$asset_name.download" "$INSTALLER_ASSET_IDENTITY" || return $?
   if [[ "$actual_sha256" != "$expected_sha256" ]]; then
-    printf 'dsh-enhanced installer: 远程 %s 完整性校验失败；拒绝执行。\n' "$asset_name" >&2
+    printf 'dsh-ray installer: 远程 %s 完整性校验失败；拒绝执行。\n' "$asset_name" >&2
     return 1
   fi
 }
@@ -460,7 +460,7 @@ seal_installer_asset() {
   validate_temporary_directory "$TEMPORARY_DIRECTORY_IDENTITY" 448 || return $?
   validate_installer_asset_path "$source_path" "$INSTALLER_ASSET_IDENTITY" || return $?
   if [[ -e "$destination_path" || -L "$destination_path" ]]; then
-    printf 'dsh-enhanced installer: 已校验安装资产的目标路径已存在：%s。\n' "$destination_path" >&2
+    printf 'dsh-ray installer: 已校验安装资产的目标路径已存在：%s。\n' "$destination_path" >&2
     return 1
   fi
   mv "$source_path" "$destination_path"
@@ -484,7 +484,7 @@ INSTALL_NEEDS_HOST_HELPERS='0'
 case "$INSTALL_OPERATION" in
   upgrade|uninstall) INSTALL_NEEDS_LIFECYCLE_HELPERS='1' ;;
 esac
-if [[ -n "${DSH_ENHANCED_HOST_UPDATE_PLAN:-}" || "${DSH_ENHANCED_HOST_RECOVERY_ONLY:-}" == '1' ]]; then
+if [[ -n "${DSH_RAY_HOST_UPDATE_PLAN:-}" || "${DSH_RAY_HOST_RECOVERY_ONLY:-}" == '1' ]]; then
   INSTALL_NEEDS_HOST_HELPERS='1'
 fi
 
@@ -493,55 +493,55 @@ if [[ -n "$SCRIPT_DIRECTORY" && -r "$SCRIPT_DIRECTORY/common.sh" ]]; then
   source "$SCRIPT_DIRECTORY/common.sh"
   # A development checkout uses its own reviewed Host contract. The immutable
   # release constants above apply only to the downloaded release assets below.
-  unset DSH_ENHANCED_PINNED_HOST_VERSION
+  unset DSH_RAY_PINNED_HOST_VERSION
 else
   umask 077
   select_temporary_parent
-  TEMPORARY_DIRECTORY="$(mktemp -d "${TEMPORARY_PARENT%/}/dsh-enhanced-install.XXXXXX")"
+  TEMPORARY_DIRECTORY="$(mktemp -d "${TEMPORARY_PARENT%/}/dsh-ray-install.XXXXXX")"
   chmod 0700 "$TEMPORARY_DIRECTORY"
   validate_temporary_directory '' 448
   TEMPORARY_DIRECTORY_IDENTITY="$INSTALLER_LAST_IDENTITY"
   validate_temporary_parent "$TEMPORARY_PARENT" "$TEMPORARY_PARENT_IDENTITY" "$INSTALLER_SYSTEM_TEMP_PATH"
   validate_temporary_directory "$TEMPORARY_DIRECTORY_IDENTITY" 448
-  INSTALL_RELEASE_REF="${DSH_ENHANCED_INSTALL_REF:-$DSH_ENHANCED_PINNED_RELEASE_REF}"
-  INSTALL_COMMON_SHA256="${DSH_ENHANCED_INSTALL_COMMON_SHA256:-$DSH_ENHANCED_PINNED_COMMON_SHA256}"
-  INSTALL_LIFECYCLE_CONFIG_SHA256="${DSH_ENHANCED_INSTALL_LIFECYCLE_CONFIG_SHA256:-$DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256}"
-  INSTALL_LIFECYCLE_PROFILE_SHA256="${DSH_ENHANCED_INSTALL_LIFECYCLE_PROFILE_SHA256:-$DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256}"
-  INSTALL_HOST_LIFECYCLE_SHA256="${DSH_ENHANCED_INSTALL_HOST_LIFECYCLE_SHA256:-$DSH_ENHANCED_PINNED_HOST_LIFECYCLE_SHA256}"
-  INSTALL_HOST_PROFILE_UPDATE_SHA256="${DSH_ENHANCED_INSTALL_HOST_PROFILE_UPDATE_SHA256:-$DSH_ENHANCED_PINNED_HOST_PROFILE_UPDATE_SHA256}"
-  INSTALL_HOST_RSI_UPDATE_SHA256="${DSH_ENHANCED_INSTALL_HOST_RSI_UPDATE_SHA256:-$DSH_ENHANCED_PINNED_HOST_RSI_UPDATE_SHA256}"
+  INSTALL_RELEASE_REF="${DSH_RAY_INSTALL_REF:-$DSH_RAY_PINNED_RELEASE_REF}"
+  INSTALL_COMMON_SHA256="${DSH_RAY_INSTALL_COMMON_SHA256:-$DSH_RAY_PINNED_COMMON_SHA256}"
+  INSTALL_LIFECYCLE_CONFIG_SHA256="${DSH_RAY_INSTALL_LIFECYCLE_CONFIG_SHA256:-$DSH_RAY_PINNED_LIFECYCLE_CONFIG_SHA256}"
+  INSTALL_LIFECYCLE_PROFILE_SHA256="${DSH_RAY_INSTALL_LIFECYCLE_PROFILE_SHA256:-$DSH_RAY_PINNED_LIFECYCLE_PROFILE_SHA256}"
+  INSTALL_HOST_LIFECYCLE_SHA256="${DSH_RAY_INSTALL_HOST_LIFECYCLE_SHA256:-$DSH_RAY_PINNED_HOST_LIFECYCLE_SHA256}"
+  INSTALL_HOST_PROFILE_UPDATE_SHA256="${DSH_RAY_INSTALL_HOST_PROFILE_UPDATE_SHA256:-$DSH_RAY_PINNED_HOST_PROFILE_UPDATE_SHA256}"
+  INSTALL_HOST_RSI_UPDATE_SHA256="${DSH_RAY_INSTALL_HOST_RSI_UPDATE_SHA256:-$DSH_RAY_PINNED_HOST_RSI_UPDATE_SHA256}"
   if [[ ! "$INSTALL_RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    printf 'dsh-enhanced installer: 远程安装 ref 必须是固定的 vX.Y.Z 发布标签。\n' >&2
+    printf 'dsh-ray installer: 远程安装 ref 必须是固定的 vX.Y.Z 发布标签。\n' >&2
     exit 2
   fi
   if [[ ! "$INSTALL_COMMON_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-    printf 'dsh-enhanced installer: 远程 common.sh SHA-256 无效。\n' >&2
+    printf 'dsh-ray installer: 远程 common.sh SHA-256 无效。\n' >&2
     exit 2
   fi
   if [[ "$INSTALL_NEEDS_LIFECYCLE_HELPERS" == '1' ]]; then
     if [[ ! "$INSTALL_LIFECYCLE_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-      printf 'dsh-enhanced installer: 远程 lifecycle-config.mjs SHA-256 无效。\n' >&2
+      printf 'dsh-ray installer: 远程 lifecycle-config.mjs SHA-256 无效。\n' >&2
       exit 2
     fi
     if [[ ! "$INSTALL_LIFECYCLE_PROFILE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-      printf 'dsh-enhanced installer: 远程 lifecycle-profile.mjs SHA-256 无效。\n' >&2
+      printf 'dsh-ray installer: 远程 lifecycle-profile.mjs SHA-256 无效。\n' >&2
       exit 2
     fi
     if [[ "$INSTALL_LIFECYCLE_CONFIG_SHA256" == '0000000000000000000000000000000000000000000000000000000000000000'
       || "$INSTALL_LIFECYCLE_PROFILE_SHA256" == '0000000000000000000000000000000000000000000000000000000000000000' ]]; then
-      printf 'dsh-enhanced installer: 固定发布未包含已校验的 lifecycle helper；拒绝远程 upgrade/uninstall。\n' >&2
+      printf 'dsh-ray installer: 固定发布未包含已校验的 lifecycle helper；拒绝远程 upgrade/uninstall。\n' >&2
       exit 1
     fi
   fi
   if [[ "$INSTALL_NEEDS_HOST_HELPERS" == '1' ]]; then
     for host_digest in "$INSTALL_HOST_LIFECYCLE_SHA256" "$INSTALL_HOST_PROFILE_UPDATE_SHA256" "$INSTALL_HOST_RSI_UPDATE_SHA256"; do
       if [[ ! "$host_digest" =~ ^[0-9a-f]{64}$ || "$host_digest" == '0000000000000000000000000000000000000000000000000000000000000000' ]]; then
-        printf 'dsh-enhanced installer: 固定发布未包含已校验的 Host helper；拒绝受管 Host 更新/恢复。\n' >&2
+        printf 'dsh-ray installer: 固定发布未包含已校验的 Host helper；拒绝受管 Host 更新/恢复。\n' >&2
         exit 1
       fi
     done
   fi
-  INSTALL_BASE_URL="${DSH_ENHANCED_INSTALL_BASE_URL:-https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/$INSTALL_RELEASE_REF/scripts/install}"
+  INSTALL_BASE_URL="${DSH_RAY_INSTALL_BASE_URL:-https://raw.githubusercontent.com/22-ai-00/dsh-ray/$INSTALL_RELEASE_REF/scripts/install}"
   download_installer_asset common.sh
   verify_installer_asset common.sh "$INSTALL_COMMON_SHA256"
   if [[ "$INSTALL_NEEDS_LIFECYCLE_HELPERS" == '1' ]]; then
@@ -582,11 +582,11 @@ else
     validate_installer_asset_path "$TEMPORARY_DIRECTORY/host-profile-update.mjs" "$HOST_PROFILE_UPDATE_DOWNLOAD_IDENTITY" 256
     validate_installer_asset_path "$TEMPORARY_DIRECTORY/host-rsi-update.mjs" "$HOST_RSI_UPDATE_DOWNLOAD_IDENTITY" 256
   fi
-  DSH_ENHANCED_VERIFIED_HOST_RANGE="$DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE"
-  export DSH_ENHANCED_VERIFIED_HOST_RANGE
-  export DSH_ENHANCED_PINNED_HOST_VERSION
+  DSH_RAY_VERIFIED_HOST_RANGE="$DSH_RAY_PINNED_VERIFIED_HOST_RANGE"
+  export DSH_RAY_VERIFIED_HOST_RANGE
+  export DSH_RAY_PINNED_HOST_VERSION
   # shellcheck source=/dev/null
   source "$TEMPORARY_DIRECTORY/common.sh"
 fi
 
-dsh_enhanced_install npm '' "$@"
+dsh_ray_install npm '' "$@"

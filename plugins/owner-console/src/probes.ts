@@ -414,7 +414,7 @@ export class CodingToolProber {
         enabled: host.enabled, routeRegistered: host.routeRegistered, ready: false,
         state: 'not-installed',
         summary: `${label} CLI 已登录可用${cli.modelCount ? `（发现 ${cli.modelCount} 个模型）` : ''}，但 Host 尚未安装接入插件`,
-        remediation: '请先安装并启用 @dsh-enhanced/traex-acp-provider',
+        remediation: '请先安装并启用 @dsh-ray/traex-acp-provider',
         ...pinFields,
         ...(cli.modelCount === undefined ? {} : { modelCount: cli.modelCount }),
         checkedAt: cli.checkedAt, cached,

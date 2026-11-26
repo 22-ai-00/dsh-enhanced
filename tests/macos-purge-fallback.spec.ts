@@ -23,8 +23,8 @@ test.each(['missing', 'old', 'malformed', 'capable', 'capable-interactive'] as c
     }
     if (cli !== 'missing') {
       const capability = cli === 'old' ? 'exit 2' : `printf '%s\\n' '${capable ? '{"capabilities":["macos-launchd-ownership-v1"]}' : 'not JSON'}'; exit 0`
-      await writeFile(join(bin, 'dsh-rsi'), `#!/bin/bash\nif [[ "$1" == --capabilities ]]; then ${capability}; fi\nprintf 'delegated:%s\\n' "$@"\n`)
-      await chmod(join(bin, 'dsh-rsi'), 0o755)
+      await writeFile(join(bin, 'dsh-ray'), `#!/bin/bash\nif [[ "$1" == --capabilities ]]; then ${capability}; fi\nprintf 'delegated:%s\\n' "$@"\n`)
+      await chmod(join(bin, 'dsh-ray'), 0o755)
     }
     const result = spawnSync('/bin/bash', [join(process.cwd(), 'scripts/install/purge.sh'),
       ...(cli === 'capable-interactive' ? [] : ['--yes']), '--no-backup'], {

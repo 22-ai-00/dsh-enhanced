@@ -80,16 +80,16 @@ open_id 由应用（app_id）决定作用域，因此**唯一可靠的办法**�
 ```sh
 PROFILE="${DSH_HOME:-$HOME/.dsh}/profiles/assistant/cordis.patch.yml"
 cp -a "$PROFILE" "$PROFILE.bak-peer-agents"
-grep -n "dsh-enhanced-assistant-delivery\|dsh-enhanced-assistant-policy\|dsh-enhanced-personal-assistant\|dsh-enhanced-lark-channel" "$PROFILE"
+grep -n "dsh-ray-assistant-delivery\|dsh-ray-assistant-policy\|dsh-ray-personal-assistant\|dsh-ray-lark-channel" "$PROFILE"
 ```
 
 ### 1) Delivery：登记精确 peer 元组
 
-在 `dsh-enhanced-assistant-delivery` 行的 `config` 中增加 `peerAgents`（既有字段保持不变）：
+在 `dsh-ray-assistant-delivery` 行的 `config` 中增加 `peerAgents`（既有字段保持不变）：
 
 ```yaml
-- id: dsh-enhanced-assistant-delivery
-  name: '@dsh-enhanced/assistant-delivery'
+- id: dsh-ray-assistant-delivery
+  name: '@dsh-ray/assistant-delivery'
   inject:
     - assistantPolicy
   config:
@@ -110,7 +110,7 @@ grep -n "dsh-enhanced-assistant-delivery\|dsh-enhanced-assistant-policy\|dsh-enh
 
 ### 2) Policy：两条 allow 规则
 
-规则写在当前 profile 实际承载 Policy 配置的位置：若安装了独立的 `dsh-enhanced-assistant-policy` 行，写在它的 `config.rules`；若由 `dsh-enhanced-personal-assistant` meta-bundle 组合，写在它的 `config.assistantPolicy.rules`。不要两处同时维护同一组规则。
+规则写在当前 profile 实际承载 Policy 配置的位置：若安装了独立的 `dsh-ray-assistant-policy` 行，写在它的 `config.rules`；若由 `dsh-ray-personal-assistant` meta-bundle 组合，写在它的 `config.assistantPolicy.rules`。不要两处同时维护同一组规则。
 
 ```yaml
 rules:
@@ -158,12 +158,12 @@ rules:
 2. **重启 profile 服务**（同一 profile/Home 只能有一个 Host，避免前台与常驻服务并存抢 Web 端口和飞书长连接）：
 
    ```sh
-   dsh-rsi restart --profile assistant
+   dsh-ray restart --profile assistant
    # 或等价的 systemd user 服务
    systemctl --user restart dsh-profile-assistant.service
    ```
 
-3. **确认服务与连接**：`dsh-rsi status` 查看 profile 与服务状态；`dsh-rsi logs --profile assistant`（必要时 `--errors-only`）确认 lark-channel 重新连接、没有配置校验错误。本次验收在重启后 `dump-config` rc=0，lark-channel 重连成功。
+3. **确认服务与连接**：`dsh-ray status` 查看 profile 与服务状态；`dsh-ray logs --profile assistant`（必要时 `--errors-only`）确认 lark-channel 重新连接、没有配置校验错误。本次验收在重启后 `dump-config` rc=0，lark-channel 重连成功。
 
 4. **确认 peer 已被链接为独立 principal**（对方下一条消息到达后）：
 

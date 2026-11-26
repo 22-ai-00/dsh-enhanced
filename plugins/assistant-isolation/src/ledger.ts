@@ -1,5 +1,5 @@
 import { markLinuxLedgerAdmissionRefusal } from './linux-repository-admission.js'
-import { validateGoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
+import { validateGoalArtifactAdmission } from '@dsh-ray/task-acceptance-contract'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, normalize } from 'node:path'

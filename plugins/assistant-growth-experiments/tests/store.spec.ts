@@ -9,7 +9,7 @@ import {
 import {
   workflowArgumentShapeDigest,
   workflowTraceRevisionDigest,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import type { WorkflowTraceEvidence, WorkflowTraceRevision } from '../src/types.ts'
 
 const roots: string[] = []

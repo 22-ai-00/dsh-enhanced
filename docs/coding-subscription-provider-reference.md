@@ -1,6 +1,6 @@
 # Coding subscription provider 详细参考
 
-本文记录 `@dsh-enhanced/coding-subscription-provider` 的完整配置、认证门禁、传输协议、排查方法和已知限制。日常安装与最小配置见[插件 README](../plugins/coding-subscription-provider/README.md)。
+本文记录 `@dsh-ray/coding-subscription-provider` 的完整配置、认证门禁、传输协议、排查方法和已知限制。日常安装与最小配置见[插件 README](../plugins/coding-subscription-provider/README.md)。
 
 ## 默认值与完整配置
 
@@ -9,8 +9,8 @@
 Cordis patch 覆盖不是深合并。手工覆盖嵌套 provider 时，建议保留该 provider 的完整对象：
 
 ```yaml
-- id: dsh-enhanced-coding-subscription-provider
-  name: '@dsh-enhanced/coding-subscription-provider'
+- id: dsh-ray-coding-subscription-provider
+  name: '@dsh-ray/coding-subscription-provider'
   config:
     cwd: !!js dshHomePath('assistant-workspace')
     timeoutMs: 600000

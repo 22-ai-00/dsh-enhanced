@@ -19,7 +19,7 @@ const fail = (message: string): never => { throw new Error(`rsi local update: ${
 
 async function loadAdapter(): Promise<{ adapterPath: string }> {
   const require = createRequire(import.meta.url)
-  const packageRoot = dirname(require.resolve('@dsh-enhanced/plugin-control-plane/package.json'))
+  const packageRoot = dirname(require.resolve('@dsh-ray/plugin-control-plane/package.json'))
   const adapterPath = join(packageRoot, 'bin', 'dsh-local-release-adapter.js')
   const adapter = await import(pathToFileURL(adapterPath).href) as { buildLocalUpdateCohort?: unknown }
   if (typeof adapter.buildLocalUpdateCohort !== 'function') throw new Error('rsi local update: Control Plane lacks isolated cohort preparation')

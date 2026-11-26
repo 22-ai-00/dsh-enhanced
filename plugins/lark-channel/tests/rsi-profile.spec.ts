@@ -1,19 +1,19 @@
 import { describe, expect, test } from 'vitest'
-import { ownerRouteAuthorityHash } from '@dsh-enhanced/assistant-delivery'
-import { Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
+import { ownerRouteAuthorityHash } from '@dsh-ray/assistant-delivery'
+import { Config as PolicyConfig } from '@dsh-ray/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { AssistantVerifierService } from '@dsh-ray/assistant-verifier'
 import { Context } from '@deepseek-ai/cordis'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import { interpolate, isJsExpr } from '@deepseek-ai/cordis-plugin-loader'
-import { Config as AutomationConfig } from '@dsh-enhanced/assistant-automations'
+import { Config as AutomationConfig } from '@dsh-ray/assistant-automations'
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
-import { controlPlaneDigest } from '@dsh-enhanced/plugin-control-plane'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
+import { controlPlaneDigest } from '@dsh-ray/plugin-control-plane'
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.js'
 import { createRsiPluginCreationSetup } from '../src/rsi-plugin-creation.js'
 import { compileRsiPersonalAssistantOptions, compileRsiProfiles, type RsiSetupManifest } from '../src/rsi-profile.ts'
@@ -21,11 +21,11 @@ import type { RsiSourceWorkspace } from '../src/rsi-source.js'
 import { nativeDescriptors } from './fixtures/rsi-linux-install.js'
 
 const rows = (extra: string) => `
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   config:
     assistantPolicy: { databasePath: !!js dshHomePath('policy.sqlite'), budgets: [], rules: [] }
     assistantAutomations: { schedulerEnabled: false, allowUnbudgetedExecution: false }
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config:
     defaultWorkspace: /tmp/rsi-workspace
     defaultAgentPreset: primary
@@ -37,19 +37,19 @@ const rows = (extra: string) => `
         agentPreset: primary
         policyRef: owner-policy
         minimumGeneration: 1
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config: { enabled: true }
-- id: dsh-enhanced-assistant-evaluation
+- id: dsh-ray-assistant-evaluation
   config: {}
-- id: dsh-enhanced-assistant-goals
+- id: dsh-ray-assistant-goals
   config: {}
-- id: dsh-enhanced-assistant-skills
+- id: dsh-ray-assistant-skills
   config: {}
-- id: dsh-enhanced-assistant-verifier
+- id: dsh-ray-assistant-verifier
   config: { databasePath: /tmp/verifier.sqlite }
-- id: dsh-enhanced-assistant-growth-driver
+- id: dsh-ray-assistant-growth-driver
   config: {}
-- id: dsh-enhanced-plugin-control-plane
+- id: dsh-ray-plugin-control-plane
   config: {}
 ${extra}`
 
@@ -79,7 +79,7 @@ const coordinatorBase = `
 describe('RSI profile compiler', () => {
   test('uses the real source-review validator before it can compose an invalid deployment', async () => {
     await expect(compileRsiProfiles({ manifest: manifest(), dshHome: '/tmp', targetPatch: '[]', targetEffective: rows(''), coordinatorPatch: '[]',
-      coordinatorEffective: '- id: dsh-enhanced-assistant-policy\n  name: "@dsh-enhanced/assistant-policy"\n  config: { budgets: [], rules: [] }\n- id: dsh-enhanced-assistant-automations\n  name: "@dsh-enhanced/assistant-automations"\n  config: { schedulerEnabled: false, allowUnbudgetedExecution: false }\n- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config: {}\n', coordinatorBase, owner })).rejects.toThrow('ENOENT')
+      coordinatorEffective: '- id: dsh-ray-assistant-policy\n  name: "@dsh-ray/assistant-policy"\n  config: { budgets: [], rules: [] }\n- id: dsh-ray-assistant-automations\n  name: "@dsh-ray/assistant-automations"\n  config: { schedulerEnabled: false, allowUnbudgetedExecution: false }\n- id: dsh-ray-plugin-control-plane\n  name: "@dsh-ray/plugin-control-plane"\n  config: {}\n', coordinatorBase, owner })).rejects.toThrow('ENOENT')
   })
 
   test.each([false, true])('compiles a complete two Host deployment with bounded-live=%s deterministically', async (boundedLive) => {
@@ -106,7 +106,7 @@ describe('RSI profile compiler', () => {
         sourceBuild,
         sourceJobs: { ...value.controlPlane.sourceJobs!, repository: root }, sourceApprovals: adapter, sourceReleases: adapter,
         sourceReleaseExecution: { reviewDecisionRoot: decision, timeoutMs: 1000, independentReview: true }, sourceAdoptions: { profile: 'target', planTtlMs: 60_000, timeoutMs: 1000, authority: adapter, handoff: { schemaVersion: 1, coordinatorId: 'coordinator', maximumWindowMs: 1000, commit: 'target-host' } },
-        runtimeObserver: { socketPath: join(privateRoot, 'observer.sock'), keyPath: key, profilePath, targets: [{ entryId: 'control', module: '@dsh-enhanced/plugin-control-plane', configDigest: 'c'.repeat(64), services: [] }] }, foregroundDeployments: { attestorJournalPath: join(root, 'attestor.json') },
+        runtimeObserver: { socketPath: join(privateRoot, 'observer.sock'), keyPath: key, profilePath, targets: [{ entryId: 'control', module: '@dsh-ray/plugin-control-plane', configDigest: 'c'.repeat(64), services: [] }] }, foregroundDeployments: { attestorJournalPath: join(root, 'attestor.json') },
         taskObservations: { policy: { id: 'observation', expiresAt: Date.now() + 60_000, maximumObservations: 1, minimumChecks: 1, maximumChecks: 1, lookbackMs: 1000 }, scope, profilePath, timeoutMs: 1000, budgetId: 'observations', budgetAmount: 1, authority: adapter },
       }
       if (boundedLive) {
@@ -126,7 +126,7 @@ describe('RSI profile compiler', () => {
       if (value.controlPlane.liveQualification) value.controlPlane.liveQualification.scope.workspace = adjustedOwner.workspace
       const hash = ownerRouteAuthorityHash({ id: 'owner-route', conversation: adjustedOwner.conversation, principal: adjustedOwner.principal, workspace: adjustedOwner.workspace, agentPreset: 'primary', policyRef: 'owner-policy', minimumGeneration: 1 })
       ;(value.sourceReviews.owner as any).authorityHash = hash
-      const coordinatorEffective = '- id: dsh-enhanced-assistant-policy\n  name: "@dsh-enhanced/assistant-policy"\n  config: { databasePath: !!js dshHomePath(\'old.sqlite\'), budgets: [], rules: [] }\n- id: dsh-enhanced-assistant-automations\n  name: "@dsh-enhanced/assistant-automations"\n  config: { databasePath: !!js dshHomePath(\'old-auto.sqlite\'), runsPath: !!js dshHomePath(\'old-runs\'), schedulerEnabled: false, allowUnbudgetedExecution: false }\n- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config: {}\n- id: tool-web\n  name: "@deepseek-ai/tool-web"\n  config: {}\n'
+      const coordinatorEffective = '- id: dsh-ray-assistant-policy\n  name: "@dsh-ray/assistant-policy"\n  config: { databasePath: !!js dshHomePath(\'old.sqlite\'), budgets: [], rules: [] }\n- id: dsh-ray-assistant-automations\n  name: "@dsh-ray/assistant-automations"\n  config: { databasePath: !!js dshHomePath(\'old-auto.sqlite\'), runsPath: !!js dshHomePath(\'old-runs\'), schedulerEnabled: false, allowUnbudgetedExecution: false }\n- id: dsh-ray-plugin-control-plane\n  name: "@dsh-ray/plugin-control-plane"\n  config: {}\n- id: tool-web\n  name: "@deepseek-ai/tool-web"\n  config: {}\n'
       const input = { manifest: value, dshHome: home, targetPatch: '[]\n', targetEffective, coordinatorPatch: '[]\n', coordinatorEffective, coordinatorBase, owner: adjustedOwner }
       const first = await compileRsiProfiles(input)
       const second = await compileRsiProfiles({ ...input, targetPatch: first.targetPatch, coordinatorPatch: first.coordinatorPatch })
@@ -138,8 +138,8 @@ describe('RSI profile compiler', () => {
       const nativeRows = (source: string) => nativeYaml.load(source, { schema: entryListSchema }) as Array<{ id: string; config: Record<string, unknown> }>
       const coordinatorRows = nativeRows(first.coordinatorPatch)
       const coordinatorRoot = join(home, 'rsi-coordinators', 'coordinator')
-      const coordinatorPolicy = coordinatorRows.find(row => row.id === 'dsh-enhanced-assistant-policy')!.config
-      const coordinatorAutomations = coordinatorRows.find(row => row.id === 'dsh-enhanced-assistant-automations')!.config
+      const coordinatorPolicy = coordinatorRows.find(row => row.id === 'dsh-ray-assistant-policy')!.config
+      const coordinatorAutomations = coordinatorRows.find(row => row.id === 'dsh-ray-assistant-automations')!.config
       expect(coordinatorPolicy.databasePath).toBe(join(coordinatorRoot, 'policy.sqlite'))
       expect(coordinatorAutomations.databasePath).toBe(join(coordinatorRoot, 'automations.sqlite'))
       expect(coordinatorAutomations.runsPath).toBe(join(coordinatorRoot, 'runs'))
@@ -151,14 +151,14 @@ describe('RSI profile compiler', () => {
       expect(() => PolicyConfig(coordinatorPolicy as unknown as Parameters<typeof PolicyConfig>[0])).not.toThrow()
       expect(() => AutomationConfig(coordinatorAutomations as unknown as Parameters<typeof AutomationConfig>[0])).not.toThrow()
       const targetRows = nativeRows(first.targetPatch)
-      const personal = targetRows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config
+      const personal = targetRows.find(row => row.id === 'dsh-ray-personal-assistant')!.config
       expect(isJsExpr((personal.assistantPolicy as Record<string, unknown>).databasePath)).toBe(true)
       const target = parse(first.targetPatch) as Array<{ id: string; config: any }>
-      expect(target.some(row => row.id === 'dsh-enhanced-assistant-memory-learning')).toBe(false)
-      expect(target.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.personalMemory).toBeUndefined()
-      expect(target.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config.sourceBuild.versioning).toBe('patch')
-      expect(target.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config.sourceJobs.authorityId).toBe('authority')
-      const reviewConfig = target.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config.sourceReviews
+      expect(target.some(row => row.id === 'dsh-ray-assistant-memory-learning')).toBe(false)
+      expect(target.find(row => row.id === 'dsh-ray-personal-assistant')!.config.personalMemory).toBeUndefined()
+      expect(target.find(row => row.id === 'dsh-ray-plugin-control-plane')!.config.sourceBuild.versioning).toBe('patch')
+      expect(target.find(row => row.id === 'dsh-ray-plugin-control-plane')!.config.sourceJobs.authorityId).toBe('authority')
+      const reviewConfig = target.find(row => row.id === 'dsh-ray-assistant-verifier')!.config.sourceReviews
       expect(reviewConfig.authorityId).toBe('review')
       expect(reviewConfig.owner.authorityId).toBe('owner-route')
       const reviewCtx = new Context()
@@ -179,8 +179,8 @@ describe('RSI profile compiler', () => {
       expect(first.coordinatorPatch).toContain(join(home, 'rsi-coordinators', 'coordinator', 'runs'))
       // The generated rules are accepted by the real Policy schema, rather
       // than merely looking structurally plausible in YAML.
-      expect(() => PolicyConfig(target.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.assistantPolicy)).not.toThrow()
-      const policyConfig = { ...target.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.assistantPolicy, databasePath: join(root, 'policy.sqlite') }
+      expect(() => PolicyConfig(target.find(row => row.id === 'dsh-ray-personal-assistant')!.config.assistantPolicy)).not.toThrow()
+      const policyConfig = { ...target.find(row => row.id === 'dsh-ray-personal-assistant')!.config.assistantPolicy, databasePath: join(root, 'policy.sqlite') }
       const policy = new AssistantPolicyService(new Context(), policyConfig)
       expect(policy.evaluate({ subject: { kind: 'background', id: 'source-job-123', workspace: adjustedOwner.workspace, principal: 'lark/account/tenant/owner' }, action: 'execute', resource: { kind: 'automation', id: 'source-job-123' }, context: { initiator: 'background' } }).effect).toBe('allow')
 
@@ -214,7 +214,7 @@ describe('RSI profile compiler', () => {
       expect(await compileRsiProfiles({ ...creationInput, targetPatch: creationOutput.targetPatch,
         coordinatorPatch: creationOutput.coordinatorPatch })).toEqual(creationOutput)
       const creationRows = parse(creationOutput.targetPatch) as Array<{ id: string; config: any }>
-      const creationPolicyConfig = creationRows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.assistantPolicy
+      const creationPolicyConfig = creationRows.find(row => row.id === 'dsh-ray-personal-assistant')!.config.assistantPolicy
       expect(() => PolicyConfig(creationPolicyConfig)).not.toThrow()
       expect(creationPolicyConfig.toolDefaultEffect).toBeUndefined()
       expect(creationPolicyConfig.rules).toContainEqual({ id: 'rsi-setup-created-tools', effect: 'allow',
@@ -285,18 +285,18 @@ describe('RSI profile compiler', () => {
         reviews: memoryReviews, adoption: memoryAdoption, limits: { extractions: 2, scans: 5 } }
       const memoryEffective = targetEffective.replace('    assistantAutomations:',
         "    personalMemory: { databasePath: !!js dshHomePath('personal-memory/memory.sqlite'), approvalMode: delivery-required }\n    assistantAutomations:")
-        + '- id: dsh-enhanced-assistant-memory-learning\n  name: "@dsh-enhanced/assistant-memory-learning"\n  disabled: true\n'
+        + '- id: dsh-ray-assistant-memory-learning\n  name: "@dsh-ray/assistant-memory-learning"\n  disabled: true\n'
       const memoryInput = { ...input, manifest: memoryManifest, targetEffective: memoryEffective }
       const memoryOutput = await compileRsiProfiles(memoryInput)
       expect(await compileRsiProfiles({ ...memoryInput, targetPatch: memoryOutput.targetPatch,
         coordinatorPatch: memoryOutput.coordinatorPatch })).toEqual(memoryOutput)
       expect(memoryOutput.targetPatch).toContain("!!js dshHomePath('personal-memory/memory.sqlite')")
       const memoryRows = parse(memoryOutput.targetPatch) as Array<{ id: string; name?: string; disabled?: boolean; config: any }>
-      const memoryPersonal = memoryRows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config
+      const memoryPersonal = memoryRows.find(row => row.id === 'dsh-ray-personal-assistant')!.config
       expect(memoryPersonal.personalMemory).toMatchObject({ approvalMode: 'delivery-required', automaticLearning: memoryAdoption })
-      expect(memoryRows.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config.memoryReviews).toEqual(memoryReviews)
-      expect(memoryRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')).toMatchObject({
-        name: '@dsh-enhanced/assistant-memory-learning', disabled: false, config: memoryManifest.memoryLearning.learning })
+      expect(memoryRows.find(row => row.id === 'dsh-ray-assistant-verifier')!.config.memoryReviews).toEqual(memoryReviews)
+      expect(memoryRows.find(row => row.id === 'dsh-ray-assistant-memory-learning')).toMatchObject({
+        name: '@dsh-ray/assistant-memory-learning', disabled: false, config: memoryManifest.memoryLearning.learning })
       const memoryPolicy = memoryPersonal.assistantPolicy
       const expectedPersonal = compileRsiPersonalAssistantOptions({ effectiveConfig: {
         assistantPolicy: { databasePath: { __jsExpr: "dshHomePath('policy.sqlite')" }, budgets: [], rules: [] },
@@ -350,7 +350,7 @@ describe('RSI profile compiler', () => {
         'budgets: [{ id: same-limit-workspace, metric: automation-runs, limit: 2, periodMs: 60000, scope: workspace }]')
       await expect(compileRsiProfiles({ ...memoryInput, targetEffective: sameLimitSharedPool })).rejects.toThrow('workspace budget')
       await expect(compileRsiProfiles({ ...memoryInput, targetEffective: memoryEffective.replace('disabled: true', 'disabled: false') })).rejects.toThrow('inactive installed bundle')
-      await expect(compileRsiProfiles({ ...memoryInput, targetEffective: memoryEffective.replace('@dsh-enhanced/assistant-memory-learning', '@owner/other') })).rejects.toThrow('inactive installed bundle')
+      await expect(compileRsiProfiles({ ...memoryInput, targetEffective: memoryEffective.replace('@dsh-ray/assistant-memory-learning', '@owner/other') })).rejects.toThrow('inactive installed bundle')
       await expect(compileRsiProfiles({ ...memoryInput, targetEffective: memoryEffective.replace('    personalMemory:', '    missingMemory:') })).rejects.toThrow('personalMemory config')
 
       if (boundedLive) {
@@ -365,7 +365,7 @@ describe('RSI profile compiler', () => {
       await expect(compileRsiProfiles({ ...input, manifest: wrongScope })).rejects.toThrow('sourceJobs')
       const wrongReviewOwner = structuredClone(value); wrongReviewOwner.sourceReviews.owner = { ...wrongReviewOwner.sourceReviews.owner, authorityId: wrongReviewOwner.controlPlane.sourceJobs!.authorityId }
       await expect(compileRsiProfiles({ ...input, manifest: wrongReviewOwner })).rejects.toThrow('sourceReviews.owner')
-      await expect(compileRsiProfiles({ ...input, coordinatorEffective: `${coordinatorEffective}- id: dsh-enhanced-web-owner\n  name: "@dsh-enhanced/web-owner"\n  config: {}\n` })).rejects.toThrow('forbidden row')
+      await expect(compileRsiProfiles({ ...input, coordinatorEffective: `${coordinatorEffective}- id: dsh-ray-web-owner\n  name: "@dsh-ray/web-owner"\n  config: {}\n` })).rejects.toThrow('forbidden row')
       await expect(compileRsiProfiles({ ...input, coordinatorEffective: coordinatorEffective.replace('@deepseek-ai/tool-web', '@evil/tool-web') })).rejects.toThrow('forbidden row')
       await expect(compileRsiProfiles({ ...input, coordinatorEffective: `${coordinatorEffective}- id: custom-ingress\n  name: "@owner/custom-ingress"\n  config: {}\n` })).rejects.toThrow('forbidden row')
       await expect(compileRsiProfiles({ ...input, coordinatorEffective: `${coordinatorEffective}- id: agent-loop\n  name: "@deepseek-ai/agent-loop"\n  config: { agents: [{ id: unexpected }] }\n` })).rejects.toThrow('agent-loop.agents')
@@ -375,7 +375,7 @@ describe('RSI profile compiler', () => {
       const fixed = structuredClone(value); fixed.growthDriver.provider = 'custom-gateway'; fixed.growthDriver.model = 'day1'; fixed.growthDriver.reasoningEffort = 'high'
       const fixedOutput = await compileRsiProfiles({ ...input, manifest: fixed })
       const fixedRows = parse(fixedOutput.targetPatch) as Array<{ id: string; config: any }>
-      expect(fixedRows.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')!.config).toMatchObject({ provider: 'custom-gateway', model: 'day1', reasoningEffort: 'high' })
+      expect(fixedRows.find(row => row.id === 'dsh-ray-assistant-growth-driver')!.config).toMatchObject({ provider: 'custom-gateway', model: 'day1', reasoningEffort: 'high' })
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 })

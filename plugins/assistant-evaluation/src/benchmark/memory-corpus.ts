@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { BenchmarkCase, BenchmarkPlan, BenchmarkVerdict, BenchmarkDomain } from './types.js'
 
 export type MemoryBenchmarkJson = null | boolean | number | string | readonly MemoryBenchmarkJson[] | { readonly [key: string]: MemoryBenchmarkJson }

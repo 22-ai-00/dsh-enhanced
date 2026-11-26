@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,11 +23,11 @@ function allPorts() {
   return Object.fromEntries(methods.map(key => [key, vi.fn()]))
 }
 
-describe('dsh-enhanced-assistant-memory-learning', () => {
+describe('dsh-ray-assistant-memory-learning', () => {
   it('exposes stable plugin identity and active-by-default bundle patch', () => {
-    expect(name).toBe('dsh-enhanced-assistant-memory-learning')
+    expect(name).toBe('dsh-ray-assistant-memory-learning')
     expect(version).toBe(manifest.version)
-    expect(bundlePatch).toContain("name: '@dsh-enhanced/assistant-memory-learning'")
+    expect(bundlePatch).toContain("name: '@dsh-ray/assistant-memory-learning'")
     expect(bundlePatch).not.toContain('disabled: true')
   })
 

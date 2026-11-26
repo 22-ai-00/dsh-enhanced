@@ -104,7 +104,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     })
     const parsed = new URL(url)
     expect(parsed.searchParams.get('from')).toBe('sdk')
-    expect(parsed.searchParams.get('source')).toBe('node-sdk/dsh-enhanced/lark-channel')
+    expect(parsed.searchParams.get('source')).toBe('node-sdk/dsh-ray/lark-channel')
     expect(parsed.searchParams.get('tp')).toBe('sdk')
     expect(parsed.searchParams.get('name')).toBe('文鳐助手')
     expect(parsed.searchParams.get('clientID')).toBe(fixtureAppId('aabbccddeeff0011'))
@@ -170,7 +170,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     }
 
     const larkDesc: SettingsDescriptor = {
-      ns: 'dsh-enhanced-lark-channel',
+      ns: 'dsh-ray-lark-channel',
       schema: {},
       value: { enabled: false, appId: fixtureAppId('0000000000000000'), account: 'primary', tenant: 'replace-with-tenant-key' },
       revision: 4,
@@ -221,7 +221,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     expect(finished.connected).toBe(false)
     expect(finished.restartRecommended).toBe(true)
     expect(finished.note).toContain('DeepSeek Harness.app')
-    expect(finished.note).toContain('dsh-rsi restart')
+    expect(finished.note).toContain('dsh-ray restart')
     expect(mutate).not.toHaveBeenCalled()
     expect(reloadEntry).not.toHaveBeenCalled()
     expect(JSON.stringify(finished)).not.toContain('super_secret_qr_token_never_leak')
@@ -237,7 +237,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     expect(patchText).not.toContain('super_secret_qr_token_never_leak')
 
     const doc = parseDocument(patchText, JS_TAG).toJSON() as Array<{ id: string; config?: Record<string, unknown> }>
-    const lark = doc.find(r => r.id === 'dsh-enhanced-lark-channel')!
+    const lark = doc.find(r => r.id === 'dsh-ray-lark-channel')!
     expect(lark.config).toMatchObject({
       enabled: true,
       appId: fixtureAppId('aabbccddeeff0011'),
@@ -251,7 +251,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     })
     expect(patchText).not.toMatch(/&a\d|\*a\d/u)
 
-    const pa = doc.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    const pa = doc.find(r => r.id === 'dsh-ray-personal-assistant')!
     const rules = (pa.config!['assistantPolicy'] as { rules: Array<{ id: string }> }).rules.map(r => r.id)
     expect(rules).toEqual(expect.arrayContaining([
       'lark-channel-credential-primary',
@@ -259,7 +259,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
       'lark-owner-reply-primary',
       'lark-owner-capability-*-primary',
       'lark-owner-tool-*-primary',
-      'lark-owner-approval-dsh-enhanced-personal-memory-primary',
+      'lark-owner-approval-dsh-ray-personal-memory-primary',
       'lark-owner-preference-signal-primary',
       'lark-owner-preference-snapshot-primary',
     ]))
@@ -350,14 +350,14 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     expect(done.note).toContain('普通私聊')
     expect(done.note).toContain('/permission')
     expect(done.note).toContain('dsh-lark-setup')
-    expect(done.note).toContain('dsh-rsi restart')
+    expect(done.note).toContain('dsh-ray restart')
     expect(pollUrls).toEqual([
       'https://accounts.feishu.cn/oauth/v1/app/registration',
       'https://accounts.larksuite.com/oauth/v1/app/registration',
     ])
 
     const doc = parseDocument(readFileSync(patchPath, 'utf8'), JS_TAG).toJSON() as Array<{ id: string; config?: Record<string, unknown> }>
-    expect(doc.find(r => r.id === 'dsh-enhanced-lark-channel')!.config!['domain']).toBe('lark')
+    expect(doc.find(r => r.id === 'dsh-ray-lark-channel')!.config!['domain']).toBe('lark')
 
     // Existing Web owner stays untouched as active owner; Lark user is linked to it.
     const db = new DatabaseSync(dbPath, { readOnly: true })
@@ -509,7 +509,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     const { dshHome, profileDir } = makeTempProfile('desktop')
     const ctx = new Context()
     const larkDesc: SettingsDescriptor = {
-      ns: 'dsh-enhanced-lark-channel',
+      ns: 'dsh-ray-lark-channel',
       schema: {},
       value: { enabled: false, appId: fixtureAppId('0000000000000000'), account: 'primary', tenant: 'replace-with-tenant-key', credentialHandle: 'lark-app-secret' },
       revision: 1,
@@ -574,7 +574,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     expect(expEnd.errorCode).toBe('expired_token')
 
     // B) Recovers after 2 transient network errors, succeeds without open_id on split policy layout
-    writeFileSync(patchPath, `- id: dsh-enhanced-assistant-policy\n  name: "@dsh-enhanced/assistant-policy"\n  config:\n    rules: []\n`, 'utf8')
+    writeFileSync(patchPath, `- id: dsh-ray-assistant-policy\n  name: "@dsh-ray/assistant-policy"\n  config:\n    rules: []\n`, 'utf8')
     let transientCount = 0
     const splitMgr = new FeishuQrOnboardingManager({
       fetchFn: async (_url, init) => {
@@ -602,7 +602,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     expect(splitDone.state).toBe('completed')
     expect(splitDone.ownerBinding).toBe('not-returned')
     const splitDoc = parseDocument(readFileSync(patchPath, 'utf8'), JS_TAG).toJSON() as Array<{ id: string; config?: Record<string, unknown> }>
-    const policyRules = (splitDoc.find(r => r.id === 'dsh-enhanced-assistant-policy')!.config!['rules'] as Array<{ id: string }>).map(r => r.id)
+    const policyRules = (splitDoc.find(r => r.id === 'dsh-ray-assistant-policy')!.config!['rules'] as Array<{ id: string }>).map(r => r.id)
     expect(policyRules).toContain('lark-channel-credential-primary')
 
     // C) Fails cleanly after 4 consecutive network errors
@@ -703,19 +703,19 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     ])
 
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-delivery',
-      '  name: "@dsh-enhanced/assistant-delivery"',
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
       '  config:',
       "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
       "    defaultWorkspace: !!js dshHomePath('assistant-workspace')",
       '    defaultAgentPreset: standard',
-      '- id: dsh-enhanced-credentials-keychain',
-      '  name: "@dsh-enhanced/credentials-keychain"',
+      '- id: dsh-ray-credentials-keychain',
+      '  name: "@dsh-ray/credentials-keychain"',
       '  disabled: true',
       '  config:',
       '    handles: []',
-      '- id: dsh-enhanced-lark-channel',
-      '  name: "@dsh-enhanced/lark-channel"',
+      '- id: dsh-ray-lark-channel',
+      '  name: "@dsh-ray/lark-channel"',
       '  disabled: true',
       '  config:',
       '    enabled: false',
@@ -764,7 +764,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     expect(yamlText).not.toContain('disabled: true')
 
     const rows = parseDocument(yamlText, JS_TAG).toJSON() as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-    const lark = rows.find(r => r.id === 'dsh-enhanced-lark-channel')!
+    const lark = rows.find(r => r.id === 'dsh-ray-lark-channel')!
     expect(lark.disabled).toBeUndefined()
     expect(lark.config).toMatchObject({
       account: 'work',
@@ -774,7 +774,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
       credentialPurpose: 'connect',
       credentialLeaseMs: 86_400_000,
     })
-    const pa = rows.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    const pa = rows.find(r => r.id === 'dsh-ray-personal-assistant')!
     const rules = (pa.config!['assistantPolicy'] as { rules: Array<{ id: string; subject: Record<string, unknown>; resource: Record<string, unknown> }> }).rules
     const replyRule = rules.find(r => r.id === 'lark-owner-reply-work')!
     expect(replyRule.subject['workspace']).toMatch(/\/assistant-workspace$/u)
@@ -982,9 +982,9 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
         if (name === 'pluginManager') {
           return {
             listBundles: async () => [
-              bundleRow('@dsh-enhanced/lark-channel', true, true),
-              bundleRow('@dsh-enhanced/assistant-delivery', true, false),
-              // @dsh-enhanced/credentials-keychain omitted (uninstalled)
+              bundleRow('@dsh-ray/lark-channel', true, true),
+              bundleRow('@dsh-ray/assistant-delivery', true, false),
+              // @dsh-ray/credentials-keychain omitted (uninstalled)
             ],
           }
         }
@@ -997,8 +997,8 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     }, { domain: 'feishu', appName: '文鳐', existingAppId: '', account: '', tenant: '', calendarReadonly: false, businessTools: true })
     expect(missingRes.state).toBe('failed')
     expect(missingRes.errorCode).toBe('missing-required-bundles')
-    expect(missingRes.note).toContain('@dsh-enhanced/credentials-keychain')
-    expect(missingRes.note).toContain('@dsh-enhanced/assistant-delivery')
+    expect(missingRes.note).toContain('@dsh-ray/credentials-keychain')
+    expect(missingRes.note).toContain('@dsh-ray/assistant-delivery')
     expect(unexpectedFetch).not.toHaveBeenCalled()
 
     // 1b) Cancelling while async pluginManager.listBundles() is hung resolves immediately without waiting on listBundles(), and a late rejection never leaks unhandled
@@ -1070,9 +1070,9 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
         if (name === 'pluginManager') {
           return {
             listBundles: async () => [
-              bundleRow('@dsh-enhanced/lark-channel', true, true),
-              bundleRow('@dsh-enhanced/credentials-keychain', true, true),
-              bundleRow('@dsh-enhanced/assistant-delivery', true, true),
+              bundleRow('@dsh-ray/lark-channel', true, true),
+              bundleRow('@dsh-ray/credentials-keychain', true, true),
+              bundleRow('@dsh-ray/assistant-delivery', true, true),
             ],
           }
         }
@@ -1148,7 +1148,7 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
       role: 'owner',
       status: 'active',
     }])
-    // Add extra tables matching real @dsh-enhanced/assistant-delivery schema
+    // Add extra tables matching real @dsh-ray/assistant-delivery schema
     const initDb = new DatabaseSync(dbPath)
     try {
       initDb.exec(`
@@ -1164,8 +1164,8 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
       initDb.close()
     }
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-dreaming',
-      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '- id: dsh-ray-assistant-dreaming',
+      '  name: "@dsh-ray/assistant-dreaming"',
       '  config:',
       '    enabled: true',
       '    retired: false',
@@ -1333,15 +1333,15 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
       host: makeHost(dshHome, profileDir, 'desktop'),
       getDescriptors: () => [],
       listBundles: async () => [
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, optional: false, removable: true, rows: [] },
-        { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, optional: false, removable: true, rows: [] },
-        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, optional: false, removable: true, rows: [] },
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, optional: false, removable: true, rows: [] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, optional: false, removable: true, rows: [] },
+        { name: '@dsh-ray/credentials-keychain', installed: true, enabled: true, optional: false, removable: true, rows: [] },
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, optional: false, removable: true, rows: [] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: false, optional: false, removable: true, rows: [] },
       ],
     }, { domain: 'feishu', appName: '文鳐', existingAppId: '', account: '', tenant: '', calendarReadonly: false, businessTools: true })
     expect(res.state).toBe('failed')
     expect(res.errorCode).toBe('missing-required-bundles')
-    expect(res.note).toContain('@dsh-enhanced/personal-assistant')
+    expect(res.note).toContain('@dsh-ray/personal-assistant')
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

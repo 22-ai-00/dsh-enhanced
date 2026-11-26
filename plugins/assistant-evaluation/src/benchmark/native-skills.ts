@@ -4,9 +4,9 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { CellObservation, HoldoutReceipt, ProspectiveBenchmarkManifest, QualificationBinding, SignedCell } from '@dsh-enhanced/task-acceptance-contract/holdout-authority'
-import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import type { CellObservation, HoldoutReceipt, ProspectiveBenchmarkManifest, QualificationBinding, SignedCell } from '@dsh-ray/task-acceptance-contract/holdout-authority'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import type { NativeAdapterFactory } from './native.js'
 import { createNativeSkillGoalRuntime, type NativeCapturedSkill, type NativeSkillGoalControl, type NativeSkillGoalOptions, type NativeSkillGoalResult } from './native-skills-runtime.js'
 import { BenchmarkStore } from './store.js'
@@ -67,13 +67,13 @@ function trainingDigest(origin: NativeCapturedSkill['origin']): string {
 export function nativeSkillRuntimeIdentity(provider: string): string {
   const names = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-query',
     '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-session-persistence', '@deepseek-ai/dsh-session-persistence-jsonl', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools',
-    '@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver', '@dsh-enhanced/assistant-evaluation', '@dsh-enhanced/assistant-delivery',
-    '@dsh-enhanced/assistant-policy', '@dsh-enhanced/assistant-goals', '@dsh-enhanced/assistant-skills', '@dsh-enhanced/assistant-isolation', '@dsh-enhanced/assistant-verifier']
-  if (provider === 'deepseek-goal-metered') names.push('@dsh-enhanced/assistant-deepseek-budget', '@deepseek-ai/dsh-credentials')
+    '@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver', '@dsh-ray/assistant-evaluation', '@dsh-ray/assistant-delivery',
+    '@dsh-ray/assistant-policy', '@dsh-ray/assistant-goals', '@dsh-ray/assistant-skills', '@dsh-ray/assistant-isolation', '@dsh-ray/assistant-verifier']
+  if (provider === 'deepseek-goal-metered') names.push('@dsh-ray/assistant-deepseek-budget', '@deepseek-ai/dsh-credentials')
   const require = createRequire(import.meta.url)
   return acceptanceDigest(names.map(packageName => {
     const moduleResolverDirectory = packageName === '@deepseek-ai/dsh-credentials'
-      ? dirname(require.resolve('@dsh-enhanced/assistant-deepseek-budget')) : resolverDirectory
+      ? dirname(require.resolve('@dsh-ray/assistant-deepseek-budget')) : resolverDirectory
     const moduleRequire = createRequire(join(moduleResolverDirectory, 'native-skill-resolver.cjs'))
     let root = dirname(realpathSync(moduleRequire.resolve(packageName)))
     while (!existsSync(join(root, 'package.json')) || JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name !== packageName) {
@@ -140,7 +140,7 @@ export function nativeSkillJournalPlan(config: NativeSkillBenchmarkConfig, bindi
 
 /** Recheck final signatures and exact per-cell observations before exposing any quality result. */
 export async function nativeSkillBenchmarkReport(evidence: NativeSkillBenchmarkEvidence, publicKey: string, generatorDigest: string) {
-  const authorityModule = '@dsh-enhanced/assistant-skills/holdout-authority', qualificationModule = '@dsh-enhanced/assistant-skills/holdout-qualification'
+  const authorityModule = '@dsh-ray/assistant-skills/holdout-authority', qualificationModule = '@dsh-ray/assistant-skills/holdout-qualification'
   const { verifyProspectiveBenchmarkManifest } = await import(authorityModule)
   const { verifyHoldoutReceipt } = await import(qualificationModule)
   benchmarkAssert(evidence.protocol === nativeSkillBenchmarkProtocol && verifyProspectiveBenchmarkManifest(evidence.manifest, evidence.binding, publicKey, generatorDigest), 'native skill manifest signature or freeze binding rejected')
@@ -195,7 +195,7 @@ export async function runNativeSkillBenchmark(input: NativeSkillBenchmarkConfig,
   const binding: QualificationBinding = { scopeDigest: acceptanceDigest(captured.selection.scope), baselineDigest: acceptanceDigest({ protocol: nativeSkillBenchmarkProtocol, skill: null }),
     candidateDigest: captured.snapshot.definitionDigest, budgetDigest: acceptanceDigest({ config, sourceDigest: captured.snapshot.sourceDigest, runtimeDigest, trainingDigest: trainingDigest(captured.origin) }), expiresAt: config.expiresAt, repeats: config.repeats }
   // Existing authority durably freezes this binding before generating any private task.
-  const skillsModule = '@dsh-enhanced/assistant-skills', authorityModule = '@dsh-enhanced/assistant-skills/holdout-authority', isolationModule = '@dsh-enhanced/assistant-isolation'
+  const skillsModule = '@dsh-ray/assistant-skills', authorityModule = '@dsh-ray/assistant-skills/holdout-authority', isolationModule = '@dsh-ray/assistant-isolation'
   const { openHoldoutProcess } = await import(skillsModule)
   const { verifyProspectiveBenchmarkManifest, verifyHoldoutSignature } = await import(authorityModule)
   const { IsolatedVerifierRunner } = await import(isolationModule)

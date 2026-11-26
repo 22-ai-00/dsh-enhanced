@@ -6,9 +6,9 @@ import plugin, { apply, Config, EventTriggersService, name, version } from '../s
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
 
-describe('dsh-enhanced-event-triggers entrypoint', () => {
+describe('dsh-ray-event-triggers entrypoint', () => {
   test('exports stable identity, service, and validated config', () => {
-    expect(name).toBe('dsh-enhanced-event-triggers')
+    expect(name).toBe('dsh-ray-event-triggers')
     expect(version).toBe(manifest.version)
     expect(plugin).toEqual({ name, Config, apply })
     expect(Config).toBe(EventTriggersService.Config)

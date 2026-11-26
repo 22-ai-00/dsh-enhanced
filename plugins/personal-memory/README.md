@@ -1,30 +1,30 @@
-# @dsh-enhanced/personal-memory
+# @dsh-ray/personal-memory
 
 面向个人助理的短期上下文之外长期记忆：保存简短且稳定的事实、偏好、约定和经验，按 user/agent 与 user-global/workspace 双维隔离。当前 owner 明确要求的普通私有 add/replace 经独立审查后可即时提交；其他手动写入走 `assistant-policy` 的持久审批提案。可选有限授权支持独立审查后的事实/经验采用。研究资料、文档和项目知识不属于这里，应交给 `personal-wiki`。
 
 ## 安装
 
-本插件要求 `@dsh-enhanced/assistant-policy` 已经挂载并提供 `ctx.assistantPolicy`。生产环境还应组合
-`@dsh-enhanced/assistant-delivery`，由当前 Agent 会话绑定的 owner 私聊派生审批 principal、workspace
+本插件要求 `@dsh-ray/assistant-policy` 已经挂载并提供 `ctx.assistantPolicy`。生产环境还应组合
+`@dsh-ray/assistant-delivery`，由当前 Agent 会话绑定的 owner 私聊派生审批 principal、workspace
 和投递 binding：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-policy
-dsh plugin --profile web add @dsh-enhanced/assistant-delivery
-dsh plugin --profile web add @dsh-enhanced/personal-memory
+dsh plugin --profile web add @dsh-ray/assistant-policy
+dsh plugin --profile web add @dsh-ray/assistant-delivery
+dsh plugin --profile web add @dsh-ray/personal-memory
 dsh --profile web --dump-config
 ```
 
 上面的 Policy 片段只覆盖 Memory 自身的前台权限，不足以发送或点击审批卡。生产飞书闭环应运行
 `dsh-lark-setup --profile web --create-app --allow-agent-tools`；向导会为 exact owner binding 写入
-`dsh-enhanced-personal-memory` 的 `approval.send` 与 owner `approval.decide` 规则。若手工维护 Policy，必须
+`dsh-ray-personal-memory` 的 `approval.send` 与 owner `approval.decide` 规则。若手工维护 Policy，必须
 提供同等精确的 source、workspace、principal 与 binding 限制，不能使用通配 owner 或 workspace。
 
 默认数据库位于 `$DSH_HOME/personal-memory/memory.sqlite`。单独安装后的 policy 默认没有 allow 规则，所以记忆搜索、快照和提案都会 fail closed；需要在 profile 中按实际 preset 与绝对 workspace 放行：
 
 ```yaml
-- id: dsh-enhanced-assistant-policy
-  name: '@dsh-enhanced/assistant-policy'
+- id: dsh-ray-assistant-policy
+  name: '@dsh-ray/assistant-policy'
   config:
     databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
     rules:
@@ -58,9 +58,9 @@ dsh --profile web --dump-config
 
 同一 Host 安装 `assistant-goals` 时，Memory 还会在每步读取可选 `taskContext()`，按当前步骤 → 最近用户输入 → 目标 objective 的顺序召回并去重，再补确认的偏好和约定。Goals 每次检查 live owner 与 `snapshot` 授权；Memory 再核对 principal record/version/digest、workspace 和 preset，不能由模型选择别人的 namespace。同 owner 的显式 focus 可提供跨会话检索上下文，但不转移原生 Goal 执行权。checkpoint 的 nextStep 仅是规划文本，用作检索关键词，不成为可信事实或新权限。
 
-该组合的可选 peer 为 `@dsh-enhanced/assistant-goals >=0.1.0 <0.2.0`；它不会自动启用 Goals。旧版本未提供 `goal-task-context/v1`、服务缺失/卸载、读取失败或身份不匹配时继续按原用户 query 召回。每个 query 字段最多 2048 字符，合并结果仍共用原有 top-K、字节和 token 预算。原生 AgentLoop 回归覆盖步骤改变和记忆撤回后的下一次模型请求；这证明动态检索接线，不代表已经测得真实模型决策收益。
+该组合的可选 peer 为 `@dsh-ray/assistant-goals >=0.1.0 <0.2.0`；它不会自动启用 Goals。旧版本未提供 `goal-task-context/v1`、服务缺失/卸载、读取失败或身份不匹配时继续按原用户 query 召回。每个 query 字段最多 2048 字符，合并结果仍共用原有 top-K、字节和 token 预算。原生 AgentLoop 回归覆盖步骤改变和记忆撤回后的下一次模型请求；这证明动态检索接线，不代表已经测得真实模型决策收益。
 
-当宿主挂载了 `@dsh-enhanced/assistant-association`（服务名 `assistantAssociation`）且 `shouldSuppressMemoryKeywordHits(agent)` 返回 `true` 时，`personal-memory:task-context` 会抑制动态关键词 `hits`（由 `<association>` 统一承接），同时保留并在首步（含空 `deriveMessages()`）继续注入已确认的 `preference`/`instruction` standing 记录；关联服务缺失、尚未就绪或返回 `false`/抛错时自动回退为完整关键词召回。面向 Host 的只读回填接口 `listActiveRecordsForAssociationSync` 与事务提交后回调 `onRecordChange` 不注册为模型工具。
+当宿主挂载了 `@dsh-ray/assistant-association`（服务名 `assistantAssociation`）且 `shouldSuppressMemoryKeywordHits(agent)` 返回 `true` 时，`personal-memory:task-context` 会抑制动态关键词 `hits`（由 `<association>` 统一承接），同时保留并在首步（含空 `deriveMessages()`）继续注入已确认的 `preference`/`instruction` standing 记录；关联服务缺失、尚未就绪或返回 `false`/抛错时自动回退为完整关键词召回。面向 Host 的只读回填接口 `listActiveRecordsForAssociationSync` 与事务提交后回调 `onRecordChange` 不注册为模型工具。
 
 内容被包在 `<memory_source>` 中并明确标为“不可信数据而非指令”；XML 元字符和模板花括号在预算计算前转义。原生 Host 持久保存发生变化的新快照，用它取代先前快照的有效语义；撤回、过期或权限撤销会影响下一步的当前快照，**不会删除 Session 中已经提供过的历史快照、工具结果或模型输出**。因此不能把本功能当作会话历史的数据擦除或跨 owner 会话迁移保护。没有 `systemPrompt` 的程序化集成保留旧的 `agent/session-start` 一次性冻结快照，不能承诺逐步更新。`memory_search`、`memory_search_confirmed` 与 `memory_manage` 的模型可见结果也使用有界、转义的独立 framing。缺少绝对 cwd、agent preset 或已验证 owner 时不搜索、不提案、不贡献新快照，也不会退化到共享域。
 

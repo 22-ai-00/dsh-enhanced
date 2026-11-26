@@ -3,13 +3,13 @@
 # Shared implementation for install-local.sh and install-npm.sh.
 # This file is sourced by the two public entrypoints; do not execute it directly.
 
-DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.2.2-rc.5'
-DSH_ENHANCED_DEFAULT_DSH_VERSION='latest'
-DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
-if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
-  DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.2.2-rc.5 <0.3.0'
+DSH_RAY_SOURCE_PINNED_HOST_VERSION='0.2.2-rc.5'
+DSH_RAY_DEFAULT_DSH_VERSION='latest'
+DSH_RAY_DEFAULT_PNPM_VERSION='11.7.0'
+if [[ -z "${DSH_RAY_VERIFIED_HOST_RANGE:-}" ]]; then
+  DSH_RAY_VERIFIED_HOST_RANGE='>=0.2.2-rc.5 <0.3.0'
 fi
-DSH_ENHANCED_CORE_PLUGIN_SLUGS=(
+DSH_RAY_CORE_PLUGIN_SLUGS=(
   'personal-assistant'
   # Read-only capability discovery and owner-approved staging are part of the
   # safe local core.  This adds no network client, daemon, or mutation tool to
@@ -17,7 +17,7 @@ DSH_ENHANCED_CORE_PLUGIN_SLUGS=(
   'plugin-control-plane'
 )
 
-DSH_ENHANCED_LARK_PLUGIN_SLUGS=(
+DSH_RAY_LARK_PLUGIN_SLUGS=(
   'assistant-delivery'
   'credentials-keychain'
   'lark-channel'
@@ -28,7 +28,7 @@ DSH_ENHANCED_LARK_PLUGIN_SLUGS=(
   'assistant-association'
 )
 
-DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
+DSH_RAY_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
   'assistant-evaluation'
   # Evaluation provides the authoritative service consumed by Evolution.  DSH
   # resolves activation by service availability, but keeping the provider
@@ -62,7 +62,7 @@ DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
 # This is retained only for users deliberately migrating an old all-in-one
 # profile.  New installs choose a small scenario and add optional bundles only
 # when the corresponding capability is needed.
-DSH_ENHANCED_LEGACY_FULL_PLUGIN_SLUGS=(
+DSH_RAY_LEGACY_FULL_PLUGIN_SLUGS=(
   'coding-subscription-provider'
   'traex-acp-provider'
   'personal-assistant'
@@ -75,12 +75,12 @@ DSH_ENHANCED_LEGACY_FULL_PLUGIN_SLUGS=(
   'assistant-health'
 )
 
-dsh_enhanced_usage() {
+dsh_ray_usage() {
   local source_mode="$1"
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Install a runnable dsh-enhanced personal-assistant scenario.
+Install a runnable dsh-ray personal-assistant scenario.
 
 Options:
   --profile <name>          DSH profile (default: web)
@@ -114,10 +114,10 @@ Options:
   --model-base-url <url>    Custom OpenAI-compatible gateway base URL (custom provider only)
   --model-api <protocol>    openai-completions (default), openai-responses, or anthropic-messages (custom provider only)
   --model-display-name <s>  Optional human label for a custom provider route
-  --dsh-version <version>   Compatible DSH version (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
+  --dsh-version <version>   Compatible DSH version (default: ${DSH_RAY_DEFAULT_DSH_VERSION})
   --no-service              Do not install or restart the platform resident service
   --yes                     Choose the platform default without the installer menu; with
-                            DEEPSEEK_API_KEY or DSH_ENHANCED_MODEL_API_KEY set and no stored
+                            DEEPSEEK_API_KEY or DSH_RAY_MODEL_API_KEY set and no stored
                             key, also configure deepseek-official and store the key (0600)
   --guided                  Interactive: accept every recommended default, asking only for a missing API key
   --customize               Interactive: show every itemized menu (scenario, model, Lark, route check)
@@ -132,7 +132,7 @@ Options:
                             Default: authorize only for a fresh supervised install; another
                             existing profile preserves its recorded decision. An explicit or
                             default decision is persisted in
-                            \$DSH_HOME/.dsh-enhanced/install-intent.json (0600) before the
+                            \$DSH_HOME/.dsh-ray/install-intent.json (0600) before the
                             profile exists and reused by retries (skip never becomes authorize).
                             Explicit --learning needs a fresh profile; an existing profile keeps
                             its recorded decision. macOS native owner deployment must authorize:
@@ -143,7 +143,7 @@ Options:
 EOF
   if [[ "$source_mode" == 'npm' ]]; then
     cat <<'EOF'
-  --plugin-version <value>  Exact version or npm dist-tag for one @dsh-enhanced cohort (default: latest)
+  --plugin-version <value>  Exact version or npm dist-tag for one @dsh-ray cohort (default: latest)
 EOF
   fi
   cat <<'EOF'
@@ -169,7 +169,7 @@ Scenarios:
              core/Lark default without ordinary-use RSI.
   core       Local Web/direct core plus read-only plugin discovery.  No channel, daemon, or scheduler.
   web        Experimental local Web owner: core plus Delivery, Goals, Web owner setup, and Owner Console (文鳐 Ray).
-             It does not configure Lark or a resident service. Use \`dsh-rsi open --profile web\` to launch.
+             It does not configure Lark or a resident service. Use \`dsh-ray open --profile web\` to launch.
   autonomy   Explicit offline, finite Web-owner execution setup with event, proactive, and skills bundles. Credentials and external targets remain independently configured.
   lark       Core plus durable Delivery, bounded automatic preference learning,
              OS credential storage, and Feishu/Lark onboarding.
@@ -184,35 +184,35 @@ Scenarios:
 EOF
 }
 
-dsh_enhanced_fail() {
+dsh_ray_fail() {
   local status="$1"
   shift
-  printf 'dsh-enhanced installer: %s\n' "$*" >&2
+  printf 'dsh-ray installer: %s\n' "$*" >&2
   return "$status"
 }
 
-dsh_enhanced_print_command() {
+dsh_ray_print_command() {
   printf '  $'
   printf ' %q' "$@"
   printf '\n'
 }
 
-dsh_enhanced_run() {
+dsh_ray_run() {
   local dry_run="$1"
   shift
   if [[ "$dry_run" == '1' ]]; then
-    dsh_enhanced_print_command "$@"
+    dsh_ray_print_command "$@"
     return 0
   fi
   "$@"
 }
 
-dsh_enhanced_refresh_global_path() {
+dsh_ray_refresh_global_path() {
   local prefix
   local selected_host_bin=''
-  if [[ -n "${DSH_ENHANCED_HOST_BIN:-}" ]] \
-    && [[ "$(command -v dsh 2>/dev/null || true)" == "$DSH_ENHANCED_HOST_BIN/dsh" ]]; then
-    selected_host_bin="$DSH_ENHANCED_HOST_BIN"
+  if [[ -n "${DSH_RAY_HOST_BIN:-}" ]] \
+    && [[ "$(command -v dsh 2>/dev/null || true)" == "$DSH_RAY_HOST_BIN/dsh" ]]; then
+    selected_host_bin="$DSH_RAY_HOST_BIN"
   fi
   prefix="$(npm prefix --global 2>/dev/null)" || return 1
   if [[ -d "$prefix/bin" ]]; then
@@ -222,7 +222,7 @@ dsh_enhanced_refresh_global_path() {
     esac
   fi
   # A Home-bound private Host must remain authoritative after installing pnpm
-  # or other global helpers. dsh-rsi verifies this directory before delegation.
+  # or other global helpers. dsh-ray verifies this directory before delegation.
   if [[ -n "$selected_host_bin" ]]; then
     case "$PATH" in
       "$selected_host_bin":*) ;;
@@ -231,22 +231,22 @@ dsh_enhanced_refresh_global_path() {
   fi
 }
 
-dsh_enhanced_require_node() {
+dsh_ray_require_node() {
   if ! command -v node >/dev/null 2>&1; then
-    dsh_enhanced_fail 1 '需要 Node.js 22.19+ 或 24+；请先安装 Node.js。'
+    dsh_ray_fail 1 '需要 Node.js 22.19+ 或 24+；请先安装 Node.js。'
     return $?
   fi
   if ! node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit((major === 22 && minor >= 19) || major >= 24 ? 0 : 1)"; then
-    dsh_enhanced_fail 1 "当前 Node.js $(node --version) 不兼容；需要 22.19+ 或 24+。"
+    dsh_ray_fail 1 "当前 Node.js $(node --version) 不兼容；需要 22.19+ 或 24+。"
     return $?
   fi
   if ! command -v npm >/dev/null 2>&1; then
-    dsh_enhanced_fail 1 '找不到 npm；请安装包含 npm 的 Node.js 发行版。'
+    dsh_ray_fail 1 '找不到 npm；请安装包含 npm 的 Node.js 发行版。'
     return $?
   fi
 }
 
-dsh_enhanced_is_host_version() {
+dsh_ray_is_host_version() {
   local version="$1"
   [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] || return 1
   local without_build="${version%%+*}"
@@ -262,13 +262,13 @@ dsh_enhanced_is_host_version() {
 }
 
 # Numeric SemVer identifiers may exceed the shell's integer width.
-dsh_enhanced_decimal_gt() {
+dsh_ray_decimal_gt() {
   local LC_ALL=C
   if [[ "${#1}" != "${#2}" ]]; then (( ${#1} > ${#2} )); return; fi
   [[ "$1" > "$2" ]]
 }
 
-dsh_enhanced_version_ge() {
+dsh_ray_version_ge() {
   local left="${1%%+*}"
   local right="${2%%+*}"
   [[ "$left" == "$right" ]] && return 0
@@ -293,8 +293,8 @@ dsh_enhanced_version_ge() {
       1) left_identifier="$left_minor"; right_identifier="$right_minor" ;;
       *) left_identifier="$left_patch"; right_identifier="$right_patch" ;;
     esac
-    if dsh_enhanced_decimal_gt "$left_identifier" "$right_identifier"; then return 0; fi
-    if dsh_enhanced_decimal_gt "$right_identifier" "$left_identifier"; then return 1; fi
+    if dsh_ray_decimal_gt "$left_identifier" "$right_identifier"; then return 0; fi
+    if dsh_ray_decimal_gt "$right_identifier" "$left_identifier"; then return 1; fi
   done
 
   # A stable version has higher precedence than a prerelease with the same
@@ -315,7 +315,7 @@ dsh_enhanced_version_ge() {
     right_identifier="${right_identifiers[$index]}"
     if [[ "$left_identifier" != "$right_identifier" ]]; then
       if [[ "$left_identifier" =~ ^[0-9]+$ && "$right_identifier" =~ ^[0-9]+$ ]]; then
-        dsh_enhanced_decimal_gt "$left_identifier" "$right_identifier"
+        dsh_ray_decimal_gt "$left_identifier" "$right_identifier"
         return
       fi
       [[ "$left_identifier" =~ ^[0-9]+$ ]] && return 1
@@ -328,7 +328,7 @@ dsh_enhanced_version_ge() {
   return 0
 }
 
-dsh_enhanced_version_in_range() {
+dsh_ray_version_in_range() {
   local version="$1"
   local range="$2"
   local token
@@ -342,7 +342,7 @@ dsh_enhanced_version_in_range() {
   local rc_core_strictly_inside='1'
   local -a tokens=()
   [[ -n "$range" ]] || return 1
-  dsh_enhanced_is_host_version "$version" || return 1
+  dsh_ray_is_host_version "$version" || return 1
   read -r -a tokens <<< "$range"
 
   # Comparator precedence check; runs for stable and prerelease versions alike.
@@ -359,25 +359,25 @@ dsh_enhanced_version_in_range() {
       '='*) op='='; bound="${token#=}" ;;
       *) op='='; bound="$token" ;;
     esac
-    dsh_enhanced_is_host_version "$bound" || return 1
+    dsh_ray_is_host_version "$bound" || return 1
     case "$op" in
       '>=')
-        dsh_enhanced_version_ge "$version" "$bound" || return 1
+        dsh_ray_version_ge "$version" "$bound" || return 1
         ;;
       '>')
-        dsh_enhanced_version_ge "$version" "$bound" || return 1
-        if dsh_enhanced_version_ge "$bound" "$version"; then return 1; fi
+        dsh_ray_version_ge "$version" "$bound" || return 1
+        if dsh_ray_version_ge "$bound" "$version"; then return 1; fi
         ;;
       '<=')
-        dsh_enhanced_version_ge "$bound" "$version" || return 1
+        dsh_ray_version_ge "$bound" "$version" || return 1
         ;;
       '<')
-        dsh_enhanced_version_ge "$bound" "$version" || return 1
-        if dsh_enhanced_version_ge "$version" "$bound"; then return 1; fi
+        dsh_ray_version_ge "$bound" "$version" || return 1
+        if dsh_ray_version_ge "$version" "$bound"; then return 1; fi
         ;;
       '=')
-        dsh_enhanced_version_ge "$version" "$bound" || return 1
-        dsh_enhanced_version_ge "$bound" "$version" || return 1
+        dsh_ray_version_ge "$version" "$bound" || return 1
+        dsh_ray_version_ge "$bound" "$version" || return 1
         ;;
     esac
     bound_without_build="${bound%%+*}"
@@ -412,69 +412,69 @@ dsh_enhanced_version_in_range() {
   return 0
 }
 
-dsh_enhanced_require_pinned_host_version() {
+dsh_ray_require_pinned_host_version() {
   local version="$1"
-  if [[ -n "${DSH_ENHANCED_PINNED_HOST_VERSION:-}" && "$DSH_ENHANCED_PINNED_HOST_VERSION" != "$DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION" ]]; then
-    dsh_enhanced_fail 2 "安装引导器的 Host pin 与安装逻辑不一致；尚未修改运行时或 profile。"
+  if [[ -n "${DSH_RAY_PINNED_HOST_VERSION:-}" && "$DSH_RAY_PINNED_HOST_VERSION" != "$DSH_RAY_SOURCE_PINNED_HOST_VERSION" ]]; then
+    dsh_ray_fail 2 "安装引导器的 Host pin 与安装逻辑不一致；尚未修改运行时或 profile。"
     return $?
   fi
   # `latest` is a selector, never an install target. The actual version is
   # checked again after registry resolution in ensure_dsh.
   [[ "$version" == 'latest' ]] && return 0
-  if ! dsh_enhanced_is_host_version "$version" || ! dsh_enhanced_is_supported_host_channel "$version" \
-    || ! dsh_enhanced_version_in_range "$version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
-    dsh_enhanced_fail 2 "此安装器支持 DSH ${DSH_ENHANCED_VERIFIED_HOST_RANGE}；收到 ${version:-unknown}。请使用兼容的独立 CLI；不会修改现有全局 DSH。"
+  if ! dsh_ray_is_host_version "$version" || ! dsh_ray_is_supported_host_channel "$version" \
+    || ! dsh_ray_version_in_range "$version" "$DSH_RAY_VERIFIED_HOST_RANGE"; then
+    dsh_ray_fail 2 "此安装器支持 DSH ${DSH_RAY_VERIFIED_HOST_RANGE}；收到 ${version:-unknown}。请使用兼容的独立 CLI；不会修改现有全局 DSH。"
     return $?
   fi
 }
 
-dsh_enhanced_is_supported_host_channel() {
+dsh_ray_is_supported_host_channel() {
   local without_build="${1%%+*}"
   [[ "$without_build" != *-* || "${without_build#*-}" == 'rc' || "${without_build#*-}" == rc.* ]]
 }
 
-dsh_enhanced_resolve_latest_host_version() {
+dsh_ray_resolve_latest_host_version() {
   local version=''
   if ! version="$(npm view @deepseek-ai/dsh dist-tags.latest 2>/dev/null)"; then
-    dsh_enhanced_fail 1 '无法从 npm registry 解析 DSH latest；尚未修改全局 DSH。'
+    dsh_ray_fail 1 '无法从 npm registry 解析 DSH latest；尚未修改全局 DSH。'
     return $?
   fi
   if [[ "$version" == *$'\n'* || "$version" == *$'\r'* ]] \
-    || ! dsh_enhanced_is_host_version "$version" \
-    || ! dsh_enhanced_is_supported_host_channel "$version" \
-    || ! dsh_enhanced_version_in_range "$version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
-    dsh_enhanced_fail 2 "npm registry 的 DSH latest 不是此安装器支持的精确版本（支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}，仅 stable/rc；可传 --dsh-version ${DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION} 安装已验证版本）；尚未修改全局 DSH。"
+    || ! dsh_ray_is_host_version "$version" \
+    || ! dsh_ray_is_supported_host_channel "$version" \
+    || ! dsh_ray_version_in_range "$version" "$DSH_RAY_VERIFIED_HOST_RANGE"; then
+    dsh_ray_fail 2 "npm registry 的 DSH latest 不是此安装器支持的精确版本（支持 ${DSH_RAY_VERIFIED_HOST_RANGE}，仅 stable/rc；可传 --dsh-version ${DSH_RAY_SOURCE_PINNED_HOST_VERSION} 安装已验证版本）；尚未修改全局 DSH。"
     return $?
   fi
   printf '%s\n' "$version"
 }
 
-dsh_enhanced_reject_incompatible_existing_dsh() {
+dsh_ray_reject_incompatible_existing_dsh() {
   local current_version=''
   if command -v dsh >/dev/null 2>&1; then
     current_version="$(dsh --version 2>/dev/null || true)"
-    if ! dsh_enhanced_is_host_version "$current_version" || ! dsh_enhanced_is_supported_host_channel "$current_version" \
-      || ! dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
-      dsh_enhanced_fail 2 "检测到 DSH ${current_version:-unknown}，但此安装器支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
+    if ! dsh_ray_is_host_version "$current_version" || ! dsh_ray_is_supported_host_channel "$current_version" \
+      || ! dsh_ray_version_in_range "$current_version" "$DSH_RAY_VERIFIED_HOST_RANGE"; then
+      dsh_ray_fail 2 "检测到 DSH ${current_version:-unknown}，但此安装器支持 ${DSH_RAY_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
       return $?
     fi
   fi
 }
 
-dsh_enhanced_ensure_dsh() {
+dsh_ray_ensure_dsh() {
   local requested_version="$1"
   local dry_run="$2"
   local ack_unverified_host="$3"
   local target_version="$requested_version"
   local current_version=''
-  dsh_enhanced_require_pinned_host_version "$requested_version" || return $?
+  dsh_ray_require_pinned_host_version "$requested_version" || return $?
   if [[ "$dry_run" == '1' ]]; then
     if [[ "$requested_version" == 'latest' ]]; then
       printf 'DSH 目标：npm latest（dry-run 未联网解析；执行时先校验精确版本和兼容范围）\n'
       printf '将仅在未安装兼容 DSH 时解析 latest 并安装精确版本。\n'
     else
       printf 'DSH 目标：@deepseek-ai/dsh@%s\n' "$requested_version"
-      dsh_enhanced_print_command npm install --global "@deepseek-ai/dsh@$target_version"
+      dsh_ray_print_command npm install --global "@deepseek-ai/dsh@$target_version"
     fi
     return 0
   fi
@@ -482,31 +482,31 @@ dsh_enhanced_ensure_dsh() {
     current_version="$(dsh --version 2>/dev/null || true)"
   fi
   if [[ -n "$current_version" ]]; then
-    if dsh_enhanced_is_host_version "$current_version" && dsh_enhanced_is_supported_host_channel "$current_version" \
-      && dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+    if dsh_ray_is_host_version "$current_version" && dsh_ray_is_supported_host_channel "$current_version" \
+      && dsh_ray_version_in_range "$current_version" "$DSH_RAY_VERIFIED_HOST_RANGE"; then
       printf 'DSH 已安装且版本兼容：%s\n' "$current_version"
     else
-      dsh_enhanced_fail 2 "检测到 DSH ${current_version}，但此安装器支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
+      dsh_ray_fail 2 "检测到 DSH ${current_version}，但此安装器支持 ${DSH_RAY_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
       return $?
     fi
     return 0
   fi
   if [[ "$requested_version" == 'latest' ]]; then
-    target_version="$(dsh_enhanced_resolve_latest_host_version)" || return $?
-    dsh_enhanced_require_pinned_host_version "$target_version" || return $?
+    target_version="$(dsh_ray_resolve_latest_host_version)" || return $?
+    dsh_ray_require_pinned_host_version "$target_version" || return $?
   fi
   printf 'DSH 目标：@deepseek-ai/dsh@%s\n' "$target_version"
   printf '未检测到 DSH，正在安装。\n'
   npm install --global "@deepseek-ai/dsh@$target_version"
   hash -r
-  dsh_enhanced_refresh_global_path || true
+  dsh_ray_refresh_global_path || true
   if ! command -v dsh >/dev/null 2>&1; then
-    dsh_enhanced_fail 1 'DSH 已安装但 dsh 不在 PATH；请把 npm global bin 目录加入 PATH 后重试。'
+    dsh_ray_fail 1 'DSH 已安装但 dsh 不在 PATH；请把 npm global bin 目录加入 PATH 后重试。'
     return $?
   fi
   current_version="$(dsh --version 2>/dev/null || true)"
   if [[ "$current_version" != "$target_version" ]]; then
-    dsh_enhanced_fail 1 "DSH 版本校验失败：得到 ${current_version:-unknown}，期望精确版本 $target_version。"
+    dsh_ray_fail 1 "DSH 版本校验失败：得到 ${current_version:-unknown}，期望精确版本 $target_version。"
     return $?
   fi
 }
@@ -515,17 +515,17 @@ dsh_enhanced_ensure_dsh() {
 # Self-evolution capabilities run user code inside that backend, so a platform
 # without one must be reported instead of silently installing a capability that
 # cannot execute (Docker is deliberately not a fallback: 0.1.70 removed it).
-DSH_ENHANCED_ISOLATION_CAPABILITY=''
-DSH_ENHANCED_ISOLATION_REASON=''
+DSH_RAY_ISOLATION_CAPABILITY=''
+DSH_RAY_ISOLATION_REASON=''
 # Prepare the native isolation capability a fresh self-evolution install needs.
 # Everything privileged is shown as an exact fixed command and only runs after the
 # operator accepts it; a non-interactive run without passwordless sudo gets the
 # commands to run by hand instead of a partial install.
-dsh_enhanced_prepare_isolation_capability() {
+dsh_ray_prepare_isolation_capability() {
   local dry_run="$1"
-  dsh_enhanced_detect_isolation_capability
-  if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" != 'none' ]]; then return 0; fi
-  local platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-}"
+  dsh_ray_detect_isolation_capability
+  if [[ "$DSH_RAY_ISOLATION_CAPABILITY" != 'none' ]]; then return 0; fi
+  local platform="${DSH_RAY_PLATFORM_OVERRIDE:-}"
   if [[ -z "$platform" ]]; then platform="$(uname -s)"; fi
   if [[ "$platform" != 'Linux' ]]; then return 0; fi
   local uid gid
@@ -568,7 +568,7 @@ dsh_enhanced_prepare_isolation_capability() {
   if [[ -n "${BASH_SOURCE[0]:-}" && -f "$(dirname "${BASH_SOURCE[0]}")/../isolation/prepare-linux-cgroups.mjs" ]]; then
     prepare_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../isolation" && pwd -P)/prepare-linux-cgroups.mjs"
   fi
-  printf '\n自演化需要原生隔离，本机还缺：%s\n' "$DSH_ENHANCED_ISOLATION_REASON"
+  printf '\n自演化需要原生隔离，本机还缺：%s\n' "$DSH_RAY_ISOLATION_REASON"
   local manager='' install_command=''
   for candidate in apt-get dnf yum pacman zypper; do
     if command -v "$candidate" >/dev/null 2>&1; then manager="$candidate"; break; fi
@@ -594,7 +594,7 @@ dsh_enhanced_prepare_isolation_capability() {
     return 0
   fi
   local sudo_path=''
-  sudo_path="$(dsh_enhanced_trusted_system_command sudo 2>/dev/null || true)"
+  sudo_path="$(dsh_ray_trusted_system_command sudo 2>/dev/null || true)"
   if [[ -z "$sudo_path" ]]; then
     printf '未找到受信任的 sudo；请手工准备隔离后重装：\n' >&2
     if [[ -n "$install_command" ]]; then printf '  sudo %s\n' "$install_command" >&2; fi
@@ -696,32 +696,32 @@ dsh_enhanced_prepare_isolation_capability() {
       done
     fi
   fi
-  dsh_enhanced_detect_isolation_capability
-  if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" == 'none' ]]; then
-    printf '提示：自动准备后仍不满足（%s）。安装继续，但不包含自演化能力。\n' "$DSH_ENHANCED_ISOLATION_REASON" >&2
+  dsh_ray_detect_isolation_capability
+  if [[ "$DSH_RAY_ISOLATION_CAPABILITY" == 'none' ]]; then
+    printf '提示：自动准备后仍不满足（%s）。安装继续，但不包含自演化能力。\n' "$DSH_RAY_ISOLATION_REASON" >&2
   else
-    printf '原生隔离已就绪：%s\n' "$DSH_ENHANCED_ISOLATION_REASON"
+    printf '原生隔离已就绪：%s\n' "$DSH_RAY_ISOLATION_REASON"
   fi
   return 0
 }
-dsh_enhanced_detect_isolation_capability() {
+dsh_ray_detect_isolation_capability() {
   # Operators who prepared isolation out of band, and test fixtures that simulate a
   # foreign platform, can pin the answer explicitly. Everything else is detected.
-  if [[ -n "${DSH_ENHANCED_ISOLATION_CAPABILITY_OVERRIDE:-}" ]]; then
-    DSH_ENHANCED_ISOLATION_CAPABILITY="$DSH_ENHANCED_ISOLATION_CAPABILITY_OVERRIDE"
-    DSH_ENHANCED_ISOLATION_REASON='explicit DSH_ENHANCED_ISOLATION_CAPABILITY_OVERRIDE'
+  if [[ -n "${DSH_RAY_ISOLATION_CAPABILITY_OVERRIDE:-}" ]]; then
+    DSH_RAY_ISOLATION_CAPABILITY="$DSH_RAY_ISOLATION_CAPABILITY_OVERRIDE"
+    DSH_RAY_ISOLATION_REASON='explicit DSH_RAY_ISOLATION_CAPABILITY_OVERRIDE'
     return 0
   fi
-  local platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
+  local platform="${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}"
   case "$platform" in
     Darwin)
-      DSH_ENHANCED_ISOLATION_CAPABILITY='macos-seatbelt'
-      DSH_ENHANCED_ISOLATION_REASON='macOS seatbelt sandbox'
+      DSH_RAY_ISOLATION_CAPABILITY='macos-seatbelt'
+      DSH_RAY_ISOLATION_REASON='macOS seatbelt sandbox'
       return 0 ;;
     Linux)
       if ! command -v bwrap >/dev/null 2>&1; then
-        DSH_ENHANCED_ISOLATION_CAPABILITY='none'
-        DSH_ENHANCED_ISOLATION_REASON='缺少 bubblewrap (bwrap)，无法提供 linux-native 隔离'
+        DSH_RAY_ISOLATION_CAPABILITY='none'
+        DSH_RAY_ISOLATION_REASON='缺少 bubblewrap (bwrap)，无法提供 linux-native 隔离'
         return 0
       fi
       local roots=0 controller uid_num v2_leaf
@@ -753,40 +753,40 @@ dsh_enhanced_detect_isolation_capability() {
         done
       fi
       if [[ $roots -lt 4 && $v2_ready -eq 0 ]]; then
-        DSH_ENHANCED_ISOLATION_CAPABILITY='none'
+        DSH_RAY_ISOLATION_CAPABILITY='none'
         if [[ -f /sys/fs/cgroup/cgroup.controllers && $roots -eq 0 ]]; then
-          DSH_ENHANCED_ISOLATION_REASON="宿主没有为当前用户委派 cgroup v2 隔离根（请以 root 执行 prepare-linux-cgroups.mjs --uid $uid_num --auto）"
+          DSH_RAY_ISOLATION_REASON="宿主没有为当前用户委派 cgroup v2 隔离根（请以 root 执行 prepare-linux-cgroups.mjs --uid $uid_num --auto）"
         else
-          DSH_ENHANCED_ISOLATION_REASON="宿主没有为当前用户委派 cgroup v1 隔离根（need memory/pids/cpu,cpuacct/freezer 下的 dsh-native）"
+          DSH_RAY_ISOLATION_REASON="宿主没有为当前用户委派 cgroup v1 隔离根（need memory/pids/cpu,cpuacct/freezer 下的 dsh-native）"
         fi
         return 0
       fi
       if [[ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)" == '0' ]]; then
-        DSH_ENHANCED_ISOLATION_CAPABILITY='none'
-        DSH_ENHANCED_ISOLATION_REASON='宿主禁用了 user namespace，无法提供 linux-native 隔离'
+        DSH_RAY_ISOLATION_CAPABILITY='none'
+        DSH_RAY_ISOLATION_REASON='宿主禁用了 user namespace，无法提供 linux-native 隔离'
         return 0
       fi
-      DSH_ENHANCED_ISOLATION_CAPABILITY='linux-native'
+      DSH_RAY_ISOLATION_CAPABILITY='linux-native'
       if [[ $v2_ready -eq 1 ]]; then
-        DSH_ENHANCED_ISOLATION_REASON='linux-native (bwrap + 委派 cgroup v2 + user namespace)'
+        DSH_RAY_ISOLATION_REASON='linux-native (bwrap + 委派 cgroup v2 + user namespace)'
       else
-        DSH_ENHANCED_ISOLATION_REASON='linux-native (bwrap + 委派 cgroup v1 + user namespace)'
+        DSH_RAY_ISOLATION_REASON='linux-native (bwrap + 委派 cgroup v1 + user namespace)'
       fi
       return 0 ;;
     *)
-      DSH_ENHANCED_ISOLATION_CAPABILITY='none'
-      DSH_ENHANCED_ISOLATION_REASON="平台 $platform 没有受支持的原生隔离后端"
+      DSH_RAY_ISOLATION_CAPABILITY='none'
+      DSH_RAY_ISOLATION_REASON="平台 $platform 没有受支持的原生隔离后端"
       return 0 ;;
   esac
 }
 
 # Drop self-evolution bundles the host cannot execute, and say exactly what was
 # skipped. Mutates the caller's selected_slugs array. Docker is never a fallback.
-dsh_enhanced_apply_isolation_capability_gate() {
-  dsh_enhanced_prepare_isolation_capability "${1:-0}"
-  if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" == 'none' ]]; then printf '隔离能力：不提供（%s）\n' "$DSH_ENHANCED_ISOLATION_REASON"; else printf '隔离能力：%s\n' "$DSH_ENHANCED_ISOLATION_REASON"; fi
-  dsh_enhanced_detect_isolation_capability
-  if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" != 'none' ]]; then return 0; fi
+dsh_ray_apply_isolation_capability_gate() {
+  dsh_ray_prepare_isolation_capability "${1:-0}"
+  if [[ "$DSH_RAY_ISOLATION_CAPABILITY" == 'none' ]]; then printf '隔离能力：不提供（%s）\n' "$DSH_RAY_ISOLATION_REASON"; else printf '隔离能力：%s\n' "$DSH_RAY_ISOLATION_REASON"; fi
+  dsh_ray_detect_isolation_capability
+  if [[ "$DSH_RAY_ISOLATION_CAPABILITY" != 'none' ]]; then return 0; fi
   local kept=() skipped=() slug
   for slug in "${selected_slugs[@]}"; do
     case "$slug" in
@@ -797,111 +797,106 @@ dsh_enhanced_apply_isolation_capability_gate() {
   done
   if [[ ${#skipped[@]} -eq 0 ]]; then return 0; fi
   selected_slugs=("${kept[@]}")
-  printf '平台能力检测：本机不提供原生隔离（%s）。\n' "$DSH_ENHANCED_ISOLATION_REASON"
+  printf '平台能力检测：本机不提供原生隔离（%s）。\n' "$DSH_RAY_ISOLATION_REASON"
   printf '已跳过需要原生隔离的自进化能力：%s\n' "${skipped[*]}"
   printf '已安装的能力在本机可正常运行；需要自进化时请先准备 bwrap + 委派 cgroup v1 + user namespace。\n'
 }
 
-dsh_enhanced_ensure_pnpm() {
+dsh_ray_ensure_pnpm() {
   local dry_run="$1"
   local current_version=''
-  printf 'pnpm 目标：%s\n' "$DSH_ENHANCED_DEFAULT_PNPM_VERSION"
+  printf 'pnpm 目标：%s\n' "$DSH_RAY_DEFAULT_PNPM_VERSION"
   if [[ "$dry_run" == '1' ]]; then
-    dsh_enhanced_print_command npm install --global "pnpm@$DSH_ENHANCED_DEFAULT_PNPM_VERSION"
+    dsh_ray_print_command npm install --global "pnpm@$DSH_RAY_DEFAULT_PNPM_VERSION"
     return 0
   fi
   if command -v pnpm >/dev/null 2>&1; then
     current_version="$(pnpm --version 2>/dev/null || true)"
   fi
-  if [[ "$current_version" == "$DSH_ENHANCED_DEFAULT_PNPM_VERSION" ]]; then
+  if [[ "$current_version" == "$DSH_RAY_DEFAULT_PNPM_VERSION" ]]; then
     return 0
   fi
-  if ! npm install --global "pnpm@$DSH_ENHANCED_DEFAULT_PNPM_VERSION"; then
+  if ! npm install --global "pnpm@$DSH_RAY_DEFAULT_PNPM_VERSION"; then
     printf '警告：pnpm 全局安装失败。若后续插件部署失败并提示找不到 pnpm，请手工执行 npm install --global pnpm@%s 并确保全局 npm bin 目录在 PATH 中。\n' \
-      "$DSH_ENHANCED_DEFAULT_PNPM_VERSION" >&2
+      "$DSH_RAY_DEFAULT_PNPM_VERSION" >&2
     return 0
   fi
   hash -r
-  dsh_enhanced_refresh_global_path || true
+  dsh_ray_refresh_global_path || true
   current_version="$(pnpm --version 2>/dev/null || true)"
-  if [[ "$current_version" != "$DSH_ENHANCED_DEFAULT_PNPM_VERSION" ]]; then
+  if [[ "$current_version" != "$DSH_RAY_DEFAULT_PNPM_VERSION" ]]; then
     # Do not abort: the deployment step reports the actionable failure itself, and a
     # prefixed npm install may still place pnpm where this shell cannot see it yet.
     printf '警告：pnpm 未能解析到 %s（当前 %s）。若后续插件部署失败，请确认全局 npm bin 目录在 PATH 中。\n' \
-      "$DSH_ENHANCED_DEFAULT_PNPM_VERSION" "${current_version:-unknown}" >&2
+      "$DSH_RAY_DEFAULT_PNPM_VERSION" "${current_version:-unknown}" >&2
   fi
 }
 
-# 安装插件集合的同时提供全局 dsh-rsi 控制/诊断/卸载命令（@dsh-enhanced/dsh-rsi-cli）。
-# npm 形态安装与 cohort 完全一致的精确版本；local 形态从当前 checkout 的 packages/dsh-rsi-cli 安装。
+# 安装插件集合的同时提供全局 dsh-ray 控制/诊断/卸载命令（dsh-ray）。
+# npm 形态安装与 cohort 完全一致的精确版本；local 形态从当前 checkout 的 packages/dsh-ray 安装。
 # 纯库包无 install 脚本、无原生依赖，全局安装安全；install/upgrade 均调用，保证老安装补齐该命令。
-dsh_enhanced_ensure_rsi_cli() {
+dsh_ray_ensure_rsi_cli() {
   local source_mode="$1"
   local repo_root="$2"
   local plugin_version="$3"
   local dry_run="$4"
-  printf '\ndsh-rsi 控制命令：\n'
-  # 旧包名 @dsh-enhanced/rsi-cli 与新包提供同名 bin dsh-rsi；先尽力卸载旧包，
-  # 避免新包安装时 bin 已被旧包占用导致 npm EEXIST（迁移：先清旧再装新）。
-  if [[ "$dry_run" != '1' ]]; then
-    npm uninstall --global @dsh-enhanced/rsi-cli >/dev/null 2>&1 || true
-  fi
+  printf '\ndsh-ray 控制命令：\n'
   if [[ "$source_mode" == 'local' ]]; then
     if [[ "$dry_run" == '1' ]]; then
-      dsh_enhanced_print_command npm install --global "$repo_root/packages/dsh-rsi-cli"
+      dsh_ray_print_command npm install --global "$repo_root/packages/dsh-ray"
       return 0
     fi
-    npm install --global "$repo_root/packages/dsh-rsi-cli" || {
-      dsh_enhanced_fail 1 'dsh-rsi 安装失败（local 形态）；可手工执行 npm install --global '"$repo_root/packages/dsh-rsi-cli"。
+    npm install --global "$repo_root/packages/dsh-ray" || {
+      dsh_ray_fail 1 'dsh-ray 安装失败（local 形态）；可手工执行 npm install --global '"$repo_root/packages/dsh-ray"。
       return $?
     }
   else
     if [[ "$dry_run" == '1' ]]; then
-      dsh_enhanced_print_command npm install --global "@dsh-enhanced/dsh-rsi-cli@$plugin_version"
+      dsh_ray_print_command npm install --global "dsh-ray@$plugin_version"
       return 0
     fi
-    npm install --global "@dsh-enhanced/dsh-rsi-cli@$plugin_version" || {
-      dsh_enhanced_fail 1 "dsh-rsi 安装失败（npm 形态 @$plugin_version）；可手工执行 npm install --global @dsh-enhanced/dsh-rsi-cli@$plugin_version。"
+    npm install --global "dsh-ray@$plugin_version" || {
+      dsh_ray_fail 1 "dsh-ray 安装失败（npm 形态 @$plugin_version）；可手工执行 npm install --global dsh-ray@$plugin_version。"
       return $?
     }
   fi
   hash -r
-  dsh_enhanced_refresh_global_path || true
-  if ! command -v dsh-rsi >/dev/null 2>&1; then
-    dsh_enhanced_fail 1 'dsh-rsi 已安装但不在 PATH；请把 npm global bin 目录加入 PATH。'
+  dsh_ray_refresh_global_path || true
+  if ! command -v dsh-ray >/dev/null 2>&1; then
+    dsh_ray_fail 1 'dsh-ray 已安装但不在 PATH；请把 npm global bin 目录加入 PATH。'
     return $?
   fi
   local rsi_version=''
-  rsi_version="$(dsh-rsi --version 2>/dev/null || true)"
+  rsi_version="$(dsh-ray --version 2>/dev/null || true)"
   if [[ -z "$rsi_version" ]]; then
-    rsi_version="$(dsh-rsi version --short 2>/dev/null || true)"
+    rsi_version="$(dsh-ray version --short 2>/dev/null || true)"
   fi
   if [[ -z "$rsi_version" ]]; then
-    rsi_version="$(dsh-rsi version 2>/dev/null || true)"
+    rsi_version="$(dsh-ray version 2>/dev/null || true)"
     rsi_version="${rsi_version%%$'\n'*}"
   fi
-  printf 'dsh-rsi 已就绪：%s\n' "${rsi_version:-unknown}"
+  printf 'dsh-ray 已就绪：%s\n' "${rsi_version:-unknown}"
 }
 
-dsh_enhanced_require_existing_runtime() {
+dsh_ray_require_existing_runtime() {
   local ack_unverified_host="$1"
   local require_pnpm="${2:-1}"
   if ! command -v dsh >/dev/null 2>&1; then
-    dsh_enhanced_fail 1 'profile 生命周期事务需要已安装的 DSH；不会在事务外安装或升级全局 Host。'
+    dsh_ray_fail 1 'profile 生命周期事务需要已安装的 DSH；不会在事务外安装或升级全局 Host。'
     return $?
   fi
   if [[ "$require_pnpm" == '1' ]] && ! command -v pnpm >/dev/null 2>&1; then
-    dsh_enhanced_fail 1 'profile 生命周期事务需要已安装的 pnpm；不会在事务外修改全局工具链。'
+    dsh_ray_fail 1 'profile 生命周期事务需要已安装的 pnpm；不会在事务外修改全局工具链。'
     return $?
   fi
   local current_version
   current_version="$(dsh --version 2>/dev/null || true)"
-  if ! dsh_enhanced_is_host_version "$current_version"; then
-    dsh_enhanced_fail 1 '无法读取当前 DSH 版本；尚未开始 profile 生命周期事务。'
+  if ! dsh_ray_is_host_version "$current_version"; then
+    dsh_ray_fail 1 '无法读取当前 DSH 版本；尚未开始 profile 生命周期事务。'
     return $?
   fi
-  if ! dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
-    dsh_enhanced_fail 2 "检测到 DSH ${current_version}，但此安装器支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改现有全局 DSH。"
+  if ! dsh_ray_version_in_range "$current_version" "$DSH_RAY_VERIFIED_HOST_RANGE"; then
+    dsh_ray_fail 2 "检测到 DSH ${current_version}，但此安装器支持 ${DSH_RAY_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改现有全局 DSH。"
     return $?
   fi
   printf '生命周期事务使用现有 DSH：%s；不会修改全局 DSH/pnpm。\n' "$current_version"
@@ -912,7 +907,7 @@ dsh_enhanced_require_existing_runtime() {
 # that value.  Values which are present but unusable stay non-empty, so they
 # correctly shadow a lower-priority valid value instead of being mistaken for
 # a fallback.
-dsh_enhanced_lark_patch_fields() {
+dsh_ray_lark_patch_fields() {
   local patch_path="$1"
   if [[ ! -f "$patch_path" ]]; then
     printf '||\n'
@@ -926,7 +921,7 @@ dsh_enhanced_lark_patch_fields() {
       return line
     }
     BEGIN { in_lark = 0; disabled = ""; enabled = ""; app_id = "" }
-    /^- id:[[:space:]]+dsh-enhanced-lark-channel[[:space:]]*$/ { in_lark = 1; next }
+    /^- id:[[:space:]]+dsh-ray-lark-channel[[:space:]]*$/ { in_lark = 1; next }
     in_lark && /^- id:/ { in_lark = 0 }
     in_lark && /^[[:space:]]+disabled:/ {
       value = value_after_colon($0)
@@ -950,15 +945,15 @@ dsh_enhanced_lark_patch_fields() {
 # take precedence over a valid home-level binding.  This mirrors what the Host
 # will run and keeps scenario selection, onboarding, probe suppression, and
 # doctor on one definition of “configured”.
-dsh_enhanced_effective_lark_is_configured() {
+dsh_ray_effective_lark_is_configured() {
   local profile_patch="$1"
   local home_patch="$2"
   local profile_disabled profile_enabled profile_app_id
   local home_disabled home_enabled home_app_id
   IFS='|' read -r profile_disabled profile_enabled profile_app_id \
-    <<< "$(dsh_enhanced_lark_patch_fields "$profile_patch")"
+    <<< "$(dsh_ray_lark_patch_fields "$profile_patch")"
   IFS='|' read -r home_disabled home_enabled home_app_id \
-    <<< "$(dsh_enhanced_lark_patch_fields "$home_patch")"
+    <<< "$(dsh_ray_lark_patch_fields "$home_patch")"
 
   local disabled="$home_disabled"
   local enabled="$home_enabled"
@@ -970,8 +965,8 @@ dsh_enhanced_effective_lark_is_configured() {
     && "$app_id" =~ ^cli_[0-9a-fA-F]{16}$ ]]
 }
 
-dsh_enhanced_lark_is_configured() {
-  dsh_enhanced_effective_lark_is_configured "$1" /dev/null
+dsh_ray_lark_is_configured() {
+  dsh_ray_effective_lark_is_configured "$1" /dev/null
 }
 
 # `dsh plugin add` is deliberately additive: rerunning a smaller scenario does
@@ -980,14 +975,14 @@ dsh_enhanced_lark_is_configured() {
 # separate required bundle.  A profile manifest is the authoritative record of
 # installed bundle layers, so use it to repair this one known historical
 # closure without broadening a normal Lark installation into supervised mode.
-dsh_enhanced_profile_mentions_bundle() {
+dsh_ray_profile_mentions_bundle() {
   local profile_manifest="$1"
   local package_name="$2"
   [[ -f "$profile_manifest" ]] || return 1
   grep -Fq "\"$package_name\"" "$profile_manifest"
 }
 
-dsh_enhanced_validate_permission_default() {
+dsh_ray_validate_permission_default() {
   local settings_path="$1"
   [[ -f "$settings_path" ]] || return 0
   local preset
@@ -1025,27 +1020,27 @@ dsh_enhanced_validate_permission_default() {
       }
     }
   ' "$settings_path")" || {
-    dsh_enhanced_fail 2 "无法读取现有权限设置：$settings_path；不会覆盖用户设置。"
+    dsh_ray_fail 2 "无法读取现有权限设置：$settings_path；不会覆盖用户设置。"
     return $?
   }
   case "$preset" in
     __absent__|workspace-write|danger-full-access) return 0 ;;
     auto)
-      dsh_enhanced_fail 2 '现有 permission.defaultPreset=auto 只适用于当前会话；不会覆盖用户设置。请先显式修改默认值，再在 Harness 会话中选择自动审查，或在已认证的助手会话中使用 /permission auto。'
+      dsh_ray_fail 2 '现有 permission.defaultPreset=auto 只适用于当前会话；不会覆盖用户设置。请先显式修改默认值，再在 Harness 会话中选择自动审查，或在已认证的助手会话中使用 /permission auto。'
       return $?
       ;;
     __unparseable__)
-      dsh_enhanced_fail 2 "无法安全解析 $settings_path 中的 permission.defaultPreset；不会覆盖用户设置。"
+      dsh_ray_fail 2 "无法安全解析 $settings_path 中的 permission.defaultPreset；不会覆盖用户设置。"
       return $?
       ;;
     *)
-      dsh_enhanced_fail 2 "现有 permission.defaultPreset=$preset 不受默认权限配置支持；不会覆盖用户设置。请先显式改为 workspace-write 或 danger-full-access。"
+      dsh_ray_fail 2 "现有 permission.defaultPreset=$preset 不受默认权限配置支持；不会覆盖用户设置。请先显式改为 workspace-write 或 danger-full-access。"
       return $?
       ;;
   esac
 }
 
-dsh_enhanced_choose_lark_mode() {
+dsh_ray_choose_lark_mode() {
   local configured="$1"
   if [[ "$configured" == '1' ]]; then
     printf '\n检测到当前 profile 已启用飞书 Bot：\n' >&2
@@ -1076,7 +1071,7 @@ dsh_enhanced_choose_lark_mode() {
   fi
 }
 
-dsh_enhanced_choose_scenario() {
+dsh_ray_choose_scenario() {
   local configured="$1"
   local platform="$2"
   printf '\n选择部署场景（能力逐档叠加：core ⊂ lark ⊂ supervised）：\n' >&2
@@ -1121,7 +1116,7 @@ dsh_enhanced_choose_scenario() {
   esac
 }
 
-dsh_enhanced_choose_model_route_mode() {
+dsh_ray_choose_model_route_mode() {
   printf '\n是否发送一次固定的最小请求来验证模型 route？这可能消耗 API 配额或订阅额度。\n' >&2
   printf '  1) 现在验证（推荐：首次接入模型后）\n' >&2
   printf '  2) 跳过，稍后执行安装器的 --model-route verify\n' >&2
@@ -1140,7 +1135,7 @@ dsh_enhanced_choose_model_route_mode() {
 # deployment relying on the built-in deepseek-official default is not treated as
 # unconfigured; a route is "configured" when a provider/model pair resolves and
 # the referenced credential is present in settings/.credentials.yaml/env.
-dsh_enhanced_model_is_configured() {
+dsh_ray_model_is_configured() {
   local profile="$1"
   local dsh_home="$2"
   local config
@@ -1159,7 +1154,7 @@ dsh_enhanced_model_is_configured() {
   ' || return 1
 }
 
-dsh_enhanced_choose_model_mode() {
+dsh_ray_choose_model_mode() {
   local configured="$1"
   if [[ "$configured" == '1' ]]; then
     printf '\n检测到当前 profile 已能解析默认模型：\n' >&2
@@ -1192,15 +1187,15 @@ dsh_enhanced_choose_model_mode() {
 # goes to stderr; nothing here echoes the API key.  Reads only the provider,
 # model, base URL, api, and display-name; the secret is prompted separately and
 # handed to dsh-model-setup through the environment, never as an argument.
-dsh_enhanced_prompt_model_route() {
+dsh_ray_prompt_model_route() {
   local provider_var="$1"
   local model_var="$2"
   local base_url_var="$3"
   local api_var="$4"
   local display_var="$5"
   local traex_command='' agy_command='' option_traex='' option_agy=''
-  traex_command="$(dsh_enhanced_detect_traex_command || true)"
-  agy_command="$(dsh_enhanced_detect_agy_command || true)"
+  traex_command="$(dsh_ray_detect_traex_command || true)"
+  agy_command="$(dsh_ray_detect_agy_command || true)"
   printf '\n配置默认模型：\n' >&2
   printf '  1) DeepSeek 官方（deepseek-official，只需 API Key）\n' >&2
   printf '  2) 自定义 OpenAI 兼容网关（provider + base URL + API Key）\n' >&2
@@ -1235,11 +1230,11 @@ dsh_enhanced_prompt_model_route() {
       local provider
       IFS= read -r provider
       if [[ -z "$provider" || "$provider" == 'deepseek-official' ]]; then
-        dsh_enhanced_fail 2 '自定义网关需要一个不同于 deepseek-official 的 provider route 名称。'
+        dsh_ray_fail 2 '自定义网关需要一个不同于 deepseek-official 的 provider route 名称。'
         return $?
       fi
-      if dsh_enhanced_is_agent_route "$provider"; then
-        dsh_enhanced_fail 2 "$provider 是本机 agent route，请在菜单中选择对应的本机编码工具选项，而不是自定义网关。"
+      if dsh_ray_is_agent_route "$provider"; then
+        dsh_ray_fail 2 "$provider 是本机 agent route，请在菜单中选择对应的本机编码工具选项，而不是自定义网关。"
         return $?
       fi
       printf -v "$provider_var" '%s' "$provider"
@@ -1247,7 +1242,7 @@ dsh_enhanced_prompt_model_route() {
       local model
       IFS= read -r model
       if [[ -z "$model" ]]; then
-        dsh_enhanced_fail 2 '自定义网关需要一个模型 id。'
+        dsh_ray_fail 2 '自定义网关需要一个模型 id。'
         return $?
       fi
       printf -v "$model_var" '%s' "$model"
@@ -1255,7 +1250,7 @@ dsh_enhanced_prompt_model_route() {
       local base_url
       IFS= read -r base_url
       if [[ "$base_url" != http://* && "$base_url" != https://* ]]; then
-        dsh_enhanced_fail 2 'Base URL 必须以 http:// 或 https:// 开头。'
+        dsh_ray_fail 2 'Base URL 必须以 http:// 或 https:// 开头。'
         return $?
       fi
       printf -v "$base_url_var" '%s' "$base_url"
@@ -1264,7 +1259,7 @@ dsh_enhanced_prompt_model_route() {
       IFS= read -r api
       case "${api:-openai-completions}" in
         openai-completions|openai-responses|anthropic-messages) printf -v "$api_var" '%s' "${api:-openai-completions}" ;;
-        *) dsh_enhanced_fail 2 'API 协议只能是 openai-completions、openai-responses 或 anthropic-messages。'; return $? ;;
+        *) dsh_ray_fail 2 'API 协议只能是 openai-completions、openai-responses 或 anthropic-messages。'; return $? ;;
       esac
       printf '显示名（可选，直接回车跳过）：' >&2
       local display
@@ -1278,7 +1273,7 @@ dsh_enhanced_prompt_model_route() {
       elif [[ "$kind" == "$option_agy" && -n "$agy_command" ]]; then
         chosen_agent='agy-agent'
       else
-        dsh_enhanced_fail 2 '本机未检测到对应的 traex/trae-cli 或 agy 可执行文件，无法选择本机 agent route。'
+        dsh_ray_fail 2 '本机未检测到对应的 traex/trae-cli 或 agy 可执行文件，无法选择本机 agent route。'
         return $?
       fi
       # An agent route needs no model id, base URL, api, or display name; the
@@ -1297,7 +1292,7 @@ dsh_enhanced_prompt_model_route() {
 
 # Detect an actual executable, not a shell function or alias: the provider later
 # starts this path with shell:false from a potentially different service PATH.
-_dsh_enhanced_detect_command() {
+_dsh_ray_detect_command() {
   local candidate found directory
   for candidate in "$@"; do
     found="$(type -P "$candidate" 2>/dev/null || true)"
@@ -1310,15 +1305,15 @@ _dsh_enhanced_detect_command() {
   return 1
 }
 
-dsh_enhanced_detect_traex_command() {
-  _dsh_enhanced_detect_command traex trae-cli
+dsh_ray_detect_traex_command() {
+  _dsh_ray_detect_command traex trae-cli
 }
 
-dsh_enhanced_detect_agy_command() {
-  _dsh_enhanced_detect_command agy
+dsh_ray_detect_agy_command() {
+  _dsh_ray_detect_command agy
 }
 
-dsh_enhanced_traex_login_ready() {
+dsh_ray_traex_login_ready() {
   local command="$1"
   node - "$command" <<'NODE'
 const { spawnSync } = require('node:child_process')
@@ -1336,7 +1331,7 @@ NODE
 }
 
 # Prompt-free Antigravity CLI readiness probe (`agy models`, never `session/prompt`).
-dsh_enhanced_agy_login_ready() {
+dsh_ray_agy_login_ready() {
   local command="$1"
   node - "$command" <<'NODE'
 const { spawnSync } = require('node:child_process')
@@ -1351,7 +1346,7 @@ NODE
 
 # Agent routes are served by a local coding agent (ACP), not an API key.
 # Mirror model-setup.ts's AGENT_ROUTES so the shell can branch without Node.
-dsh_enhanced_is_agent_route() {
+dsh_ray_is_agent_route() {
   [[ "$1" == 'traex-agent' || "$1" == 'agy-agent' ]]
 }
 
@@ -1359,7 +1354,7 @@ dsh_enhanced_is_agent_route() {
 # Resolve it once from the meta bundle, then make the whole install cohort use
 # that exact version.  Tags stay supported for callers that deliberately use a
 # release channel; ranges are rejected because they cannot describe one cohort.
-dsh_enhanced_is_exact_plugin_version() {
+dsh_ray_is_exact_plugin_version() {
   local value="$1"
   local without_build="$value"
   local build=''
@@ -1383,18 +1378,18 @@ dsh_enhanced_is_exact_plugin_version() {
   [[ "$core" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 }
 
-dsh_enhanced_validate_plugin_selector() {
+dsh_ray_validate_plugin_selector() {
   local selector="$1"
-  if dsh_enhanced_is_exact_plugin_version "$selector"; then return 0; fi
+  if dsh_ray_is_exact_plugin_version "$selector"; then return 0; fi
   # npm dist-tags are deliberately a narrow token here.  It keeps existing tag
   # support without accepting a range or a selector that is ambiguous in a
   # package spec.  Arguments are still passed as separate argv values.
   if [[ "$selector" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; then return 0; fi
-  dsh_enhanced_fail 2 '插件版本必须是精确 SemVer 或 npm dist-tag；不支持 range。'
+  dsh_ray_fail 2 '插件版本必须是精确 SemVer 或 npm dist-tag；不支持 range。'
   return $?
 }
 
-dsh_enhanced_npm_exact_version_from_json() {
+dsh_ray_npm_exact_version_from_json() {
   local raw="$1"
   node -e '
     const parsed = JSON.parse(process.argv[1])
@@ -1403,21 +1398,21 @@ dsh_enhanced_npm_exact_version_from_json() {
   ' "$raw"
 }
 
-dsh_enhanced_resolve_npm_cohort() {
+dsh_ray_resolve_npm_cohort() {
   local selector="$1"
   local dry_run="$2"
   shift 2
-  local anchor='@dsh-enhanced/personal-assistant'
+  local anchor='@dsh-ray/personal-assistant'
   local slug package_spec raw resolved available
-  DSH_ENHANCED_RESOLVED_PLUGIN_VERSION=''
-  dsh_enhanced_validate_plugin_selector "$selector" || return $?
+  DSH_RAY_RESOLVED_PLUGIN_VERSION=''
+  dsh_ray_validate_plugin_selector "$selector" || return $?
 
   if [[ "$dry_run" == '1' ]]; then
-    if dsh_enhanced_is_exact_plugin_version "$selector"; then
-      DSH_ENHANCED_RESOLVED_PLUGIN_VERSION="$selector"
+    if dsh_ray_is_exact_plugin_version "$selector"; then
+      DSH_RAY_RESOLVED_PLUGIN_VERSION="$selector"
       printf 'npm cohort（dry-run）：将核验所有 bundle 都已发布为 %s；不会访问 npm registry。\n' "$selector"
     else
-      DSH_ENHANCED_RESOLVED_PLUGIN_VERSION="<npm-anchor:$selector>"
+      DSH_RAY_RESOLVED_PLUGIN_VERSION="<npm-anchor:$selector>"
       printf 'npm cohort（dry-run）：将先解析 %s@%s 的精确版本，再核验所有 bundle；不会访问 npm registry。\n' \
         "$anchor" "$selector"
     fi
@@ -1426,29 +1421,29 @@ dsh_enhanced_resolve_npm_cohort() {
 
   package_spec="$anchor@$selector"
   if ! raw="$(npm view "$package_spec" version --json --location=global)"; then
-    dsh_enhanced_fail 1 "无法从 npm 解析 $package_spec 的版本。"
+    dsh_ray_fail 1 "无法从 npm 解析 $package_spec 的版本。"
     return $?
   fi
-  if ! resolved="$(dsh_enhanced_npm_exact_version_from_json "$raw")" \
-    || ! dsh_enhanced_is_exact_plugin_version "$resolved"; then
-    dsh_enhanced_fail 1 "npm 为 $package_spec 返回了无效的版本数据。"
+  if ! resolved="$(dsh_ray_npm_exact_version_from_json "$raw")" \
+    || ! dsh_ray_is_exact_plugin_version "$resolved"; then
+    dsh_ray_fail 1 "npm 为 $package_spec 返回了无效的版本数据。"
     return $?
   fi
 
   printf 'npm cohort：%s@%s 解析为精确版本 %s。\n' "$anchor" "$selector" "$resolved"
   for slug in "$@"; do
-    package_spec="@dsh-enhanced/$slug@$resolved"
+    package_spec="@dsh-ray/$slug@$resolved"
     if ! raw="$(npm view "$package_spec" version --json --location=global)"; then
-      dsh_enhanced_fail 1 "npm 未发布所需 cohort bundle：$package_spec。尚未修改 profile。"
+      dsh_ray_fail 1 "npm 未发布所需 cohort bundle：$package_spec。尚未修改 profile。"
       return $?
     fi
-    if ! available="$(dsh_enhanced_npm_exact_version_from_json "$raw")" \
+    if ! available="$(dsh_ray_npm_exact_version_from_json "$raw")" \
       || [[ "$available" != "$resolved" ]]; then
-      dsh_enhanced_fail 1 "npm 未发布所需 cohort bundle：$package_spec。尚未修改 profile。"
+      dsh_ray_fail 1 "npm 未发布所需 cohort bundle：$package_spec。尚未修改 profile。"
       return $?
     fi
   done
-  DSH_ENHANCED_RESOLVED_PLUGIN_VERSION="$resolved"
+  DSH_RAY_RESOLVED_PLUGIN_VERSION="$resolved"
   printf 'npm cohort：已核验 %s 个 bundle 均为 %s；现在才会修改 profile。\n' "$#" "$resolved"
 }
 
@@ -1456,7 +1451,7 @@ dsh_enhanced_resolve_npm_cohort() {
 # profile before we enable and resolve it.  The flag path pre-selects the slug
 # with every other bundle; this covers interactive selection made after the main
 # install, and is a no-op when the bundle is already registered.
-dsh_enhanced_ensure_agent_bundle() {
+dsh_ray_ensure_agent_bundle() {
   local provider="$1"
   local profile="$2"
   local dsh_home="$3"
@@ -1464,31 +1459,31 @@ dsh_enhanced_ensure_agent_bundle() {
   local repo_root="$5"
   local plugin_version="$6"
   local dry_run="$7"
-  dsh_enhanced_is_agent_route "$provider" || return 0
+  dsh_ray_is_agent_route "$provider" || return 0
   local slug='traex-acp-provider'
   # Registration is the source of truth, not the node_modules directory: a
   # failed pnpm add leaves the directory linked while the Host never registers
   # the bundle, so the directory check would skip the half-installed retry.
   if [[ "$dry_run" != '1' ]] \
-    && dsh_enhanced_bundle_registered "$dsh_home/profiles/$profile" "@dsh-enhanced/$slug"; then
+    && dsh_ray_bundle_registered "$dsh_home/profiles/$profile" "@dsh-ray/$slug"; then
     return 0
   fi
   local target
   if [[ "$source_mode" == 'local' ]]; then
     target="$repo_root/plugins/$slug"
     if [[ ! -f "$target/package.json" ]]; then
-      dsh_enhanced_fail 1 "缺少本地插件：$target"
+      dsh_ray_fail 1 "缺少本地插件：$target"
       return $?
     fi
   else
-    target="@dsh-enhanced/$slug@$plugin_version"
+    target="@dsh-ray/$slug@$plugin_version"
   fi
   printf '\n为 %s 安装 provider bundle：\n' "$provider"
   if [[ "$source_mode" == 'npm' ]]; then
-    dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
-    dsh_enhanced_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "$target" || return $?
+    dsh_ray_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
+    dsh_ray_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "$target" || return $?
   fi
-  dsh_enhanced_run "$dry_run" dsh plugin --profile "$profile" add "$target"
+  dsh_ray_run "$dry_run" dsh plugin --profile "$profile" add "$target"
 }
 
 # pnpm 11 requires an explicit decision for every build script. Write the
@@ -1500,22 +1495,22 @@ dsh_enhanced_ensure_agent_bundle() {
 # and the value must match what local-cohort receipts freeze. protobufjs=false
 # (advisory-only postinstall). A fresh profile uses DSH's own initializer and
 # its installed YAML parser.
-dsh_enhanced_prepare_profile_build_policy() {
+dsh_ray_prepare_profile_build_policy() {
   local profile="$1" dsh_home="$2" dry_run="$3"
   local profile_directory="$dsh_home/profiles/$profile"
   local workspace="$profile_directory/pnpm-workspace.yaml"
   if [[ "$dry_run" == '1' ]]; then
     printf 'profile 依赖构建策略：add 前将确保 pnpm-workspace.yaml 含经评审决策 koffi=true（平台预编译绑定时其安装脚本仅做加载自检，不编译、不联网）与 protobufjs=false（仅输出版本建议）；新 profile 先由 Host 初始化 workspace，owner 已有的显式布尔决策保持原样。\n'
-    dsh_enhanced_print_command dsh plugin --profile "$profile" version-exemptions
+    dsh_ray_print_command dsh plugin --profile "$profile" version-exemptions
     return 0
   fi
   if [[ ! -e "$workspace" ]]; then
     if [[ -e "$profile_directory/package.json" ]]; then
-      dsh_enhanced_fail 1 "现有 profile 缺少 pnpm-workspace.yaml；不会创建不完整的 Host workspace：$profile_directory"
+      dsh_ray_fail 1 "现有 profile 缺少 pnpm-workspace.yaml；不会创建不完整的 Host workspace：$profile_directory"
       return $?
     fi
     dsh plugin --profile "$profile" version-exemptions >/dev/null || {
-      dsh_enhanced_fail 1 "Host 无法初始化 profile workspace：$profile_directory"
+      dsh_ray_fail 1 "Host 无法初始化 profile workspace：$profile_directory"
       return $?
     }
   fi
@@ -1581,7 +1576,7 @@ if (unknownPending.length > 0) {
   fail(`unreviewed pending build decisions require an explicit boolean in pnpm-workspace.yaml before retrying: ${unknownPending.join(', ')}`)
 }
 if (!changed) process.exit(0)
-const temporary = join(dirname(workspace), `.pnpm-workspace.yaml.dsh-enhanced-${randomBytes(12).toString('hex')}`)
+const temporary = join(dirname(workspace), `.pnpm-workspace.yaml.dsh-ray-${randomBytes(12).toString('hex')}`)
 let descriptor
 try {
   descriptor = openSync(temporary, 'wx', 0o600)
@@ -1603,7 +1598,7 @@ NODE
 # bundle in the Host's bundle list. A node_modules directory or dependency
 # entry left by a failed add does not count; a missing or unreadable manifest
 # is treated as "not registered" so the caller proceeds to install.
-dsh_enhanced_bundle_registered() {
+dsh_ray_bundle_registered() {
   local profile_directory="$1" name="$2"
   node - "$profile_directory/package.json" "$name" <<'NODE'
 const { readFileSync } = require('node:fs')
@@ -1625,7 +1620,7 @@ NODE
 # as pre-existing — an install that exits 0 with zero bundles loaded. Drop the
 # half-installed entries for the exact targets about to be added so the Host's
 # own reconciliation registers them; pnpm rewrites the lockfile on the add.
-dsh_enhanced_prune_half_installed_bundles() {
+dsh_ray_prune_half_installed_bundles() {
   local profile="$1" dsh_home="$2" dry_run="$3"
   shift 3
   local profile_directory="$dsh_home/profiles/$profile"
@@ -1641,7 +1636,7 @@ const specName = spec => {
   return at > 0 ? spec.slice(0, at) : spec
 }
 const names = [...new Set(process.argv.slice(5).map(specName))]
-  .filter(name => /^@(?:dsh-enhanced|deepseek-ai)\//u.test(name))
+  .filter(name => /^@(?:dsh-ray|deepseek-ai)\//u.test(name))
 if (names.length === 0) process.exit(0)
 if (!existsSync(manifestPath)) process.exit(0)
 const fail = message => { throw new Error(`half-installed bundle cleanup: ${message}`) }
@@ -1684,7 +1679,7 @@ if (dryRun) {
 console.log(`检测到上次安装失败遗留的半装 bundle（依赖已存在但未注册到 profile）：${stale.join(', ')}；已移除 package.json 中的残留条目，随后重新安装以完成注册。`)
 for (const name of stale) delete dependencies[name]
 manifest.dependencies = dependencies
-const temporary = join(dirname(manifestPath), `.package.json.dsh-enhanced-${randomBytes(12).toString('hex')}`)
+const temporary = join(dirname(manifestPath), `.package.json.dsh-ray-${randomBytes(12).toString('hex')}`)
 let descriptor
 try {
   descriptor = openSync(temporary, 'wx', 0o600)
@@ -1706,12 +1701,12 @@ NODE
 # tiny exact-file snapshot while a newly selected agent route is being
 # validated, so an adapter composition failure cannot leave all profiles
 # pointing at a route that was never proven usable.
-dsh_enhanced_snapshot_agent_route_configuration() {
+dsh_ray_snapshot_agent_route_configuration() {
   local profile="$1"
   local dsh_home="$2"
   local scope="${3:-global-and-profile}"
   local snapshot_directory
-  if ! snapshot_directory="$(mktemp -d "${TMPDIR:-/tmp}/dsh-enhanced-agent-route.XXXXXX")"; then
+  if ! snapshot_directory="$(mktemp -d "${TMPDIR:-/tmp}/dsh-ray-agent-route.XXXXXX")"; then
     return 1
   fi
   if ! chmod 700 "$snapshot_directory"; then
@@ -1740,7 +1735,7 @@ dsh_enhanced_snapshot_agent_route_configuration() {
   printf '%s' "$snapshot_directory"
 }
 
-dsh_enhanced_restore_agent_route_configuration() {
+dsh_ray_restore_agent_route_configuration() {
   local snapshot_directory="$1"
   local profile="$2"
   local dsh_home="$3"
@@ -1762,7 +1757,7 @@ dsh_enhanced_restore_agent_route_configuration() {
   rm -rf -- "$snapshot_directory"
 }
 
-dsh_enhanced_discard_agent_route_configuration_snapshot() {
+dsh_ray_discard_agent_route_configuration_snapshot() {
   local snapshot_directory="$1"
   [[ -n "$snapshot_directory" && -d "$snapshot_directory" ]] || return 0
   rm -rf -- "$snapshot_directory"
@@ -1775,7 +1770,7 @@ dsh_enhanced_discard_agent_route_configuration_snapshot() {
 # the shim, then fall back to running a provider package's bin script with node
 # (which needs no exec bit and resolves the shared implementation the same way).
 # Prints the launcher tokens, one per line; returns non-zero when none is found.
-dsh_enhanced_resolve_model_setup() {
+dsh_ray_resolve_model_setup() {
   local profile="$1"
   local dsh_home="$2"
   local base="$dsh_home/profiles/$profile/node_modules"
@@ -1786,8 +1781,8 @@ dsh_enhanced_resolve_model_setup() {
   fi
   local candidate
   for candidate in \
-    "$base/@dsh-enhanced/personal-assistant/bin/dsh-model-setup.js" \
-    "$base/@dsh-enhanced/assistant-policy/bin/dsh-model-setup.js"; do
+    "$base/@dsh-ray/personal-assistant/bin/dsh-model-setup.js" \
+    "$base/@dsh-ray/assistant-policy/bin/dsh-model-setup.js"; do
     if [[ -f "$candidate" ]]; then
       printf 'node\n%s\n' "$candidate"
       return 0
@@ -1800,27 +1795,27 @@ dsh_enhanced_resolve_model_setup() {
 # profile/settings (e.g. a newly selected default model or enabled route). This
 # only restarts; it never installs a unit. A missing unit is not fatal here —
 # the Feishu step installs/starts it — so we warn and continue.
-dsh_enhanced_restart_resident_service() {
+dsh_ray_restart_resident_service() {
   local profile="$1"
   local dry_run="$2"
   local dsh_home="${3:-${DSH_HOME:-$HOME/.dsh}}"
   local reason="${4:-新模型配置}"
-  local platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
+  local platform="${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}"
   case "$platform" in
     Darwin|darwin)
       local target="gui/$(id -u)/ai.deepseek.dsh.profile.$profile"
       if [[ "$dry_run" == '1' ]]; then
         printf '常驻服务：将重启以加载%s。\n' "$reason"
-        dsh_enhanced_print_command launchctl kickstart -k "$target"
+        dsh_ray_print_command launchctl kickstart -k "$target"
         return 0
       fi
-      dsh_enhanced_macos_service_action "$profile" "$dsh_home" restart-if-loaded || return $?
+      dsh_ray_macos_service_action "$profile" "$dsh_home" restart-if-loaded || return $?
       ;;
     Linux|linux)
       local target="dsh-profile-$profile.service"
       if [[ "$dry_run" == '1' ]]; then
         printf '常驻服务：将重启以加载%s。\n' "$reason"
-        dsh_enhanced_print_command systemctl --user restart "$target"
+        dsh_ray_print_command systemctl --user restart "$target"
         return 0
       fi
       if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$target" >/dev/null 2>&1; then
@@ -1832,8 +1827,8 @@ dsh_enhanced_restart_resident_service() {
       local target="DSH profile $profile"
       if [[ "$dry_run" == '1' ]]; then
         printf '常驻服务：将重启以加载%s。\n' "$reason"
-        dsh_enhanced_print_command schtasks.exe /End /TN "$target"
-        dsh_enhanced_print_command schtasks.exe /Run /TN "$target"
+        dsh_ray_print_command schtasks.exe /End /TN "$target"
+        dsh_ray_print_command schtasks.exe /Run /TN "$target"
         return 0
       fi
       if schtasks.exe /Query /TN "$target" >/dev/null 2>&1; then
@@ -1846,7 +1841,7 @@ dsh_enhanced_restart_resident_service() {
 }
 
 # Run dsh-model-setup with the resolved route.  For an API-key route the key is
-# read from the environment (DSH_ENHANCED_MODEL_API_KEY or the derived credential
+# read from the environment (DSH_RAY_MODEL_API_KEY or the derived credential
 # reference); in an interactive terminal we offer a hidden prompt and export it
 # only for the child process.  When no key is available we still write the route
 # selection and tell the owner where to supply the secret, rather than failing
@@ -1854,7 +1849,7 @@ dsh_enhanced_restart_resident_service() {
 # selection and enable the route bundle row in this profile's patch layer.  The
 # subsequent model-route step owns its adapter/login validation, so an explicit
 # --model-route skip can still opt out.
-dsh_enhanced_apply_model() {
+dsh_ray_apply_model() {
   local profile="$1"
   local dsh_home="$2"
   local provider="$3"
@@ -1873,9 +1868,9 @@ dsh_enhanced_apply_model() {
     local launcher_token
     while IFS= read -r launcher_token; do
       resolved_launcher+=("$launcher_token")
-    done < <(dsh_enhanced_resolve_model_setup "$profile" "$dsh_home")
+    done < <(dsh_ray_resolve_model_setup "$profile" "$dsh_home")
     if [[ -z "${resolved_launcher[0]+set}" ]]; then
-      dsh_enhanced_fail 1 "找不到安装后的 dsh-model-setup（既无 .bin/dsh-model-setup，也无 personal-assistant/assistant-policy 的 bin 脚本）：$dsh_home/profiles/$profile"
+      dsh_ray_fail 1 "找不到安装后的 dsh-model-setup（既无 .bin/dsh-model-setup，也无 personal-assistant/assistant-policy 的 bin 脚本）：$dsh_home/profiles/$profile"
       return $?
     fi
     setup_launcher=("${resolved_launcher[@]}")
@@ -1894,12 +1889,12 @@ dsh_enhanced_apply_model() {
 
   # Agent route (TraeX / Antigravity): no API key. Write the default selection
   # and flip the route field in this profile's patch layer.
-  if dsh_enhanced_is_agent_route "$provider"; then
+  if dsh_ray_is_agent_route "$provider"; then
     local detected_agent_cmd=''
     if [[ "$provider" == 'traex-agent' ]]; then
-      detected_agent_cmd="$(dsh_enhanced_detect_traex_command || true)"
+      detected_agent_cmd="$(dsh_ray_detect_traex_command || true)"
     elif [[ "$provider" == 'agy-agent' ]]; then
-      detected_agent_cmd="$(dsh_enhanced_detect_agy_command || true)"
+      detected_agent_cmd="$(dsh_ray_detect_agy_command || true)"
     fi
     args+=(--enable-in-profile "$profile")
     if [[ -n "$detected_agent_cmd" ]]; then
@@ -1907,18 +1902,18 @@ dsh_enhanced_apply_model() {
     fi
     if [[ "$dry_run" == '1' ]]; then
       printf '模型配置：将在 profile %s 的 patch 层写入默认模型并启用 %s（traex-acp-provider，无需 API Key）。\n' "$profile" "$provider"
-      dsh_enhanced_print_command "$setup_display" "${args[@]}"
+      dsh_ray_print_command "$setup_display" "${args[@]}"
       return 0
     fi
-    dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}" || return $?
+    dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}" || return $?
     return 0
   fi
 
   # Decide whether a key is (or can be made) available for this run.
   local have_key='0'
-  local key_env_var='DSH_ENHANCED_MODEL_API_KEY'
+  local key_env_var='DSH_RAY_MODEL_API_KEY'
   local derived_ref
-  derived_ref="$(dsh_enhanced_derive_api_key_env "$provider")"
+  derived_ref="$(dsh_ray_derive_api_key_env "$provider")"
   if [[ -n "${!key_env_var:-}" || -n "${!derived_ref:-}" ]]; then
     have_key='1'
   fi
@@ -1926,10 +1921,10 @@ dsh_enhanced_apply_model() {
   if [[ "$dry_run" == '1' ]]; then
     if [[ "$have_key" == '1' ]]; then
       printf '模型配置：将写入 profile %s 的 patch 层，并把环境中的 API Key 存入 .credentials.yaml。\n' "$profile"
-      dsh_enhanced_print_command "$setup_display" "${args[@]}" --store-key
+      dsh_ray_print_command "$setup_display" "${args[@]}" --store-key
     else
       printf '模型配置：将写入 profile %s 的 patch 层；未检测到 API Key，稍后请设置 %s 或编辑 .credentials.yaml。\n' "$profile" "$derived_ref"
-      dsh_enhanced_print_command "$setup_display" "${args[@]}"
+      dsh_ray_print_command "$setup_display" "${args[@]}"
     fi
     return 0
   fi
@@ -1943,7 +1938,7 @@ dsh_enhanced_apply_model() {
     IFS= read -rs secret || secret=''
     printf '\n' >&2
     if [[ -n "$secret" ]]; then
-      DSH_ENHANCED_MODEL_API_KEY="$secret" dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}" --store-key
+      DSH_RAY_MODEL_API_KEY="$secret" dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}" --store-key
       local status=$?
       unset secret
       return $status
@@ -1951,9 +1946,9 @@ dsh_enhanced_apply_model() {
   fi
 
   if [[ "$have_key" == '1' ]]; then
-    dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}" --store-key
+    dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}" --store-key
   else
-    dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}"
+    dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}"
     printf '模型配置：未存储 API Key；请设置环境变量 %s 或编辑 %s/.credentials.yaml 后再验证。\n' \
       "$derived_ref" "$dsh_home"
   fi
@@ -1961,7 +1956,7 @@ dsh_enhanced_apply_model() {
 
 # Mirror deriveApiKeyEnv() in model-setup.ts so the shell can tell whether a
 # credential reference is already present without launching Node.
-dsh_enhanced_derive_api_key_env() {
+dsh_ray_derive_api_key_env() {
   local provider="$1"
   if [[ "$provider" == 'deepseek-official' ]]; then
     printf 'DEEPSEEK_API_KEY'
@@ -1981,41 +1976,41 @@ dsh_enhanced_derive_api_key_env() {
 # in $DSH_HOME/.credentials.yaml (managed services do not inherit the
 # installer's shell environment). Only the key name is matched; the secret
 # value is never printed.
-dsh_enhanced_model_credential_stored() {
+dsh_ray_model_credential_stored() {
   local dsh_home="$1" provider="$2"
   [[ -n "$provider" ]] || return 1
-  if dsh_enhanced_is_agent_route "$provider"; then
+  if dsh_ray_is_agent_route "$provider"; then
     return 0
   fi
   local ref file="$dsh_home/.credentials.yaml"
-  ref="$(dsh_enhanced_derive_api_key_env "$provider")"
+  ref="$(dsh_ray_derive_api_key_env "$provider")"
   [[ -f "$file" ]] || return 1
   grep -Eq "^${ref}:[[:space:]]*[^[:space:]#]" "$file"
 }
 
 # True when this installer process carries an API key that dsh-model-setup
 # --store-key can persist for the provider (value is never inspected here).
-dsh_enhanced_model_env_key_present() {
+dsh_ray_model_env_key_present() {
   local provider="$1" ref
-  ref="$(dsh_enhanced_derive_api_key_env "$provider")"
-  [[ -n "${DSH_ENHANCED_MODEL_API_KEY:-}" || -n "${!ref:-}" ]]
+  ref="$(dsh_ray_derive_api_key_env "$provider")"
+  [[ -n "${DSH_RAY_MODEL_API_KEY:-}" || -n "${!ref:-}" ]]
 }
 
 # Decide the guided/automatic model step without any prompt. Prints `keep`
 # (leave the composed default untouched) or `configure` (write the built-in
 # DeepSeek default and store its key). A user-owned non-default route is always
 # kept; an unresolved provider on an existing profile is treated the same way.
-# `interactive=1` means the hidden key prompt in dsh_enhanced_apply_model may
+# `interactive=1` means the hidden key prompt in dsh_ray_apply_model may
 # collect the key; otherwise only a key already in the environment is used.
-dsh_enhanced_guided_model_plan() {
+dsh_ray_guided_model_plan() {
   local dsh_home="$1" provider="$2" interactive="$3"
   if [[ -n "$provider" && "$provider" != 'deepseek-official' ]]; then
     printf 'keep'
     return 0
   fi
-  if dsh_enhanced_model_credential_stored "$dsh_home" 'deepseek-official'; then
+  if dsh_ray_model_credential_stored "$dsh_home" 'deepseek-official'; then
     printf 'keep'
-  elif dsh_enhanced_model_env_key_present 'deepseek-official' || [[ "$interactive" == '1' ]]; then
+  elif dsh_ray_model_env_key_present 'deepseek-official' || [[ "$interactive" == '1' ]]; then
     printf 'configure'
   else
     printf 'keep'
@@ -2026,9 +2021,9 @@ dsh_enhanced_guided_model_plan() {
 # (no directory yet) composes the built-in deepseek-official default; an
 # existing profile whose composition cannot be read is reported as
 # `unresolved` so the guided flow never overwrites it.
-dsh_enhanced_guided_model_provider() {
+dsh_ray_guided_model_provider() {
   local dsh_home="$1" profile="$2" provider=''
-  if provider="$(DSH_HOME="$dsh_home" dsh_enhanced_effective_default_provider "$dsh_home" "$profile" 2>/dev/null)" && [[ -n "$provider" ]]; then
+  if provider="$(DSH_HOME="$dsh_home" dsh_ray_effective_default_provider "$dsh_home" "$profile" 2>/dev/null)" && [[ -n "$provider" ]]; then
     printf '%s' "$provider"
   elif [[ -d "$dsh_home/profiles/$profile" ]]; then
     printf 'unresolved'
@@ -2038,7 +2033,7 @@ dsh_enhanced_guided_model_provider() {
 }
 
 # Guided onboarding: offer the recommended assistant features (default yes).
-dsh_enhanced_confirm_plugin_preset() {
+dsh_ray_confirm_plugin_preset() {
   [[ -t 0 && -t 1 ]] || return 1
   printf '\n开启推荐的多轮工作台辅助功能？（自动追踪待处理任务队列、超额提醒与事件响应，可随时调整）[Y/n]：' >&2
   local answer
@@ -2051,7 +2046,7 @@ dsh_enhanced_confirm_plugin_preset() {
 
 
 # Guided onboarding: explicit ordinary-use learning authorization (default yes).
-dsh_enhanced_confirm_ordinary_use_learning() {
+dsh_ray_confirm_ordinary_use_learning() {
   [[ -t 0 && -t 1 ]] || return 1
   printf '\n启用普通使用学习？（记住你认可的偏好与日常使用经验，仅限授权范围内且受预算限制）[Y/n]：' >&2
   local answer
@@ -2064,7 +2059,7 @@ dsh_enhanced_confirm_ordinary_use_learning() {
 
 # Guided plain-language toggles for Proactive / Growth / Dreaming.
 # Usage: <scenario> <proactive_var> <dreaming_var> <growth_var>
-dsh_enhanced_prompt_capability_toggles() {
+dsh_ray_prompt_capability_toggles() {
   local scenario="$1" proactive_var="$2" dreaming_var="$3" growth_var="$4"
   local current_p="${!proactive_var:-auto}"
   local current_d="${!dreaming_var:-auto}"
@@ -2115,7 +2110,7 @@ dsh_enhanced_prompt_capability_toggles() {
 # Resolve the effective learning decision for a managed supervised install.
 # Usage: <explicit: auto|authorize|skip> <scenario> <fresh 0|1> <guided 0|1> <assume_yes 0|1>
 # Prints authorize, skip, or preserve (keep an existing installation untouched).
-dsh_enhanced_resolve_learning_decision() {
+dsh_ray_resolve_learning_decision() {
   local explicit="$1" scenario="$2" fresh="$3" guided="$4" assume_yes="$5"
   case "$explicit" in
     authorize|skip) printf '%s' "$explicit"; return 0 ;;
@@ -2131,7 +2126,7 @@ dsh_enhanced_resolve_learning_decision() {
     return 0
   fi
   if [[ "$guided" == '1' && "$assume_yes" != '1' && -t 0 && -t 1 ]]; then
-    if dsh_enhanced_confirm_ordinary_use_learning; then printf 'authorize'; else printf 'skip'; fi
+    if dsh_ray_confirm_ordinary_use_learning; then printf 'authorize'; else printf 'skip'; fi
     return 0
   fi
   printf 'authorize'
@@ -2139,9 +2134,9 @@ dsh_enhanced_resolve_learning_decision() {
 
 # Read the persisted pre-profile install intent. 0 = valid (prints
 # "scenario learning preset at [proactive dreaming growth]"), 1 = absent, 2 = invalid.
-dsh_enhanced_read_install_intent() {
+dsh_ray_read_install_intent() {
   local dsh_home="$1" file
-  file="$dsh_home/.dsh-enhanced/install-intent.json"
+  file="$dsh_home/.dsh-ray/install-intent.json"
   if [[ -L "$file" || ( -e "$file" && ! -f "$file" ) ]]; then
     printf 'install intent is not a regular file: %s\n' "$file" >&2
     return 2
@@ -2182,33 +2177,33 @@ NODE
 
 # Atomically persist the explicit install decisions before the profile exists.
 # The marker is private (0600 in a 0700 directory) and reused by retries.
-dsh_enhanced_write_install_intent() {
+dsh_ray_write_install_intent() {
   local dsh_home="$1" scenario="$2" learning="$3" preset="$4"
   local proactive="${5:-auto}" dreaming="${6:-auto}" growth="${7:-auto}"
   case "$scenario" in core|web|autonomy|lark|supervised|full) ;; *)
-    dsh_enhanced_fail 2 "安装意图场景不合法：$scenario"
+    dsh_ray_fail 2 "安装意图场景不合法：$scenario"
     return $?
     ;;
   esac
   case "$learning" in authorize|skip) ;; *)
-    dsh_enhanced_fail 2 "安装意图学习决策不合法：$learning"
+    dsh_ray_fail 2 "安装意图学习决策不合法：$learning"
     return $?
     ;;
   esac
   if [[ ! "$preset" =~ ^[a-z][a-z0-9-]*$ ]]; then
-    dsh_enhanced_fail 2 "安装意图插件预设不合法：$preset"
+    dsh_ray_fail 2 "安装意图插件预设不合法：$preset"
     return $?
   fi
   local toggle_val
   for toggle_val in "$proactive" "$dreaming" "$growth"; do
     case "$toggle_val" in auto|on|off) ;; *)
-      dsh_enhanced_fail 2 "安装意图能力开关不合法：$toggle_val"
+      dsh_ray_fail 2 "安装意图能力开关不合法：$toggle_val"
       return $?
       ;;
     esac
   done
   if [[ -L "$dsh_home" || ( -e "$dsh_home" && ! -d "$dsh_home" ) ]]; then
-    dsh_enhanced_fail 1 "安装意图 DSH_HOME 不是可信目录：$dsh_home"
+    dsh_ray_fail 1 "安装意图 DSH_HOME 不是可信目录：$dsh_home"
     return $?
   fi
   # Create a missing DSH_HOME as 0700 (mkdir -p would inherit the caller's
@@ -2216,19 +2211,19 @@ dsh_enhanced_write_install_intent() {
   # installer does not rewrite a parent directory it does not own wholesale.
   if [[ ! -d "$dsh_home" ]]; then
     if ! mkdir -p "$dsh_home" || ! chmod 700 "$dsh_home"; then
-      dsh_enhanced_fail 1 "无法创建私有 DSH_HOME：$dsh_home"
+      dsh_ray_fail 1 "无法创建私有 DSH_HOME：$dsh_home"
       return $?
     fi
   fi
-  local directory="$dsh_home/.dsh-enhanced"
+  local directory="$dsh_home/.dsh-ray"
   local file="$directory/install-intent.json"
   local temporary="$directory/.install-intent.$$.tmp"
   if [[ -L "$directory" ]]; then
-    dsh_enhanced_fail 1 "安装意图目录不能是符号链接：$directory"
+    dsh_ray_fail 1 "安装意图目录不能是符号链接：$directory"
     return $?
   fi
   if ! mkdir -p "$directory" || ! chmod 700 "$directory"; then
-    dsh_enhanced_fail 1 "无法创建安装意图目录：$directory"
+    dsh_ray_fail 1 "无法创建安装意图目录：$directory"
     return $?
   fi
   local extras_json=''
@@ -2238,12 +2233,12 @@ dsh_enhanced_write_install_intent() {
   if ! ( umask 077; printf '{"schemaVersion":1,"scenario":"%s","learning":"%s","pluginPreset":"%s"%s,"at":%s}\n' \
       "$scenario" "$learning" "$preset" "$extras_json" "$(date +%s)" > "$temporary" ); then
     rm -f "$temporary" 2>/dev/null || true
-    dsh_enhanced_fail 1 "无法写入安装意图：$temporary"
+    dsh_ray_fail 1 "无法写入安装意图：$temporary"
     return $?
   fi
   if ! chmod 600 "$temporary" || ! mv -f "$temporary" "$file"; then
     rm -f "$temporary" 2>/dev/null || true
-    dsh_enhanced_fail 1 "无法提交安装意图：$file"
+    dsh_ray_fail 1 "无法提交安装意图：$file"
     return $?
   fi
   printf '安装意图：已记录学习决策 %s 与插件预设 %s（%s）。\n' "$learning" "$preset" "$file"
@@ -2251,7 +2246,7 @@ dsh_enhanced_write_install_intent() {
 
 # One-question guided onboarding: accept every recommended default (scenario,
 # model, Lark, route check) or fall back to the itemized menus.
-dsh_enhanced_choose_onboarding_mode() {
+dsh_ray_choose_onboarding_mode() {
   printf '\n安装向导：\n' >&2
   printf '  1) 按推荐配置一路继续（推荐：各步骤采用推荐项；保留已有模型/飞书配置，缺少 API Key 时只问一次）\n' >&2
   printf '  2) 逐项自定义（部署场景、模型、飞书、route 验证）\n' >&2
@@ -2265,11 +2260,11 @@ dsh_enhanced_choose_onboarding_mode() {
   esac
 }
 
-dsh_enhanced_is_02_host_version() {
+dsh_ray_is_02_host_version() {
   [[ "${1:-}" =~ ^0\.2\.((0|1)-rc\.2|2-rc\.(1|3|5))$ ]]
 }
 
-dsh_enhanced_verify_model_route() {
+dsh_ray_verify_model_route() {
   local mode="$1"
   local dry_run="$2"
   local profile="$3"
@@ -2283,34 +2278,34 @@ dsh_enhanced_verify_model_route() {
 
   local effective_provider="$configured_provider"
   if [[ -z "$effective_provider" ]]; then
-    if ! effective_provider="$(dsh_enhanced_effective_default_provider "$dsh_home" "$profile")"; then
-      dsh_enhanced_fail 1 "模型 route 验证失败：无法解析 profile $profile 的有效默认模型。"
+    if ! effective_provider="$(dsh_ray_effective_default_provider "$dsh_home" "$profile")"; then
+      dsh_ray_fail 1 "模型 route 验证失败：无法解析 profile $profile 的有效默认模型。"
       return $?
     fi
   fi
-  if dsh_enhanced_is_agent_route "$effective_provider"; then
-    dsh_enhanced_verify_agent_route "$effective_provider" "$profile" "$dry_run" "$agent_login_verified"
+  if dsh_ray_is_agent_route "$effective_provider"; then
+    dsh_ray_verify_agent_route "$effective_provider" "$profile" "$dry_run" "$agent_login_verified"
     return $?
   fi
 
   if [[ "$dry_run" == '1' ]]; then
     printf '模型 route：将使用目标 profile 的模型配置，通过 DSH headless profile 发送一次固定的最小验证请求。\n'
-    dsh_enhanced_print_command dsh --profile headless 'Reply with exactly DSH_ROUTE_READY and nothing else.'
+    dsh_ray_print_command dsh --profile headless 'Reply with exactly DSH_ROUTE_READY and nothing else.'
     return 0
   fi
 
   printf '模型 route：正在发送最小验证请求。\n'
   local response verification_directory='' status=0
   local route_args=(--profile headless)
-  if dsh_enhanced_is_02_host_version "$(dsh --version 2>/dev/null || true)"; then
+  if dsh_ray_is_02_host_version "$(dsh --version 2>/dev/null || true)"; then
     if [[ -e "$dsh_home/settings.yaml" ]]; then
-      dsh_enhanced_fail 1 '仍有待迁移的 settings.yaml；请先在目标 profile 完成原生导入，再验证模型，避免 headless 消费其他 profile 的配置。'
+      dsh_ray_fail 1 '仍有待迁移的 settings.yaml；请先在目标 profile 完成原生导入，再验证模型，避免 headless 消费其他 profile 的配置。'
       return $?
     fi
     verification_directory="$(mktemp -d)" || return 1
-    if ! dsh_enhanced_prepare_model_verification "$profile" "$verification_directory"; then
+    if ! dsh_ray_prepare_model_verification "$profile" "$verification_directory"; then
       rm -rf -- "$verification_directory"
-      dsh_enhanced_fail 1 '无法读取目标 profile 的模型配置；未向其他 profile 的默认模型发送请求。'
+      dsh_ray_fail 1 '无法读取目标 profile 的模型配置；未向其他 profile 的默认模型发送请求。'
       return $?
     fi
     route_args+=(--patch "$verification_directory/route.yml")
@@ -2319,18 +2314,18 @@ dsh_enhanced_verify_model_route() {
   [[ -z "$verification_directory" ]] || rm -rf -- "$verification_directory"
   if [[ "$status" != 0 ]]; then
     printf '%s\n' "$response" >&2
-    dsh_enhanced_fail 1 '模型 route 验证失败。请先在 DSH 中配置并登录可用模型，然后重新运行 --model-route verify。'
+    dsh_ray_fail 1 '模型 route 验证失败。请先在 DSH 中配置并登录可用模型，然后重新运行 --model-route verify。'
     return $?
   fi
   if [[ "$response" != *'DSH_ROUTE_READY'* ]]; then
     printf '%s\n' "$response" >&2
-    dsh_enhanced_fail 1 '模型 route 没有返回预期的就绪标记；不会把当前部署标记为可用。'
+    dsh_ray_fail 1 '模型 route 没有返回预期的就绪标记；不会把当前部署标记为可用。'
     return $?
   fi
   printf '模型 route 验证通过。\n'
 }
 
-dsh_enhanced_prepare_model_verification() {
+dsh_ray_prepare_model_verification() {
   local profile="$1" directory="$2"
   dsh --profile "$profile" --dump-config > "$directory/composed.yml" || return 1
   NODE_PATH='' NODE_OPTIONS='' node --input-type=module - "$(command -v dsh)" "$directory" <<'NODE'
@@ -2377,12 +2372,12 @@ for (const [id, entry] of entries) {
 NODE
 }
 
-dsh_enhanced_effective_default_provider() {
+dsh_ray_effective_default_provider() {
   local dsh_home="$1"
   local profile="${2:-}"
   local settings_path="$dsh_home/settings.yaml"
   local provider=''
-  if [[ -n "$profile" ]] && dsh_enhanced_is_02_host_version "$(dsh --version 2>/dev/null || true)"; then
+  if [[ -n "$profile" ]] && dsh_ray_is_02_host_version "$(dsh --version 2>/dev/null || true)"; then
     settings_path=''
   fi
   if [[ -f "$settings_path" ]]; then
@@ -2423,24 +2418,24 @@ dsh_enhanced_effective_default_provider() {
 # Verify the local login independently of profile writes.  This is intentionally
 # done before dsh-model-setup changes the global default, so an absent or stale
 # TraeX login cannot strand other profiles on an unusable route.
-dsh_enhanced_verify_agent_login() {
+dsh_ray_verify_agent_login() {
   local provider="$1"
   local dry_run="$2"
-  dsh_enhanced_is_agent_route "$provider" || return 0
+  dsh_ray_is_agent_route "$provider" || return 0
   if [[ "$provider" == 'agy-agent' ]]; then
     if [[ "$dry_run" == '1' ]]; then
       printf '模型 route：将确认本机 Antigravity (agy) 登录状态（不启动 ACP、不会消耗模型额度）。\n'
-      dsh_enhanced_print_command agy models
+      dsh_ray_print_command agy models
       return 0
     fi
     local agy_command=''
-    agy_command="$(dsh_enhanced_detect_agy_command || true)"
+    agy_command="$(dsh_ray_detect_agy_command || true)"
     if [[ -z "$agy_command" ]]; then
-      dsh_enhanced_fail 1 '模型 route 验证失败：未在 PATH 找到 agy CLI。'
+      dsh_ray_fail 1 '模型 route 验证失败：未在 PATH 找到 agy CLI。'
       return $?
     fi
-    if ! dsh_enhanced_agy_login_ready "$agy_command"; then
-      dsh_enhanced_fail 1 "模型 route 验证失败：$agy_command 未确认就绪；请先在同一 OS 用户下登录 Antigravity 并确认 \`$agy_command models\` 返回 0 后重试。"
+    if ! dsh_ray_agy_login_ready "$agy_command"; then
+      dsh_ray_fail 1 "模型 route 验证失败：$agy_command 未确认就绪；请先在同一 OS 用户下登录 Antigravity 并确认 \`$agy_command models\` 返回 0 后重试。"
       return $?
     fi
     printf '模型 route：%s 已确认模型与登录就绪。\n' "$agy_command"
@@ -2448,17 +2443,17 @@ dsh_enhanced_verify_agent_login() {
   fi
   if [[ "$dry_run" == '1' ]]; then
     printf '模型 route：将确认本机 TraeX 登录状态（不启动 ACP、不会消耗模型额度）。\n'
-    dsh_enhanced_print_command traex login status
+    dsh_ray_print_command traex login status
     return 0
   fi
   local traex_command=''
-  traex_command="$(dsh_enhanced_detect_traex_command || true)"
+  traex_command="$(dsh_ray_detect_traex_command || true)"
   if [[ -z "$traex_command" ]]; then
-    dsh_enhanced_fail 1 '模型 route 验证失败：未在 PATH 找到 traex/trae-cli。'
+    dsh_ray_fail 1 '模型 route 验证失败：未在 PATH 找到 traex/trae-cli。'
     return $?
   fi
-  if ! dsh_enhanced_traex_login_ready "$traex_command"; then
-    dsh_enhanced_fail 1 "模型 route 验证失败：$traex_command 未确认登录；请在同一 OS 用户下运行 \`$traex_command login\` 后重试。"
+  if ! dsh_ray_traex_login_ready "$traex_command"; then
+    dsh_ray_fail 1 "模型 route 验证失败：$traex_command 未确认登录；请在同一 OS 用户下运行 \`$traex_command login\` 后重试。"
     return $?
   fi
   printf '模型 route：%s 已确认登录。\n' "$traex_command"
@@ -2468,14 +2463,14 @@ dsh_enhanced_verify_agent_login() {
 # route-enabled (`enabled` for traex-agent, `agyEnabled` for agy-agent) in the
 # target profile, and (unless checked immediately prior) the backing local agent
 # must report ready login.
-dsh_enhanced_verify_agent_route() {
+dsh_ray_verify_agent_route() {
   local provider="$1"
   local profile="$2"
   local dry_run="$3"
   local login_verified="${4:-0}"
   if [[ "$dry_run" == '1' ]]; then
     printf '模型 route：agent route %s 不发送模型请求；将校验 profile %s 已注册适配器并检查本机登录。\n' "$provider" "$profile"
-    dsh_enhanced_print_command dsh --profile "$profile" --dump-config
+    dsh_ray_print_command dsh --profile "$profile" --dump-config
     return 0
   fi
   printf '模型 route：agent route %s，改为结构化校验（不消耗模型额度）。\n' "$provider"
@@ -2483,11 +2478,11 @@ dsh_enhanced_verify_agent_route() {
   local composed
   if ! composed="$(dsh --profile "$profile" --dump-config 2>&1)"; then
     printf '%s\n' "$composed" >&2
-    dsh_enhanced_fail 1 "模型 route 验证失败：profile $profile 无法组合。"
+    dsh_ray_fail 1 "模型 route 验证失败：profile $profile 无法组合。"
     return $?
   fi
-  if [[ "$composed" != *'@dsh-enhanced/traex-acp-provider'* ]]; then
-    dsh_enhanced_fail 1 "模型 route 验证失败：profile $profile 未注册 traex-acp-provider 适配器；请运行 dsh-model-setup --provider $provider --enable-in-profile $profile。"
+  if [[ "$composed" != *'@dsh-ray/traex-acp-provider'* ]]; then
+    dsh_ray_fail 1 "模型 route 验证失败：profile $profile 未注册 traex-acp-provider 适配器；请运行 dsh-model-setup --provider $provider --enable-in-profile $profile。"
     return $?
   fi
 
@@ -2503,7 +2498,7 @@ for (const rawLine of composed.split(/\r?\n/)) {
   const indent = rawLine.length - rawLine.trimStart().length
   if (/^-\s+/.test(trimmed)) {
     const rest = trimmed.replace(/^-\s+/, '')
-    inRow = rest === 'id: dsh-enhanced-traex-acp-provider' || rest === "id: 'dsh-enhanced-traex-acp-provider'" || rest === 'id: "dsh-enhanced-traex-acp-provider"'
+    inRow = rest === 'id: dsh-ray-traex-acp-provider' || rest === "id: 'dsh-ray-traex-acp-provider'" || rest === 'id: "dsh-ray-traex-acp-provider"'
     inConfig = false
     configIndent = -1
     if (inRow) { foundRow = true; disabled = false; enabledVal = undefined }
@@ -2523,7 +2518,7 @@ for (const rawLine of composed.split(/\r?\n/)) {
       continue
     }
   }
-  if (/^id:\s*['"]?dsh-enhanced-traex-acp-provider['"]?$/.test(trimmed)) {
+  if (/^id:\s*['"]?dsh-ray-traex-acp-provider['"]?$/.test(trimmed)) {
     foundRow = true
   } else if (/^disabled:\s*true$/.test(trimmed)) {
     disabled = true
@@ -2535,12 +2530,12 @@ for (const rawLine of composed.split(/\r?\n/)) {
 if (!foundRow || disabled || enabledVal !== 'true') process.exitCode = 1
 NODE
   then
-    dsh_enhanced_fail 1 "模型 route 验证失败：profile $profile 的 traex-acp-provider 未开启 $expected_key: true；请运行 dsh-model-setup --provider $provider --enable-in-profile $profile。"
+    dsh_ray_fail 1 "模型 route 验证失败：profile $profile 的 traex-acp-provider 未开启 $expected_key: true；请运行 dsh-model-setup --provider $provider --enable-in-profile $profile。"
     return $?
   fi
 
   if [[ "$login_verified" != '1' ]]; then
-    dsh_enhanced_verify_agent_login "$provider" "$dry_run" || return $?
+    dsh_ray_verify_agent_login "$provider" "$dry_run" || return $?
   fi
   printf '模型 route 验证通过：%s（traex-acp-provider.%s=true）已在 profile %s 就绪。\n' "$provider" "$expected_key" "$profile"
 }
@@ -2552,7 +2547,7 @@ NODE
 # signal after dsh-model-setup has written the new global default therefore
 # restores the exact pre-write settings and profile patch before this subshell
 # exits.
-dsh_enhanced_apply_verified_agent_model() (
+dsh_ray_apply_verified_agent_model() (
   local profile="$1"
   local dsh_home="$2"
   local provider="$3"
@@ -2563,26 +2558,26 @@ dsh_enhanced_apply_verified_agent_model() (
   local dry_run="$8"
   local login_verified="${9:-0}"
   if [[ "$dry_run" == '1' ]]; then
-    dsh_enhanced_apply_model "$profile" "$dsh_home" "$provider" "$model" \
+    dsh_ray_apply_model "$profile" "$dsh_home" "$provider" "$model" \
       "$base_url" "$api" "$display_name" "$dry_run" || return $?
-    dsh_enhanced_verify_model_route verify "$dry_run" "$profile" "$dsh_home" \
+    dsh_ray_verify_model_route verify "$dry_run" "$profile" "$dsh_home" \
       "$provider" "$login_verified"
     return $?
   fi
 
   local snapshot=''
-  if ! snapshot="$(dsh_enhanced_snapshot_agent_route_configuration "$profile" "$dsh_home")"; then
-    dsh_enhanced_fail 1 "无法创建 $provider 模型配置回滚点；为避免写入未经验证的全局默认模型，已停止。"
+  if ! snapshot="$(dsh_ray_snapshot_agent_route_configuration "$profile" "$dsh_home")"; then
+    dsh_ray_fail 1 "无法创建 $provider 模型配置回滚点；为避免写入未经验证的全局默认模型，已停止。"
     return $?
   fi
   local committed='0'
   trap '
     status=$?
     if [[ "$committed" != "1" && -n "$snapshot" ]]; then
-      if dsh_enhanced_restore_agent_route_configuration "$snapshot" "$profile" "$dsh_home"; then
+      if dsh_ray_restore_agent_route_configuration "$snapshot" "$profile" "$dsh_home"; then
         printf "模型配置：%s route 未通过验证或安装被中断，已恢复原有 settings/profile patch。\n" "$provider" >&2
       else
-        printf "dsh-enhanced installer: %s 模型 route 未通过验证，且无法自动恢复原有 settings/profile patch；请立即检查这两个文件。\n" "$provider" >&2
+        printf "dsh-ray installer: %s 模型 route 未通过验证，且无法自动恢复原有 settings/profile patch；请立即检查这两个文件。\n" "$provider" >&2
       fi
     fi
     exit "$status"
@@ -2590,18 +2585,18 @@ dsh_enhanced_apply_verified_agent_model() (
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
-  dsh_enhanced_apply_model "$profile" "$dsh_home" "$provider" "$model" \
+  dsh_ray_apply_model "$profile" "$dsh_home" "$provider" "$model" \
     "$base_url" "$api" "$display_name" "$dry_run" || return $?
-  dsh_enhanced_verify_model_route verify "$dry_run" "$profile" "$dsh_home" \
+  dsh_ray_verify_model_route verify "$dry_run" "$profile" "$dsh_home" \
     "$provider" "$login_verified" || return $?
 
   committed='1'
-  dsh_enhanced_discard_agent_route_configuration_snapshot "$snapshot" || true
+  dsh_ray_discard_agent_route_configuration_snapshot "$snapshot" || true
   trap - EXIT INT TERM
 )
 
 # Shared probe for auto-discovered ACP coding-agent routes (`traex-agent` / `agy-agent`).
-_dsh_enhanced_probe_auto_agent_route() {
+_dsh_ray_probe_auto_agent_route() {
   local provider="$1"
   local profile="$2"
   local dsh_home="$3"
@@ -2625,12 +2620,12 @@ try {
   // installed parent package, then use Policy's own YAML dependency; never
   // rely on a hoisted top-level yaml link in the profile.
   const nodeModules = join(profileDir, 'node_modules')
-  const topLevelPolicy = join(nodeModules, '@dsh-enhanced', 'assistant-policy', 'package.json')
+  const topLevelPolicy = join(nodeModules, '@dsh-ray', 'assistant-policy', 'package.json')
   let policyManifest = topLevelPolicy
   if (!existsSync(topLevelPolicy)) {
-    const personalManifest = realpathSync(join(nodeModules, '@dsh-enhanced', 'personal-assistant', 'package.json'))
+    const personalManifest = realpathSync(join(nodeModules, '@dsh-ray', 'personal-assistant', 'package.json'))
     const personalRequire = createRequire(personalManifest)
-    policyManifest = personalRequire.resolve('@dsh-enhanced/assistant-policy/package.json')
+    policyManifest = personalRequire.resolve('@dsh-ray/assistant-policy/package.json')
   }
   const packageRequire = createRequire(realpathSync(policyManifest))
   const { parseDocument, isMap, isSeq } = packageRequire('yaml')
@@ -2649,7 +2644,7 @@ try {
     return rows
   }
   function routeFrom(path) {
-    const route = rowsFrom(path).filter(row => row.get('id') === 'dsh-enhanced-traex-acp-provider').at(-1)
+    const route = rowsFrom(path).filter(row => row.get('id') === 'dsh-ray-traex-acp-provider').at(-1)
     if (!route) throw new Error(`${label} route row missing: ${path}`)
     return route
   }
@@ -2658,7 +2653,7 @@ try {
     if (config.has(commandField)) return config.get(commandField)
     if (defaultCommand === undefined) {
       const fromProfile = createRequire(join(profileDir, 'package.json'))
-      const providerManifest = realpathSync(fromProfile.resolve('@dsh-enhanced/traex-acp-provider/package.json'))
+      const providerManifest = realpathSync(fromProfile.resolve('@dsh-ray/traex-acp-provider/package.json'))
       const { Config } = await import(pathToFileURL(join(dirname(providerManifest), 'lib', 'config.js')).href)
       defaultCommand = isAgy ? (Config().agyCommand || 'agy') : Config().command
       if (typeof defaultCommand !== 'string' || !defaultCommand.trim()) {
@@ -2673,7 +2668,7 @@ try {
   if (route.get('disabled') !== undefined && route.get('disabled') !== false) {
     throw new Error(`${label} profile route row is disabled`)
   }
-  if ((route.get('name') !== undefined && route.get('name') !== '@dsh-enhanced/traex-acp-provider')
+  if ((route.get('name') !== undefined && route.get('name') !== '@dsh-ray/traex-acp-provider')
     || !isMap(config) || config.get(enableField) !== true || typeof command !== 'string' || !command.trim()) {
     throw new Error(isAgy
       ? `${label} route (${enableField}) is not enabled with a nonempty command`
@@ -2683,7 +2678,7 @@ try {
     const effective = routeFrom(composedPath)
     const effectiveConfig = effective.get('config', true)
     const effectiveCommand = isMap(effectiveConfig) ? await routeCommand(effectiveConfig) : undefined
-    if (effective.get('name') !== '@dsh-enhanced/traex-acp-provider'
+    if (effective.get('name') !== '@dsh-ray/traex-acp-provider'
       || (effective.get('disabled') !== undefined && effective.get('disabled') !== false)
       || !isMap(effectiveConfig) || effectiveConfig.get(enableField) !== true
       || typeof effectiveCommand !== 'string' || !effectiveCommand.trim()) {
@@ -2697,7 +2692,7 @@ try {
   }
   process.stdout.write(command)
 } catch (error) {
-  process.stderr.write(`dsh-enhanced installer: ${label} route postflight: ${error.message}\n`)
+  process.stderr.write(`dsh-ray installer: ${label} route postflight: ${error.message}\n`)
   process.exitCode = 1
 }
 }
@@ -2707,28 +2702,28 @@ NODE
 
 # Auto-discovered TraeX is an optional route in this profile. Its setup must
 # never rewrite an existing global default or another profile's default.
-dsh_enhanced_probe_auto_traex_route() {
+dsh_ray_probe_auto_traex_route() {
   local profile="$1" dsh_home="$2" composed_path="${3:-}"
-  _dsh_enhanced_probe_auto_agent_route traex-agent "$profile" "$dsh_home" "$composed_path"
+  _dsh_ray_probe_auto_agent_route traex-agent "$profile" "$dsh_home" "$composed_path"
 }
 
-dsh_enhanced_probe_auto_agy_route() {
+dsh_ray_probe_auto_agy_route() {
   local profile="$1" dsh_home="$2" composed_path="${3:-}"
-  _dsh_enhanced_probe_auto_agent_route agy-agent "$profile" "$dsh_home" "$composed_path"
+  _dsh_ray_probe_auto_agent_route agy-agent "$profile" "$dsh_home" "$composed_path"
 }
 
-_dsh_enhanced_apply_auto_agent_route() (
+_dsh_ray_apply_auto_agent_route() (
   local provider="$1"
   local profile="$2"
   local dsh_home="$3"
   local agent_command="$4"
   local default_candidate="$5"
   local dry_run="$6"
-  local label='TraeX' login_fn='dsh_enhanced_traex_login_ready' probe_fn='dsh_enhanced_probe_auto_traex_route' login_hint=''
+  local label='TraeX' login_fn='dsh_ray_traex_login_ready' probe_fn='dsh_ray_probe_auto_traex_route' login_hint=''
   if [[ "$provider" == 'agy-agent' ]]; then
     label='Antigravity (agy)'
-    login_fn='dsh_enhanced_agy_login_ready'
-    probe_fn='dsh_enhanced_probe_auto_agy_route'
+    login_fn='dsh_ray_agy_login_ready'
+    probe_fn='dsh_ray_probe_auto_agy_route'
   fi
   local setup_display="$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup"
   local setup_launcher=()
@@ -2737,9 +2732,9 @@ _dsh_enhanced_apply_auto_agent_route() (
   if [[ "$dry_run" != '1' ]]; then
     local launcher_token
     while IFS= read -r launcher_token; do setup_launcher+=("$launcher_token"); done \
-      < <(dsh_enhanced_resolve_model_setup "$profile" "$dsh_home")
+      < <(dsh_ray_resolve_model_setup "$profile" "$dsh_home")
     if [[ -z "${setup_launcher[0]+set}" ]]; then
-      dsh_enhanced_fail 1 "$label 自动启用缺少安装后的 dsh-model-setup：$dsh_home/profiles/$profile"
+      dsh_ray_fail 1 "$label 自动启用缺少安装后的 dsh-model-setup：$dsh_home/profiles/$profile"
       return $?
     fi
     setup_display="${setup_launcher[*]}"
@@ -2749,43 +2744,43 @@ _dsh_enhanced_apply_auto_agent_route() (
   if [[ "$dry_run" == '1' ]]; then
     printf '%s：dry-run 不检查最终命令或登录；执行时仅在最终命令已登录且无显式默认模型时设置此 profile 的默认模型。\n' "$label"
     printf '%s：未登录或显式 --model skip 时仅启用 route：\n' "$label"
-    dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
+    dsh_ray_print_command "$setup_display" --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
       --enable-in-profile "$profile" --agent-command "$agent_command" --enable-only
     if [[ "$default_candidate" == '1' ]]; then
       printf '%s：已登录时由 model-setup 原子确认无显式默认模型：\n' "$label"
-      dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
+      dsh_ray_print_command "$setup_display" --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
         --enable-in-profile "$profile" --agent-command "$agent_command" --default-if-absent
     fi
     return 0
   fi
 
   local snapshot=''
-  snapshot="$(dsh_enhanced_snapshot_agent_route_configuration "$profile" "$dsh_home" profile-only)" || {
-    dsh_enhanced_fail 1 "$label 自动启用无法创建配置回滚点；尚未修改模型配置。"
+  snapshot="$(dsh_ray_snapshot_agent_route_configuration "$profile" "$dsh_home" profile-only)" || {
+    dsh_ray_fail 1 "$label 自动启用无法创建配置回滚点；尚未修改模型配置。"
     return $?
   }
   local committed='0'
   trap '
     status=$?
     if [[ "$committed" != "1" && -n "$snapshot" ]]; then
-      dsh_enhanced_restore_agent_route_configuration "$snapshot" "$profile" "$dsh_home" \
-        || printf "dsh-enhanced installer: %s 自动接入回滚失败；请检查 profile patch。\n" "$label" >&2
+      dsh_ray_restore_agent_route_configuration "$snapshot" "$profile" "$dsh_home" \
+        || printf "dsh-ray installer: %s 自动接入回滚失败；请检查 profile patch。\n" "$label" >&2
     fi
     exit "$status"
   ' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
-  dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
+  dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
     --enable-in-profile "$profile" --agent-command "$agent_command" --enable-only || return $?
   local composed_path="$snapshot/composed.yml"
   if ! dsh --profile "$profile" --dump-config > "$composed_path"; then
-    dsh_enhanced_fail 1 "$label 自动启用后 profile 无法组合。"
+    dsh_ray_fail 1 "$label 自动启用后 profile 无法组合。"
     return $?
   fi
   local effective_command=''
   effective_command="$("$probe_fn" "$profile" "$dsh_home" "$composed_path")" || {
-    dsh_enhanced_fail 1 "$label 自动启用后 profile/composed route 未确认启用或缺少有效 command；已恢复原配置。"
+    dsh_ray_fail 1 "$label 自动启用后 profile/composed route 未确认启用或缺少有效 command；已恢复原配置。"
     return $?
   }
   # Never infer login for an explicit user-selected command from PATH discovery alone.
@@ -2793,17 +2788,17 @@ _dsh_enhanced_apply_auto_agent_route() (
     logged_in='1'
   fi
   if [[ "$default_candidate" == '1' && "$logged_in" == '1' ]]; then
-    dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
+    dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
       --enable-in-profile "$profile" --agent-command "$agent_command" --default-if-absent || return $?
     dsh --profile "$profile" --dump-config > "$composed_path" || return $?
     effective_command="$("$probe_fn" "$profile" "$dsh_home" "$composed_path")" || return $?
     if [[ "$effective_command" != "$agent_command" ]]; then
-      dsh_enhanced_fail 1 "$label 自动设置默认模型期间 route command 已变化；已恢复原配置。"
+      dsh_ray_fail 1 "$label 自动设置默认模型期间 route command 已变化；已恢复原配置。"
       return $?
     fi
   fi
   committed='1'
-  dsh_enhanced_discard_agent_route_configuration_snapshot "$snapshot" || true
+  dsh_ray_discard_agent_route_configuration_snapshot "$snapshot" || true
   if [[ "$logged_in" == '1' ]]; then
     printf '%s：本机已登录；已启用 profile route。\n' "$label"
   elif [[ "$provider" == 'agy-agent' ]]; then
@@ -2813,17 +2808,17 @@ _dsh_enhanced_apply_auto_agent_route() (
   fi
 )
 
-dsh_enhanced_apply_auto_traex() {
-  _dsh_enhanced_apply_auto_agent_route traex-agent "$1" "$2" "$3" "$4" "$5"
+dsh_ray_apply_auto_traex() {
+  _dsh_ray_apply_auto_agent_route traex-agent "$1" "$2" "$3" "$4" "$5"
 }
 
-dsh_enhanced_apply_auto_agy() {
-  _dsh_enhanced_apply_auto_agent_route agy-agent "$1" "$2" "$3" "$4" "$5"
+dsh_ray_apply_auto_agy() {
+  _dsh_ray_apply_auto_agent_route agy-agent "$1" "$2" "$3" "$4" "$5"
 }
 
 # Report whether assistant-dreaming in a composed profile meets fail-closed
 # enablement prerequisites (scope, databasePath, provider/model, finite budget).
-dsh_enhanced_check_dreaming_prerequisites() {
+dsh_ray_check_dreaming_prerequisites() {
   local profile="$1" dsh_home="$2"
   local composed
   composed="$(DSH_HOME="$dsh_home" dsh --profile "$profile" --dump-config 2>/dev/null)" || return 1
@@ -2837,7 +2832,7 @@ for (const rawLine of composed.split(/\r?\n/)) {
   const indent = rawLine.length - rawLine.trimStart().length
   if (/^-\s+/.test(trimmed)) {
     const rest = trimmed.replace(/^-\s+/, '')
-    inDreaming = /^id:\s*['"]?dsh-enhanced-assistant-dreaming['"]?$/.test(rest)
+    inDreaming = /^id:\s*['"]?dsh-ray-assistant-dreaming['"]?$/.test(rest)
     inConfig = false
     configIndent = -1
     continue
@@ -2858,7 +2853,7 @@ for (const rawLine of composed.split(/\r?\n/)) {
       continue
     }
   }
-  if (/^id:\s*['"]?dsh-enhanced-assistant-dreaming['"]?$/.test(trimmed)) inDreaming = true
+  if (/^id:\s*['"]?dsh-ray-assistant-dreaming['"]?$/.test(trimmed)) inDreaming = true
   else if (/^config:\s*$/.test(trimmed)) { inConfig = true; configIndent = -1 }
 }
 const missing = ['scope', 'databasePath', 'provider', 'model', 'budgetId', 'budgetAmount'].filter(k => !present.has(k))
@@ -2867,14 +2862,14 @@ NODE
 }
 
 
-dsh_enhanced_check_web_port_available() {
+dsh_ray_check_web_port_available() {
   local port="$1"
   if ! command -v node >/dev/null 2>&1; then
-    dsh_enhanced_fail 1 '需要 Node.js 22.19+ 或 24+；请先安装 Node.js（安装器尚未修改本机）。'
+    dsh_ray_fail 1 '需要 Node.js 22.19+ 或 24+；请先安装 Node.js（安装器尚未修改本机）。'
     return $?
   fi
   if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || (( port < 1 || port > 65535 )); then
-    dsh_enhanced_fail 2 'Web 端口必须是 1..65535。'
+    dsh_ray_fail 2 'Web 端口必须是 1..65535。'
     return $?
   fi
   if ! node - "$port" <<'NODE'
@@ -2894,7 +2889,7 @@ server.once('error', error => {
 server.listen({ host: '127.0.0.1', port, exclusive: true }, () => server.close())
 NODE
   then
-    dsh_enhanced_fail 1 'Web 端口预检未通过。'
+    dsh_ray_fail 1 'Web 端口预检未通过。'
     return $?
   fi
   printf 'doctor：Web 端口 127.0.0.1:%s 可用。\n' "$port"
@@ -2905,7 +2900,7 @@ NODE
 # linger policy cannot strand a successfully created cloud app. loginctl gets
 # one non-interactive, unprivileged attempt. sudo is only run after a TTY user
 # sees the exact fixed command and explicitly accepts it.
-dsh_enhanced_confirm_sudo_linger() {
+dsh_ray_confirm_sudo_linger() {
   local loginctl_path="$1"
   local current_uid="$2"
   local interaction_mode="${3:-detect}"
@@ -2928,7 +2923,7 @@ dsh_enhanced_confirm_sudo_linger() {
 # system directories below. Other layouts can still use the printed manual
 # command, but the installer will not elevate an arbitrary user-controlled
 # path automatically.
-dsh_enhanced_trusted_system_command() {
+dsh_ray_trusted_system_command() {
   local command_name="$1"
   local candidate=''
   for candidate in "/usr/bin/$command_name" "/bin/$command_name"; do
@@ -2940,10 +2935,10 @@ dsh_enhanced_trusted_system_command() {
   return 1
 }
 
-dsh_enhanced_prepare_linux_resident_service() {
+dsh_ray_prepare_linux_resident_service() {
   local dry_run="$1"
   local interaction_mode="${2:-detect}"
-  case "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" in
+  case "${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}" in
     Linux|linux) ;;
     *) return 0 ;;
   esac
@@ -2955,17 +2950,17 @@ dsh_enhanced_prepare_linux_resident_service() {
   local loginctl_path
   local systemctl_path
   loginctl_path="$(command -v loginctl 2>/dev/null)" || {
-    dsh_enhanced_fail 1 '飞书常驻服务需要 systemd-logind（找不到 loginctl）；尚未开始飞书授权。'
+    dsh_ray_fail 1 '飞书常驻服务需要 systemd-logind（找不到 loginctl）；尚未开始飞书授权。'
     return $?
   }
   systemctl_path="$(command -v systemctl 2>/dev/null)" || {
-    dsh_enhanced_fail 1 '飞书常驻服务需要 systemd user manager（找不到 systemctl）；尚未开始飞书授权。'
+    dsh_ray_fail 1 '飞书常驻服务需要 systemd user manager（找不到 systemctl）；尚未开始飞书授权。'
     return $?
   }
   local current_uid
   current_uid="${EUID:-}"
   if ! [[ "$current_uid" =~ ^[0-9]+$ ]]; then
-    dsh_enhanced_fail 1 '无法确定将运行飞书服务的当前 Linux UID；尚未开始飞书授权。'
+    dsh_ray_fail 1 '无法确定将运行飞书服务的当前 Linux UID；尚未开始飞书授权。'
     return $?
   fi
 
@@ -2976,26 +2971,26 @@ dsh_enhanced_prepare_linux_resident_service() {
     if ! "$loginctl_path" --no-ask-password enable-linger "$current_uid" >/dev/null 2>&1; then
       local privileged_loginctl_path=''
       local sudo_path=''
-      privileged_loginctl_path="$(dsh_enhanced_trusted_system_command loginctl 2>/dev/null || true)"
-      sudo_path="$(dsh_enhanced_trusted_system_command sudo 2>/dev/null || true)"
+      privileged_loginctl_path="$(dsh_ray_trusted_system_command loginctl 2>/dev/null || true)"
+      sudo_path="$(dsh_ray_trusted_system_command sudo 2>/dev/null || true)"
       if [[ -z "$privileged_loginctl_path" || -z "$sudo_path" ]]; then
-        dsh_enhanced_fail 1 '无法从受信任的系统目录自动执行 sudo/loginctl；请手工运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。尚未开始飞书授权。'
+        dsh_ray_fail 1 '无法从受信任的系统目录自动执行 sudo/loginctl；请手工运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。尚未开始飞书授权。'
         return $?
       fi
-      if dsh_enhanced_confirm_sudo_linger "$privileged_loginctl_path" "$current_uid" "$interaction_mode"; then
+      if dsh_ray_confirm_sudo_linger "$privileged_loginctl_path" "$current_uid" "$interaction_mode"; then
         printf 'systemd：正在执行上面显示的唯一提权动作；密码由 sudo 直接读取，不会进入安装器。\n'
         if ! "$sudo_path" -- "$privileged_loginctl_path" enable-linger "$current_uid"; then
-          dsh_enhanced_fail 1 'sudo 未能启用 lingering；请运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。尚未开始飞书授权。'
+          dsh_ray_fail 1 'sudo 未能启用 lingering；请运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。尚未开始飞书授权。'
           return $?
         fi
       else
-        dsh_enhanced_fail 1 '系统要求管理员批准 lingering；请先运行 `sudo loginctl enable-linger "$(id -u)"`，再重新运行安装器。尚未开始飞书授权。'
+        dsh_ray_fail 1 '系统要求管理员批准 lingering；请先运行 `sudo loginctl enable-linger "$(id -u)"`，再重新运行安装器。尚未开始飞书授权。'
         return $?
       fi
     fi
     linger="$("$loginctl_path" show-user "$current_uid" --property=Linger --value 2>/dev/null || true)"
     if [[ "$linger" != 'yes' ]]; then
-      dsh_enhanced_fail 1 'loginctl 未确认 lingering 已启用；请运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。尚未开始飞书授权。'
+      dsh_ray_fail 1 'loginctl 未确认 lingering 已启用；请运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。尚未开始飞书授权。'
       return $?
     fi
     printf 'systemd：已为当前用户启用 logout persistence。\n'
@@ -3026,7 +3021,7 @@ dsh_enhanced_prepare_linux_resident_service() {
     export DBUS_SESSION_BUS_ADDRESS
   fi
   if ! "$systemctl_path" --user show-environment >/dev/null 2>&1; then
-    dsh_enhanced_fail 1 'systemd user manager 不可连接；请以目标普通用户直接登录（不要通过 sudo/su），确认 `systemctl --user show-environment` 成功后重试。尚未开始飞书授权。'
+    dsh_ray_fail 1 'systemd user manager 不可连接；请以目标普通用户直接登录（不要通过 sudo/su），确认 `systemctl --user show-environment` 成功后重试。尚未开始飞书授权。'
     return $?
   fi
   printf 'systemd：user manager 与 logout persistence 已就绪。\n'
@@ -3039,7 +3034,7 @@ dsh_enhanced_prepare_linux_resident_service() {
 # enabled Cordis entry actually activated.  A configured Lark row is disabled
 # in a process-only overlay so the probe neither opens another WebSocket nor
 # changes the saved profile.
-dsh_enhanced_stop_activation_probe() {
+dsh_ray_stop_activation_probe() {
   local pid="$1"
   local attempt
   [[ -n "$pid" ]] || return 0
@@ -3060,16 +3055,16 @@ dsh_enhanced_stop_activation_probe() {
   wait "$pid" >/dev/null 2>&1 || true
 }
 
-dsh_enhanced_cleanup_activation_probe() {
+dsh_ray_cleanup_activation_probe() {
   local pid="${1:-}"
   local probe_directory="${2:-}"
-  dsh_enhanced_stop_activation_probe "$pid"
+  dsh_ray_stop_activation_probe "$pid"
   if [[ -n "$probe_directory" && -d "$probe_directory" ]]; then
     rm -rf -- "$probe_directory"
   fi
 }
 
-dsh_enhanced_restore_trap() {
+dsh_ray_restore_trap() {
   local saved_trap="$1"
   local signal="$2"
   trap - "$signal"
@@ -3082,13 +3077,13 @@ dsh_enhanced_restore_trap() {
 
 # 从日志/输出文件中提取最新一次 `dsh web: http://...` 完整 URL（含 token）。
 # 取最后一个匹配行：token 随每次重启变化。无匹配时返回空（不报错）。
-dsh_enhanced_latest_web_url() {
+dsh_ray_latest_web_url() {
   local file="$1"
   [[ -f "$file" ]] || return 0
   grep -Eo 'dsh web: https?://[^ ]+' "$file" 2>/dev/null | tail -n 1 | sed -E 's/^dsh web: //' || true
 }
 
-dsh_enhanced_verify_profile_activation() {
+dsh_ray_verify_profile_activation() {
   local profile="$1"
   local dsh_home="$2"
   local dry_run="$3"
@@ -3096,18 +3091,18 @@ dsh_enhanced_verify_profile_activation() {
   local home_patch="$dsh_home/cordis.patch.yml"
   if [[ "$dry_run" == '1' ]]; then
     printf 'profile 运行时自检：将实际加载全部插件，并等待 Host 就绪信号（Web 使用临时 loopback 端口）。\n'
-    dsh_enhanced_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
+    dsh_ray_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
     return 0
   fi
 
   local probe_directory
-  if ! probe_directory="$(mktemp -d "${TMPDIR:-/tmp}/dsh-enhanced-activation.XXXXXX")"; then
-    dsh_enhanced_fail 1 '无法创建 profile 运行时自检的临时目录。'
+  if ! probe_directory="$(mktemp -d "${TMPDIR:-/tmp}/dsh-ray-activation.XXXXXX")"; then
+    dsh_ray_fail 1 '无法创建 profile 运行时自检的临时目录。'
     return $?
   fi
   chmod 700 "$probe_directory" || {
     rm -rf -- "$probe_directory"
-    dsh_enhanced_fail 1 '无法保护 profile 运行时自检的临时目录。'
+    dsh_ray_fail 1 '无法保护 profile 运行时自检的临时目录。'
     return $?
   }
 
@@ -3116,8 +3111,8 @@ dsh_enhanced_verify_profile_activation() {
   local overlay_path="$probe_directory/disable-lark.yml"
   local overlay_args=()
   local lark_temporarily_disabled='0'
-  if dsh_enhanced_effective_lark_is_configured "$profile_patch" "$home_patch"; then
-    printf '%s\n' '- id: dsh-enhanced-lark-channel' '  disabled: true' > "$overlay_path"
+  if dsh_ray_effective_lark_is_configured "$profile_patch" "$home_patch"; then
+    printf '%s\n' '- id: dsh-ray-lark-channel' '  disabled: true' > "$overlay_path"
     overlay_args=(--patch "$overlay_path")
     lark_temporarily_disabled='1'
   fi
@@ -3126,14 +3121,14 @@ dsh_enhanced_verify_profile_activation() {
   if [[ "$profile" != 'web' ]]; then
     # The native launcher commits appReady only after the Loader activation
     # audit. A process-only observer works without adding a Web surface.
-    ready_marker="dsh-enhanced activation ready: ${probe_directory##*/}"
+    ready_marker="dsh-ray activation ready: ${probe_directory##*/}"
     if ! node --input-type=module - "$probe_directory" "$ready_marker" <<'NODE'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 const [directory, marker] = process.argv.slice(2)
 const observer = join(directory, 'ready.mjs')
 writeFileSync(observer, `export default {
-  name: 'dsh-enhanced-installer-readiness',
+  name: 'dsh-ray-installer-readiness',
   inject: ['appReady'],
   apply(ctx) {
     ctx.effect(() => ctx.get('appReady').onReady(() => {
@@ -3142,12 +3137,12 @@ writeFileSync(observer, `export default {
   },
 };\n`, { mode: 0o600 })
 writeFileSync(join(directory, 'readiness.yml'), JSON.stringify([
-  { insert: [{ id: 'dsh-enhanced-installer-readiness', name: observer }] },
+  { insert: [{ id: 'dsh-ray-installer-readiness', name: observer }] },
 ]), { mode: 0o600 })
 NODE
     then
       rm -rf -- "$probe_directory"
-      dsh_enhanced_fail 1 '无法创建 profile 运行时就绪探针。'
+      dsh_ray_fail 1 '无法创建 profile 运行时就绪探针。'
       return $?
     fi
     overlay_args+=(--patch "$probe_directory/readiness.yml")
@@ -3159,9 +3154,9 @@ NODE
   saved_exit_trap="$(trap -p EXIT || true)"
   saved_int_trap="$(trap -p INT || true)"
   saved_term_trap="$(trap -p TERM || true)"
-  trap 'dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"' EXIT
-  trap 'dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"; exit 130' INT
-  trap 'dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"; exit 143' TERM
+  trap 'dsh_ray_cleanup_activation_probe "$probe_pid" "$probe_directory"' EXIT
+  trap 'dsh_ray_cleanup_activation_probe "$probe_pid" "$probe_directory"; exit 130' INT
+  trap 'dsh_ray_cleanup_activation_probe "$probe_pid" "$probe_directory"; exit 143' TERM
   dsh --profile "$profile" "${overlay_args[@]+"${overlay_args[@]}"}" \
     --host 127.0.0.1 --no-open --port 0 > "$stdout_path" 2> "$stderr_path" &
   probe_pid=$!
@@ -3169,8 +3164,8 @@ NODE
   local elapsed
   for ((elapsed = 0; elapsed < 30; elapsed += 1)); do
     if grep -Fq "$ready_marker" "$stdout_path" 2>/dev/null \
-      || grep -Fxq 'dsh-enhanced host ready: v1' "$stdout_path" 2>/dev/null \
-      || grep -Fxq 'dsh-enhanced host ready: v1' "$stderr_path" 2>/dev/null; then
+      || grep -Fxq 'dsh-ray host ready: v1' "$stdout_path" 2>/dev/null \
+      || grep -Fxq 'dsh-ray host ready: v1' "$stderr_path" 2>/dev/null; then
       ready='1'
       break
     fi
@@ -3183,18 +3178,18 @@ NODE
   # activation probe too; the probe only needs to prove that DSH composed and
   # activated the profile and committed the native readiness signal.
   if grep -Fq "$ready_marker" "$stdout_path" 2>/dev/null \
-      || grep -Fxq 'dsh-enhanced host ready: v1' "$stdout_path" 2>/dev/null \
-      || grep -Fxq 'dsh-enhanced host ready: v1' "$stderr_path" 2>/dev/null; then
+      || grep -Fxq 'dsh-ray host ready: v1' "$stdout_path" 2>/dev/null \
+      || grep -Fxq 'dsh-ray host ready: v1' "$stderr_path" 2>/dev/null; then
     ready='1'
   fi
 
   if [[ "$ready" == '1' ]]; then
     local probe_url=""
-    probe_url="$(dsh_enhanced_latest_web_url "$stdout_path" || true)"
-    dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"
-    dsh_enhanced_restore_trap "$saved_exit_trap" EXIT
-    dsh_enhanced_restore_trap "$saved_int_trap" INT
-    dsh_enhanced_restore_trap "$saved_term_trap" TERM
+    probe_url="$(dsh_ray_latest_web_url "$stdout_path" || true)"
+    dsh_ray_cleanup_activation_probe "$probe_pid" "$probe_directory"
+    dsh_ray_restore_trap "$saved_exit_trap" EXIT
+    dsh_ray_restore_trap "$saved_int_trap" INT
+    dsh_ray_restore_trap "$saved_term_trap" TERM
     if [[ -n "$probe_url" ]]; then
       printf 'profile 运行时自检：DSH 已打印带 token 的 Web URL（临时端口，仅用于验证激活，不是持久访问地址）。\n'
     fi
@@ -3210,10 +3205,10 @@ NODE
   if kill -0 "$probe_pid" >/dev/null 2>&1; then
     failure='30 秒内没有等到 Host 就绪。'
   fi
-  dsh_enhanced_stop_activation_probe "$probe_pid"
-  dsh_enhanced_restore_trap "$saved_exit_trap" EXIT
-  dsh_enhanced_restore_trap "$saved_int_trap" INT
-  dsh_enhanced_restore_trap "$saved_term_trap" TERM
+  dsh_ray_stop_activation_probe "$probe_pid"
+  dsh_ray_restore_trap "$saved_exit_trap" EXIT
+  dsh_ray_restore_trap "$saved_int_trap" INT
+  dsh_ray_restore_trap "$saved_term_trap" TERM
   printf 'profile 运行时自检失败：%s\n' "$failure" >&2
   if [[ -s "$stdout_path" ]]; then
     printf '%s\n' '--- DSH stdout ---' >&2
@@ -3224,10 +3219,10 @@ NODE
     sed -n '1,240p' "$stderr_path" >&2
   fi
   rm -rf -- "$probe_directory"
-  dsh_enhanced_fail 1 "profile $profile 未能完整激活；尚未继续飞书授权、凭据写入或常驻服务启动。"
+  dsh_ray_fail 1 "profile $profile 未能完整激活；尚未继续飞书授权、凭据写入或常驻服务启动。"
 }
 
-dsh_enhanced_read_linux_service_snapshot() {
+dsh_ray_read_linux_service_snapshot() {
   local target="$1"
   local snapshot
   if ! snapshot="$(systemctl --user show "$target" \
@@ -3247,7 +3242,7 @@ dsh_enhanced_read_linux_service_snapshot() {
   printf '%s|%s|%s|%s\n' "$active_state" "$sub_state" "$restarts" "$main_status"
 }
 
-dsh_enhanced_report_linux_service_failure() {
+dsh_ray_report_linux_service_failure() {
   local target="$1"
   local reason="$2"
   printf 'doctor：systemd 服务 %s 未能稳定运行：%s\n' "$target" "$reason" >&2
@@ -3261,30 +3256,30 @@ dsh_enhanced_report_linux_service_failure() {
   fi
 }
 
-dsh_enhanced_verify_linux_service_stability() {
+dsh_ray_verify_linux_service_stability() {
   local profile="$1"
   local target="dsh-profile-$profile.service"
   local first
-  if ! first="$(dsh_enhanced_read_linux_service_snapshot "$target")"; then
-    dsh_enhanced_report_linux_service_failure "$target" '无法读取 initial systemd 状态。'
-    dsh_enhanced_fail 1 "doctor：无法确认 systemd 服务 $target 稳定运行。"
+  if ! first="$(dsh_ray_read_linux_service_snapshot "$target")"; then
+    dsh_ray_report_linux_service_failure "$target" '无法读取 initial systemd 状态。'
+    dsh_ray_fail 1 "doctor：无法确认 systemd 服务 $target 稳定运行。"
     return $?
   fi
   local first_active first_substate first_restarts first_status
   IFS='|' read -r first_active first_substate first_restarts first_status <<< "$first"
   if [[ "$first_active" != 'active' || "$first_substate" != 'running' || "$first_status" != '0' ]]; then
-    dsh_enhanced_report_linux_service_failure "$target" \
+    dsh_ray_report_linux_service_failure "$target" \
       "initial state=$first_active/$first_substate, restarts=$first_restarts, main-status=$first_status"
-    dsh_enhanced_fail 1 "doctor：systemd 服务 $target 未处于 active/running。"
+    dsh_ray_fail 1 "doctor：systemd 服务 $target 未处于 active/running。"
     return $?
   fi
 
   # The unit waits five seconds before a restart.  Twelve seconds catches an
   # immediate failure plus a full restart without making normal onboarding
   # feel stalled; it is an acceptance window, not a perpetual monitor.
-  local stability_seconds="${DSH_ENHANCED_SERVICE_STABILITY_SECONDS:-12}"
+  local stability_seconds="${DSH_RAY_SERVICE_STABILITY_SECONDS:-12}"
   if ! [[ "$stability_seconds" =~ ^[0-9]{1,2}$ ]] || (( stability_seconds > 60 )); then
-    dsh_enhanced_fail 2 'DSH_ENHANCED_SERVICE_STABILITY_SECONDS 必须是 0..60。'
+    dsh_ray_fail 2 'DSH_RAY_SERVICE_STABILITY_SECONDS 必须是 0..60。'
     return $?
   fi
   if (( stability_seconds > 0 )); then
@@ -3293,39 +3288,39 @@ dsh_enhanced_verify_linux_service_stability() {
   fi
 
   local second
-  if ! second="$(dsh_enhanced_read_linux_service_snapshot "$target")"; then
-    dsh_enhanced_report_linux_service_failure "$target" '稳定性观察后无法读取 systemd 状态。'
-    dsh_enhanced_fail 1 "doctor：无法确认 systemd 服务 $target 稳定运行。"
+  if ! second="$(dsh_ray_read_linux_service_snapshot "$target")"; then
+    dsh_ray_report_linux_service_failure "$target" '稳定性观察后无法读取 systemd 状态。'
+    dsh_ray_fail 1 "doctor：无法确认 systemd 服务 $target 稳定运行。"
     return $?
   fi
   local second_active second_substate second_restarts second_status
   IFS='|' read -r second_active second_substate second_restarts second_status <<< "$second"
   if [[ "$second_active" != 'active' || "$second_substate" != 'running' || "$second_status" != '0'
     || "$second_restarts" != "$first_restarts" ]]; then
-    dsh_enhanced_report_linux_service_failure "$target" \
+    dsh_ray_report_linux_service_failure "$target" \
       "final state=$second_active/$second_substate, restarts=$first_restarts->$second_restarts, main-status=$second_status"
-    dsh_enhanced_fail 1 "doctor：systemd 服务 $target 在稳定性窗口内退出或重启。"
+    dsh_ray_fail 1 "doctor：systemd 服务 $target 在稳定性窗口内退出或重启。"
     return $?
   fi
   printf 'doctor：systemd 服务稳定运行（NRestarts=%s）。\n' "$second_restarts"
 }
 
 # Explicit post-install diagnostics can run alongside an existing Host.
-dsh_enhanced_doctor_isolation() {
+dsh_ray_doctor_isolation() {
   local profile="$1"
   local dsh_home="$2"
   local executable="$dsh_home/profiles/$profile/node_modules/.bin/dsh-autonomy-doctor"
   if [[ ! -x "$executable" ]]; then
-    dsh_enhanced_fail 1 'doctor：未安装自治诊断入口，请安装匹配版本的 assistant-web-owner；不会重建或续期授权。'
+    dsh_ray_fail 1 'doctor：未安装自治诊断入口，请安装匹配版本的 assistant-web-owner；不会重建或续期授权。'
     return $?
   fi
-  dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-autonomy-doctor --dsh-home "$dsh_home" --profile "$profile"
+  dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" dsh-autonomy-doctor --dsh-home "$dsh_home" --profile "$profile"
 }
 
 # The installer calls this before creating a brand-new profile and after it has
 # composed the final profile.  It deliberately never starts an Agent or sends a
 # model request; model readiness is an explicit separate choice.
-dsh_enhanced_doctor() {
+dsh_ray_doctor() {
   local phase="$1"
   local profile="$2"
   local dsh_home="$3"
@@ -3333,27 +3328,27 @@ dsh_enhanced_doctor() {
   local require_service="${5:-0}"
   case "$phase" in
     preflight)
-      dsh_enhanced_check_web_port_available "$port"
+      dsh_ray_check_web_port_available "$port"
       return $?
       ;;
     postflight) ;;
     *)
-      dsh_enhanced_fail 2 "doctor 不支持的阶段：$phase"
+      dsh_ray_fail 2 "doctor 不支持的阶段：$phase"
       return $?
       ;;
   esac
   if ! dsh --profile "$profile" --dump-config >/dev/null; then
-    dsh_enhanced_fail 1 "doctor：profile $profile 无法组合。"
+    dsh_ray_fail 1 "doctor：profile $profile 无法组合。"
     return $?
   fi
   local patch_path="$dsh_home/profiles/$profile/cordis.patch.yml"
   local home_patch_path="$dsh_home/cordis.patch.yml"
-  if ! dsh_enhanced_effective_lark_is_configured "$patch_path" "$home_patch_path"; then
+  if ! dsh_ray_effective_lark_is_configured "$patch_path" "$home_patch_path"; then
     if [[ "$require_service" == '1' ]]; then
-      dsh_enhanced_fail 1 "doctor：profile $profile 未配置已启用的飞书 channel，不能验证常驻服务。"
+      dsh_ray_fail 1 "doctor：profile $profile 未配置已启用的飞书 channel，不能验证常驻服务。"
       return $?
     fi
-    dsh_enhanced_verify_profile_activation "$profile" "$dsh_home" 0 || return $?
+    dsh_ray_verify_profile_activation "$profile" "$dsh_home" 0 || return $?
     printf 'doctor：profile 可组合且已激活；未启用飞书常驻服务。\n'
     return 0
   fi
@@ -3362,37 +3357,37 @@ dsh_enhanced_doctor() {
     printf 'doctor：飞书服务状态可用 doctor.sh --require-service 复查。\n'
     return 0
   fi
-  case "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" in
+  case "${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}" in
     Linux)
       if ! command -v systemctl >/dev/null 2>&1; then
-        dsh_enhanced_fail 1 'doctor：找不到 systemctl，无法验证 Linux 常驻服务。'
+        dsh_ray_fail 1 'doctor：找不到 systemctl，无法验证 Linux 常驻服务。'
         return $?
       fi
       local systemd_target="dsh-profile-$profile.service"
       if ! systemctl --user is-active --quiet "$systemd_target"; then
-        dsh_enhanced_report_linux_service_failure "$systemd_target" 'systemctl is-active 报告服务未运行。'
-        dsh_enhanced_fail 1 "doctor：systemd 服务 $systemd_target 未运行。"
+        dsh_ray_report_linux_service_failure "$systemd_target" 'systemctl is-active 报告服务未运行。'
+        dsh_ray_fail 1 "doctor：systemd 服务 $systemd_target 未运行。"
         return $?
       fi
-      dsh_enhanced_verify_linux_service_stability "$profile" || return $?
+      dsh_ray_verify_linux_service_stability "$profile" || return $?
       if ! command -v loginctl >/dev/null 2>&1; then
-        dsh_enhanced_fail 1 'doctor：找不到 loginctl，无法验证 Linux logout persistence。'
+        dsh_ray_fail 1 'doctor：找不到 loginctl，无法验证 Linux logout persistence。'
         return $?
       fi
       if ! loginctl show-user "$EUID" --property=Linger --value 2>/dev/null | grep -qx 'yes'; then
-        dsh_enhanced_fail 1 'doctor：systemd user service 在注销后不会保持；运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。'
+        dsh_ray_fail 1 'doctor：systemd user service 在注销后不会保持；运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。'
         return $?
       fi
       ;;
     Darwin|darwin)
-      if ! dsh_enhanced_macos_service_action "$profile" "$dsh_home" running; then
-        dsh_enhanced_fail 1 "doctor：当前 Home 的 launchd 服务 ai.deepseek.dsh.profile.$profile 未运行或归属无法确认。"
+      if ! dsh_ray_macos_service_action "$profile" "$dsh_home" running; then
+        dsh_ray_fail 1 "doctor：当前 Home 的 launchd 服务 ai.deepseek.dsh.profile.$profile 未运行或归属无法确认。"
         return $?
       fi
       ;;
     MINGW*|MSYS*|CYGWIN*)
       if ! schtasks.exe /Query /TN "DSH profile $profile" >/dev/null 2>&1; then
-        dsh_enhanced_fail 1 "doctor：Windows 计划任务 DSH profile $profile 未注册。"
+        dsh_ray_fail 1 "doctor：Windows 计划任务 DSH profile $profile 未注册。"
         return $?
       fi
       ;;
@@ -3400,10 +3395,10 @@ dsh_enhanced_doctor() {
   printf 'doctor：profile、channel 与常驻服务均已通过检查。\n'
 }
 
-# Resolve bound `.dsh-rsi-host.json` binary directory safely onto PATH when present.
-dsh_enhanced_prepend_bound_host_bin() {
+# Resolve bound `.dsh-ray-host.json` binary directory safely onto PATH when present.
+dsh_ray_prepend_bound_host_bin() {
   local dsh_home="$1"
-  local binding="$dsh_home/.dsh-rsi-host.json"
+  local binding="$dsh_home/.dsh-ray-host.json"
   [[ -f "$binding" && ! -L "$binding" ]] || return 0
   command -v node >/dev/null 2>&1 || return 0
   local bin_dir=''
@@ -3430,31 +3425,31 @@ NODE
 }
 
 # Print read-only live checks for credentials (keys only), traex/agy auth, and autonomy readiness.
-dsh_enhanced_doctor_live_summary() {
+dsh_ray_doctor_live_summary() {
   local profile="$1" dsh_home="$2"
   local script_dir cli_entry='' cli_lib=''
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 0
-  cli_entry="$script_dir/../../packages/dsh-rsi-cli/bin/dsh-rsi.js"
-  cli_lib="$script_dir/../../packages/dsh-rsi-cli/lib/index.js"
+  cli_entry="$script_dir/../../packages/dsh-ray/bin/dsh-ray.js"
+  cli_lib="$script_dir/../../packages/dsh-ray/lib/index.js"
   if [[ -f "$cli_entry" && -f "$cli_lib" ]] && command -v node >/dev/null 2>&1; then
     node "$cli_entry" --dsh-home "$dsh_home" doctor --profile "$profile"
     return $?
-  elif command -v dsh-rsi >/dev/null 2>&1; then
-    dsh-rsi --dsh-home "$dsh_home" doctor --profile "$profile"
+  elif command -v dsh-ray >/dev/null 2>&1; then
+    dsh-ray --dsh-home "$dsh_home" doctor --profile "$profile"
     return $?
   fi
   local traex_cmd='' agy_cmd=''
-  traex_cmd="$(dsh_enhanced_detect_traex_command || true)"
-  agy_cmd="$(dsh_enhanced_detect_agy_command || true)"
+  traex_cmd="$(dsh_ray_detect_traex_command || true)"
+  agy_cmd="$(dsh_ray_detect_agy_command || true)"
   if [[ -n "$traex_cmd" ]]; then
-    if dsh_enhanced_traex_login_ready "$traex_cmd"; then
+    if dsh_ray_traex_login_ready "$traex_cmd"; then
       printf 'doctor：TraeX 已登录（%s）\n' "$traex_cmd"
     else
       printf 'doctor：TraeX 尚未登录（%s login）\n' "$traex_cmd"
     fi
   fi
   if [[ -n "$agy_cmd" ]]; then
-    if dsh_enhanced_agy_login_ready "$agy_cmd"; then
+    if dsh_ray_agy_login_ready "$agy_cmd"; then
       printf 'doctor：Antigravity (agy) 模型探测就绪（%s）\n' "$agy_cmd"
     else
       printf 'doctor：Antigravity (agy) 尚未就绪（%s models）\n' "$agy_cmd"
@@ -3467,11 +3462,11 @@ dsh_enhanced_doctor_live_summary() {
 # with a successful setup followed by a missing-service doctor error. Keep the
 # standalone doctor read-only and reuse the service-only setup path so repairing
 # registration cannot reopen credentials or owner onboarding.
-dsh_enhanced_ensure_resident_service() {
+dsh_ray_ensure_resident_service() {
   local profile="$1"
   local dsh_home="$2"
   local dry_run="$3"
-  case "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" in
+  case "${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}" in
     Darwin|darwin) ;;
     *) return 0 ;;
   esac
@@ -3479,11 +3474,11 @@ dsh_enhanced_ensure_resident_service() {
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-lark-setup"
   if [[ "$dry_run" == '1' ]]; then
     printf '常驻服务：将检查 launchd 注册，缺失时自动安装当前 profile 的 LaunchAgent。\n'
-    dsh_enhanced_print_command "$setup_bin" --profile "$profile" --install-service
+    dsh_ray_print_command "$setup_bin" --profile "$profile" --install-service
     return 0
   fi
   local inspection_status=0
-  if dsh_enhanced_macos_service_action "$profile" "$dsh_home" registered; then
+  if dsh_ray_macos_service_action "$profile" "$dsh_home" registered; then
     return 0
   else
     inspection_status=$?
@@ -3492,28 +3487,28 @@ dsh_enhanced_ensure_resident_service() {
   # must not overwrite a service belonging to another Home.
   if [[ "$inspection_status" != '3' ]]; then return "$inspection_status"; fi
   if [[ ! -x "$setup_bin" ]]; then
-    dsh_enhanced_fail 1 "常驻服务：launchd 服务未注册，且找不到注册入口：$setup_bin"
+    dsh_ray_fail 1 "常驻服务：launchd 服务未注册，且找不到注册入口：$setup_bin"
     return $?
   fi
   printf '常驻服务：检测到 launchd 服务未注册，正在自动注册 %s。\n' "$target"
-  if ! dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --install-service; then
-    dsh_enhanced_fail 1 "常驻服务：自动注册 $target 失败；请检查上方 launchd 错误后重试安装。"
+  if ! dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --install-service; then
+    dsh_ray_fail 1 "常驻服务：自动注册 $target 失败；请检查上方 launchd 错误后重试安装。"
     return $?
   fi
-  if ! dsh_enhanced_macos_service_action "$profile" "$dsh_home" registered; then
-    dsh_enhanced_fail 1 "常驻服务：自动注册后 $target 仍不可见；请在当前 macOS 用户的图形登录会话中重试安装。"
+  if ! dsh_ray_macos_service_action "$profile" "$dsh_home" registered; then
+    dsh_ray_fail 1 "常驻服务：自动注册后 $target 仍不可见；请在当前 macOS 用户的图形登录会话中重试安装。"
     return $?
   fi
   printf '常驻服务：launchd 注册已完成。\n'
 }
 
-dsh_enhanced_macos_service_action() {
+dsh_ray_macos_service_action() {
   local profile="$1" dsh_home="$2" action="$3"
-  dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" internal-lark-service \
+  dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" internal-lark-service \
     --profile "$profile" --dsh-home "$dsh_home" --action "$action"
 }
 
-dsh_enhanced_apply_permission_choice() {
+dsh_ray_apply_permission_choice() {
   local preset="$1"
   local confirmed="$2"
   local profile="$3"
@@ -3525,41 +3520,41 @@ dsh_enhanced_apply_permission_choice() {
     return 0
   fi
   if [[ "$preset" == 'danger-full-access' && "$confirmed" != '1' ]]; then
-    dsh_enhanced_fail 2 '--permission danger-full-access 需要同时传入 --confirm-dangerous-full-access。'
+    dsh_ray_fail 2 '--permission danger-full-access 需要同时传入 --confirm-dangerous-full-access。'
     return $?
   fi
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-permission-setup"
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
-    dsh_enhanced_fail 1 "找不到安装后的 dsh-permission-setup：$setup_bin"
+    dsh_ray_fail 1 "找不到安装后的 dsh-permission-setup：$setup_bin"
     return $?
   fi
   printf '权限默认值：显式设置为 %s。\n' "$preset"
-  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-permission-setup --dsh-home "$dsh_home" --profile "$profile" --preset "$preset"
+  dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-permission-setup --dsh-home "$dsh_home" --profile "$profile" --preset "$preset"
 }
 
 # Apply a dsh-plugin-setup preset (default: recommended) to one installed profile.
 # Onboarding flows call it after the profile's plugins are installed.
 # Usage: <profile> <dsh_home> <dry_run> [preset]
-dsh_enhanced_apply_plugin_preset() {
+dsh_ray_apply_plugin_preset() {
   local profile="$1"
   local dsh_home="$2"
   local dry_run="$3"
   local preset="${4:-recommended}"
   if [[ ! "$preset" =~ ^[a-z][a-z0-9-]*$ ]]; then
-    dsh_enhanced_fail 2 "无效的插件预设：$preset"
+    dsh_ray_fail 2 "无效的插件预设：$preset"
     return $?
   fi
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-plugin-setup"
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
-    dsh_enhanced_fail 1 "找不到安装后的 dsh-plugin-setup：$setup_bin"
+    dsh_ray_fail 1 "找不到安装后的 dsh-plugin-setup：$setup_bin"
     return $?
   fi
   printf '插件预设：为 profile %s 应用 %s。\n' "$profile" "$preset"
-  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-plugin-setup preset "$preset" --yes --dsh-home "$dsh_home" --profile "$profile"
+  dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-plugin-setup preset "$preset" --yes --dsh-home "$dsh_home" --profile "$profile"
 }
 
 # Managed supervised installs assemble ordinary-use learning in two passes: the
-# preset before `dsh-rsi-setup --install-owner` can only touch already-loaded
+# preset before `dsh-ray-setup --install-owner` can only touch already-loaded
 # bundles, so after the finite owner grants exist the same idempotent preset runs
 # once more. Only a fresh profile is assembled implicitly; explicit
 # `--plugin-preset`, a guided decline, and existing profiles keep their owner
@@ -3568,7 +3563,7 @@ dsh_enhanced_apply_plugin_preset() {
 # Usage: <profile> <dsh_home> <dry_run> <requested_preset|auto|skip> <guided_declined 0|1> <fresh_profile 0|1>
 # Returns 0 when a preset was applied, 2 when nothing is assembled, otherwise the
 # dsh-plugin-setup exit status.
-dsh_enhanced_apply_supervised_learning_assembly() {
+dsh_ray_apply_supervised_learning_assembly() {
   local profile="$1"
   local dsh_home="$2"
   local dry_run="$3"
@@ -3588,10 +3583,10 @@ dsh_enhanced_apply_supervised_learning_assembly() {
     return 2
   fi
   printf '\n自治学习装配：owner 学习配置生成后再次应用 %s 预设（只改已安装且未禁用的插件；授权、密钥与签名 pin 不自动生成）。\n' "$preset"
-  dsh_enhanced_apply_plugin_preset "$profile" "$dsh_home" "$dry_run" "$preset"
+  dsh_ray_apply_plugin_preset "$profile" "$dsh_home" "$dry_run" "$preset"
 }
 
-dsh_enhanced_apply_lark() {
+dsh_ray_apply_lark() {
   local mode="$1"
   local profile="$2"
   local dsh_home="$3"
@@ -3610,22 +3605,22 @@ dsh_enhanced_apply_lark() {
   case "$mode" in
     keep)
       if [[ "$configured" != '1' ]]; then
-        dsh_enhanced_fail 2 '没有可保留的飞书配置；请使用 --lark configure 或 --lark skip。'
+        dsh_ray_fail 2 '没有可保留的飞书配置；请使用 --lark configure 或 --lark skip。'
         return $?
       fi
       printf '\n飞书处理：保留当前应用配置。\n'
       if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
-        dsh_enhanced_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
+        dsh_ray_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
         return $?
       fi
       # Refresh only the policy layer from the existing channel binding before
       # any restart; this path never reopens app/credential/owner onboarding.
       if [[ "$agent_tools" == 'allow' || "$agent_tools" == 'disable' ]]; then
-        dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --refresh-agent-policy \
+        dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --refresh-agent-policy \
           "${agent_tools_flag[@]}" || return $?
       fi
       if [[ "$manage_service" == '1' ]]; then
-        dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --install-service
+        dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --install-service
       else
         printf '已按 --no-service 跳过常驻服务重启。\n'
       fi
@@ -3634,48 +3629,48 @@ dsh_enhanced_apply_lark() {
       printf '\n飞书处理：选择已有应用或创建新应用，并覆盖当前 channel 配置。\n'
       if [[ "$dry_run" != '1' ]]; then
         if [[ ! -t 0 || ! -t 1 ]]; then
-          dsh_enhanced_fail 1 '飞书向导需要交互式终端；请直接运行脚本，或使用 --lark skip。'
+          dsh_ray_fail 1 '飞书向导需要交互式终端；请直接运行脚本，或使用 --lark skip。'
           return $?
         fi
         if [[ ! -x "$setup_bin" ]]; then
-          dsh_enhanced_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
+          dsh_ray_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
           return $?
         fi
       fi
       if [[ "$manage_service" == '1' ]]; then
-        dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" "${agent_tools_flag[@]+"${agent_tools_flag[@]}"}"
+        dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" "${agent_tools_flag[@]+"${agent_tools_flag[@]}"}"
       else
-        dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --no-service "${agent_tools_flag[@]+"${agent_tools_flag[@]}"}"
+        dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --no-service "${agent_tools_flag[@]+"${agent_tools_flag[@]}"}"
       fi
       ;;
     skip)
       printf '\n飞书处理：本次跳过；现有配置不会被修改。\n'
       if [[ "$agent_tools" == 'allow' || "$agent_tools" == 'disable' ]]; then
         if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
-          dsh_enhanced_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
+          dsh_ray_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
           return $?
         fi
         # Agent reachability is independent of channel onboarding. In skip
         # mode this only edits installer-managed Policy rules; it does not
         # enable or alter the Lark row and never installs/restarts a service.
-        dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --refresh-agent-policy \
+        dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --refresh-agent-policy \
           "${agent_tools_flag[@]}" || return $?
       fi
       ;;
     *)
-      dsh_enhanced_fail 2 "不支持的飞书模式：$mode"
+      dsh_ray_fail 2 "不支持的飞书模式：$mode"
       return $?
       ;;
   esac
 }
 
-dsh_enhanced_prepare_rsi_source() {
+dsh_ray_prepare_rsi_source() {
   local profile="$1"
   local dsh_home="$2"
   local source_mode="$3"
   local repo_root="$4"
   local dry_run="$5"
-  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-rsi-setup"
+  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-ray-setup"
   local args=(--prepare-build --optional-build --profile "$profile" --dsh-home "$dsh_home")
   if [[ "$source_mode" == 'local' ]]; then
     args+=(--source-repository "$repo_root")
@@ -3683,19 +3678,19 @@ dsh_enhanced_prepare_rsi_source() {
 
   printf '\nsupervised-growth：准备自迭代源码和构建环境。\n'
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
-    dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
+    dsh_ray_fail 1 "找不到安装后的 dsh-ray-setup：$setup_bin"
     return $?
   fi
-  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-rsi-setup "${args[@]}" || {
+  dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-ray-setup "${args[@]}" || {
     local status=$?
-    dsh_enhanced_fail "$status" '自迭代源码和构建环境准备失败，安装已停止。'
+    dsh_ray_fail "$status" '自迭代源码和构建环境准备失败，安装已停止。'
     return $?
   }
 }
 
-dsh_enhanced_install_rsi_owner() {
+dsh_ray_install_rsi_owner() {
   local profile="$1" dsh_home="$2" source_mode="$3" repo_root="$4" dry_run="$5" acknowledge="${6:-0}" learning="${7:-preserve}"
-  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-rsi-setup"
+  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-ray-setup"
   local args=(--install-owner --profile "$profile" --dsh-home "$dsh_home")
   if [[ "$source_mode" == 'local' ]]; then args+=(--source-repository "$repo_root"); fi
   if [[ "$acknowledge" == '1' ]]; then args+=(--ack-existing-automations); fi
@@ -3707,14 +3702,14 @@ dsh_enhanced_install_rsi_owner() {
     authorize) args+=(--enable-ordinary-use-learning) ;;
     skip) args+=(--skip-memory-learning) ;;
     preserve) ;;
-    *) dsh_enhanced_fail 2 "学习授权决策不合法：$learning"; return $? ;;
+    *) dsh_ray_fail 2 "学习授权决策不合法：$learning"; return $? ;;
   esac
   printf '\nsupervised-growth：自动配置当前 owner 的学习与能力进化。\n'
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
-    dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
+    dsh_ray_fail 1 "找不到安装后的 dsh-ray-setup：$setup_bin"
     return $?
   fi
-  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-rsi-setup "${args[@]}"
+  dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-ray-setup "${args[@]}"
 }
 
 # First-install convenience: owner learning setup needs exactly one owner DM
@@ -3723,26 +3718,26 @@ dsh_enhanced_install_rsi_owner() {
 # message in an interactive terminal. This never creates or widens a binding;
 # the DSH-CONNECT owner binding and owner-only authorization are unchanged.
 # Any wait failure (older setup binary, timeout, ambiguity) falls through to
-# dsh_enhanced_install_rsi_owner, which keeps its existing fail-closed checks.
-dsh_enhanced_wait_owner_dm() {
+# dsh_ray_install_rsi_owner, which keeps its existing fail-closed checks.
+dsh_ray_wait_owner_dm() {
   local profile="$1" dsh_home="$2" seconds="$3" dry_run="$4"
   [[ "$seconds" != '0' ]] || return 0
   local args=(--wait-owner-dm --profile "$profile" --dsh-home "$dsh_home")
   if [[ "$dry_run" == '1' ]]; then
     printf '\n首次 owner 私聊：如尚无 owner 私聊绑定，将等待 owner 在飞书私聊 Bot（最长 %s 秒）。\n' "$seconds"
-    dsh_enhanced_print_command "$dsh_home/profiles/$profile/node_modules/.bin/dsh-rsi-setup" "${args[@]}" --timeout-seconds "$seconds"
+    dsh_ray_print_command "$dsh_home/profiles/$profile/node_modules/.bin/dsh-ray-setup" "${args[@]}" --timeout-seconds "$seconds"
     return 0
   fi
   [[ -t 0 && -t 1 ]] || return 0
   local output=''
-  output="$(dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-rsi-setup "${args[@]}" --timeout-seconds 1 2>/dev/null)" || true
+  output="$(dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" dsh-ray-setup "${args[@]}" --timeout-seconds 1 2>/dev/null)" || true
   [[ "$output" != *'"mode":"ready"'* ]] || return 0
   if [[ "$output" == *'"mode":"ambiguous"'* ]]; then
     return 0
   fi
   printf '\n最后一步：请在飞书/Lark 中给刚绑定的 Bot 发送一条私聊消息（例如 /model）。\n'
   printf '安装器检测到 owner 私聊后会自动继续（最长等待 %s 秒；可用 --owner-wait-seconds 调整）。\n' "$seconds"
-  output="$(dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-rsi-setup "${args[@]}" --timeout-seconds "$seconds" 2>/dev/null)" || true
+  output="$(dsh_ray_run_profile_setup 0 "$dsh_home" "$profile" dsh-ray-setup "${args[@]}" --timeout-seconds "$seconds" 2>/dev/null)" || true
   if [[ "$output" == *'"mode":"ready"'* ]]; then
     printf '已检测到 owner 私聊，继续配置学习与能力进化。\n'
   else
@@ -3751,34 +3746,34 @@ dsh_enhanced_wait_owner_dm() {
   return 0
 }
 
-dsh_enhanced_install_local_cohort() {
+dsh_ray_install_local_cohort() {
   local profile="$1" dsh_home="$2" repo_root="$3" dry_run="$4"
   shift 4
   local args=(--install-local-cohort --profile "$profile" --dsh-home "$dsh_home" --source-repository "$repo_root")
   local slug
   for slug in "$@"; do args+=(--bundle "$slug"); done
   printf '\n本地 supervised：从冻结提交构建独立包，并安装到 profile 内。\n'
-  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" source-rsi "$repo_root" "${args[@]}"
+  dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" source-rsi "$repo_root" "${args[@]}"
 }
 
-dsh_enhanced_run_profile_setup() {
+dsh_ray_run_profile_setup() {
   local dry_run="$1" dsh_home="$2" profile="$3" setup="$4"
   shift 4
   local executable="$dsh_home/profiles/$profile/node_modules/.bin/$setup"
   if [[ "$setup" == 'source-rsi' ]]; then
-    executable="$1/plugins/lark-channel/bin/dsh-rsi-setup.js"
+    executable="$1/plugins/lark-channel/bin/dsh-ray-setup.js"
   fi
   if [[ "$dry_run" == '1' ]]; then
     if [[ "$setup" == 'source-rsi' ]]; then
-      dsh_enhanced_print_command node "$executable" "${@:2}"
+      dsh_ray_print_command node "$executable" "${@:2}"
     else
-      dsh_enhanced_print_command "$executable" "$@"
+      dsh_ray_print_command "$executable" "$@"
     fi
     return 0
   fi
-  if ! dsh_enhanced_is_02_host_version "$(NODE_PATH='' NODE_OPTIONS='' dsh --version 2>/dev/null || true)"; then
+  if ! dsh_ray_is_02_host_version "$(NODE_PATH='' NODE_OPTIONS='' dsh --version 2>/dev/null || true)"; then
     if [[ "$setup" == 'internal-lark-service' ]]; then
-      dsh_enhanced_fail 1 'macOS 服务归属检查需要已验证的 DSH Host；尚未操作服务。'
+      dsh_ray_fail 1 'macOS 服务归属检查需要已验证的 DSH Host；尚未操作服务。'
       return $?
     fi
     if [[ "$setup" == 'source-rsi' ]]; then
@@ -3786,7 +3781,7 @@ dsh_enhanced_run_profile_setup() {
     elif [[ "$setup" == 'dsh-model-setup' && ! -x "$executable" ]]; then
       local launcher=() launcher_token=''
       while IFS= read -r launcher_token; do launcher+=("$launcher_token"); done \
-        < <(dsh_enhanced_resolve_model_setup "$profile" "$dsh_home")
+        < <(dsh_ray_resolve_model_setup "$profile" "$dsh_home")
       [[ -n "${launcher[0]+set}" ]] || return 1
       "${launcher[@]}" "$@"
     else
@@ -3810,7 +3805,7 @@ const modules = {
   'dsh-plugin-setup': ['assistant-policy', 'plugin-setup', 'runPluginSetup'],
   'dsh-lark-setup': ['lark-channel', 'setup', 'runLarkSetup'],
   'internal-lark-service': ['lark-channel', 'launchd-control', 'runLaunchdControl'],
-  'dsh-rsi-setup': ['lark-channel', 'rsi-setup', 'runRsiSetup'],
+  'dsh-ray-setup': ['lark-channel', 'rsi-setup', 'runRsiSetup'],
   'dsh-web-owner-setup': ['assistant-web-owner', 'setup', 'runWebOwnerSetup'],
   'dsh-autonomy-doctor': ['assistant-web-owner', 'doctor', 'runAutonomyDoctor'],
   'source-rsi': ['lark-channel', 'rsi-setup', 'runRsiSetup'],
@@ -3873,7 +3868,7 @@ if (!installationCordis || await realpath(installationCordis.packageDir) !== dir
   throw new Error('selected Host Cordis was not resolved from installation')
 }
 const [packageName, moduleName, exportName] = modules[setup]
-const expectedName = `@dsh-enhanced/${packageName}`
+const expectedName = `@dsh-ray/${packageName}`
 const direct = resolution.localPackageNames.includes(expectedName)
 const layer = profile?.layers.find(entry => entry.packageName === expectedName)
 const selected = resolution.entries.find(entry => entry.name === expectedName && entry.scope === 'profile')
@@ -3890,7 +3885,7 @@ if (setup !== 'source-rsi' && layer && (!direct || await realpath(layer.packageD
   throw new Error('setup package differs from native profile resolution')
 }
 const packageManifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'))
-const binName = setup === 'source-rsi' ? 'dsh-rsi-setup' : setup === 'internal-lark-service' ? 'dsh-lark-setup' : setup
+const binName = setup === 'source-rsi' ? 'dsh-ray-setup' : setup === 'internal-lark-service' ? 'dsh-lark-setup' : setup
 const binRelative = packageManifest.bin?.[binName]
 if (packageManifest.name !== expectedName || typeof binRelative !== 'string'
   || isAbsolute(binRelative) || binRelative.split('/').some(part => part === '..')
@@ -3914,12 +3909,12 @@ NODE
   NODE_PATH='' NODE_OPTIONS='' node --input-type=module -e "$runtime_script" "$dsh_home" "$profile" "$setup" "$source_root" "$(command -v dsh)" "$@"
 }
 
-dsh_enhanced_heal_host_module_fallback() {
+dsh_ray_heal_host_module_fallback() {
   local dsh_home="$1"
   local expected_version="$2"
   local dsh_executable=''
   dsh_executable="$(command -v dsh 2>/dev/null)" || {
-    dsh_enhanced_fail 1 '找不到已验证的 dsh executable；无法准备 setup 所需的 Host peer 闭包。'
+    dsh_ray_fail 1 '找不到已验证的 dsh executable；无法准备 setup 所需的 Host peer 闭包。'
     return $?
   }
   if ! node --input-type=module - "$dsh_home" "$dsh_executable" "$expected_version" <<'NODE'
@@ -3972,13 +3967,13 @@ if (['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1', '0.2.2-rc.3', '0.2.2-rc.5'].inclu
 }
 NODE
   then
-    dsh_enhanced_fail 1 '无法准备已验证 DSH 的 setup peer 闭包；尚未运行 setup 或启动 profile。'
+    dsh_ray_fail 1 '无法准备已验证 DSH 的 setup peer 闭包；尚未运行 setup 或启动 profile。'
     return $?
   fi
   printf '已验证 DSH 的 setup peer 解析；未挂载或启动 profile。\n'
 }
 
-dsh_enhanced_apply_web_owner() {
+dsh_ray_apply_web_owner() {
   local profile="$1"
   local dsh_home="$2"
   local workspace="$3"
@@ -3992,7 +3987,7 @@ dsh_enhanced_apply_web_owner() {
   local isolation_runtime_ms="${9:-}"
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-web-owner-setup"
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
-    dsh_enhanced_fail 1 "找不到安装后的 dsh-web-owner-setup：$setup_bin"
+    dsh_ray_fail 1 "找不到安装后的 dsh-web-owner-setup：$setup_bin"
     return $?
   fi
   local args=(--dsh-home "$dsh_home" --profile "$profile" --workspace "$workspace" --preset "$preset")
@@ -4002,32 +3997,32 @@ dsh_enhanced_apply_web_owner() {
     args+=(--isolation-backend "$isolation_backend" --isolation-max-runs "$isolation_max_runs" --isolation-lease-ms "$isolation_lease_ms" --isolation-runtime-ms "$isolation_runtime_ms")
     if [[ -n "$isolation_source_repository" ]]; then args+=(--isolation-source-repository "$isolation_source_repository"); fi
   fi
-  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-web-owner-setup "${args[@]}"
+  dsh_ray_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-web-owner-setup "${args[@]}"
 }
 
-dsh_enhanced_validate_lifecycle_state_paths() {
+dsh_ray_validate_lifecycle_state_paths() {
   local profile="$1"
   local dsh_home="$2"
   local composed_path="${3:-}"
   local dsh_executable=''
   dsh_executable="$(command -v dsh 2>/dev/null)" || {
-    dsh_enhanced_fail 1 '找不到现有 dsh executable；尚未开始生命周期事务。'
+    dsh_ray_fail 1 '找不到现有 dsh executable；尚未开始生命周期事务。'
     return $?
   }
   local temporary=''
   if [[ -z "$composed_path" ]]; then
-    temporary="$(mktemp "${TMPDIR:-/tmp}/dsh-enhanced-lifecycle-config.XXXXXX")" || return 1
+    temporary="$(mktemp "${TMPDIR:-/tmp}/dsh-ray-lifecycle-config.XXXXXX")" || return 1
     composed_path="$temporary"
   fi
   if [[ ! -s "$composed_path" ]] && ! DSH_HOME="$dsh_home" dsh --profile "$profile" --dump-config > "$composed_path" 2>/dev/null; then
     [[ -z "$temporary" ]] || rm -f -- "$temporary"
-    dsh_enhanced_fail 1 '现有 profile 无法组合；尚未开始生命周期事务。'
+    dsh_ray_fail 1 '现有 profile 无法组合；尚未开始生命周期事务。'
     return $?
   fi
   local validator="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lifecycle-config.mjs"
   if [[ ! -f "$validator" ]] || ! node "$validator" "$composed_path" "$dsh_home" "$dsh_executable"; then
     [[ -z "$temporary" ]] || rm -f -- "$temporary"
-    dsh_enhanced_fail 1 'profile 生命周期状态路径未通过结构化校验。'
+    dsh_ray_fail 1 'profile 生命周期状态路径未通过结构化校验。'
     return $?
   fi
   [[ -z "$temporary" ]] || rm -f -- "$temporary"
@@ -4039,7 +4034,7 @@ dsh_enhanced_validate_lifecycle_state_paths() {
 # mutation so a caller cannot route an enabled resident profile through the
 # stopped-home web/autonomy path. The same structural helper is used by the
 # locked executor.
-dsh_enhanced_effective_lifecycle_scenario() {
+dsh_ray_effective_lifecycle_scenario() {
   local profile="$1"
   local dsh_home="$2"
   local lifecycle_directory="$3"
@@ -4047,33 +4042,33 @@ dsh_enhanced_effective_lifecycle_scenario() {
   local composed_path=''
   local effective_scenario=''
   dsh_executable="$(command -v dsh 2>/dev/null)" || {
-    dsh_enhanced_fail 1 '找不到现有 dsh executable；无法验证 lifecycle scenario。'
+    dsh_ray_fail 1 '找不到现有 dsh executable；无法验证 lifecycle scenario。'
     return $?
   }
-  composed_path="$(mktemp "${TMPDIR:-/tmp}/dsh-enhanced-lifecycle-scenario.XXXXXX")" || {
-    dsh_enhanced_fail 1 '无法创建 lifecycle scenario 的私有临时文件。'
+  composed_path="$(mktemp "${TMPDIR:-/tmp}/dsh-ray-lifecycle-scenario.XXXXXX")" || {
+    dsh_ray_fail 1 '无法创建 lifecycle scenario 的私有临时文件。'
     return $?
   }
   if ! DSH_HOME="$dsh_home" "$dsh_executable" --profile "$profile" --dump-config > "$composed_path" 2>/dev/null; then
     rm -f -- "$composed_path"
-    dsh_enhanced_fail 1 "现有 profile $profile 无法组合；尚未开始 lifecycle 操作。"
+    dsh_ray_fail 1 "现有 profile $profile 无法组合；尚未开始 lifecycle 操作。"
     return $?
   fi
-  if ! dsh_enhanced_validate_lifecycle_state_paths "$profile" "$dsh_home" "$composed_path"; then
+  if ! dsh_ray_validate_lifecycle_state_paths "$profile" "$dsh_home" "$composed_path"; then
     rm -f -- "$composed_path"
     return 1
   fi
   if ! effective_scenario="$(node "$lifecycle_directory/lifecycle-config.mjs" \
     classify "$composed_path" "$dsh_executable")"; then
     rm -f -- "$composed_path"
-    dsh_enhanced_fail 1 '无法安全判定实际 effective/composed profile 的 lifecycle scenario。'
+    dsh_ray_fail 1 '无法安全判定实际 effective/composed profile 的 lifecycle scenario。'
     return $?
   fi
   rm -f -- "$composed_path"
   printf '%s' "$effective_scenario"
 }
 
-dsh_enhanced_canonical_lifecycle_home() {
+dsh_ray_canonical_lifecycle_home() {
   node --input-type=module - "$1" <<'NODE'
 import { lstat, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve } from 'node:path'
@@ -4104,20 +4099,20 @@ for (;;) {
 NODE
 }
 
-dsh_enhanced_recover_profile_lifecycle() {
+dsh_ray_recover_profile_lifecycle() {
   local profile="$1"
   local dsh_home="$2"
   local dry_run="$3"
-  local transaction_root="${dsh_home}.dsh-enhanced-transaction"
+  local transaction_root="${dsh_home}.dsh-ray-transaction"
   if [[ "$dry_run" == '1' ]]; then
     [[ -e "$transaction_root" ]] || return 0
-    dsh_enhanced_fail 1 "检测到未完成的 profile 生命周期事务；请非 dry-run 重试以恢复：$transaction_root"
+    dsh_ray_fail 1 "检测到未完成的 profile 生命周期事务；请非 dry-run 重试以恢复：$transaction_root"
     return $?
   fi
-  dsh_enhanced_run_lifecycle_executor recover "$profile" "$dsh_home"
+  dsh_ray_run_lifecycle_executor recover "$profile" "$dsh_home"
 }
 
-dsh_enhanced_run_lifecycle_executor() {
+dsh_ray_run_lifecycle_executor() {
   local operation="$1"
   local profile="$2"
   local dsh_home="$3"
@@ -4133,29 +4128,29 @@ dsh_enhanced_run_lifecycle_executor() {
   local systemctl_executable=''
   local journalctl_executable=''
   if [[ ! -x /usr/bin/perl ]]; then
-    dsh_enhanced_fail 1 '安全生命周期事务需要 /usr/bin/perl 验证继承的内核锁。'
+    dsh_ray_fail 1 '安全生命周期事务需要 /usr/bin/perl 验证继承的内核锁。'
     return $?
   fi
-  local lock_path="${dsh_home}.dsh-enhanced-lifecycle.lock"
+  local lock_path="${dsh_home}.dsh-ray-lifecycle.lock"
   if [[ "$operation" == 'host-recover' ]]; then
     # A v4 rename gap may leave neither the Home nor its former dsh on PATH.
     dsh_executable='/usr/bin/node'
     bwrap_executable='/nonexistent/bwrap-not-required-for-recovery'
   elif [[ "$operation" == 'recover' || "$operation" == 'service-recover' ]]; then
-    dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_enhanced_fail 1 'lifecycle recovery 需要现有 dsh executable 复检绑定配置。'; return $?; }
+    dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_ray_fail 1 'lifecycle recovery 需要现有 dsh executable 复检绑定配置。'; return $?; }
     bwrap_executable='/nonexistent/bwrap-not-required-for-recovery'
   else
-    dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_enhanced_fail 1 '找不到现有 dsh executable。'; return $?; }
-    bwrap_executable="$(command -v bwrap 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 bubblewrap（bwrap）。'; return $?; }
+    dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_ray_fail 1 '找不到现有 dsh executable。'; return $?; }
+    bwrap_executable="$(command -v bwrap 2>/dev/null)" || { dsh_ray_fail 1 '安全生命周期事务需要 bubblewrap（bwrap）。'; return $?; }
   fi
   if [[ "$operation" == 'service-upgrade' || "$operation" == 'npm-service-upgrade' || "$operation" == 'service-uninstall' || "$operation" == 'service-recover' || "$operation" == 'host-update' || "$operation" == 'host-recover' ]]; then
-    systemctl_executable="$(command -v systemctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark/supervised service lifecycle 需要 systemctl。'; return $?; }
-    journalctl_executable="$(command -v journalctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark/supervised service lifecycle 需要 journalctl 验证 fresh InvocationID readiness。'; return $?; }
+    systemctl_executable="$(command -v systemctl 2>/dev/null)" || { dsh_ray_fail 1 'Lark/supervised service lifecycle 需要 systemctl。'; return $?; }
+    journalctl_executable="$(command -v journalctl 2>/dev/null)" || { dsh_ray_fail 1 'Lark/supervised service lifecycle 需要 journalctl 验证 fresh InvocationID readiness。'; return $?; }
     set -- "$systemctl_executable" "$journalctl_executable" "$@"
   fi
   if [[ "$operation" == 'npm-upgrade' || "$operation" == 'npm-service-upgrade' ]]; then
-    npm_executable="$(command -v npm 2>/dev/null)" || { dsh_enhanced_fail 1 'npm upgrade 生命周期事务需要已安装的 npm。'; return $?; }
-    pnpm_executable="$(command -v pnpm 2>/dev/null)" || { dsh_enhanced_fail 1 'npm upgrade 生命周期事务需要已安装的 pnpm。'; return $?; }
+    npm_executable="$(command -v npm 2>/dev/null)" || { dsh_ray_fail 1 'npm upgrade 生命周期事务需要已安装的 npm。'; return $?; }
+    pnpm_executable="$(command -v pnpm 2>/dev/null)" || { dsh_ray_fail 1 'npm upgrade 生命周期事务需要已安装的 pnpm。'; return $?; }
     if [[ "$operation" == 'npm-service-upgrade' ]]; then
       local service_systemctl="$1"
       local service_journalctl="$2"
@@ -4165,34 +4160,34 @@ dsh_enhanced_run_lifecycle_executor() {
       set -- "$npm_executable" "$pnpm_executable" "$@"
     fi
   fi
-  flock_executable="$(command -v flock 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 flock。'; return $?; }
-  if [[ ! -f "$executor" ]]; then dsh_enhanced_fail 1 "缺少生命周期执行器：$executor"; return $?; fi
-  DSH_ENHANCED_LIFECYCLE_FLOCK="$flock_executable" node "$executor" "$operation" "$profile" "$dsh_home" "$dsh_executable" "$bwrap_executable" "$@"
+  flock_executable="$(command -v flock 2>/dev/null)" || { dsh_ray_fail 1 '安全生命周期事务需要 flock。'; return $?; }
+  if [[ ! -f "$executor" ]]; then dsh_ray_fail 1 "缺少生命周期执行器：$executor"; return $?; fi
+  DSH_RAY_LIFECYCLE_FLOCK="$flock_executable" node "$executor" "$operation" "$profile" "$dsh_home" "$dsh_executable" "$bwrap_executable" "$@"
   local status=$?
   if [[ "$status" == '75' ]]; then
-    dsh_enhanced_fail 1 "DSH_HOME 生命周期锁正在占用，拒绝并发操作：$lock_path"
+    dsh_ray_fail 1 "DSH_HOME 生命周期锁正在占用，拒绝并发操作：$lock_path"
     return $?
   fi
   return "$status"
 }
 
-dsh_enhanced_finish_host_update() {
+dsh_ray_finish_host_update() {
   local profile="$1"
   local dsh_home="$2"
-  local plan_path="${DSH_ENHANCED_HOST_UPDATE_PLAN:-}"
+  local plan_path="${DSH_RAY_HOST_UPDATE_PLAN:-}"
   [[ -n "$plan_path" ]] || return 0
-  if [[ "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" != 'Linux' ]]; then
-    dsh_enhanced_fail 1 '受管 Host 更新需要 Linux systemd --user。'
+  if [[ "${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}" != 'Linux' ]]; then
+    dsh_ray_fail 1 '受管 Host 更新需要 Linux systemd --user。'
     return $?
   fi
-  dsh_enhanced_run_lifecycle_executor host-update "$profile" "$dsh_home" "$plan_path" || return $?
-  if [[ -n "${DSH_ENHANCED_HOST_UPDATE_BIN:-}" ]]; then
-    PATH="${DSH_ENHANCED_HOST_UPDATE_BIN}:$PATH"
-    export PATH DSH_ENHANCED_HOST_BIN="$DSH_ENHANCED_HOST_UPDATE_BIN"
+  dsh_ray_run_lifecycle_executor host-update "$profile" "$dsh_home" "$plan_path" || return $?
+  if [[ -n "${DSH_RAY_HOST_UPDATE_BIN:-}" ]]; then
+    PATH="${DSH_RAY_HOST_UPDATE_BIN}:$PATH"
+    export PATH DSH_RAY_HOST_BIN="$DSH_RAY_HOST_UPDATE_BIN"
   fi
 }
 
-dsh_enhanced_profile_lifecycle() {
+dsh_ray_profile_lifecycle() {
   local operation="$1"
   local profile="$2"
   local dsh_home="$3"
@@ -4204,21 +4199,21 @@ dsh_enhanced_profile_lifecycle() {
     printf '  - 持有 DSH_HOME 外部非阻塞锁，在无网络 bwrap 中复制、更新、组合并实际激活私有副本。\n'
     printf '  - 仅当副本全部通过后，以同文件系统 rename 原子切换；故障现场保持绑定并可恢复。\n'
     if [[ "$operation" == 'upgrade' ]]; then
-      dsh_enhanced_print_command dsh plugin --profile "$profile" add "$@"
+      dsh_ray_print_command dsh plugin --profile "$profile" add "$@"
     else
       printf '  - 卸载会归档完整旧 profile；检测到第三方顶层 bundle 时拒绝操作。\n'
     fi
-    dsh_enhanced_print_command dsh --profile "$profile" --dump-config
-    dsh_enhanced_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
+    dsh_ray_print_command dsh --profile "$profile" --dump-config
+    dsh_ray_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
     return 0
   fi
-  dsh_enhanced_run_lifecycle_executor "$operation" "$profile" "$dsh_home" "$expected_scenario" "$@"
+  dsh_ray_run_lifecycle_executor "$operation" "$profile" "$dsh_home" "$expected_scenario" "$@"
 }
 
 # The confirmation flag cannot establish quiescence or authorize replacing a
 # frozen native owner/source cohort. Run this before registry, store, workspace
 # or profile work, for every profile in the canonical Home.
-dsh_enhanced_macos_upgrade_guard() {
+dsh_ray_macos_upgrade_guard() {
   node --input-type=module - "$1" <<'NODE'
 import { lstatSync, readdirSync, realpathSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -4310,7 +4305,7 @@ NODE
 }
 
 # macOS 没有 Linux bwrap/systemd 强事务。升级前完整备份 profile，失败时恢复原目录。
-dsh_enhanced_macos_stopped_upgrade() {
+dsh_ray_macos_stopped_upgrade() {
   local profile="$1"
   local dsh_home="$2"
   local dry_run="$3"
@@ -4322,28 +4317,28 @@ dsh_enhanced_macos_stopped_upgrade() {
     printf '  - 将备份完整 profile，精确更新现有受管 bundle，并执行组合与临时 Host 激活验证。\n'
     printf '  - 失败将恢复原 profile；不执行飞书 onboarding，不创建或启动 LaunchAgent。\n'
     if [[ "$source_mode" == 'npm' ]]; then
-      dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run"
+      dsh_ray_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run"
     fi
-    dsh_enhanced_print_command env npm_config_loglevel=error dsh plugin --profile "$profile" add "$@"
-    dsh_enhanced_print_command dsh --profile "$profile" --dump-config
-    dsh_enhanced_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
+    dsh_ray_print_command env npm_config_loglevel=error dsh plugin --profile "$profile" add "$@"
+    dsh_ray_print_command dsh --profile "$profile" --dump-config
+    dsh_ray_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
     return 0
   fi
   # Registry resolution and source preparation can take time. Narrow the gap
   # before the first profile mutation; this is still not a held Home lock.
-  dsh_enhanced_macos_upgrade_guard "$dsh_home" || {
-    dsh_enhanced_fail 1 'macOS Home 在升级前复检时不再静止或存在冻结资源；尚未修改 profile。'
+  dsh_ray_macos_upgrade_guard "$dsh_home" || {
+    dsh_ray_fail 1 'macOS Home 在升级前复检时不再静止或存在冻结资源；尚未修改 profile。'
     return $?
   }
   local backup_directory=''
   backup_directory="$(mktemp -d "$dsh_home/profiles/.${profile}.upgrade-backup.XXXXXX")" || {
-    dsh_enhanced_fail 1 'macOS 升级无法创建 profile 备份目录。'
+    dsh_ray_fail 1 'macOS 升级无法创建 profile 备份目录。'
     return $?
   }
   chmod 700 "$backup_directory" || { rm -rf -- "$backup_directory"; return 1; }
   if ! cp -pR "$profile_directory/." "$backup_directory/"; then
     rm -rf -- "$backup_directory"
-    dsh_enhanced_fail 1 'macOS 升级无法完整备份当前 profile；尚未修改安装。'
+    dsh_ray_fail 1 'macOS 升级无法完整备份当前 profile；尚未修改安装。'
     return $?
   fi
   local failure=''
@@ -4352,7 +4347,7 @@ dsh_enhanced_macos_stopped_upgrade() {
   # a first install. Write the reviewed table after the backup: if anything
   # later fails, the restored profile is byte-identical to the quiesced one.
   if [[ "$source_mode" == 'npm' ]]; then
-    dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || failure='build policy preparation failed'
+    dsh_ray_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || failure='build policy preparation failed'
   fi
   if [[ -z "$failure" ]]; then
     npm_config_loglevel=error dsh plugin --profile "$profile" add "$@" || failure='package update failed'
@@ -4360,7 +4355,7 @@ dsh_enhanced_macos_stopped_upgrade() {
   if [[ -z "$failure" ]] && ! dsh --profile "$profile" --dump-config >/dev/null; then
     failure='profile composition failed'
   fi
-  if [[ -z "$failure" ]] && ! dsh_enhanced_verify_profile_activation "$profile" "$dsh_home" 0; then
+  if [[ -z "$failure" ]] && ! dsh_ray_verify_profile_activation "$profile" "$dsh_home" 0; then
     failure='profile activation failed'
   fi
   if [[ -z "$failure" ]]; then
@@ -4370,19 +4365,19 @@ dsh_enhanced_macos_stopped_upgrade() {
   fi
   local failed_directory="${profile_directory}.failed-upgrade.$(date -u +%Y%m%dT%H%M%SZ).$$"
   if ! mv "$profile_directory" "$failed_directory" || ! mv "$backup_directory" "$profile_directory"; then
-    dsh_enhanced_fail 1 "macOS 升级失败（$failure），且自动恢复未完成；原备份保留在 $backup_directory。"
+    dsh_ray_fail 1 "macOS 升级失败（$failure），且自动恢复未完成；原备份保留在 $backup_directory。"
     return $?
   fi
-  dsh_enhanced_fail 1 "macOS 升级失败（$failure）；原 profile 已恢复，失败现场保留在 $failed_directory。"
+  dsh_ray_fail 1 "macOS 升级失败（$failure）；原 profile 已恢复，失败现场保留在 $failed_directory。"
 }
 
 
-dsh_enhanced_install() {
+dsh_ray_install() {
   local source_mode="$1"
   local repo_root="$2"
   shift 2
 
-  local profile="${DSH_ENHANCED_PROFILE:-web}"
+  local profile="${DSH_RAY_PROFILE:-web}"
   local operation='install'
   local confirm_dsh_home_stopped='0'
   local scenario='auto'
@@ -4406,7 +4401,7 @@ dsh_enhanced_install() {
   local model_base_url=''
   local model_api=''
   local model_display_name=''
-  local web_port="${DSH_ENHANCED_WEB_PORT:-3080}"
+  local web_port="${DSH_RAY_WEB_PORT:-3080}"
   local web_workspace=''
   local web_workspace_explicit='0'
   local web_preset='standard'
@@ -4418,9 +4413,9 @@ dsh_enhanced_install() {
   local isolation_max_runs='20'
   local isolation_lease_minutes='60'
   local isolation_runtime_minutes='10'
-  local dsh_version="${DSH_VERSION:-$DSH_ENHANCED_DEFAULT_DSH_VERSION}"
+  local dsh_version="${DSH_VERSION:-$DSH_RAY_DEFAULT_DSH_VERSION}"
   local dsh_version_explicit='0'
-  local plugin_version="${DSH_ENHANCED_VERSION:-latest}"
+  local plugin_version="${DSH_RAY_VERSION:-latest}"
   local manage_service='1'
   local ack_existing_automations='0'
   local ack_unverified_host='0'
@@ -4436,12 +4431,12 @@ dsh_enhanced_install() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --profile)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--profile 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--profile 需要一个值。'; return $?; }
         profile="$2"
         shift 2
         ;;
       --operation)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--operation 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--operation 需要一个值。'; return $?; }
         operation="$2"
         shift 2
         ;;
@@ -4450,79 +4445,79 @@ dsh_enhanced_install() {
         shift
         ;;
       --scenario)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--scenario 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--scenario 需要一个值。'; return $?; }
         scenario="$2"
         scenario_explicit='1'
         shift 2
         ;;
       --workspace)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--workspace 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--workspace 需要一个值。'; return $?; }
         web_workspace="$2"
         web_workspace_explicit='1'
         shift 2
         ;;
       --agent-preset)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--agent-preset 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--agent-preset 需要一个值。'; return $?; }
         web_preset="$2"
         web_preset_explicit='1'
         shift 2
         ;;
       --isolation-backend)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-backend 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--isolation-backend 需要一个值。'; return $?; }
         isolation_option_explicit=1; isolation_backend="$2"; shift 2 ;;
       --isolation-source-repository)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-source-repository 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--isolation-source-repository 需要一个值。'; return $?; }
         isolation_option_explicit=1; isolation_source_repository="$2"; shift 2 ;;
       --isolation-image)
-        dsh_enhanced_fail 2 '不支持 Docker 镜像隔离：任何平台都只用原生隔离（Linux linux-native / macOS macos-seatbelt）。'
+        dsh_ray_fail 2 '不支持 Docker 镜像隔离：任何平台都只用原生隔离（Linux linux-native / macOS macos-seatbelt）。'
         return $? ;;
       --isolation-max-runs)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-max-runs 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--isolation-max-runs 需要一个值。'; return $?; }
         isolation_option_explicit=1; isolation_max_runs="$2"; shift 2 ;;
       --isolation-lease-minutes)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-lease-minutes 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--isolation-lease-minutes 需要一个值。'; return $?; }
         isolation_option_explicit=1; isolation_lease_minutes="$2"; shift 2 ;;
       --isolation-runtime-minutes)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-runtime-minutes 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--isolation-runtime-minutes 需要一个值。'; return $?; }
         isolation_option_explicit=1; isolation_runtime_minutes="$2"; shift 2 ;;
       --mode)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--mode 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--mode 需要一个值。'; return $?; }
         deployment_mode="$2"
         deployment_mode_explicit='1'
         shift 2
         ;;
       --with)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--with 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--with 需要一个值。'; return $?; }
         add_ons+=("$2")
         shift 2
         ;;
       --proactive)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--proactive 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--proactive 需要一个值。'; return $?; }
         proactive_mode="$2"
         shift 2
         ;;
       --dreaming)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--dreaming 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--dreaming 需要一个值。'; return $?; }
         dreaming_mode="$2"
         shift 2
         ;;
       --growth)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--growth 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--growth 需要一个值。'; return $?; }
         growth_mode="$2"
         shift 2
         ;;
       --lark)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--lark 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--lark 需要一个值。'; return $?; }
         lark_mode="$2"
         shift 2
         ;;
       --agent-tools)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--agent-tools 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--agent-tools 需要一个值。'; return $?; }
         agent_tools_mode="$2"
         shift 2
         ;;
       --permission)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--permission 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--permission 需要一个值。'; return $?; }
         permission_preset="$2"
         shift 2
         ;;
@@ -4531,52 +4526,52 @@ dsh_enhanced_install() {
         shift
         ;;
       --model-route)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-route 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--model-route 需要一个值。'; return $?; }
         model_route_mode="$2"
         shift 2
         ;;
       --model)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--model 需要一个值。'; return $?; }
         model_mode="$2"
         shift 2
         ;;
       --model-provider)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-provider 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--model-provider 需要一个值。'; return $?; }
         model_provider="$2"
         shift 2
         ;;
       --model-name)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-name 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--model-name 需要一个值。'; return $?; }
         model_name="$2"
         shift 2
         ;;
       --model-base-url)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-base-url 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--model-base-url 需要一个值。'; return $?; }
         model_base_url="$2"
         shift 2
         ;;
       --model-api)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-api 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--model-api 需要一个值。'; return $?; }
         model_api="$2"
         shift 2
         ;;
       --model-display-name)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-display-name 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--model-display-name 需要一个值。'; return $?; }
         model_display_name="$2"
         shift 2
         ;;
       --dsh-version)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--dsh-version 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--dsh-version 需要一个值。'; return $?; }
         dsh_version="$2"
         dsh_version_explicit='1'
         shift 2
         ;;
       --plugin-version)
         if [[ "$source_mode" != 'npm' ]]; then
-          dsh_enhanced_fail 2 '--plugin-version 只适用于 npm 安装脚本。'
+          dsh_ray_fail 2 '--plugin-version 只适用于 npm 安装脚本。'
           return $?
         fi
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--plugin-version 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--plugin-version 需要一个值。'; return $?; }
         plugin_version="$2"
         shift 2
         ;;
@@ -4605,29 +4600,29 @@ dsh_enhanced_install() {
         shift
         ;;
       --owner-wait-seconds)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--owner-wait-seconds 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--owner-wait-seconds 需要一个值。'; return $?; }
         if [[ ! "$2" =~ ^(0|[1-9][0-9]{0,3})$ ]] || (( $2 > 3600 )); then
-          dsh_enhanced_fail 2 '--owner-wait-seconds 只能是 0 到 3600 的整数。'
+          dsh_ray_fail 2 '--owner-wait-seconds 只能是 0 到 3600 的整数。'
           return $?
         fi
         owner_wait_seconds="$2"
         shift 2
         ;;
       --plugin-preset)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--plugin-preset 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--plugin-preset 需要一个值。'; return $?; }
         if [[ ! "$2" =~ ^[a-z][a-z0-9-]*$ ]]; then
-          dsh_enhanced_fail 2 '--plugin-preset 只能是预设名（如 recommended）或 skip。'
+          dsh_ray_fail 2 '--plugin-preset 只能是预设名（如 recommended）或 skip。'
           return $?
         fi
         plugin_preset="$2"
         shift 2
         ;;
       --learning)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--learning 需要一个值。'; return $?; }
+        [[ $# -ge 2 ]] || { dsh_ray_fail 2 '--learning 需要一个值。'; return $?; }
         case "$2" in
           authorize|skip) learning_mode="$2" ;;
           *)
-            dsh_enhanced_fail 2 '--learning 只能是 authorize 或 skip。'
+            dsh_ray_fail 2 '--learning 只能是 authorize 或 skip。'
             return $?
             ;;
         esac
@@ -4638,50 +4633,50 @@ dsh_enhanced_install() {
         shift
         ;;
       -h|--help)
-        dsh_enhanced_usage "$source_mode"
+        dsh_ray_usage "$source_mode"
         return 0
         ;;
       *)
-        dsh_enhanced_fail 2 "未知参数：$1"
+        dsh_ray_fail 2 "未知参数：$1"
         return $?
         ;;
     esac
   done
 
   if [[ ! "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
-    dsh_enhanced_fail 2 'profile 名称不合法；只能包含字母、数字、点、下划线和连字符。'
+    dsh_ray_fail 2 'profile 名称不合法；只能包含字母、数字、点、下划线和连字符。'
     return $?
   fi
   case "$operation" in install|upgrade|uninstall) ;; *)
-    dsh_enhanced_fail 2 '--operation 只能是 install、upgrade 或 uninstall。'
+    dsh_ray_fail 2 '--operation 只能是 install、upgrade 或 uninstall。'
     return $?
   esac
   case "$lark_mode" in auto|keep|configure|skip) ;; *)
-    dsh_enhanced_fail 2 '--lark 只能是 auto、keep、configure 或 skip。'
+    dsh_ray_fail 2 '--lark 只能是 auto、keep、configure 或 skip。'
     return $?
   esac
   case "$scenario" in auto|core|web|autonomy|lark|supervised|full) ;; *)
-    dsh_enhanced_fail 2 '--scenario 只能是 auto、core、web、autonomy、lark、supervised 或 full。'
+    dsh_ray_fail 2 '--scenario 只能是 auto、core、web、autonomy、lark、supervised 或 full。'
     return $?
   esac
   case "$deployment_mode" in standard|supervised-growth) ;; *)
-    dsh_enhanced_fail 2 '--mode 只能是 standard 或 supervised-growth。'
+    dsh_ray_fail 2 '--mode 只能是 standard 或 supervised-growth。'
     return $?
   esac
   case "$agent_tools_mode" in auto|allow|preserve|disable) ;; *)
-    dsh_enhanced_fail 2 '--agent-tools 只能是 auto、allow、preserve 或 disable。'
+    dsh_ray_fail 2 '--agent-tools 只能是 auto、allow、preserve 或 disable。'
     return $?
   esac
   case "$proactive_mode" in auto|on|off) ;; *)
-    dsh_enhanced_fail 2 '--proactive 只能是 auto、on 或 off。'
+    dsh_ray_fail 2 '--proactive 只能是 auto、on 或 off。'
     return $?
   esac
   case "$dreaming_mode" in auto|on|off) ;; *)
-    dsh_enhanced_fail 2 '--dreaming 只能是 auto、on 或 off。'
+    dsh_ray_fail 2 '--dreaming 只能是 auto、on 或 off。'
     return $?
   esac
   case "$growth_mode" in auto|on|off) ;; *)
-    dsh_enhanced_fail 2 '--growth 只能是 auto、on 或 off。'
+    dsh_ray_fail 2 '--growth 只能是 auto、on 或 off。'
     return $?
   esac
   if [[ "$operation" != 'install' && "$agent_tools_mode" == 'auto' ]]; then
@@ -4690,65 +4685,65 @@ dsh_enhanced_install() {
   case "$permission_preset" in
     preserve|workspace-write|danger-full-access) ;;
     auto)
-      dsh_enhanced_fail 2 '--permission auto 只适用于当前会话。请在 Harness 会话中选择自动审查，或在已认证的助手会话中使用 /permission auto。'
+      dsh_ray_fail 2 '--permission auto 只适用于当前会话。请在 Harness 会话中选择自动审查，或在已认证的助手会话中使用 /permission auto。'
       return $?
       ;;
     *)
-      dsh_enhanced_fail 2 '--permission 只能是 preserve、workspace-write 或 danger-full-access。'
+      dsh_ray_fail 2 '--permission 只能是 preserve、workspace-write 或 danger-full-access。'
       return $?
       ;;
   esac
   if [[ "$permission_preset" == 'danger-full-access' && "$confirm_dangerous_full_access" != '1' ]]; then
-    dsh_enhanced_fail 2 '--permission danger-full-access 需要同时传入 --confirm-dangerous-full-access。'
+    dsh_ray_fail 2 '--permission danger-full-access 需要同时传入 --confirm-dangerous-full-access。'
     return $?
   fi
   case "$model_route_mode" in auto|verify|skip) ;; *)
-    dsh_enhanced_fail 2 '--model-route 只能是 auto、verify 或 skip。'
+    dsh_ray_fail 2 '--model-route 只能是 auto、verify 或 skip。'
     return $?
   esac
   case "$model_mode" in auto|configure|skip) ;; *)
-    dsh_enhanced_fail 2 '--model 只能是 auto、configure 或 skip。'
+    dsh_ray_fail 2 '--model 只能是 auto、configure 或 skip。'
     return $?
   esac
   if [[ -n "$model_api" ]]; then
     case "$model_api" in openai-completions|openai-responses|anthropic-messages) ;; *)
-      dsh_enhanced_fail 2 '--model-api 只能是 openai-completions、openai-responses 或 anthropic-messages。'
+      dsh_ray_fail 2 '--model-api 只能是 openai-completions、openai-responses 或 anthropic-messages。'
       return $?
     esac
   fi
   # A custom gateway route needs a base URL; the built-in deepseek-official route
   # and local agent routes (TraeX) must not carry gateway transport fields.  Fail
   # loud before any install work.
-  if dsh_enhanced_is_agent_route "$model_provider"; then
+  if dsh_ray_is_agent_route "$model_provider"; then
     if [[ -n "$model_base_url" || -n "$model_api" || -n "$model_display_name" ]]; then
-      dsh_enhanced_fail 2 "--model-base-url/--model-api/--model-display-name 不适用于本机 agent route $model_provider。"
+      dsh_ray_fail 2 "--model-base-url/--model-api/--model-display-name 不适用于本机 agent route $model_provider。"
       return $?
     fi
   elif [[ -n "$model_provider" && "$model_provider" != 'deepseek-official' ]]; then
     if [[ -z "$model_base_url" ]]; then
-      dsh_enhanced_fail 2 '自定义模型 provider 需要 --model-base-url（以 http:// 或 https:// 开头）。'
+      dsh_ray_fail 2 '自定义模型 provider 需要 --model-base-url（以 http:// 或 https:// 开头）。'
       return $?
     fi
   elif [[ -n "$model_base_url" || -n "$model_api" || -n "$model_display_name" ]]; then
-    dsh_enhanced_fail 2 '--model-base-url/--model-api/--model-display-name 仅适用于自定义 provider，不能用于 deepseek-official。'
+    dsh_ray_fail 2 '--model-base-url/--model-api/--model-display-name 仅适用于自定义 provider，不能用于 deepseek-official。'
     return $?
   fi
   if [[ -z "$dsh_version" \
     || ( "$dsh_version" != 'latest' && ! "$dsh_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ) ]]; then
-    dsh_enhanced_fail 2 'DSH 版本值不合法。'
+    dsh_ray_fail 2 'DSH 版本值不合法。'
     return $?
   fi
   if ! [[ "$web_port" =~ ^[0-9]{1,5}$ ]] || (( web_port < 1 || web_port > 65535 )); then
-    dsh_enhanced_fail 2 'DSH_ENHANCED_WEB_PORT 必须是 1..65535。'
+    dsh_ray_fail 2 'DSH_RAY_WEB_PORT 必须是 1..65535。'
     return $?
   fi
   if [[ "$source_mode" == 'npm' ]]; then
-    dsh_enhanced_validate_plugin_selector "$plugin_version" || return $?
+    dsh_ray_validate_plugin_selector "$plugin_version" || return $?
   fi
 
   local dsh_home="${DSH_HOME:-$HOME/.dsh}"
   if [[ "$dsh_home" != /* ]]; then
-    dsh_enhanced_fail 2 'DSH_HOME 必须是绝对路径。'
+    dsh_ray_fail 2 'DSH_HOME 必须是绝对路径。'
     return $?
   fi
   # Capture profile freshness before `dsh plugin add` creates the profile. Only a
@@ -4758,14 +4753,14 @@ dsh_enhanced_install() {
   if [[ ! -f "$dsh_home/profiles/$profile/package.json" ]]; then fresh_profile='1'; fi
   if [[ "$source_mode" == 'local' ]]; then
     if [[ ! -f "$repo_root/package.json" || ! -d "$repo_root/plugins" ]]; then
-      dsh_enhanced_fail 1 "无法识别 dsh-enhanced 仓库根目录：$repo_root"
+      dsh_ray_fail 1 "无法识别 dsh-ray 仓库根目录：$repo_root"
       return $?
     fi
   fi
   if [[ "$operation" == 'install' ]]; then
-    dsh_enhanced_require_pinned_host_version "$dsh_version" || return $?
+    dsh_ray_require_pinned_host_version "$dsh_version" || return $?
     if [[ "$dry_run" != '1' ]]; then
-      dsh_enhanced_reject_incompatible_existing_dsh || return $?
+      dsh_ray_reject_incompatible_existing_dsh || return $?
     fi
   fi
   if [[ "$operation" != 'install' ]]; then
@@ -4773,94 +4768,94 @@ dsh_enhanced_install() {
     lifecycle_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 1
     for lifecycle_asset in lifecycle-config.mjs lifecycle-profile.mjs; do
       if [[ ! -f "$lifecycle_directory/$lifecycle_asset" || -L "$lifecycle_directory/$lifecycle_asset" ]]; then
-        dsh_enhanced_fail 1 "缺少可信的生命周期资产：$lifecycle_directory/$lifecycle_asset"
+        dsh_ray_fail 1 "缺少可信的生命周期资产：$lifecycle_directory/$lifecycle_asset"
         return $?
       fi
     done
-    dsh_home="$(dsh_enhanced_canonical_lifecycle_home "$dsh_home")" || {
-      dsh_enhanced_fail 1 '无法解析 lifecycle DSH_HOME 的 canonical 路径。'
+    dsh_home="$(dsh_ray_canonical_lifecycle_home "$dsh_home")" || {
+      dsh_ray_fail 1 '无法解析 lifecycle DSH_HOME 的 canonical 路径。'
       return $?
     }
-    local lifecycle_platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
+    local lifecycle_platform="${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}"
     if [[ "$operation" == 'upgrade' && ( "$lifecycle_platform" == 'Darwin' || "$lifecycle_platform" == 'darwin' ) ]]; then
-      dsh_enhanced_macos_upgrade_guard "$dsh_home" || {
-        dsh_enhanced_fail 1 'macOS Home 升级拒绝继续；未修改 profile、registry 或 store。保留原数据，冻结的 owner/source 需要专用迁移。'
+      dsh_ray_macos_upgrade_guard "$dsh_home" || {
+        dsh_ray_fail 1 'macOS Home 升级拒绝继续；未修改 profile、registry 或 store。保留原数据，冻结的 owner/source 需要专用迁移。'
         return $?
       }
     fi
-    if [[ "${DSH_ENHANCED_HOST_RECOVERY_ONLY:-}" == '1' ]]; then
+    if [[ "${DSH_RAY_HOST_RECOVERY_ONLY:-}" == '1' ]]; then
       if [[ "$operation" != 'upgrade' || "$dry_run" == '1' ]]; then
-        dsh_enhanced_fail 2 'Host recovery 仅用于非 dry-run upgrade。'
+        dsh_ray_fail 2 'Host recovery 仅用于非 dry-run upgrade。'
         return $?
       fi
       for lifecycle_asset in host-lifecycle.mjs host-profile-update.mjs host-rsi-update.mjs; do
         if [[ ! -f "$lifecycle_directory/$lifecycle_asset" || -L "$lifecycle_directory/$lifecycle_asset" ]]; then
-          dsh_enhanced_fail 1 "缺少可信的 Host 资产：$lifecycle_directory/$lifecycle_asset"
+          dsh_ray_fail 1 "缺少可信的 Host 资产：$lifecycle_directory/$lifecycle_asset"
           return $?
         fi
       done
-      dsh_enhanced_run_lifecycle_executor host-recover "${DSH_ENHANCED_HOST_RECOVERY_PROFILE:-$profile}" "$dsh_home"
+      dsh_ray_run_lifecycle_executor host-recover "${DSH_RAY_HOST_RECOVERY_PROFILE:-$profile}" "$dsh_home"
       return $?
     fi
-    if [[ -n "${DSH_ENHANCED_HOST_UPDATE_PLAN:-}" ]]; then
-      local host_update_platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
+    if [[ -n "${DSH_RAY_HOST_UPDATE_PLAN:-}" ]]; then
+      local host_update_platform="${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}"
       if [[ "$host_update_platform" == 'Darwin' || "$host_update_platform" == 'darwin' ]]; then
-        dsh_enhanced_fail 2 'macOS 尚不支持受管 Host 跨版本更新；未修改原 Home 或插件。请保留当前 Host，或在新的 DSH_HOME 中安装并验证目标版本。'
+        dsh_ray_fail 2 'macOS 尚不支持受管 Host 跨版本更新；未修改原 Home 或插件。请保留当前 Host，或在新的 DSH_HOME 中安装并验证目标版本。'
         return $?
       fi
       for lifecycle_asset in host-lifecycle.mjs host-profile-update.mjs host-rsi-update.mjs; do
         if [[ ! -f "$lifecycle_directory/$lifecycle_asset" || -L "$lifecycle_directory/$lifecycle_asset" ]]; then
-          dsh_enhanced_fail 1 "缺少可信的 Host 资产：$lifecycle_directory/$lifecycle_asset"
+          dsh_ray_fail 1 "缺少可信的 Host 资产：$lifecycle_directory/$lifecycle_asset"
           return $?
         fi
       done
     fi
     if [[ "$confirm_dsh_home_stopped" != '1' ]]; then
-      dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；Lark/supervised service lifecycle 会自行停止受管 systemd units，该确认表示其它外部/手工进程均已停止。"
+      dsh_ray_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；Lark/supervised service lifecycle 会自行停止受管 systemd units，该确认表示其它外部/手工进程均已停止。"
       return $?
     fi
     if [[ "$scenario_explicit" == '1'
       && "$scenario" != 'web' && "$scenario" != 'autonomy'
       && "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
-      dsh_enhanced_fail 2 '--operation upgrade/uninstall 的 --scenario 只支持 web、autonomy、lark 或 supervised。'
+      dsh_ray_fail 2 '--operation upgrade/uninstall 的 --scenario 只支持 web、autonomy、lark 或 supervised。'
       return $?
     fi
-    if [[ "$dry_run" == '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
-      dsh_enhanced_fail 1 "检测到未完成的 profile 生命周期事务；请非 dry-run 重试以持锁恢复：${dsh_home}.dsh-enhanced-transaction"
+    if [[ "$dry_run" == '1' && -e "${dsh_home}.dsh-ray-transaction" ]]; then
+      dsh_ray_fail 1 "检测到未完成的 profile 生命周期事务；请非 dry-run 重试以持锁恢复：${dsh_home}.dsh-ray-transaction"
       return $?
     fi
     if [[ "$dry_run" == '1' && ! -f "$dsh_home/profiles/$profile/package.json" ]]; then
-      dsh_enhanced_fail 1 "--operation $operation 需要已存在的 profile：$dsh_home/profiles/$profile"
+      dsh_ray_fail 1 "--operation $operation 需要已存在的 profile：$dsh_home/profiles/$profile"
       return $?
     fi
     if [[ "$permission_preset" != 'preserve' || "$agent_tools_mode" != 'preserve'
       || "$model_mode" == 'configure' || -n "$model_provider" || "$lark_mode" == 'configure' || "$lark_mode" == 'keep' ]]; then
-      dsh_enhanced_fail 2 'profile 生命周期事务只更新安装包；权限、Agent 工具、模型和 Lark 配置必须保持 preserve/skip。'
+      dsh_ray_fail 2 'profile 生命周期事务只更新安装包；权限、Agent 工具、模型和 Lark 配置必须保持 preserve/skip。'
       return $?
     fi
     if [[ "$isolation_option_explicit" == '1' ]]; then
-      dsh_enhanced_fail 2 'profile 生命周期事务保留现有 Isolation 配置和预算；不得重新传入 --isolation-*。'
+      dsh_ray_fail 2 'profile 生命周期事务保留现有 Isolation 配置和预算；不得重新传入 --isolation-*。'
       return $?
     fi
     if [[ -n "${add_ons[0]+set}" || "$proactive_mode" != 'auto' || "$dreaming_mode" != 'auto' || "$growth_mode" != 'auto' ]]; then
-      dsh_enhanced_fail 2 'profile 生命周期事务不会扩展能力；升级期间不能使用 --with 或 --proactive/--dreaming/--growth。'
+      dsh_ray_fail 2 'profile 生命周期事务不会扩展能力；升级期间不能使用 --with 或 --proactive/--dreaming/--growth。'
       return $?
     fi
-    if [[ "$dsh_version_explicit" == '1' && "${DSH_ENHANCED_HOST_SELECTOR_VALIDATED:-}" != '1' ]]; then
-      dsh_enhanced_fail 2 'profile 生命周期事务不会修改全局 DSH；请先单独完成 Host 升级，再执行本操作。'
+    if [[ "$dsh_version_explicit" == '1' && "${DSH_RAY_HOST_SELECTOR_VALIDATED:-}" != '1' ]]; then
+      dsh_ray_fail 2 'profile 生命周期事务不会修改全局 DSH；请先单独完成 Host 升级，再执行本操作。'
       return $?
     fi
-    if [[ "$dry_run" != '1' && "$scenario_explicit" == '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
+    if [[ "$dry_run" != '1' && "$scenario_explicit" == '1' && -e "${dsh_home}.dsh-ray-transaction" ]]; then
       if [[ "$scenario" == 'lark' || "$scenario" == 'supervised' ]]; then
-        dsh_enhanced_run_lifecycle_executor service-recover "$profile" "$dsh_home" "$scenario" || return $?
+        dsh_ray_run_lifecycle_executor service-recover "$profile" "$dsh_home" "$scenario" || return $?
       else
-        dsh_enhanced_run_lifecycle_executor recover "$profile" "$dsh_home" "$scenario" || return $?
+        dsh_ray_run_lifecycle_executor recover "$profile" "$dsh_home" "$scenario" || return $?
       fi
-      dsh_enhanced_fail 1 '已恢复或隔离上次生命周期事务；本次未开始新的 package、registry、store 或 service mutation。请检查恢复结果后重试。'
+      dsh_ray_fail 1 '已恢复或隔离上次生命周期事务；本次未开始新的 package、registry、store 或 service mutation。请检查恢复结果后重试。'
       return $?
     fi
     local effective_lifecycle_scenario=''
-    if ! effective_lifecycle_scenario="$(dsh_enhanced_effective_lifecycle_scenario \
+    if ! effective_lifecycle_scenario="$(dsh_ray_effective_lifecycle_scenario \
       "$profile" "$dsh_home" "$lifecycle_directory")"; then
       return 1
     fi
@@ -4869,54 +4864,54 @@ dsh_enhanced_install() {
       printf '生命周期场景：已从 effective/composed profile 自动识别为 %s。\n' "$scenario"
     fi
     if [[ "$effective_lifecycle_scenario" == 'unsupported' && "$operation" != 'uninstall' ]]; then
-      dsh_enhanced_fail 1 '实际 effective/composed profile 无法安全归类为 web、autonomy 或已启用 Lark；拒绝 lifecycle 操作。'
+      dsh_ray_fail 1 '实际 effective/composed profile 无法安全归类为 web、autonomy 或已启用 Lark；拒绝 lifecycle 操作。'
       return $?
     fi
     if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$manage_service" != '1' ]]; then
-      dsh_enhanced_fail 2 'Lark/supervised upgrade/uninstall 必须管理受管常驻服务；不能使用 --no-service。'
+      dsh_ray_fail 2 'Lark/supervised upgrade/uninstall 必须管理受管常驻服务；不能使用 --no-service。'
       return $?
     fi
     if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' )
       && "$lifecycle_platform" != 'Linux'
       && !( "$operation" == 'upgrade' && ( "$lifecycle_platform" == 'Darwin' || "$lifecycle_platform" == 'darwin' ) ) ]]; then
-      dsh_enhanced_fail 2 'Lark/supervised 生命周期支持 Linux systemd --user；macOS 仅支持已停止 Home 的 upgrade。'
+      dsh_ray_fail 2 'Lark/supervised 生命周期支持 Linux systemd --user；macOS 仅支持已停止 Home 的 upgrade。'
       return $?
     fi
     if [[ "$effective_lifecycle_scenario" != "$scenario"
       && !( "$operation" == 'uninstall' && "$effective_lifecycle_scenario" == 'unsupported' ) ]]; then
-      dsh_enhanced_fail 2 "声明的 --scenario $scenario 与实际 effective/composed profile 场景 $effective_lifecycle_scenario 不一致；拒绝 lifecycle 操作。"
+      dsh_ray_fail 2 "声明的 --scenario $scenario 与实际 effective/composed profile 场景 $effective_lifecycle_scenario 不一致；拒绝 lifecycle 操作。"
       return $?
     fi
-    if [[ "$dry_run" != '1' && "$scenario_explicit" != '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
+    if [[ "$dry_run" != '1' && "$scenario_explicit" != '1' && -e "${dsh_home}.dsh-ray-transaction" ]]; then
       if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$lifecycle_platform" == 'Linux' ]]; then
-        dsh_enhanced_run_lifecycle_executor service-recover "$profile" "$dsh_home" "$scenario" || return $?
+        dsh_ray_run_lifecycle_executor service-recover "$profile" "$dsh_home" "$scenario" || return $?
       else
-        dsh_enhanced_run_lifecycle_executor recover "$profile" "$dsh_home" "$scenario" || return $?
+        dsh_ray_run_lifecycle_executor recover "$profile" "$dsh_home" "$scenario" || return $?
       fi
-      dsh_enhanced_fail 1 '已恢复或隔离上次生命周期事务；本次未开始新的 package、registry、store 或 service mutation。请检查恢复结果后重试。'
+      dsh_ray_fail 1 '已恢复或隔离上次生命周期事务；本次未开始新的 package、registry、store 或 service mutation。请检查恢复结果后重试。'
       return $?
     fi
     model_mode='skip'
     model_route_mode='skip'
     lark_mode='skip'
     if [[ "$dry_run" != '1' && "$scenario" != 'lark' && "$scenario" != 'supervised' && ( "$source_mode" != 'npm' || "$operation" != 'upgrade' ) ]]; then
-      dsh_enhanced_recover_profile_lifecycle "$profile" "$dsh_home" "$dry_run" || return $?
+      dsh_ray_recover_profile_lifecycle "$profile" "$dsh_home" "$dry_run" || return $?
       if [[ ! -f "$dsh_home/profiles/$profile/package.json" ]]; then
-        dsh_enhanced_fail 1 "--operation $operation 需要已存在的 profile：$dsh_home/profiles/$profile"
+        dsh_ray_fail 1 "--operation $operation 需要已存在的 profile：$dsh_home/profiles/$profile"
         return $?
       fi
     fi
     if [[ "$source_mode" == 'npm' && "$operation" == 'upgrade' && "$dry_run" != '1' ]]; then
-      dsh_enhanced_require_node || return $?
-      dsh_enhanced_require_existing_runtime "$ack_unverified_host" || return $?
+      dsh_ray_require_node || return $?
+      dsh_ray_require_existing_runtime "$ack_unverified_host" || return $?
       if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$lifecycle_platform" == 'Linux' ]]; then
-        dsh_enhanced_run_lifecycle_executor npm-service-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version" || return $?
-        dsh_enhanced_finish_host_update "$profile" "$dsh_home"
+        dsh_ray_run_lifecycle_executor npm-service-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version" || return $?
+        dsh_ray_finish_host_update "$profile" "$dsh_home"
         return $?
       fi
       if [[ "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
-        dsh_enhanced_run_lifecycle_executor npm-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version" || return $?
-        dsh_enhanced_finish_host_update "$profile" "$dsh_home"
+        dsh_ray_run_lifecycle_executor npm-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version" || return $?
+        dsh_ray_finish_host_update "$profile" "$dsh_home"
         return $?
       fi
       printf 'macOS 已停止 Home 升级：将保留现有 Lark/supervised 配置，不重跑 onboarding 或注册服务。\n'
@@ -4930,22 +4925,22 @@ dsh_enhanced_install() {
     if [[ "$dry_run" == '1' ]]; then
       printf 'doctor：将检查 Web 端口 127.0.0.1:%s 是否可用。\n' "$web_port"
     else
-      dsh_enhanced_doctor preflight "$profile" "$dsh_home" "$web_port" || return $?
+      dsh_ray_doctor preflight "$profile" "$dsh_home" "$web_port" || return $?
     fi
   fi
-  dsh_enhanced_validate_permission_default "$dsh_home/settings.yaml" || return $?
+  dsh_ray_validate_permission_default "$dsh_home/settings.yaml" || return $?
 
   local existing_patch_path="$dsh_home/profiles/$profile/cordis.patch.yml"
   local existing_home_patch_path="$dsh_home/cordis.patch.yml"
   local existing_lark_configured='0'
-  if dsh_enhanced_effective_lark_is_configured "$existing_patch_path" "$existing_home_patch_path"; then
+  if dsh_ray_effective_lark_is_configured "$existing_patch_path" "$existing_home_patch_path"; then
     existing_lark_configured='1'
   fi
 
-  local install_platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
+  local install_platform="${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}"
   if [[ "$deployment_mode" == 'supervised-growth' ]]; then
     if [[ "$scenario_explicit" == '1' && "$scenario" != 'supervised' ]]; then
-      dsh_enhanced_fail 2 '--mode supervised-growth 只能与 --scenario supervised 一起使用。'
+      dsh_ray_fail 2 '--mode supervised-growth 只能与 --scenario supervised 一起使用。'
       return $?
     fi
     scenario='supervised'
@@ -4957,7 +4952,7 @@ dsh_enhanced_install() {
     && "$existing_lark_configured" != '1'
     && ( "$scenario" == 'lark' || "$scenario" == 'supervised' || "$scenario" == 'full' )
     && ( ! -t 0 || ! -t 1 ) ]]; then
-    dsh_enhanced_fail 2 '非交互环境无法选择飞书应用。请显式加 --lark skip（仅本机使用，稍后可再配置飞书）或 --lark configure（配置飞书）。本次未开始安装，未改动任何文件。'
+    dsh_ray_fail 2 '非交互环境无法选择飞书应用。请显式加 --lark skip（仅本机使用，稍后可再配置飞书）或 --lark configure（配置飞书）。本次未开始安装，未改动任何文件。'
     return $?
   fi
 
@@ -4966,8 +4961,8 @@ dsh_enhanced_install() {
   # non-interactive runs keep their existing non-prompting defaults.
   if [[ "$operation" == 'install' && "$assume_yes" != '1' && -t 0 && -t 1 ]]; then
     if [[ "$onboarding_mode" == 'auto' && "$model_mode" == 'auto' && -z "$model_provider" && "$lark_mode" == 'auto' ]]; then
-      onboarding_mode="$(dsh_enhanced_choose_onboarding_mode)" || {
-        dsh_enhanced_fail 2 '安装向导选项无效。'
+      onboarding_mode="$(dsh_ray_choose_onboarding_mode)" || {
+        dsh_ray_fail 2 '安装向导选项无效。'
         return $?
       }
     fi
@@ -4982,8 +4977,8 @@ dsh_enhanced_install() {
       if [[ "$assume_yes" == '1' || "$guided" == '1' || ! -t 0 || ! -t 1 ]]; then
         scenario='supervised'
       else
-        scenario="$(dsh_enhanced_choose_scenario "$existing_lark_configured" "$install_platform")" || {
-          dsh_enhanced_fail 2 '部署场景选项无效。'
+        scenario="$(dsh_ray_choose_scenario "$existing_lark_configured" "$install_platform")" || {
+          dsh_ray_fail 2 '部署场景选项无效。'
           return $?
         }
       fi
@@ -4992,22 +4987,22 @@ dsh_enhanced_install() {
     elif [[ "$assume_yes" == '1' || "$guided" == '1' || ! -t 0 || ! -t 1 ]]; then
       scenario='core'
     else
-      scenario="$(dsh_enhanced_choose_scenario "$existing_lark_configured" 'limited')" || {
-        dsh_enhanced_fail 2 '部署场景选项无效。'
+      scenario="$(dsh_ray_choose_scenario "$existing_lark_configured" 'limited')" || {
+        dsh_ray_fail 2 '部署场景选项无效。'
         return $?
       }
     fi
   fi
   if [[ "$scenario" == 'supervised' ]]; then
     if [[ "$deployment_mode_explicit" == '1' && "$deployment_mode" != 'supervised-growth' ]]; then
-      dsh_enhanced_fail 2 '--scenario supervised 需要 --mode supervised-growth（或省略 --mode）。'
+      dsh_ray_fail 2 '--scenario supervised 需要 --mode supervised-growth（或省略 --mode）。'
       return $?
     fi
     deployment_mode='supervised-growth'
   fi
   if [[ "$operation" == 'install' && "$scenario" == 'supervised' && "$existing_lark_configured" != '1'
     && "$dry_run" != '1' && ( ! -t 0 || ! -t 1 ) ]]; then
-    dsh_enhanced_fail 1 'supervised 安装需要交互式飞书 onboarding；当前没有已配置的飞书 Bot。请在终端运行安装器完成 onboarding，或显式选择有限场景；本次未开始安装。'
+    dsh_ray_fail 1 'supervised 安装需要交互式飞书 onboarding；当前没有已配置的飞书 Bot。请在终端运行安装器完成 onboarding，或显式选择有限场景；本次未开始安装。'
     return $?
   fi
   if [[ "$agent_tools_mode" == 'auto' && "$scenario" != 'lark' && "$scenario" != 'supervised' && "$scenario" != 'full' ]]; then
@@ -5015,85 +5010,85 @@ dsh_enhanced_install() {
   fi
   if [[ "$scenario" == 'autonomy' && "$operation" == 'install' ]]; then
     if [[ -z "$isolation_backend" ]]; then
-      dsh_enhanced_detect_isolation_capability
-      if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" == 'none' ]]; then
-        dsh_enhanced_fail 2 "本机无法提供自演化所需的原生隔离：$DSH_ENHANCED_ISOLATION_REASON。请先准备隔离能力，或用 --scenario lark 安装不含自治执行能力的场景。"
+      dsh_ray_detect_isolation_capability
+      if [[ "$DSH_RAY_ISOLATION_CAPABILITY" == 'none' ]]; then
+        dsh_ray_fail 2 "本机无法提供自演化所需的原生隔离：$DSH_RAY_ISOLATION_REASON。请先准备隔离能力，或用 --scenario lark 安装不含自治执行能力的场景。"
         return $?
       fi
-      isolation_backend="$DSH_ENHANCED_ISOLATION_CAPABILITY"
+      isolation_backend="$DSH_RAY_ISOLATION_CAPABILITY"
     fi
     case "$isolation_backend" in
       linux-native)
-        if [[ "$install_platform" != 'Linux' || -n "$isolation_image" ]]; then dsh_enhanced_fail 2 'linux-native 只支持 Linux，且不能同时指定 --isolation-image。'; return $?; fi
-        if [[ -n "$isolation_source_repository" && "$isolation_source_repository" != /* ]]; then dsh_enhanced_fail 2 '--isolation-source-repository 必须是绝对路径。'; return $?; fi
+        if [[ "$install_platform" != 'Linux' || -n "$isolation_image" ]]; then dsh_ray_fail 2 'linux-native 只支持 Linux，且不能同时指定 --isolation-image。'; return $?; fi
+        if [[ -n "$isolation_source_repository" && "$isolation_source_repository" != /* ]]; then dsh_ray_fail 2 '--isolation-source-repository 必须是绝对路径。'; return $?; fi
         ;;
       macos-seatbelt)
         # Verifier/self-evolution can run under seatbelt, but the isolated Web-owner
         # autonomy closure has no macOS backend yet: refuse instead of composing a
         # profile whose autonomy step cannot execute.
-        dsh_enhanced_fail 2 'macOS 上暂无自治执行后端：autonomy 场景需要 linux-native（Linux）。可改用 --scenario web 或 supervised。'
+        dsh_ray_fail 2 'macOS 上暂无自治执行后端：autonomy 场景需要 linux-native（Linux）。可改用 --scenario web 或 supervised。'
         return $?
         ;;
       docker)
-        dsh_enhanced_fail 2 '不支持 Docker：任何平台都只用原生隔离（Linux linux-native / macOS macos-seatbelt）。'
+        dsh_ray_fail 2 '不支持 Docker：任何平台都只用原生隔离（Linux linux-native / macOS macos-seatbelt）。'
         return $?
         ;;
-      *) dsh_enhanced_fail 2 '--isolation-backend 只能是 linux-native 或 macos-seatbelt。'; return $? ;;
+      *) dsh_ray_fail 2 '--isolation-backend 只能是 linux-native 或 macos-seatbelt。'; return $? ;;
     esac
     local value_limit value maximum label
     for value_limit in "$isolation_max_runs:10000:--isolation-max-runs" "$isolation_lease_minutes:10080:--isolation-lease-minutes" "$isolation_runtime_minutes:1440:--isolation-runtime-minutes"; do
       IFS=: read -r value maximum label <<< "$value_limit"
-      if [[ ! "$value" =~ ^[1-9][0-9]*$ || ${#value} -gt 5 || $((10#$value)) -lt 1 || $((10#$value)) -gt "$maximum" ]]; then dsh_enhanced_fail 2 "$label 必须是有效上限内的正整数。"; return $?; fi
+      if [[ ! "$value" =~ ^[1-9][0-9]*$ || ${#value} -gt 5 || $((10#$value)) -lt 1 || $((10#$value)) -gt "$maximum" ]]; then dsh_ray_fail 2 "$label 必须是有效上限内的正整数。"; return $?; fi
     done
   elif [[ "$isolation_option_explicit" == '1' ]]; then
-    dsh_enhanced_fail 2 '--isolation-* 仅适用于 --scenario autonomy。'
+    dsh_ray_fail 2 '--isolation-* 仅适用于 --scenario autonomy。'
     return $?
   fi
   if [[ "$scenario" == 'web' || "$scenario" == 'autonomy' ]]; then
     if [[ "$web_workspace_explicit" != '1' ]]; then web_workspace="$PWD"; fi
     if [[ "$web_workspace" != /* ]]; then
-      dsh_enhanced_fail 2 '--workspace 必须是绝对路径。'
+      dsh_ray_fail 2 '--workspace 必须是绝对路径。'
       return $?
     fi
     if [[ "$web_workspace" == *'*'* || "$web_workspace" == *$'\n'* || "$web_workspace" == *$'\r'* ]]; then
-      dsh_enhanced_fail 2 '--workspace 不能包含通配符或换行。'
+      dsh_ray_fail 2 '--workspace 不能包含通配符或换行。'
       return $?
     fi
     if [[ ! "$web_preset" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
-      dsh_enhanced_fail 2 '--agent-preset 必须匹配 ^[a-z0-9][a-z0-9-]*$。'
+      dsh_ray_fail 2 '--agent-preset 必须匹配 ^[a-z0-9][a-z0-9-]*$。'
       return $?
     fi
     if [[ "$lark_mode" == 'configure' || "$lark_mode" == 'keep' || "$existing_lark_configured" == '1' ]]; then
-      dsh_enhanced_fail 2 "$scenario 场景不能与 Lark configure/keep 或已有启用的 Lark channel 共用同一 profile。"
+      dsh_ray_fail 2 "$scenario 场景不能与 Lark configure/keep 或已有启用的 Lark channel 共用同一 profile。"
       return $?
     fi
     if [[ "$agent_tools_mode" != 'preserve' ]]; then
-      dsh_enhanced_fail 2 "$scenario 场景固定当前 owner capability 规则；--agent-tools 必须为 preserve。"
+      dsh_ray_fail 2 "$scenario 场景固定当前 owner capability 规则；--agent-tools 必须为 preserve。"
       return $?
     fi
     lark_mode='skip'
   elif [[ "$web_workspace_explicit" == '1' || "$web_preset_explicit" == '1' ]]; then
-    dsh_enhanced_fail 2 '--workspace 和 --agent-preset 仅适用于 --scenario web 或 autonomy。'
+    dsh_ray_fail 2 '--workspace 和 --agent-preset 仅适用于 --scenario web 或 autonomy。'
     return $?
   fi
   if [[ "$scenario" == 'core' && ( "$lark_mode" == 'configure' || "$lark_mode" == 'keep' ) ]]; then
-    dsh_enhanced_fail 2 'core 场景不包含飞书；请改用 --scenario lark 或 --scenario supervised。'
+    dsh_ray_fail 2 'core 场景不包含飞书；请改用 --scenario lark 或 --scenario supervised。'
     return $?
   fi
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$lark_mode" == 'skip' ]]; then
-    dsh_enhanced_fail 2 'supervised-growth 需要飞书 onboarding；不能与 --lark skip 一起使用。'
+    dsh_ray_fail 2 'supervised-growth 需要飞书 onboarding；不能与 --lark skip 一起使用。'
     return $?
   fi
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$manage_service" != '1' ]]; then
-    dsh_enhanced_fail 2 'supervised-growth 需要常驻服务；不能与 --no-service 一起使用。'
+    dsh_ray_fail 2 'supervised-growth 需要常驻服务；不能与 --no-service 一起使用。'
     return $?
   fi
   if [[ "$deployment_mode" == 'standard' && "$ack_existing_automations" == '1' ]]; then
-    dsh_enhanced_fail 2 '--ack-existing-automations 仅适用于 --mode supervised-growth。'
+    dsh_ray_fail 2 '--ack-existing-automations 仅适用于 --mode supervised-growth。'
     return $?
   fi
   if [[ "$scenario" == 'core' && "$agent_tools_mode" != 'preserve' ]]; then
-    dsh_enhanced_fail 2 'core 场景没有飞书策略管理器；请先使用 --scenario lark，或保留 --agent-tools preserve。'
+    dsh_ray_fail 2 'core 场景没有飞书策略管理器；请先使用 --scenario lark，或保留 --agent-tools preserve。'
     return $?
   fi
 
@@ -5112,10 +5107,10 @@ dsh_enhanced_install() {
   printf 'Agent 工具授权：%s\n' "$agent_tools_mode"
   printf 'DSH_HOME：%s\n\n' "$dsh_home"
   if [[ "$dry_run" != '1' ]]; then
-    dsh_enhanced_require_node || return $?
+    dsh_ray_require_node || return $?
   fi
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$dry_run" != '1' ]]; then
-    dsh_home="$(dsh_enhanced_canonical_lifecycle_home "$dsh_home")" || return $?
+    dsh_home="$(dsh_ray_canonical_lifecycle_home "$dsh_home")" || return $?
     export DSH_HOME="$dsh_home"
   fi
   # Persist the explicit install decisions before `dsh plugin add` creates the
@@ -5130,10 +5125,10 @@ dsh_enhanced_install() {
     plugin_preset_explicit='0'
     plugin_preset='skip'
     if [[ "$guided" == '1' ]]; then
-      if dsh_enhanced_confirm_plugin_preset; then plugin_preset='recommended'; else plugin_preset_declined='1'; fi
+      if dsh_ray_confirm_plugin_preset; then plugin_preset='recommended'; else plugin_preset_declined='1'; fi
       if [[ "$assume_yes" != '1' ]]; then
-        dsh_enhanced_prompt_capability_toggles "$scenario" proactive_mode dreaming_mode growth_mode || {
-          dsh_enhanced_fail 2 '能力开关选项无效。'
+        dsh_ray_prompt_capability_toggles "$scenario" proactive_mode dreaming_mode growth_mode || {
+          dsh_ray_fail 2 '能力开关选项无效。'
           return $?
         }
       fi
@@ -5153,12 +5148,12 @@ dsh_enhanced_install() {
   # an already issued grant.
   if [[ "$operation" != 'install' || "$deployment_mode" != 'supervised-growth' ]]; then
     if [[ "$learning_mode" != 'auto' ]]; then
-      dsh_enhanced_fail 2 "--learning $learning_mode 仅适用于 supervised 安装。"
+      dsh_ray_fail 2 "--learning $learning_mode 仅适用于 supervised 安装。"
       return $?
     fi
     if [[ "$operation" == 'install' ]]; then
       local non_sup_intent_status=0 non_sup_intent=''
-      if non_sup_intent="$(dsh_enhanced_read_install_intent "$dsh_home")"; then
+      if non_sup_intent="$(dsh_ray_read_install_intent "$dsh_home")"; then
         local _ns_sc _ns_le _ns_pr _ns_at _ns_p _ns_d _ns_g
         read -r _ns_sc _ns_le _ns_pr _ns_at _ns_p _ns_d _ns_g <<< "$non_sup_intent"
         [[ "$proactive_mode" == 'auto' && ( "${_ns_p:-}" == 'on' || "${_ns_p:-}" == 'off' ) ]] && proactive_mode="$_ns_p"
@@ -5173,12 +5168,12 @@ dsh_enhanced_install() {
       else
         non_sup_intent_status=$?
         if [[ "$non_sup_intent_status" -eq 2 ]]; then
-          dsh_enhanced_fail 2 "已存在的 $dsh_home/.dsh-enhanced/install-intent.json 无法通过校验；拒绝在未知安装意图上继续。请检查或移除该文件后重试。"
+          dsh_ray_fail 2 "已存在的 $dsh_home/.dsh-ray/install-intent.json 无法通过校验；拒绝在未知安装意图上继续。请检查或移除该文件后重试。"
           return $?
         fi
       fi
       if [[ "$dry_run" != '1' && ( "$plugin_preset_requested" != 'auto' || "$proactive_mode" != 'auto' || "$dreaming_mode" != 'auto' || "$growth_mode" != 'auto' ) ]]; then
-        dsh_enhanced_write_install_intent "$dsh_home" "$scenario" 'skip' "$install_intent_preset" \
+        dsh_ray_write_install_intent "$dsh_home" "$scenario" 'skip' "$install_intent_preset" \
           "$proactive_mode" "$dreaming_mode" "$growth_mode" || return $?
       fi
     fi
@@ -5188,19 +5183,19 @@ dsh_enhanced_install() {
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
     local install_intent_valid='0' intent_record='' intent_status=0 intent_preset_refresh='0'
     local intent_scenario='' intent_learning='' intent_preset='' intent_at='' intent_p='' intent_d='' intent_g=''
-    if intent_record="$(dsh_enhanced_read_install_intent "$dsh_home")"; then
+    if intent_record="$(dsh_ray_read_install_intent "$dsh_home")"; then
       install_intent_valid='1'
       read -r intent_scenario intent_learning intent_preset intent_at intent_p intent_d intent_g <<< "$intent_record"
       [[ "$proactive_mode" == 'auto' && ( "${intent_p:-}" == 'on' || "${intent_p:-}" == 'off' ) ]] && proactive_mode="$intent_p"
       [[ "$dreaming_mode" == 'auto' && ( "${intent_d:-}" == 'on' || "${intent_d:-}" == 'off' ) ]] && dreaming_mode="$intent_d"
       [[ "$growth_mode" == 'auto' && ( "${intent_g:-}" == 'on' || "${intent_g:-}" == 'off' ) ]] && growth_mode="$intent_g"
       if [[ "$intent_scenario" != 'supervised' ]]; then
-        dsh_enhanced_fail 2 "已记录的安装意图场景（${intent_scenario}）与本次 supervised 安装不一致；请检查 $dsh_home/.dsh-enhanced/install-intent.json。"
+        dsh_ray_fail 2 "已记录的安装意图场景（${intent_scenario}）与本次 supervised 安装不一致；请检查 $dsh_home/.dsh-ray/install-intent.json。"
         return $?
       fi
       printf '安装意图：沿用已记录的学习决策（%s）。\n' "$intent_learning"
       if [[ "$learning_mode" != 'auto' && "$learning_mode" != "$intent_learning" ]]; then
-        dsh_enhanced_fail 2 "本次 --learning $learning_mode 与已记录的安装决策（${intent_learning}）冲突；重试必须沿用已记录决策。"
+        dsh_ray_fail 2 "本次 --learning $learning_mode 与已记录的安装决策（${intent_learning}）冲突；重试必须沿用已记录决策。"
         return $?
       fi
       learning_decision="$intent_learning"
@@ -5218,7 +5213,7 @@ dsh_enhanced_install() {
         fi
       else
         if [[ "$plugin_preset_requested" != 'auto' && "$plugin_preset_requested" != "$intent_preset" ]]; then
-          dsh_enhanced_fail 2 "本次 --plugin-preset $plugin_preset_requested 与已记录的安装预设（${intent_preset}）冲突；重试必须沿用已记录决策。"
+          dsh_ray_fail 2 "本次 --plugin-preset $plugin_preset_requested 与已记录的安装预设（${intent_preset}）冲突；重试必须沿用已记录决策。"
           return $?
         fi
         plugin_preset_requested="$intent_preset"
@@ -5231,15 +5226,15 @@ dsh_enhanced_install() {
       if [[ "$intent_status" -eq 2 ]]; then
         # A marker exists but fails the schema: fail closed instead of guessing a
         # different install intent, which could silently authorize learning.
-        dsh_enhanced_fail 2 "已存在的 $dsh_home/.dsh-enhanced/install-intent.json 无法通过校验；拒绝在未知安装意图上继续。请检查或移除该文件后重试。"
+        dsh_ray_fail 2 "已存在的 $dsh_home/.dsh-ray/install-intent.json 无法通过校验；拒绝在未知安装意图上继续。请检查或移除该文件后重试。"
         return $?
       fi
       if [[ "$learning_mode" != 'auto' && "$fresh_profile" != '1' ]]; then
-        dsh_enhanced_fail 2 "既有安装不接受新的学习决策（--learning ${learning_mode}）；请使用全新 profile，或沿用已记录决策。"
+        dsh_ray_fail 2 "既有安装不接受新的学习决策（--learning ${learning_mode}）；请使用全新 profile，或沿用已记录决策。"
         return $?
       fi
-      learning_decision="$(dsh_enhanced_resolve_learning_decision "$learning_mode" "$scenario" "$fresh_profile" "$guided" "$assume_yes")" || {
-        dsh_enhanced_fail 2 '学习授权选项无效。'
+      learning_decision="$(dsh_ray_resolve_learning_decision "$learning_mode" "$scenario" "$fresh_profile" "$guided" "$assume_yes")" || {
+        dsh_ray_fail 2 '学习授权选项无效。'
         return $?
       }
     fi
@@ -5257,7 +5252,7 @@ dsh_enhanced_install() {
         printf '学习授权：现有 profile 保留已记录的学习授权状态；本次安装不新增或撤销学习授权。\n'
         ;;
       *)
-        dsh_enhanced_fail 2 '学习授权选项无效。'
+        dsh_ray_fail 2 '学习授权选项无效。'
         return $?
         ;;
     esac
@@ -5266,7 +5261,7 @@ dsh_enhanced_install() {
       rsi_learning_flag='preserve'
     fi
     if [[ "$learning_decision" == 'skip' && ( "$install_platform" == 'Darwin' || "$install_platform" == 'darwin' ) && "$dry_run" != '1' ]]; then
-      dsh_enhanced_fail 2 'supervised 安装跳过学习授权目前仅支持 Linux；macOS 原生 owner 部署固定启用记忆学习。'
+      dsh_ray_fail 2 'supervised 安装跳过学习授权目前仅支持 Linux；macOS 原生 owner 部署固定启用记忆学习。'
       return $?
     fi
     # Persist only real decisions: an existing installation without a marker keeps
@@ -5274,29 +5269,29 @@ dsh_enhanced_install() {
     # override of a previously implicit marker refreshes the same intent.
     if [[ "$dry_run" != '1' ]]; then
       if [[ "$install_intent_valid" != '1' && ( "$learning_decision" == 'authorize' || "$learning_decision" == 'skip' ) ]]; then
-        dsh_enhanced_write_install_intent "$dsh_home" "$scenario" "$learning_decision" "$install_intent_preset" \
+        dsh_ray_write_install_intent "$dsh_home" "$scenario" "$learning_decision" "$install_intent_preset" \
           "$proactive_mode" "$dreaming_mode" "$growth_mode" || return $?
       elif [[ "$install_intent_valid" == '1' && ( "$intent_preset_refresh" == '1' || "$proactive_mode" != "${intent_p:-auto}" || "$dreaming_mode" != "${intent_d:-auto}" || "$growth_mode" != "${intent_g:-auto}" ) ]]; then
-        dsh_enhanced_write_install_intent "$dsh_home" "$scenario" "$learning_decision" "$install_intent_preset" \
+        dsh_ray_write_install_intent "$dsh_home" "$scenario" "$learning_decision" "$install_intent_preset" \
           "$proactive_mode" "$dreaming_mode" "$growth_mode" || return $?
       fi
     fi
   fi
   if [[ "$operation" == 'install' ]]; then
-    dsh_enhanced_ensure_dsh "$dsh_version" "$dry_run" "$ack_unverified_host" || return $?
+    dsh_ray_ensure_dsh "$dsh_version" "$dry_run" "$ack_unverified_host" || return $?
   elif [[ "$dry_run" == '1' ]]; then
     printf '生命周期事务：将使用现有 DSH/pnpm，不修改全局工具链。\n'
   else
     local lifecycle_requires_pnpm='1'
     [[ "$operation" == 'uninstall' ]] && lifecycle_requires_pnpm='0'
-    dsh_enhanced_require_existing_runtime "$ack_unverified_host" "$lifecycle_requires_pnpm" || return $?
+    dsh_ray_require_existing_runtime "$ack_unverified_host" "$lifecycle_requires_pnpm" || return $?
   fi
   # The deployment step runs "dsh plugin add", which shells out to pnpm, so a fresh
   # install needs pnpm regardless of where the payload came from. Gate the bootstrap
   # on the operation instead of the source; otherwise an npm install reaches
   # deployment on a machine without pnpm and fails with "spawn pnpm ENOENT".
   if [[ "$operation" == 'install' ]]; then
-    dsh_enhanced_ensure_pnpm "$dry_run" || return $?
+    dsh_ray_ensure_pnpm "$dry_run" || return $?
   fi
   if [[ "$operation" == 'uninstall' ]]; then
     if [[ "$effective_lifecycle_scenario" == 'lark' || "$effective_lifecycle_scenario" == 'supervised' ]]; then
@@ -5317,10 +5312,10 @@ dsh_enhanced_install() {
           printf '  - Do not access the npm registry or pnpm store.\n'
         fi
       else
-        dsh_enhanced_run_lifecycle_executor service-uninstall "$profile" "$dsh_home" "$effective_lifecycle_scenario"
+        dsh_ray_run_lifecycle_executor service-uninstall "$profile" "$dsh_home" "$effective_lifecycle_scenario"
       fi
     else
-      dsh_enhanced_profile_lifecycle uninstall "$profile" "$dsh_home" "$dry_run" "$effective_lifecycle_scenario"
+      dsh_ray_profile_lifecycle uninstall "$profile" "$dsh_home" "$dry_run" "$effective_lifecycle_scenario"
     fi
     return $?
   fi
@@ -5329,11 +5324,11 @@ dsh_enhanced_install() {
     printf '\n准备并构建当前仓库：\n'
     if [[ "$dry_run" == '1' ]]; then
       if [[ "$operation" == 'upgrade' ]]; then
-        dsh_enhanced_print_command pnpm --dir "$repo_root" install --offline --frozen-lockfile
+        dsh_ray_print_command pnpm --dir "$repo_root" install --offline --frozen-lockfile
       else
-        dsh_enhanced_print_command pnpm --dir "$repo_root" install
+        dsh_ray_print_command pnpm --dir "$repo_root" install
       fi
-      dsh_enhanced_print_command pnpm --dir "$repo_root" build
+      dsh_ray_print_command pnpm --dir "$repo_root" build
     elif [[ "$operation" == 'upgrade' ]]; then
       pnpm --dir "$repo_root" install --offline --frozen-lockfile || return $?
       pnpm --dir "$repo_root" build || return $?
@@ -5347,8 +5342,8 @@ dsh_enhanced_install() {
   # every other bundle; otherwise a partially published provider could fail
   # only after the core profile had already changed.
   if [[ "$operation" == 'install' ]]; then
-    auto_traex_command="$(dsh_enhanced_detect_traex_command || true)"
-    auto_agy_command="$(dsh_enhanced_detect_agy_command || true)"
+    auto_traex_command="$(dsh_ray_detect_traex_command || true)"
+    auto_agy_command="$(dsh_ray_detect_agy_command || true)"
     if [[ ( -n "$auto_traex_command" || -n "$auto_agy_command" ) && "$model_mode" == 'auto' && -z "$model_provider" ]]; then
       # Auto-discovery is independent of the model menu. An authenticated
       # local agent route (TraeX / Antigravity) may become this profile's
@@ -5363,18 +5358,18 @@ dsh_enhanced_install() {
   local model_configured='0'
   local agent_route_verified='0'
   local agent_login_verified='0'
-  if [[ "$dry_run" != '1' ]] && dsh_enhanced_model_is_configured "$profile" "$dsh_home"; then
+  if [[ "$dry_run" != '1' ]] && dsh_ray_model_is_configured "$profile" "$dsh_home"; then
     model_configured='1'
   fi
   local model_interactive='0'
   if [[ -t 0 && -t 1 ]]; then model_interactive='1'; fi
   if [[ "$model_mode" == 'auto' && "$operation" == 'install' && "$guided" != '1'
     && ( "$assume_yes" == '1' || "$model_interactive" != '1' ) ]] \
-    && dsh_enhanced_model_env_key_present 'deepseek-official'; then
+    && dsh_ray_model_env_key_present 'deepseek-official'; then
     # Scripted install with a key in the environment: persist it for the
     # built-in default route unless the profile owns another route or a key
     # is already stored. The secret only reaches dsh-model-setup via env.
-    if [[ "$(dsh_enhanced_guided_model_plan "$dsh_home" "$(dsh_enhanced_guided_model_provider "$dsh_home" "$profile")" 0)" == 'configure' ]]; then
+    if [[ "$(dsh_ray_guided_model_plan "$dsh_home" "$(dsh_ray_guided_model_provider "$dsh_home" "$profile")" 0)" == 'configure' ]]; then
       printf '\n模型配置：检测到环境中的 API Key，将配置 deepseek-official 并存入 %s/.credentials.yaml（0600）。\n' "$dsh_home"
       model_mode='configure'
       model_provider='deepseek-official'
@@ -5386,9 +5381,9 @@ dsh_enhanced_install() {
     if [[ "$dry_run" == '1' ]]; then
       guided_provider='deepseek-official'
     else
-      guided_provider="$(dsh_enhanced_guided_model_provider "$dsh_home" "$profile")"
+      guided_provider="$(dsh_ray_guided_model_provider "$dsh_home" "$profile")"
     fi
-    if [[ "$(dsh_enhanced_guided_model_plan "$dsh_home" "$guided_provider" 1)" == 'configure' ]]; then
+    if [[ "$(dsh_ray_guided_model_plan "$dsh_home" "$guided_provider" 1)" == 'configure' ]]; then
       printf '\n模型配置：使用 DeepSeek 官方默认模型 deepseek-v4-flash。\n'
       model_mode='configure'
       model_provider='deepseek-official'
@@ -5404,33 +5399,33 @@ dsh_enhanced_install() {
       model_mode='skip'
       if [[ "$operation" == 'install' && -z "$model_provider" ]]; then model_key_hint='1'; fi
     else
-      model_mode="$(dsh_enhanced_choose_model_mode "$model_configured")" || {
-        dsh_enhanced_fail 2 '模型配置选项无效。'
+      model_mode="$(dsh_ray_choose_model_mode "$model_configured")" || {
+        dsh_ray_fail 2 '模型配置选项无效。'
         return $?
       }
     fi
   fi
   if [[ "$model_mode" == 'configure' && -z "$model_provider" ]]; then
     if [[ "$dry_run" == '1' || ( ! -t 0 || ! -t 1 ) ]]; then
-      dsh_enhanced_fail 2 '非交互配置模型需要 --model-provider（自定义网关还需 --model-name 与 --model-base-url）。'
+      dsh_ray_fail 2 '非交互配置模型需要 --model-provider（自定义网关还需 --model-name 与 --model-base-url）。'
       return $?
     fi
-    dsh_enhanced_prompt_model_route model_provider model_name model_base_url model_api model_display_name || {
-      dsh_enhanced_fail 2 '模型配置输入无效。'
+    dsh_ray_prompt_model_route model_provider model_name model_base_url model_api model_display_name || {
+      dsh_ray_fail 2 '模型配置输入无效。'
       return $?
     }
   fi
-  if dsh_enhanced_is_agent_route "$model_provider" && [[ "$model_mode" == 'configure' && "$model_route_mode" != 'skip' ]]; then
+  if dsh_ray_is_agent_route "$model_provider" && [[ "$model_mode" == 'configure' && "$model_route_mode" != 'skip' ]]; then
     # An explicit global default must not be written after Lark has already
     # restarted with an unauthenticated local agent. Check before service work.
-    dsh_enhanced_verify_agent_login "$model_provider" "$dry_run" || return $?
+    dsh_ray_verify_agent_login "$model_provider" "$dry_run" || return $?
     agent_login_verified='1'
   fi
 
   local selected_slugs=()
   local slug
   local existing_slug
-  dsh_enhanced_append_slug() {
+  dsh_ray_append_slug() {
     local candidate="$1"
     if [[ -n "${selected_slugs[0]+set}" ]]; then
       for existing_slug in "${selected_slugs[@]}"; do
@@ -5445,75 +5440,75 @@ dsh_enhanced_install() {
 import { readFileSync } from 'node:fs'
 const manifest = JSON.parse(readFileSync(process.argv[2], 'utf8'))
 for (const name of Object.keys(manifest.dependencies ?? {})) {
-  const match = /^@dsh-enhanced\/([a-z0-9-]+)$/.exec(name)
+  const match = /^@dsh-ray\/([a-z0-9-]+)$/.exec(name)
   if (match) process.stdout.write(match[1] + '\n')
 }
 NODE
     )"; then
-      dsh_enhanced_fail 1 '现有 profile manifest 无法读取；尚未开始升级。'
+      dsh_ray_fail 1 '现有 profile manifest 无法读取；尚未开始升级。'
       return $?
     fi
     while IFS= read -r slug; do
-      [[ -n "$slug" ]] && dsh_enhanced_append_slug "$slug"
+      [[ -n "$slug" ]] && dsh_ray_append_slug "$slug"
     done <<< "$existing_slugs"
     if [[ -z "${selected_slugs[0]+set}" ]]; then
-      dsh_enhanced_fail 1 '当前 profile 没有可升级的 @dsh-enhanced/* 顶层依赖。'
+      dsh_ray_fail 1 '当前 profile 没有可升级的 @dsh-ray/* 顶层依赖。'
       return $?
     fi
-    if dsh_enhanced_profile_mentions_bundle "$dsh_home/profiles/$profile/package.json" '@dsh-enhanced/assistant-recovery' \
-      && ! dsh_enhanced_profile_mentions_bundle "$dsh_home/profiles/$profile/package.json" '@dsh-enhanced/assistant-goals'; then
+    if dsh_ray_profile_mentions_bundle "$dsh_home/profiles/$profile/package.json" '@dsh-ray/assistant-recovery' \
+      && ! dsh_ray_profile_mentions_bundle "$dsh_home/profiles/$profile/package.json" '@dsh-ray/assistant-goals'; then
       printf '兼容性修复：检测到旧 profile 含 assistant-recovery 但缺少 assistant-goals；本次将补齐其必需 provider。\n'
-      dsh_enhanced_append_slug 'assistant-goals'
+      dsh_ray_append_slug 'assistant-goals'
     fi
   else
-    for slug in "${DSH_ENHANCED_CORE_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
+    for slug in "${DSH_RAY_CORE_PLUGIN_SLUGS[@]}"; do dsh_ray_append_slug "$slug"; done
     case "$scenario" in
     web)
-      for slug in assistant-delivery assistant-goals assistant-web-owner owner-console assistant-association assistant-evaluation assistant-verifier assistant-work-items assistant-proactive event-triggers assistant-skills assistant-growth-driver assistant-evolution; do dsh_enhanced_append_slug "$slug"; done
+      for slug in assistant-delivery assistant-goals assistant-web-owner owner-console assistant-association assistant-evaluation assistant-verifier assistant-work-items assistant-proactive event-triggers assistant-skills assistant-growth-driver assistant-evolution; do dsh_ray_append_slug "$slug"; done
       ;;
     autonomy)
-      for slug in assistant-delivery assistant-goals assistant-web-owner owner-console assistant-isolation assistant-actions credentials-keychain assistant-evaluation assistant-verifier assistant-deepseek-budget event-triggers assistant-proactive assistant-skills; do dsh_enhanced_append_slug "$slug"; done
+      for slug in assistant-delivery assistant-goals assistant-web-owner owner-console assistant-isolation assistant-actions credentials-keychain assistant-evaluation assistant-verifier assistant-deepseek-budget event-triggers assistant-proactive assistant-skills; do dsh_ray_append_slug "$slug"; done
       ;;
     lark)
-      for slug in "${DSH_ENHANCED_LARK_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
+      for slug in "${DSH_RAY_LARK_PLUGIN_SLUGS[@]}"; do dsh_ray_append_slug "$slug"; done
       ;;
     supervised)
-      for slug in "${DSH_ENHANCED_LARK_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
-      for slug in "${DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
+      for slug in "${DSH_RAY_LARK_PLUGIN_SLUGS[@]}"; do dsh_ray_append_slug "$slug"; done
+      for slug in "${DSH_RAY_SUPERVISED_GROWTH_PLUGIN_SLUGS[@]}"; do dsh_ray_append_slug "$slug"; done
       ;;
     full)
       # Keep the modern safe core (including the discovery control plane) and
       # add every bundle that used to be selected by the legacy all-in-one
       # installer.
-      for slug in "${DSH_ENHANCED_LEGACY_FULL_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
+      for slug in "${DSH_RAY_LEGACY_FULL_PLUGIN_SLUGS[@]}"; do dsh_ray_append_slug "$slug"; done
       ;;
     esac
     if [[ "$plugin_preset" == 'dogfood' ]]; then
       for slug in preference-learning assistant-evaluation assistant-verifier assistant-memory-learning assistant-work-items assistant-association; do
-        dsh_enhanced_append_slug "$slug"
+        dsh_ray_append_slug "$slug"
       done
     fi
   fi
-  dsh_enhanced_apply_isolation_capability_gate
+  dsh_ray_apply_isolation_capability_gate
   if [[ -n "${add_ons[0]+set}" ]]; then
     if [[ "$operation" == 'install' ]]; then
     for slug in "${add_ons[@]}"; do
       case "$slug" in
-        coding) dsh_enhanced_append_slug 'coding-subscription-provider' ;;
-        traex) dsh_enhanced_append_slug 'traex-acp-provider' ;;
-        console) dsh_enhanced_append_slug 'owner-console' ;;
-        health) dsh_enhanced_append_slug 'assistant-health' ;;
-        heartbeat) dsh_enhanced_append_slug 'assistant-heartbeat' ;;
-        events) dsh_enhanced_append_slug 'event-triggers' ;;
-        bridge) dsh_enhanced_append_slug 'memory-wiki-bridge' ;;
+        coding) dsh_ray_append_slug 'coding-subscription-provider' ;;
+        traex) dsh_ray_append_slug 'traex-acp-provider' ;;
+        console) dsh_ray_append_slug 'owner-console' ;;
+        health) dsh_ray_append_slug 'assistant-health' ;;
+        heartbeat) dsh_ray_append_slug 'assistant-heartbeat' ;;
+        events) dsh_ray_append_slug 'event-triggers' ;;
+        bridge) dsh_ray_append_slug 'memory-wiki-bridge' ;;
         proactive)
-          for dep_slug in assistant-delivery event-triggers assistant-proactive; do dsh_enhanced_append_slug "$dep_slug"; done
+          for dep_slug in assistant-delivery event-triggers assistant-proactive; do dsh_ray_append_slug "$dep_slug"; done
           ;;
         dreaming)
-          for dep_slug in assistant-delivery assistant-evaluation assistant-goals assistant-skills assistant-dreaming; do dsh_enhanced_append_slug "$dep_slug"; done
+          for dep_slug in assistant-delivery assistant-evaluation assistant-goals assistant-skills assistant-dreaming; do dsh_ray_append_slug "$dep_slug"; done
           ;;
         *)
-          dsh_enhanced_fail 2 "不支持的 --with add-on：$slug；可选 coding、traex、console、health、heartbeat、events、bridge、proactive、dreaming。"
+          dsh_ray_fail 2 "不支持的 --with add-on：$slug；可选 coding、traex、console、health、heartbeat、events、bridge、proactive、dreaming。"
           return $?
           ;;
       esac
@@ -5522,13 +5517,13 @@ NODE
   fi
   if [[ "$operation" == 'install' ]]; then
     if [[ "$proactive_mode" == 'on' ]]; then
-      for dep_slug in assistant-delivery event-triggers assistant-proactive; do dsh_enhanced_append_slug "$dep_slug"; done
+      for dep_slug in assistant-delivery event-triggers assistant-proactive; do dsh_ray_append_slug "$dep_slug"; done
     fi
     if [[ "$growth_mode" == 'on' ]]; then
-      for dep_slug in assistant-delivery assistant-goals assistant-skills assistant-evaluation assistant-growth-driver; do dsh_enhanced_append_slug "$dep_slug"; done
+      for dep_slug in assistant-delivery assistant-goals assistant-skills assistant-evaluation assistant-growth-driver; do dsh_ray_append_slug "$dep_slug"; done
     fi
     if [[ "$dreaming_mode" == 'on' ]]; then
-      for dep_slug in assistant-delivery assistant-evaluation assistant-goals assistant-skills assistant-dreaming; do dsh_enhanced_append_slug "$dep_slug"; done
+      for dep_slug in assistant-delivery assistant-evaluation assistant-goals assistant-skills assistant-dreaming; do dsh_ray_append_slug "$dep_slug"; done
     fi
     if [[ "$proactive_mode" == 'off' || "$dreaming_mode" == 'off' || "$growth_mode" == 'off' ]]; then
       local filtered_slugs=()
@@ -5549,11 +5544,11 @@ NODE
   fi
   # Selecting a local coding-agent route pulls in its provider bundle so the
   # route can be enabled and resolve in the same run.
-  if [[ "$operation" == 'install' ]] && dsh_enhanced_is_agent_route "$model_provider"; then
-    dsh_enhanced_append_slug 'traex-acp-provider'
+  if [[ "$operation" == 'install' ]] && dsh_ray_is_agent_route "$model_provider"; then
+    dsh_ray_append_slug 'traex-acp-provider'
   fi
   if [[ "$operation" == 'install' && ( -n "$auto_traex_command" || -n "$auto_agy_command" ) ]]; then
-    dsh_enhanced_append_slug 'traex-acp-provider'
+    dsh_ray_append_slug 'traex-acp-provider'
   fi
 
   # Migration repair for profiles created before Evaluation became Evolution's
@@ -5562,10 +5557,10 @@ NODE
   # to start.  Keep the repair precise: do not enable Evolution for a normal
   # Lark profile and do not remove any user-selected bundle.
   local profile_manifest="$dsh_home/profiles/$profile/package.json"
-  if [[ "$operation" == 'install' ]] && dsh_enhanced_profile_mentions_bundle "$profile_manifest" '@dsh-enhanced/assistant-evolution' \
-    && ! dsh_enhanced_profile_mentions_bundle "$profile_manifest" '@dsh-enhanced/assistant-evaluation'; then
+  if [[ "$operation" == 'install' ]] && dsh_ray_profile_mentions_bundle "$profile_manifest" '@dsh-ray/assistant-evolution' \
+    && ! dsh_ray_profile_mentions_bundle "$profile_manifest" '@dsh-ray/assistant-evaluation'; then
     printf '兼容性修复：检测到旧 profile 含 assistant-evolution 但缺少 assistant-evaluation；本次将自动补齐其运行时 provider。\n'
-    dsh_enhanced_append_slug 'assistant-evaluation'
+    dsh_ray_append_slug 'assistant-evaluation'
   fi
 
   # TraeX ACP provider 的 cordis.patch.yml 把 cwd 固定为 dshHomePath('assistant-workspace')。
@@ -5575,10 +5570,10 @@ NODE
   for slug in "${selected_slugs[@]}"; do
     if [[ "$slug" == 'traex-acp-provider' ]]; then
       if [[ "$dry_run" == '1' ]]; then
-        dsh_enhanced_print_command install -d -m 700 "$dsh_home/assistant-workspace"
+        dsh_ray_print_command install -d -m 700 "$dsh_home/assistant-workspace"
       else
         install -d -m 700 "$dsh_home/assistant-workspace" || {
-          dsh_enhanced_fail 1 "无法创建 TraeX 工作目录 $dsh_home/assistant-workspace。"
+          dsh_ray_fail 1 "无法创建 TraeX 工作目录 $dsh_home/assistant-workspace。"
           return $?
         }
       fi
@@ -5590,8 +5585,8 @@ NODE
   if [[ "$source_mode" == 'npm' ]]; then
     # Do this before `dsh plugin add`: a partially published release must fail
     # as a unit instead of leaving a profile with independently resolved tags.
-    dsh_enhanced_resolve_npm_cohort "$plugin_version" "$dry_run" "${selected_slugs[@]}" || return $?
-    resolved_plugin_version="$DSH_ENHANCED_RESOLVED_PLUGIN_VERSION"
+    dsh_ray_resolve_npm_cohort "$plugin_version" "$dry_run" "${selected_slugs[@]}" || return $?
+    resolved_plugin_version="$DSH_RAY_RESOLVED_PLUGIN_VERSION"
   fi
 
   local targets=()
@@ -5599,12 +5594,12 @@ NODE
     if [[ "$source_mode" == 'local' ]]; then
       local plugin_path="$repo_root/plugins/$slug"
       if [[ ! -f "$plugin_path/package.json" ]]; then
-        dsh_enhanced_fail 1 "缺少本地插件：$plugin_path"
+        dsh_ray_fail 1 "缺少本地插件：$plugin_path"
         return $?
       fi
       targets+=("$plugin_path")
     else
-      targets+=("@dsh-enhanced/$slug@$resolved_plugin_version")
+      targets+=("@dsh-ray/$slug@$resolved_plugin_version")
     fi
   done
 
@@ -5626,20 +5621,20 @@ NODE
           printf '  - Restart only the previously active units; require fresh InvocationID journal readiness and stability before backup cleanup.\n'
         fi
         printf '  - On readiness failure, keep services stopped and preserve both homes plus the bound manifest without automatic rollback.\n'
-        dsh_enhanced_print_command dsh plugin --profile "$profile" add "${targets[@]}"
+        dsh_ray_print_command dsh plugin --profile "$profile" add "${targets[@]}"
       else
-        dsh_enhanced_run_lifecycle_executor service-upgrade "$profile" "$dsh_home" "$scenario" "${targets[@]}" || return $?
-        dsh_enhanced_finish_host_update "$profile" "$dsh_home"
+        dsh_ray_run_lifecycle_executor service-upgrade "$profile" "$dsh_home" "$scenario" "${targets[@]}" || return $?
+        dsh_ray_finish_host_update "$profile" "$dsh_home"
       fi
       return $?
     fi
     if [[ "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
-      dsh_enhanced_profile_lifecycle upgrade "$profile" "$dsh_home" "$dry_run" "$scenario" "${targets[@]}" || return $?
-      if [[ "$dry_run" != '1' ]]; then dsh_enhanced_finish_host_update "$profile" "$dsh_home"; fi
+      dsh_ray_profile_lifecycle upgrade "$profile" "$dsh_home" "$dry_run" "$scenario" "${targets[@]}" || return $?
+      if [[ "$dry_run" != '1' ]]; then dsh_ray_finish_host_update "$profile" "$dsh_home"; fi
       return $?
     fi
-    dsh_enhanced_macos_stopped_upgrade "$profile" "$dsh_home" "$dry_run" "$source_mode" "${targets[@]}" || return $?
-    if [[ "$dry_run" != '1' ]]; then dsh_enhanced_finish_host_update "$profile" "$dsh_home"; fi
+    dsh_ray_macos_stopped_upgrade "$profile" "$dsh_home" "$dry_run" "$source_mode" "${targets[@]}" || return $?
+    if [[ "$dry_run" != '1' ]]; then dsh_ray_finish_host_update "$profile" "$dsh_home"; fi
     return $?
   fi
 
@@ -5654,17 +5649,17 @@ NODE
   # retain their non-zero status.  The installer already prints the exact cohort
   # and every lifecycle stage above/below this call.
   if [[ "$source_mode" == 'local' && "$deployment_mode" == 'supervised-growth' ]]; then
-    dsh_enhanced_install_local_cohort "$profile" "$dsh_home" "$repo_root" "$dry_run" "${selected_slugs[@]}" || return $?
+    dsh_ray_install_local_cohort "$profile" "$dsh_home" "$repo_root" "$dry_run" "${selected_slugs[@]}" || return $?
   elif [[ "$dry_run" == '1' ]]; then
     if [[ "$source_mode" == 'npm' ]]; then
-      dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
-      dsh_enhanced_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "${targets[@]}" || return $?
+      dsh_ray_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
+      dsh_ray_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "${targets[@]}" || return $?
     fi
-    dsh_enhanced_print_command env npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}"
+    dsh_ray_print_command env npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}"
   else
     if [[ "$source_mode" == 'npm' ]]; then
-      dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
-      dsh_enhanced_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "${targets[@]}" || return $?
+      dsh_ray_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
+      dsh_ray_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "${targets[@]}" || return $?
     fi
     npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}" || return $?
   fi
@@ -5672,23 +5667,23 @@ NODE
     if [[ "$dry_run" == '1' ]]; then
       printf 'DSH setup peer 闭包：dry-run 不写入 %s/profiles/node_modules。\n' "$dsh_home"
     else
-      dsh_enhanced_heal_host_module_fallback "$dsh_home" "$(dsh --version 2>/dev/null || true)" || return $?
+      dsh_ray_heal_host_module_fallback "$dsh_home" "$(dsh --version 2>/dev/null || true)" || return $?
     fi
   fi
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
-    dsh_enhanced_prepare_rsi_source "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" || return $?
+    dsh_ray_prepare_rsi_source "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" || return $?
   fi
   if [[ "$scenario" == 'web' || "$scenario" == 'autonomy' ]]; then
     printf '\nWeb owner 初始化：\n'
     if [[ "$scenario" == 'autonomy' ]]; then
-      dsh_enhanced_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" "$isolation_image" "$isolation_max_runs" "$((10#$isolation_lease_minutes * 60000))" "$((10#$isolation_runtime_minutes * 60000))" "$isolation_backend" "$isolation_source_repository" || return $?
+      dsh_ray_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" "$isolation_image" "$isolation_max_runs" "$((10#$isolation_lease_minutes * 60000))" "$((10#$isolation_runtime_minutes * 60000))" "$isolation_backend" "$isolation_source_repository" || return $?
     else
-      dsh_enhanced_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" || return $?
+      dsh_ray_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" || return $?
     fi
   fi
   printf '\n校验组合后的 profile：\n'
   if [[ "$dry_run" == '1' ]]; then
-    dsh_enhanced_print_command dsh --profile "$profile" --dump-config
+    dsh_ray_print_command dsh --profile "$profile" --dump-config
   else
     dsh --profile "$profile" --dump-config >/dev/null
     printf 'profile 配置校验通过。\n'
@@ -5696,14 +5691,14 @@ NODE
   if [[ "$existing_lark_configured" == '1' && "$operation" == 'install' ]]; then
     printf 'profile 运行时自检：检测到已有启用的 Lark channel；跳过临时 Host，避免与可能运行的既有服务并发访问状态。\n'
   else
-    dsh_enhanced_verify_profile_activation "$profile" "$dsh_home" "$dry_run" || return $?
+    dsh_ray_verify_profile_activation "$profile" "$dsh_home" "$dry_run" || return $?
   fi
-  dsh_enhanced_apply_permission_choice "$permission_preset" "$confirm_dangerous_full_access" \
+  dsh_ray_apply_permission_choice "$permission_preset" "$confirm_dangerous_full_access" \
     "$profile" "$dsh_home" "$dry_run" || return $?
 
   local patch_path="$dsh_home/profiles/$profile/cordis.patch.yml"
   local lark_configured='0'
-  if dsh_enhanced_effective_lark_is_configured "$patch_path" "$existing_home_patch_path"; then
+  if dsh_ray_effective_lark_is_configured "$patch_path" "$existing_home_patch_path"; then
     lark_configured='1'
   fi
   if [[ "$scenario" == 'core' || "$scenario" == 'web' || "$scenario" == 'autonomy' ]]; then
@@ -5713,26 +5708,26 @@ NODE
     if [[ "$assume_yes" == '1' || "$guided" == '1' ]]; then
       if [[ "$lark_configured" == '1' ]]; then lark_mode='keep'; else lark_mode='configure'; fi
     elif [[ -t 0 && -t 1 ]]; then
-      lark_mode="$(dsh_enhanced_choose_lark_mode "$lark_configured")" || {
-        dsh_enhanced_fail 2 '飞书选项无效。'
+      lark_mode="$(dsh_ray_choose_lark_mode "$lark_configured")" || {
+        dsh_ray_fail 2 '飞书选项无效。'
         return $?
       }
     elif [[ "$lark_configured" == '1' ]]; then
       lark_mode='keep'
     else
-      dsh_enhanced_fail 2 '非交互环境无法选择飞书应用；请显式使用 --lark configure 或 --lark skip。'
+      dsh_ray_fail 2 '非交互环境无法选择飞书应用；请显式使用 --lark configure 或 --lark skip。'
       return $?
     fi
   fi
   if [[ "$scenario" != 'core' && "$scenario" != 'web' && "$scenario" != 'autonomy' ]]; then
     if [[ "$lark_mode" == 'configure' && "$dry_run" != '1' && ( ! -t 0 || ! -t 1 ) ]]; then
-      dsh_enhanced_fail 1 '飞书向导需要交互式终端；尚未修改 lingering 或开始飞书授权。请直接运行脚本，或使用 --lark skip。'
+      dsh_ray_fail 1 '飞书向导需要交互式终端；尚未修改 lingering 或开始飞书授权。请直接运行脚本，或使用 --lark skip。'
       return $?
     fi
     if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
-      dsh_enhanced_prepare_linux_resident_service "$dry_run" || return $?
+      dsh_ray_prepare_linux_resident_service "$dry_run" || return $?
     fi
-    dsh_enhanced_apply_lark "$lark_mode" "$profile" "$dsh_home" "$lark_configured" "$manage_service" "$dry_run" "$agent_tools_mode" || return $?
+    dsh_ray_apply_lark "$lark_mode" "$profile" "$dsh_home" "$lark_configured" "$manage_service" "$dry_run" "$agent_tools_mode" || return $?
   fi
   # Ordinary-use RSI configures its owner route and bounded scheduler in the
   # final paired setup transaction. Fixed Recovery remains an explicit setup;
@@ -5741,27 +5736,27 @@ NODE
   if [[ "$operation" == 'install' && ( -n "$auto_traex_command" || -n "$auto_agy_command" ) ]]; then
     local applied_auto_agent='0'
     if [[ -n "$auto_traex_command" && "$model_provider" != 'traex-agent' ]]; then
-      dsh_enhanced_apply_auto_traex "$profile" "$dsh_home" "$auto_traex_command" \
+      dsh_ray_apply_auto_traex "$profile" "$dsh_home" "$auto_traex_command" \
         "$auto_traex_default_candidate" "$dry_run" || return $?
       applied_auto_agent='1'
     fi
     if [[ -n "$auto_agy_command" && "$model_provider" != 'agy-agent' ]]; then
-      dsh_enhanced_apply_auto_agy "$profile" "$dsh_home" "$auto_agy_command" \
+      dsh_ray_apply_auto_agy "$profile" "$dsh_home" "$auto_agy_command" \
         "$auto_traex_default_candidate" "$dry_run" || return $?
       applied_auto_agent='1'
     fi
     if [[ "$applied_auto_agent" == '1' && "$model_mode" != 'configure' && "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
-      dsh_enhanced_restart_resident_service "$profile" "$dry_run" "$dsh_home" || return $?
+      dsh_ray_restart_resident_service "$profile" "$dry_run" "$dsh_home" || return $?
     fi
   fi
 
   if [[ "$model_mode" == 'configure' ]]; then
     # An explicit agent provider selected above is already in the preflighted
     # cohort; keep this idempotent check for a pre-existing installed profile.
-    dsh_enhanced_ensure_agent_bundle "$model_provider" "$profile" "$dsh_home" \
+    dsh_ray_ensure_agent_bundle "$model_provider" "$profile" "$dsh_home" \
       "$source_mode" "$repo_root" "$resolved_plugin_version" "$dry_run" || return $?
 
-    if dsh_enhanced_is_agent_route "$model_provider"; then
+    if dsh_ray_is_agent_route "$model_provider"; then
       if [[ "$model_route_mode" == 'auto' ]]; then
         # This verification checks adapter enablement and local login readiness;
         # it never starts an ACP session/prompt or spends model quota.
@@ -5773,20 +5768,20 @@ NODE
       if [[ "$model_route_mode" == 'verify' ]]; then
         # Check the external prerequisite before writing a global default.
         if [[ "$agent_login_verified" != '1' ]]; then
-          dsh_enhanced_verify_agent_login "$model_provider" "$dry_run" || return $?
+          dsh_ray_verify_agent_login "$model_provider" "$dry_run" || return $?
         fi
         agent_login_verified='1'
       fi
     fi
 
-    if dsh_enhanced_is_agent_route "$model_provider" && [[ "$model_route_mode" == 'verify' ]]; then
+    if dsh_ray_is_agent_route "$model_provider" && [[ "$model_route_mode" == 'verify' ]]; then
       # Do not restart a managed Lark service into an unusable global default.
       # The scoped transaction also rolls back a Ctrl-C/TERM during validation.
-      dsh_enhanced_apply_verified_agent_model "$profile" "$dsh_home" "$model_provider" "$model_name" \
+      dsh_ray_apply_verified_agent_model "$profile" "$dsh_home" "$model_provider" "$model_name" \
         "$model_base_url" "$model_api" "$model_display_name" "$dry_run" "$agent_login_verified" || return $?
       agent_route_verified='1'
     else
-      dsh_enhanced_apply_model "$profile" "$dsh_home" "$model_provider" "$model_name" \
+      dsh_ray_apply_model "$profile" "$dsh_home" "$model_provider" "$model_name" \
         "$model_base_url" "$model_api" "$model_display_name" "$dry_run" || return $?
     fi
     # A resident service is already running the pre-change profile; enabling a
@@ -5794,7 +5789,7 @@ NODE
     # after it reloads. An agent route has already passed its zero-cost local
     # prerequisite check above; now reload the resident process for postflight.
     if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
-      dsh_enhanced_restart_resident_service "$profile" "$dry_run" "$dsh_home" || return $?
+      dsh_ray_restart_resident_service "$profile" "$dry_run" "$dsh_home" || return $?
     fi
   else
     printf '\n模型配置：本次跳过；使用 profile 已组合的默认模型。\n'
@@ -5809,20 +5804,20 @@ NODE
     elif [[ "$guided" == '1' ]]; then
       # Guided: spend one minimal request only when this run wrote the route
       # and its key is now stored; otherwise there is nothing new to check.
-      if [[ "$model_mode" == 'configure' ]] && dsh_enhanced_model_credential_stored "$dsh_home" "$model_provider"; then
+      if [[ "$model_mode" == 'configure' ]] && dsh_ray_model_credential_stored "$dsh_home" "$model_provider"; then
         model_route_mode='verify'
       else
         model_route_mode='skip'
       fi
     else
-      model_route_mode="$(dsh_enhanced_choose_model_route_mode)" || {
-        dsh_enhanced_fail 2 '模型 route 验证选项无效。'
+      model_route_mode="$(dsh_ray_choose_model_route_mode)" || {
+        dsh_ray_fail 2 '模型 route 验证选项无效。'
         return $?
       }
     fi
   fi
   if [[ "$agent_route_verified" != '1' ]]; then
-    dsh_enhanced_verify_model_route "$model_route_mode" "$dry_run" "$profile" "$dsh_home" \
+    dsh_ray_verify_model_route "$model_route_mode" "$dry_run" "$profile" "$dsh_home" \
       "$model_provider" || return $?
   fi
 
@@ -5831,7 +5826,7 @@ NODE
   if [[ "$operation" == 'install' && "$plugin_preset" != 'skip' ]]; then
     printf '\n'
     local plugin_preset_status=0
-    dsh_enhanced_apply_plugin_preset "$profile" "$dsh_home" "$dry_run" "$plugin_preset" || plugin_preset_status=$?
+    dsh_ray_apply_plugin_preset "$profile" "$dsh_home" "$dry_run" "$plugin_preset" || plugin_preset_status=$?
     if [[ "$plugin_preset_status" -ne 0 ]]; then
       if [[ "$plugin_preset_explicit" == '1' ]]; then
         return "$plugin_preset_status"
@@ -5839,13 +5834,13 @@ NODE
       printf '插件预设：未应用（退出码 %s），其余安装不受影响；可稍后运行 dsh-plugin-setup preset %s。\n' \
         "$plugin_preset_status" "$plugin_preset"
     elif [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
-      dsh_enhanced_restart_resident_service "$profile" "$dry_run" "$dsh_home" '插件预设' || return $?
+      dsh_ray_restart_resident_service "$profile" "$dry_run" "$dsh_home" '插件预设' || return $?
     fi
   fi
 
   printf '\n最终 profile 自检：\n'
   if [[ "$dry_run" == '1' ]]; then
-    dsh_enhanced_print_command dsh --profile "$profile" --dump-config
+    dsh_ray_print_command dsh --profile "$profile" --dump-config
   else
     dsh --profile "$profile" --dump-config >/dev/null
     printf '最终 profile 配置校验通过。\n'
@@ -5854,11 +5849,11 @@ NODE
   local require_service='0'
   if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
     require_service='1'
-    dsh_enhanced_ensure_resident_service "$profile" "$dsh_home" "$dry_run" || return $?
+    dsh_ray_ensure_resident_service "$profile" "$dsh_home" "$dry_run" || return $?
   fi
   if [[ "$dry_run" == '1' ]]; then
     if [[ "$require_service" == '1' ]]; then
-      if [[ "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" == 'Linux' ]]; then
+      if [[ "${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}" == 'Linux' ]]; then
         printf 'doctor：将验证 profile、飞书 channel、常驻服务与 Linux logout persistence。\n'
       else
         printf 'doctor：将验证 profile、飞书 channel 与当前登录会话的常驻服务。\n'
@@ -5867,25 +5862,25 @@ NODE
       printf 'doctor：将验证 profile 能真实激活；飞书服务可用 doctor.sh --require-service 复查。\n'
     fi
   else
-    dsh_enhanced_doctor postflight "$profile" "$dsh_home" "$web_port" "$require_service" || return $?
+    dsh_ray_doctor postflight "$profile" "$dsh_home" "$web_port" "$require_service" || return $?
   fi
   if [[ "$scenario" == 'autonomy' ]]; then
     if [[ "$dry_run" == '1' ]]; then
-      dsh_enhanced_print_command "$dsh_home/profiles/$profile/node_modules/.bin/dsh-autonomy-doctor" --dsh-home "$dsh_home" --profile "$profile"
+      dsh_ray_print_command "$dsh_home/profiles/$profile/node_modules/.bin/dsh-autonomy-doctor" --dsh-home "$dsh_home" --profile "$profile"
     else
-      dsh_enhanced_doctor_isolation "$profile" "$dsh_home" || return $?
+      dsh_ray_doctor_isolation "$profile" "$dsh_home" || return $?
     fi
   fi
 
   if [[ "$operation" == 'install' ]]; then
-    dsh_enhanced_ensure_rsi_cli "$source_mode" "$repo_root" "$resolved_plugin_version" "$dry_run" || return $?
+    dsh_ray_ensure_rsi_cli "$source_mode" "$repo_root" "$resolved_plugin_version" "$dry_run" || return $?
   fi
 
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$lark_mode" != 'skip' ]]; then
-    dsh_enhanced_wait_owner_dm "$profile" "$dsh_home" "$owner_wait_seconds" "$dry_run"
+    dsh_ray_wait_owner_dm "$profile" "$dsh_home" "$owner_wait_seconds" "$dry_run"
   fi
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
-    dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" "$ack_existing_automations" "$rsi_learning_flag" || return $?
+    dsh_ray_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" "$ack_existing_automations" "$rsi_learning_flag" || return $?
   fi
 
   # Fresh managed supervised installs get the audited ordinary-use learning
@@ -5896,7 +5891,7 @@ NODE
   # profile's explicit configuration wins over this implicit default.
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$lark_mode" != 'skip' ]]; then
     local assembly_status=0
-    dsh_enhanced_apply_supervised_learning_assembly "$profile" "$dsh_home" "$dry_run" \
+    dsh_ray_apply_supervised_learning_assembly "$profile" "$dsh_home" "$dry_run" \
       "$plugin_preset_requested" "$plugin_preset_declined" "$fresh_profile" || assembly_status=$?
     if [[ "$assembly_status" -eq 2 ]]; then
       :
@@ -5906,7 +5901,7 @@ NODE
       fi
       printf '自治学习装配：未应用（退出码 %s），其余安装不受影响；可稍后运行 dsh-plugin-setup preset recommended。\n' "$assembly_status"
     elif [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
-      dsh_enhanced_restart_resident_service "$profile" "$dry_run" "$dsh_home" '自治学习装配' || return $?
+      dsh_ray_restart_resident_service "$profile" "$dry_run" "$dsh_home" '自治学习装配' || return $?
     fi
   fi
 
@@ -5916,10 +5911,10 @@ NODE
     [[ "$slug" == 'assistant-dreaming' ]] && has_dreaming='1'
     if [[ "$slug" == 'traex-acp-provider' && "$dry_run" != '1' ]]; then
       if [[ -n "$auto_traex_command" ]]; then
-        effective_traex_command="$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home")" || return $?
+        effective_traex_command="$(dsh_ray_probe_auto_traex_route "$profile" "$dsh_home")" || return $?
       fi
       if [[ -n "$auto_agy_command" ]]; then
-        effective_agy_command="$(dsh_enhanced_probe_auto_agy_route "$profile" "$dsh_home")" || return $?
+        effective_agy_command="$(dsh_ray_probe_auto_agy_route "$profile" "$dsh_home")" || return $?
       fi
     fi
   done
@@ -5931,9 +5926,9 @@ NODE
   # configured without a stored key.
   if [[ "$model_mode" == 'configure' && "$model_provider" == 'deepseek-official' ]]; then model_key_hint='1'; fi
   if [[ "$dry_run" != '1' && "$operation" == 'install' && "$model_key_hint" == '1' ]] \
-    && ! dsh_enhanced_model_credential_stored "$dsh_home" 'deepseek-official'; then
+    && ! dsh_ray_model_credential_stored "$dsh_home" 'deepseek-official'; then
     printf '下一步（模型）：若默认模型为 DeepSeek 官方，尚未存储 DEEPSEEK_API_KEY。export DEEPSEEK_API_KEY 后运行（Key 只从环境读取，写入 0600 的 .credentials.yaml）：\n'
-    dsh_enhanced_print_command "$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup" \
+    dsh_ray_print_command "$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup" \
       --dsh-home "$dsh_home" --profile "$profile" --provider deepseek-official --store-key
   fi
   if [[ "$operation" == 'install' ]]; then
@@ -5941,17 +5936,17 @@ NODE
       "$dsh_home/profiles/$profile/node_modules/.bin/dsh-plugin-setup"
   fi
   if [[ "$has_owner_console" == '1' ]]; then
-    printf '控制台 UI：已安装 @dsh-enhanced/owner-console；打开 Web URL 后可在侧边栏进入「文鳐」或在设置 →「文鳐助手」管理助手与本机编程工具。\n'
+    printf '控制台 UI：已安装 @dsh-ray/owner-console；打开 Web URL 后可在侧边栏进入「文鳐」或在设置 →「文鳐助手」管理助手与本机编程工具。\n'
   fi
   if [[ "$has_dreaming" == '1' ]]; then
     if [[ "$dry_run" == '1' ]]; then
-      printf 'Dreaming：将安装 @dsh-enhanced/assistant-dreaming（默认安全休眠 enabled=false）；需配齐独立 scope、databasePath、provider/model 与有限预算后才启用。\n'
+      printf 'Dreaming：将安装 @dsh-ray/assistant-dreaming（默认安全休眠 enabled=false）；需配齐独立 scope、databasePath、provider/model 与有限预算后才启用。\n'
     else
       local dreaming_check=''
-      dreaming_check="$(dsh_enhanced_check_dreaming_prerequisites "$profile" "$dsh_home" || true)"
+      dreaming_check="$(dsh_ray_check_dreaming_prerequisites "$profile" "$dsh_home" || true)"
       case "$dreaming_check" in
         dormant\ *)
-          printf 'Dreaming：已安装 @dsh-enhanced/assistant-dreaming（安全休眠 enabled=false）；缺少唤醒必填项：%s。\n' "${dreaming_check#dormant }"
+          printf 'Dreaming：已安装 @dsh-ray/assistant-dreaming（安全休眠 enabled=false）；缺少唤醒必填项：%s。\n' "${dreaming_check#dormant }"
           ;;
         enabled\ )
           printf 'Dreaming：已安装并满足启用前置条件（scope/模型/有限预算就绪）。\n'
@@ -5966,16 +5961,16 @@ NODE
     printf '下一步（使用）：在飞书/Lark 私聊 Bot 即可开始；只有已绑定的 owner 可以操作和授权。\n'
   fi
   if [[ "$scenario" == 'core' || "$scenario" == 'web' ]]; then
-    printf '立即使用：dsh --profile %s（或运行 dsh-rsi open --profile %s 一键打开）\n' "$profile" "$profile"
-    printf '  `dsh-rsi open` 会读取私有 Host、打印带 token 的完整授权 URL 并自动在浏览器中打开。\n'
+    printf '立即使用：dsh --profile %s（或运行 dsh-ray open --profile %s 一键打开）\n' "$profile" "$profile"
+    printf '  `dsh-ray open` 会读取私有 Host、打印带 token 的完整授权 URL 并自动在浏览器中打开。\n'
   elif [[ "$scenario" == 'lark' || "$scenario" == 'supervised' || "$scenario" == 'full' ]]; then
     if [[ "$lark_mode" == 'skip' ]]; then
-      printf '立即使用：dsh --profile %s（或运行 dsh-rsi open --profile %s 一键打开）\n' "$profile" "$profile"
+      printf '立即使用：dsh --profile %s（或运行 dsh-ray open --profile %s 一键打开）\n' "$profile" "$profile"
       printf '  （本次跳过了飞书；命令会输出带 token 的完整 URL，请勿打开裸地址。）\n'
     fi
   elif [[ "$scenario" == 'autonomy' ]]; then
     printf '自治安装已完成离线有限执行配置；凭据、外部目标验证与完整自治仍需单独配置。\n'
-    printf '打开控制台：dsh-rsi open --profile %s\n' "$profile"
+    printf '打开控制台：dsh-ray open --profile %s\n' "$profile"
   fi
 
   # Automatic discovery already enabled this profile's route. A manually added
@@ -6005,15 +6000,15 @@ NODE
   done
 
   if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
-    case "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" in
+    case "${DSH_RAY_PLATFORM_OVERRIDE:-$(uname -s)}" in
       Linux) printf '查看日志：journalctl --user -u dsh-profile-%s.service -f\n' "$profile" ;;
       *) printf '查看日志：tail -f %s/logs/%s-host.error.log\n' "$dsh_home" "$profile" ;;
     esac
-    # 受管服务已在后台运行；用刚装好的 dsh-rsi 解析当前带 token 的 Web URL（不关闭认证）。
-    if [[ "$dry_run" != '1' ]] && command -v dsh-rsi >/dev/null 2>&1; then
+    # 受管服务已在后台运行；用刚装好的 dsh-ray 解析当前带 token 的 Web URL（不关闭认证）。
+    if [[ "$dry_run" != '1' ]] && command -v dsh-ray >/dev/null 2>&1; then
       printf '\n当前 Web 授权 URL（受管服务；token 随重启变化）：\n'
-      dsh-rsi web-url --profile "$profile" --dsh-home "$dsh_home" --wait 8 || true
-      printf '快捷打开浏览器：dsh-rsi open --profile %s\n' "$profile"
+      dsh-ray web-url --profile "$profile" --dsh-home "$dsh_home" --wait 8 || true
+      printf '快捷打开浏览器：dsh-ray open --profile %s\n' "$profile"
     fi
   fi
 }

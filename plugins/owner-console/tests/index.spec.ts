@@ -52,9 +52,9 @@ async function mount(settings?: SettingsService, loader?: FakeLoader, manager?: 
   return { ctx, console: ctx.get('ownerConsole' as never) as unknown as OwnerConsoleService }
 }
 
-describe('dsh-enhanced-owner-console', () => {
+describe('dsh-ray-owner-console', () => {
   it('exposes stable identity and conservative defaults', () => {
-    expect(name).toBe('dsh-enhanced-owner-console')
+    expect(name).toBe('dsh-ray-owner-console')
     expect(version).toBe(manifest.version)
     expect(Config({} as never)).toEqual(defaults)
     expect(() => Config({ feishuAppId: 5 } as never)).toThrow()
@@ -81,50 +81,50 @@ describe('dsh-enhanced-owner-console', () => {
     // to the service method, so the declared order must match the implementation.
     const wires = (id: string) => TYPERT.invocations.find(invocation => invocation.id === id)!
       .parameters.map(parameter => parameter.wire)
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureFeishu'))
+    expect(wires('@dsh-ray/owner-console#ownerConsole/configureFeishu'))
       .toEqual(['appId', 'appSecretEnv', 'credentialHandle', 'account', 'tenant', 'discoverAppId'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureTraex')).toEqual(['enabled', 'command'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureBundle')).toEqual(['entry', 'config'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/setBundleEnabled')).toEqual(['name', 'enabled'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/setPluginEnabled')).toEqual(['entryId', 'enabled'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/installProjectBundle')).toEqual(['spec', 'approvedBuilds'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/removeProjectBundle')).toEqual(['name'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/trendSnapshots')).toEqual(['planId', 'beforeSequence', 'limit'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/intakeAgreement')).toEqual(['workspace', 'preset'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/intakeAgreementHistory')).toEqual(['workspace', 'preset', 'limit'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureAgy')).toEqual(['enabled', 'command'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/probeCodingTool')).toEqual(['tool', 'command', 'force'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/setDefaultModelRoute')).toEqual(['provider', 'model', 'reasoningEffort'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/assistantOverview')).toEqual(['workspace', 'preset'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/actDreamingIdea')).toEqual(['ideaId', 'action', 'note'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/actAttentionQuestion'))
+    expect(wires('@dsh-ray/owner-console#ownerConsole/configureTraex')).toEqual(['enabled', 'command'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/configureBundle')).toEqual(['entry', 'config'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/setBundleEnabled')).toEqual(['name', 'enabled'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/setPluginEnabled')).toEqual(['entryId', 'enabled'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/installProjectBundle')).toEqual(['spec', 'approvedBuilds'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/removeProjectBundle')).toEqual(['name'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/trendSnapshots')).toEqual(['planId', 'beforeSequence', 'limit'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/intakeAgreement')).toEqual(['workspace', 'preset'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/intakeAgreementHistory')).toEqual(['workspace', 'preset', 'limit'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/configureAgy')).toEqual(['enabled', 'command'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/probeCodingTool')).toEqual(['tool', 'command', 'force'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/setDefaultModelRoute')).toEqual(['provider', 'model', 'reasoningEffort'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/assistantOverview')).toEqual(['workspace', 'preset'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/actDreamingIdea')).toEqual(['ideaId', 'action', 'note'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/actAttentionQuestion'))
       .toEqual(['workspace', 'preset', 'cohortLane', 'cohortSourceId', 'questionId', 'choice'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/actProactiveDraft')).toEqual(['id', 'action', 'workspace', 'preset'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/autonomySetupStatus')).toEqual([])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureAutonomySetup'))
+    expect(wires('@dsh-ray/owner-console#ownerConsole/actProactiveDraft')).toEqual(['id', 'action', 'workspace', 'preset'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/autonomySetupStatus')).toEqual([])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/configureAutonomySetup'))
       .toEqual([
         'action', 'tier', 'provider', 'model', 'reasoningEffort',
         'enableMemoryLearning', 'enableDreaming', 'enableGrowth', 'workItemExperiences', 'customBudget',
       ])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/growthReport'))
+    expect(wires('@dsh-ray/owner-console#ownerConsole/growthReport'))
       .toEqual(['workspace', 'preset', 'sinceDays'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/checkSelfUpgrade')).toEqual(['force'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/dryRunSelfUpgrade')).toEqual([])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/runSelfUpgrade')).toEqual(['confirmed'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/setupDoctor')).toEqual([])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/applyDoctorRepair')).toEqual(['issueIds'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureFeishuEasy')).toEqual(['appId', 'appSecret', 'account', 'tenant'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/modelCatalog')).toEqual(['force'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/assistantChatContext')).toEqual([])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/registerAssistantSession')).toEqual(['sessionId', 'makeActive'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/startFeishuQrOnboarding'))
+    expect(wires('@dsh-ray/owner-console#ownerConsole/checkSelfUpgrade')).toEqual(['force'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/dryRunSelfUpgrade')).toEqual([])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/runSelfUpgrade')).toEqual(['confirmed'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/setupDoctor')).toEqual([])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/applyDoctorRepair')).toEqual(['issueIds'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/configureFeishuEasy')).toEqual(['appId', 'appSecret', 'account', 'tenant'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/modelCatalog')).toEqual(['force'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/assistantChatContext')).toEqual([])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/registerAssistantSession')).toEqual(['sessionId', 'makeActive'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/startFeishuQrOnboarding'))
       .toEqual(['domain', 'appName', 'existingAppId', 'account', 'tenant', 'calendarReadonly', 'businessTools'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/feishuQrOnboardingStatus')).toEqual(['sessionId'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/cancelFeishuQrOnboarding')).toEqual(['sessionId'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/promoteFeishuQrOwner')).toEqual(['sessionId', 'confirmed'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/restartProfile')).toEqual(['confirmed'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/controlSelfIteration')).toEqual(['action', 'confirmed'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/versionInfo')).toEqual([])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/feishuQrOnboardingStatus')).toEqual(['sessionId'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/cancelFeishuQrOnboarding')).toEqual(['sessionId'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/promoteFeishuQrOwner')).toEqual(['sessionId', 'confirmed'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/restartProfile')).toEqual(['confirmed'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/controlSelfIteration')).toEqual(['action', 'confirmed'])
+    expect(wires('@dsh-ray/owner-console#ownerConsole/versionInfo')).toEqual([])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {
@@ -150,16 +150,16 @@ describe('dsh-enhanced-owner-console', () => {
 
   it('reads the real entries and never surfaces secret values', async () => {
     const lark = fakeSettings([
-      { ns: 'dsh-enhanced-lark-channel', value: { enabled: true, appId: 'cli_0123456789abcdef', account: 'owner', appSecretEnv: 'LARK_APP_SECRET' } },
-      { ns: 'dsh-enhanced-traex-acp-provider', value: { enabled: false, command: 'traex' } },
-      { ns: 'dsh-enhanced-other', value: { enabled: true } },
+      { ns: 'dsh-ray-lark-channel', value: { enabled: true, appId: 'cli_0123456789abcdef', account: 'owner', appSecretEnv: 'LARK_APP_SECRET' } },
+      { ns: 'dsh-ray-traex-acp-provider', value: { enabled: false, command: 'traex' } },
+      { ns: 'dsh-ray-other', value: { enabled: true } },
       { ns: 'personal-assistant', value: { enabled: true } },
     ])
     const { ctx, console } = await mount(lark.service)
     try {
       const status = await console.status()
-      expect(status.feishu).toMatchObject({ entry: 'dsh-enhanced-lark-channel', enabled: true, appIdConfigured: true, appId: 'cli_0123456789abcdef' })
-      expect(status.traex).toEqual({ entry: 'dsh-enhanced-traex-acp-provider', installed: false, enabled: false, command: 'traex' })
+      expect(status.feishu).toMatchObject({ entry: 'dsh-ray-lark-channel', enabled: true, appIdConfigured: true, appId: 'cli_0123456789abcdef' })
+      expect(status.traex).toEqual({ entry: 'dsh-ray-traex-acp-provider', installed: false, enabled: false, command: 'traex' })
       expect(status.bundles).toEqual([])
       expect(status.plugins).toEqual([])
       expect(JSON.stringify(status)).not.toContain('LARK_APP_SECRET')
@@ -169,7 +169,7 @@ describe('dsh-enhanced-owner-console', () => {
   })
 
   it('derives the pairing mode from the secret-source discriminator', async () => {
-    const envMode = fakeSettings([{ ns: 'dsh-enhanced-lark-channel',
+    const envMode = fakeSettings([{ ns: 'dsh-ray-lark-channel',
       value: { enabled: true, appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET', secretSource: 'env', credentialHandle: 'inherited-handle' } }])
     const mounted = await mount(envMode.service)
     try {
@@ -177,7 +177,7 @@ describe('dsh-enhanced-owner-console', () => {
     } finally {
       await mounted.ctx.fiber.dispose()
     }
-    const handleMode = fakeSettings([{ ns: 'dsh-enhanced-lark-channel',
+    const handleMode = fakeSettings([{ ns: 'dsh-ray-lark-channel',
       value: { enabled: true, appId: 'cli_0123456789abcdef', credentialHandle: 'owner-handle', secretSource: 'handle' } }])
     const second = await mount(handleMode.service)
     try {
@@ -188,14 +188,14 @@ describe('dsh-enhanced-owner-console', () => {
   })
 
   it('writes one lark-channel entry with exactly one secret reference and preserves identity', async () => {
-    const lark = fakeSettings([{ ns: 'dsh-enhanced-lark-channel', value: { account: 'owner-acct', tenant: 'owner-tenant', credentialHandle: 'old-handle' } }])
+    const lark = fakeSettings([{ ns: 'dsh-ray-lark-channel', value: { account: 'owner-acct', tenant: 'owner-tenant', credentialHandle: 'old-handle' } }])
     const { ctx, console } = await mount(lark.service)
     try {
       vi.stubEnv('LARK_APP_SECRET', 'present')
       vi.stubEnv('A', 'present')
       await expect(console.configureFeishu('cli_0123456789abcdef', 'LARK_APP_SECRET', '', '', '', false))
-        .resolves.toMatchObject({ applied: true, entry: 'dsh-enhanced-lark-channel' })
-      expect(lark.mutate).toHaveBeenCalledWith('dsh-enhanced-lark-channel', [
+        .resolves.toMatchObject({ applied: true, entry: 'dsh-ray-lark-channel' })
+      expect(lark.mutate).toHaveBeenCalledWith('dsh-ray-lark-channel', [
         { op: 'set', path: ['enabled'], value: true },
         { op: 'set', path: ['appId'], value: 'cli_0123456789abcdef' },
         { op: 'set', path: ['account'], value: 'owner-acct' },
@@ -207,7 +207,7 @@ describe('dsh-enhanced-owner-console', () => {
       // The secret source is derived from the reference the owner actually filled.
       await expect(console.configureFeishu('cli_0123456789abcdef', '', 'owner-handle', '', '', false))
         .resolves.toMatchObject({ applied: true })
-      expect(lark.mutate).toHaveBeenLastCalledWith('dsh-enhanced-lark-channel', [
+      expect(lark.mutate).toHaveBeenLastCalledWith('dsh-ray-lark-channel', [
         { op: 'set', path: ['enabled'], value: true },
         { op: 'set', path: ['appId'], value: 'cli_0123456789abcdef' },
         { op: 'set', path: ['account'], value: 'owner-acct' },
@@ -231,19 +231,19 @@ describe('dsh-enhanced-owner-console', () => {
   })
 
   it('toggles only the TraeX entry and bounds its command line', async () => {
-    const traex = fakeSettings([{ ns: 'dsh-enhanced-traex-acp-provider', value: {} }])
+    const traex = fakeSettings([{ ns: 'dsh-ray-traex-acp-provider', value: {} }])
     const { ctx, console } = await mount(traex.service)
     try {
-      const loader: FakeLoader = { entries: new Map([['dsh-enhanced-traex-acp-provider', { updated: [], refreshed: 0 }]]) }
+      const loader: FakeLoader = { entries: new Map([['dsh-ray-traex-acp-provider', { updated: [], refreshed: 0 }]]) }
       const mounted = await mount(traex.service, loader)
       try {
         await expect(mounted.console.configureTraex(true, 'traex')).resolves.toMatchObject({ applied: true })
-        expect(loader.entries.get('dsh-enhanced-traex-acp-provider')).toEqual({ updated: [{ enabled: true }], refreshed: 0 })
+        expect(loader.entries.get('dsh-ray-traex-acp-provider')).toEqual({ updated: [{ enabled: true }], refreshed: 0 })
       } finally {
         await mounted.ctx.fiber.dispose()
       }
       await expect(console.configureTraex(true, 'traex')).resolves.toMatchObject({ applied: true })
-      expect(traex.mutate).toHaveBeenCalledWith('dsh-enhanced-traex-acp-provider', [
+      expect(traex.mutate).toHaveBeenCalledWith('dsh-ray-traex-acp-provider', [
         { op: 'set', path: ['enabled'], value: true },
         { op: 'set', path: ['command'], value: 'traex' },
       ], 3)
@@ -256,19 +256,19 @@ describe('dsh-enhanced-owner-console', () => {
 
   it('configures only this project\'s bundle entries with a bounded object', async () => {
     const bundles = fakeSettings([
-      { ns: 'dsh-enhanced-other', value: {} },
+      { ns: 'dsh-ray-other', value: {} },
       { ns: 'personal-assistant', value: {} },
     ])
     const { ctx, console } = await mount(bundles.service)
     try {
-      await expect(console.configureBundle('dsh-enhanced-other', { enabled: false }))
-        .resolves.toMatchObject({ applied: true, entry: 'dsh-enhanced-other' })
-      expect(bundles.mutate).toHaveBeenCalledWith('dsh-enhanced-other', [{ op: 'set', path: ['enabled'], value: false }], 3)
+      await expect(console.configureBundle('dsh-ray-other', { enabled: false }))
+        .resolves.toMatchObject({ applied: true, entry: 'dsh-ray-other' })
+      expect(bundles.mutate).toHaveBeenCalledWith('dsh-ray-other', [{ op: 'set', path: ['enabled'], value: false }], 3)
       expect((await console.configureBundle('personal-assistant', { enabled: false })).applied).toBe(false)
-      expect((await console.configureBundle('dsh-enhanced-missing', {})).applied).toBe(false)
-      expect((await console.configureBundle('dsh-enhanced-other', [] as never)).applied).toBe(false)
-      expect((await console.configureBundle('dsh-enhanced-other', { blob: 'x'.repeat(20_000) })).applied).toBe(false)
-      expect((await console.configureBundle('dsh-enhanced-other', {})).applied).toBe(false)
+      expect((await console.configureBundle('dsh-ray-missing', {})).applied).toBe(false)
+      expect((await console.configureBundle('dsh-ray-other', [] as never)).applied).toBe(false)
+      expect((await console.configureBundle('dsh-ray-other', { blob: 'x'.repeat(20_000) })).applied).toBe(false)
+      expect((await console.configureBundle('dsh-ray-other', {})).applied).toBe(false)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -277,12 +277,12 @@ describe('dsh-enhanced-owner-console', () => {
   it('lists and toggles only this project\'s bundles and loaded entries', async () => {
     const manager = {
       listBundles: vi.fn(async () => [
-        { name: '@dsh-enhanced/lark-channel', version: '0.1.65', enabled: true, installed: true, removable: true, optional: false },
-        { name: '@dsh-enhanced/traex-acp-provider', version: '0.1.65', enabled: false, installed: true, removable: true, optional: false },
+        { name: '@dsh-ray/lark-channel', version: '0.1.65', enabled: true, installed: true, removable: true, optional: false },
+        { name: '@dsh-ray/traex-acp-provider', version: '0.1.65', enabled: false, installed: true, removable: true, optional: false },
         { name: 'other-package', enabled: true, installed: true, removable: true, optional: false },
       ]),
       listPlugins: vi.fn(async () => [
-        { entryId: 'lark-entry', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' as const },
+        { entryId: 'lark-entry', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'active' as const },
         { entryId: 'foreign-entry', moduleName: '@deepseek-ai/dsh-base', enabled: true, fiberPhase: 'active' as const },
       ]),
       setBundleEnabled: vi.fn(async (name: string) => ({ changed: true, application: 'applied' as const, target: name, enabled: true })),
@@ -294,22 +294,22 @@ describe('dsh-enhanced-owner-console', () => {
     try {
       const status = await console.status()
       expect(status.bundles.map(item => item.name))
-        .toEqual(['@dsh-enhanced/lark-channel', '@dsh-enhanced/traex-acp-provider'])
-      expect(status.plugins).toEqual([{ entryId: 'lark-entry', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' }])
+        .toEqual(['@dsh-ray/lark-channel', '@dsh-ray/traex-acp-provider'])
+      expect(status.plugins).toEqual([{ entryId: 'lark-entry', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'active' }])
       expect(status.feishu.installed).toBe(true)
       expect(status.traex.installed).toBe(true)
       expect(status.bundles[0]).toMatchObject({ enabled: true, installed: true, removable: true })
-      await expect(console.setBundleEnabled('@dsh-enhanced/lark-channel', false)).resolves.toMatchObject({ applied: true })
+      await expect(console.setBundleEnabled('@dsh-ray/lark-channel', false)).resolves.toMatchObject({ applied: true })
       expect((await console.setBundleEnabled('other-package', false)).applied).toBe(false)
       const toggled = await console.setPluginEnabled('lark-entry', false)
       expect(toggled.applied).toBe(true)
       expect(toggled.note).toMatch(/restart-required|重启/u)
       expect((await console.setPluginEnabled('foreign-entry', false)).applied).toBe(false)
-      await expect(console.installProjectBundle('@dsh-enhanced/hello')).resolves.toMatchObject({ applied: true })
-      expect(manager.installBundle).toHaveBeenCalledWith('@dsh-enhanced/hello', { enabled: true, saveExact: true })
+      await expect(console.installProjectBundle('@dsh-ray/hello')).resolves.toMatchObject({ applied: true })
+      expect(manager.installBundle).toHaveBeenCalledWith('@dsh-ray/hello', { enabled: true, saveExact: true })
       expect((await console.installProjectBundle('./local-path')).applied).toBe(false)
-      await expect(console.removeProjectBundle('@dsh-enhanced/lark-channel')).resolves.toMatchObject({ applied: true, entry: '@dsh-enhanced/lark-channel' })
-      expect(manager.removeBundle).toHaveBeenCalledWith('@dsh-enhanced/lark-channel')
+      await expect(console.removeProjectBundle('@dsh-ray/lark-channel')).resolves.toMatchObject({ applied: true, entry: '@dsh-ray/lark-channel' })
+      expect(manager.removeBundle).toHaveBeenCalledWith('@dsh-ray/lark-channel')
       expect((await console.removeProjectBundle('other-package')).applied).toBe(false)
     } finally {
       await ctx.fiber.dispose()
@@ -319,7 +319,7 @@ describe('dsh-enhanced-owner-console', () => {
   it('does not count a non-bundle dependency row as installed', async () => {
     const manager = {
       listBundles: vi.fn(async () => [
-        { name: '@dsh-enhanced/lark-channel', enabled: true, installed: true, removable: false, optional: false, error: { code: 'not-bundle' } },
+        { name: '@dsh-ray/lark-channel', enabled: true, installed: true, removable: false, optional: false, error: { code: 'not-bundle' } },
       ]),
       listPlugins: vi.fn(async () => []),
     }
@@ -402,19 +402,19 @@ function fakeManager(install: (spec: string, options?: unknown) => unknown) {
 
 describe('owner console install failures', () => {
   it('reads build names out of pnpm\'s coloured refusal even when the Host recorded none', async () => {
-    const manager = fakeManager(() => ({ changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+    const manager = fakeManager(() => ({ changed: false, application: 'failed', target: '@dsh-ray/lark-channel',
       error: { code: 'operation-error', diagnostic: ANSI_BUILD_BLOCKED }, pendingBuilds: [],
       packageResult: { kind: 'build-blocked', exitCode: 1 } }))
     const { ctx, console } = await mount(undefined, undefined, manager)
     try {
-      const refused = await console.installProjectBundle(' @dsh-enhanced/lark-channel ')
-      expect(refused).toMatchObject({ applied: false, entry: '@dsh-enhanced/lark-channel' })
+      const refused = await console.installProjectBundle(' @dsh-ray/lark-channel ')
+      expect(refused).toMatchObject({ applied: false, entry: '@dsh-ray/lark-channel' })
       // pnpm named the script; the panel offers the owner an approval for exactly that name.
       expect(refused.pendingBuilds).toEqual(['protobufjs@7.6.6'])
       expect(refused.note).toContain('protobufjs@7.6.6')
       expect(refused.note).toContain('allowBuilds')
       expect(refused.note).not.toContain(ESC)
-      expect(manager.installBundle).toHaveBeenCalledExactlyOnceWith('@dsh-enhanced/lark-channel',
+      expect(manager.installBundle).toHaveBeenCalledExactlyOnceWith('@dsh-ray/lark-channel',
         { enabled: true, saveExact: true })
     } finally {
       await ctx.fiber.dispose()
@@ -425,23 +425,23 @@ describe('owner console install failures', () => {
     const dir = await mkdtemp(join(tmpdir(), 'owner-console-builds-'))
     const manager = fakeManager((_spec, options) => {
       if ((options as { approvedBuilds?: readonly string[] }).approvedBuilds !== undefined) {
-        return { changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+        return { changed: false, application: 'failed', target: '@dsh-ray/lark-channel',
           error: { code: 'stale-approval', diagnostic: 'not pending' }, pendingBuilds: [] }
       }
       return manager.installBundle.mock.calls.length === 1
-        ? { changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+        ? { changed: false, application: 'failed', target: '@dsh-ray/lark-channel',
           error: { code: 'operation-error', diagnostic: ANSI_BUILD_BLOCKED }, pendingBuilds: [],
           packageResult: { kind: 'build-blocked', exitCode: 1 } }
-        : { changed: true, application: 'restart-required', target: '@dsh-enhanced/lark-channel' }
+        : { changed: true, application: 'restart-required', target: '@dsh-ray/lark-channel' }
     })
     const { ctx, console } = await mount(undefined, undefined, manager)
     ctx.provide('profileContext' as never, { dir } as never)
     try {
-      const refused = await console.installProjectBundle('@dsh-enhanced/lark-channel')
+      const refused = await console.installProjectBundle('@dsh-ray/lark-channel')
       expect(refused.pendingBuilds).toEqual(['protobufjs@7.6.6'])
-      const retried = await console.installProjectBundle('@dsh-enhanced/lark-channel', ['protobufjs@7.6.6'])
-      expect(retried).toMatchObject({ applied: true, entry: '@dsh-enhanced/lark-channel' })
-      expect(manager.installBundle).toHaveBeenLastCalledWith('@dsh-enhanced/lark-channel',
+      const retried = await console.installProjectBundle('@dsh-ray/lark-channel', ['protobufjs@7.6.6'])
+      expect(retried).toMatchObject({ applied: true, entry: '@dsh-ray/lark-channel' })
+      expect(manager.installBundle).toHaveBeenLastCalledWith('@dsh-ray/lark-channel',
         { enabled: true, saveExact: true })
       expect(await readFile(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toContain('protobufjs@7.6.6: true')
     } finally {
@@ -453,21 +453,21 @@ describe('owner console install failures', () => {
   it('keeps the Host-recorded build names and pre-writes exactly those on a confirmed retry', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'owner-console-builds-'))
     const manager = fakeManager(() => (manager.installBundle.mock.calls.length === 1
-      ? { changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+      ? { changed: false, application: 'failed', target: '@dsh-ray/lark-channel',
         error: { code: 'operation-error', diagnostic: ANSI_BUILD_BLOCKED }, pendingBuilds: ['protobufjs@7.6.6'],
         packageResult: { kind: 'build-blocked', exitCode: 1 } }
-      : { changed: true, application: 'restart-required', target: '@dsh-enhanced/lark-channel' }))
+      : { changed: true, application: 'restart-required', target: '@dsh-ray/lark-channel' }))
     const { ctx, console } = await mount(undefined, undefined, manager)
     ctx.provide('profileContext' as never, { dir } as never)
     try {
-      const refused = await console.installProjectBundle('@dsh-enhanced/lark-channel')
+      const refused = await console.installProjectBundle('@dsh-ray/lark-channel')
       expect(refused).toMatchObject({ applied: false, pendingBuilds: ['protobufjs@7.6.6'] })
       expect(refused.note).toContain('确认允许')
-      const retried = await console.installProjectBundle('@dsh-enhanced/lark-channel', ['protobufjs@7.6.6'])
-      expect(retried).toMatchObject({ applied: true, entry: '@dsh-enhanced/lark-channel' })
+      const retried = await console.installProjectBundle('@dsh-ray/lark-channel', ['protobufjs@7.6.6'])
+      expect(retried).toMatchObject({ applied: true, entry: '@dsh-ray/lark-channel' })
       // The names are written before the retry; the Host never sees an approval flag it might reject.
       expect(await readFile(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toContain('protobufjs@7.6.6: true')
-      expect(manager.installBundle).toHaveBeenLastCalledWith('@dsh-enhanced/lark-channel',
+      expect(manager.installBundle).toHaveBeenLastCalledWith('@dsh-ray/lark-channel',
         { enabled: true, saveExact: true })
     } finally {
       await ctx.fiber.dispose()
@@ -476,14 +476,14 @@ describe('owner console install failures', () => {
   })
 
   it('reports a compatibility refusal with the exact package and runtime versions', async () => {
-    const manager = fakeManager(() => ({ changed: false, application: 'failed', target: '@dsh-enhanced/traex-acp-provider',
-      error: { code: 'incompatible-version', incompatible: [{ name: '@dsh-enhanced/traex-acp-provider', version: '0.1.65',
+    const manager = fakeManager(() => ({ changed: false, application: 'failed', target: '@dsh-ray/traex-acp-provider',
+      error: { code: 'incompatible-version', incompatible: [{ name: '@dsh-ray/traex-acp-provider', version: '0.1.65',
         runtimeVersion: '0.2.2-rc.1', requirements: { '@deepseek-ai/dsh-llm': '0.2.1-rc.2' } }] } }))
     const { ctx, console } = await mount(undefined, undefined, manager)
     try {
-      const refused = await console.installProjectBundle('@dsh-enhanced/traex-acp-provider')
+      const refused = await console.installProjectBundle('@dsh-ray/traex-acp-provider')
       expect(refused.applied).toBe(false)
-      expect(refused.note).toContain('@dsh-enhanced/traex-acp-provider@0.1.65')
+      expect(refused.note).toContain('@dsh-ray/traex-acp-provider@0.1.65')
       expect(refused.note).toContain('@deepseek-ai/dsh-llm 0.2.1-rc.2')
       expect(refused.note).toContain('0.2.2-rc.1')
       expect(refused.note).toContain('兼容豁免')
@@ -493,12 +493,12 @@ describe('owner console install failures', () => {
   })
 
   it('rejects malformed approvals before touching the Host manager', async () => {
-    const manager = fakeManager(() => ({ changed: true, application: 'applied', target: '@dsh-enhanced/lark-channel' }))
+    const manager = fakeManager(() => ({ changed: true, application: 'applied', target: '@dsh-ray/lark-channel' }))
     const { ctx, console } = await mount(undefined, undefined, manager)
     try {
       for (const names of [[''], ['pkg*'], ['pkg\n2'], ['x'.repeat(201)],
         Array.from({ length: 65 }, (_value, index) => `pkg${String(index)}`)]) {
-        expect((await console.installProjectBundle('@dsh-enhanced/lark-channel', names)).applied).toBe(false)
+        expect((await console.installProjectBundle('@dsh-ray/lark-channel', names)).applied).toBe(false)
       }
       expect(manager.installBundle).not.toHaveBeenCalled()
     } finally {
@@ -516,7 +516,7 @@ describe('owner console install failures', () => {
   })
 
   it('bounds a generic diagnostic instead of echoing the whole pnpm log', () => {
-    const bounded = applyInstall({ changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+    const bounded = applyInstall({ changed: false, application: 'failed', target: '@dsh-ray/lark-channel',
       error: { code: 'operation-error', diagnostic: `${ESC}[31m${'x'.repeat(4_000)}${ESC}[39m` },
       packageResult: { kind: 'network', exitCode: 1 } })
     expect(bounded.applied).toBe(false)
@@ -531,12 +531,12 @@ describe('owner console install failures', () => {
     expect(WRITE_RESULT.safeParse({ applied: false, entry: 'e', note: 'n', pendingBuilds: many }).success).toBe(false)
     // A Host list the wire would reject is bounded by the service instead of failing the whole result.
     const hostile = [...many, '', 'line\nbreak', 'x'.repeat(201)]
-    const manager = fakeManager(() => ({ changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+    const manager = fakeManager(() => ({ changed: false, application: 'failed', target: '@dsh-ray/lark-channel',
       error: { code: 'operation-error', diagnostic: ANSI_BUILD_BLOCKED }, pendingBuilds: hostile,
       packageResult: { kind: 'build-blocked', exitCode: 1 } }))
     const { ctx, console } = await mount(undefined, undefined, manager)
     try {
-      const result = await console.installProjectBundle('@dsh-enhanced/lark-channel')
+      const result = await console.installProjectBundle('@dsh-ray/lark-channel')
       expect(result.pendingBuilds).toHaveLength(64)
       expect(WRITE_RESULT.safeParse(result).success).toBe(true)
     } finally {
@@ -546,12 +546,12 @@ describe('owner console install failures', () => {
 })
 
 const larkBundle = (overrides: Record<string, unknown> = {}) => ({
-  name: '@dsh-enhanced/lark-channel', enabled: true, installed: true, removable: true, optional: false,
-  rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }], ...overrides,
+  name: '@dsh-ray/lark-channel', enabled: true, installed: true, removable: true, optional: false,
+  rows: [{ rowId: 'dsh-ray-lark-channel', moduleName: '@dsh-ray/lark-channel' }], ...overrides,
 })
 const traexBundle = (overrides: Record<string, unknown> = {}) => ({
-  name: '@dsh-enhanced/traex-acp-provider', enabled: true, installed: true, removable: true, optional: false,
-  rows: [{ rowId: 'dsh-enhanced-traex-acp-provider', moduleName: '@dsh-enhanced/traex-acp-provider' }], ...overrides,
+  name: '@dsh-ray/traex-acp-provider', enabled: true, installed: true, removable: true, optional: false,
+  rows: [{ rowId: 'dsh-ray-traex-acp-provider', moduleName: '@dsh-ray/traex-acp-provider' }], ...overrides,
 })
 const managerWith = (bundles: readonly unknown[], plugins: readonly unknown[] = []) => ({
   listBundles: vi.fn(async () => bundles),
@@ -562,17 +562,17 @@ describe('owner console honest status and configuration repair', () => {
   it('keeps errored bundles visible and isolates a rejecting inventory read', async () => {
     const manager = managerWith([
       larkBundle({ error: { code: 'incompatible-version', diagnostic: 'pins 0.2.1-rc.2' } }),
-      { name: '@dsh-enhanced/helper', enabled: true, installed: true, removable: false, optional: false,
+      { name: '@dsh-ray/helper', enabled: true, installed: true, removable: false, optional: false,
         error: { code: 'not-bundle' } },
-    ], [{ entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'failed',
+    ], [{ entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'failed',
       diagnostic: 'cannot inject assistantDelivery' }])
     const mounted = await mount(undefined, undefined, manager)
     try {
       const status = await mounted.console.status()
       // Only the not-bundle dependency row is filtered; an incompatible installed bundle stays visible.
-      expect(status.bundles.map(bundle => bundle.name)).toEqual(['@dsh-enhanced/lark-channel'])
+      expect(status.bundles.map(bundle => bundle.name)).toEqual(['@dsh-ray/lark-channel'])
       expect(status.bundles[0]!.error).toEqual({ code: 'incompatible-version', diagnostic: 'pins 0.2.1-rc.2' })
-      expect(status.bundles[0]!.rows).toEqual([{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }])
+      expect(status.bundles[0]!.rows).toEqual([{ rowId: 'dsh-ray-lark-channel', moduleName: '@dsh-ray/lark-channel' }])
       expect(status.plugins[0]!.diagnostic).toBe('cannot inject assistantDelivery')
       expect(status.host).toMatchObject({ pluginManager: true, bundles: 'ok', plugins: 'ok' })
     } finally {
@@ -581,7 +581,7 @@ describe('owner console honest status and configuration repair', () => {
 
     const broken = {
       listBundles: vi.fn(async () => { throw new Error('bundle list exploded') }),
-      listPlugins: vi.fn(async () => [{ entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' }]),
+      listPlugins: vi.fn(async () => [{ entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'active' }]),
     }
     const partial = await mount(undefined, undefined, broken)
     try {
@@ -609,11 +609,11 @@ describe('owner console honest status and configuration repair', () => {
   it('does not claim a reload it could not verify', async () => {
     let active = true
     const settings = {
-      describe: () => active ? [{ ns: 'dsh-enhanced-traex-acp-provider', schema: {}, value: { enabled: false, command: 'traex' },
+      describe: () => active ? [{ ns: 'dsh-ray-traex-acp-provider', schema: {}, value: { enabled: false, command: 'traex' },
         revision: 1, applies: 'live' as const }] : [],
       mutate: vi.fn(async () => { active = false }),
     } satisfies SettingsService
-    const loader: FakeLoader = { entries: new Map([['dsh-enhanced-traex-acp-provider', { updated: [], refreshed: 0 }]]) }
+    const loader: FakeLoader = { entries: new Map([['dsh-ray-traex-acp-provider', { updated: [], refreshed: 0 }]]) }
     const mounted = await mount(settings, loader)
     try {
       const result = await mounted.console.configureTraex(true, '')
@@ -627,13 +627,13 @@ describe('owner console honest status and configuration repair', () => {
 
   it('forwards pending build names and the pnpm log path on every failure branch', () => {
     const logPath = '/Users/owner/.dsh/profiles/desktop/.plugin-manager/logs/operation-x/pnpm.log'
-    const generic = applyInstall({ changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+    const generic = applyInstall({ changed: false, application: 'failed', target: '@dsh-ray/lark-channel',
       error: { code: 'operation-error', diagnostic: 'network down' }, pendingBuilds: ['protobufjs@7.6.6'],
       packageResult: { kind: 'network', exitCode: 1, logPath } })
     expect(generic.pendingBuilds).toEqual(['protobufjs@7.6.6'])
     expect(generic.note).toContain(logPath)
-    const incompatible = applyInstall({ changed: false, application: 'failed', target: '@dsh-enhanced/traex-acp-provider',
-      error: { code: 'incompatible-version', incompatible: [{ name: '@dsh-enhanced/traex-acp-provider', version: '0.1.65',
+    const incompatible = applyInstall({ changed: false, application: 'failed', target: '@dsh-ray/traex-acp-provider',
+      error: { code: 'incompatible-version', incompatible: [{ name: '@dsh-ray/traex-acp-provider', version: '0.1.65',
         runtimeVersion: '0.2.2-rc.1', requirements: { '@deepseek-ai/dsh-llm': '0.2.1-rc.2' } }] },
       pendingBuilds: ['esbuild@1'], packageResult: { logPath } })
     expect(incompatible.pendingBuilds).toEqual(['esbuild@1'])
@@ -641,7 +641,7 @@ describe('owner console honest status and configuration repair', () => {
   })
 
   it('verifies keychain handles when the provider can list them, and fails soft otherwise', async () => {
-    const lark = fakeSettings([{ ns: 'dsh-enhanced-lark-channel',
+    const lark = fakeSettings([{ ns: 'dsh-ray-lark-channel',
       value: { enabled: false, appId: 'cli_0123456789abcdef', account: 'owner', tenant: 'tenant' } }])
     const missing = await mount(lark.service, undefined, undefined, undefined, { listHandles: () => [{ id: 'other-handle' }] })
     try {
@@ -664,11 +664,11 @@ describe('owner console honest status and configuration repair', () => {
   })
 
   it('maps settings.mutate refusals and repairs a stalled target instead of the generic refusal', async () => {
-    const entries = fakeSettings([{ ns: 'dsh-enhanced-other', value: {} }])
+    const entries = fakeSettings([{ ns: 'dsh-ray-other', value: {} }])
     const volatile = { ...entries.service, mutate: vi.fn(async () => { throw new Error('Config field "blob" is not volatile') }) }
     const mapped = await mount(volatile)
     try {
-      const result = await mapped.console.configureBundle('dsh-enhanced-other', { blob: 1 })
+      const result = await mapped.console.configureBundle('dsh-ray-other', { blob: 1 })
       expect(result.applied).toBe(false)
       expect(result.note).toContain('字段不能实时修改')
       expect(result.note).toContain('blob')
@@ -678,24 +678,24 @@ describe('owner console honest status and configuration repair', () => {
     const conflict = { ...entries.service, mutate: vi.fn(async () => { throw new Error('settings namespace "x" changed since it was read') }) }
     const raced = await mount(conflict)
     try {
-      expect((await raced.console.configureBundle('dsh-enhanced-other', { enabled: false })).note).toContain('CAS 冲突')
+      expect((await raced.console.configureBundle('dsh-ray-other', { enabled: false })).note).toContain('CAS 冲突')
     } finally {
       await raced.ctx.fiber.dispose()
     }
 
     // Installed + enabled but its fiber failed: show the phase, diagnostic, missing bundles and repair.
     const manager = managerWith([larkBundle(), traexBundle()],
-      [{ entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'failed',
+      [{ entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'failed',
         diagnostic: 'cannot inject assistantDelivery' },
-      { entryId: 'traex', moduleName: '@dsh-enhanced/traex-acp-provider', enabled: true, fiberPhase: 'pending' }])
+      { entryId: 'traex', moduleName: '@dsh-ray/traex-acp-provider', enabled: true, fiberPhase: 'pending' }])
     const stalled = await mount(fakeSettings([]).service, undefined, manager)
     try {
-      const result = await stalled.console.configureBundle('dsh-enhanced-lark-channel', { enabled: false })
+      const result = await stalled.console.configureBundle('dsh-ray-lark-channel', { enabled: false })
       expect(result.applied).toBe(false)
       expect(result.note).toContain('已启用但未加载')
       expect(result.note).toContain('failed')
       expect(result.note).toContain('cannot inject assistantDelivery')
-      expect(result.note).toContain('@dsh-enhanced/assistant-delivery')
+      expect(result.note).toContain('@dsh-ray/assistant-delivery')
       expect(result.note).toContain('disabled: true')
       // The same repair context answers the Feishu card's generic target refusal.
       const feishu = await stalled.console.configureFeishu('cli_0123456789abcdef', 'LARK_APP_SECRET', '', 'owner', 'tenant', false)
@@ -707,9 +707,9 @@ describe('owner console honest status and configuration repair', () => {
 
     // Active fiber but the entry exposes no live field in describe(): say that, not "not loaded".
     const active = await mount(fakeSettings([]).service, undefined,
-      managerWith([larkBundle()], [{ entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' }]))
+      managerWith([larkBundle()], [{ entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'active' }]))
     try {
-      expect((await active.console.configureBundle('dsh-enhanced-lark-channel', { enabled: false })).note)
+      expect((await active.console.configureBundle('dsh-ray-lark-channel', { enabled: false })).note)
         .toContain('没有声明任何可实时修改的配置字段')
     } finally {
       await active.ctx.fiber.dispose()
@@ -908,7 +908,7 @@ describe('owner console intake agreement (read-only)', () => {
 })
 
 const evaluationEntry = (config: unknown, extra: Record<string, unknown> = {}) =>
-  ({ id: 'include:eval', options: { id: 'dsh-enhanced-assistant-evaluation', name: '@dsh-enhanced/assistant-evaluation', config, ...extra },
+  ({ id: 'include:eval', options: { id: 'dsh-ray-assistant-evaluation', name: '@dsh-ray/assistant-evaluation', config, ...extra },
     refresh: async () => undefined })
 const loaderOf = (...entries: unknown[]) => ({ entries: () => entries })
 
@@ -925,7 +925,7 @@ describe('owner console intake agreement availability (scope-free)', () => {
     expect(readIntakeAgreementAvailability(provider, loaderOf(
       evaluationEntry({ intakeAttentionAgreementEnabled: false }, { disabled: true }),
       evaluationEntry({ intakeAttentionAgreementEnabled: true }),
-      { id: 'other', options: { id: 'other', name: '@dsh-enhanced/lark-channel', config: { intakeAttentionAgreementEnabled: false } } },
+      { id: 'other', options: { id: 'other', name: '@dsh-ray/lark-channel', config: { intakeAttentionAgreementEnabled: false } } },
     ))).toBe('available')
     expect(read).not.toHaveBeenCalled()
   })
@@ -970,12 +970,12 @@ describe('owner console intake agreement availability (scope-free)', () => {
     await mkdir(profileDir, { recursive: true })
     const patchPath = join(profileDir, 'cordis.patch.yml')
     await writeFile(patchPath, [
-      '- id: dsh-enhanced-personal-assistant',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '- id: dsh-ray-personal-assistant',
+      '  name: "@dsh-ray/personal-assistant"',
       '  disabled: true',
       '  config: {}',
-      '- id: dsh-enhanced-lark-channel',
-      '  name: "@dsh-enhanced/lark-channel"',
+      '- id: dsh-ray-lark-channel',
+      '  name: "@dsh-ray/lark-channel"',
       '  config:',
       '    enabled: true',
       '    appId: cli_aabbccddeeff0011',
@@ -993,11 +993,11 @@ describe('owner console intake agreement availability (scope-free)', () => {
     ctx.provide('settings' as never, fakeSettings([]).service as never)
     ctx.provide('pluginManager' as never, {
       listBundles: async () => [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, removable: true, rows: [] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: false, removable: true, rows: [] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
       ],
       listPlugins: async () => [
-        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'pending' },
+        { entryId: 'lark', moduleName: '@dsh-ray/lark-channel', enabled: true, fiberPhase: 'pending' },
       ],
       setBundleEnabled,
       setPluginEnabled: async () => ({ target: '', changed: false, application: 'applied' as const }),
@@ -1014,7 +1014,7 @@ describe('owner console intake agreement availability (scope-free)', () => {
       expect(status.feishu.appIdConfigured).toBe(true)
       expect(status.feishu.appId).toBe('cli_aabbccddeeff0011')
 
-      const enableRes = await svc.setBundleEnabled('@dsh-enhanced/personal-assistant', true)
+      const enableRes = await svc.setBundleEnabled('@dsh-ray/personal-assistant', true)
       expect(enableRes.applied).toBe(true)
       expect(enableRes.note).toContain('disabled')
       const updatedPatch = await readFile(patchPath, 'utf8')
@@ -1036,11 +1036,11 @@ describe('owner console intake agreement availability (scope-free)', () => {
     const patchPath = join(profileDir, 'cordis.patch.yml')
     await writeFile(patchPath, [
       '- id: custom-pa-row-id',
-      '  name: "@dsh-enhanced/personal-assistant"',
+      '  name: "@dsh-ray/personal-assistant"',
       '  disabled: true',
       '  config: {}',
-      '- id: dsh-enhanced-lark-channel',
-      '  name: "@dsh-enhanced/lark-channel"',
+      '- id: dsh-ray-lark-channel',
+      '  name: "@dsh-ray/lark-channel"',
       '  config:',
       '    enabled: true',
       '',
@@ -1054,8 +1054,8 @@ describe('owner console intake agreement availability (scope-free)', () => {
       entries: () => [
         {
           options: {
-            id: 'dsh-enhanced-lark-channel',
-            name: '@dsh-enhanced/lark-channel',
+            id: 'dsh-ray-lark-channel',
+            name: '@dsh-ray/lark-channel',
             config: {
               appId: 'cli_1122334455667788',
               secretSource: 'handle',
@@ -1067,8 +1067,8 @@ describe('owner console intake agreement availability (scope-free)', () => {
     } as never)
     ctx.provide('pluginManager' as never, {
       listBundles: async () => [
-        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, removable: true, rows: [] },
-        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-ray/personal-assistant', installed: true, enabled: false, removable: true, rows: [] },
+        { name: '@dsh-ray/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
       ],
       listPlugins: async () => [],
       setBundleEnabled: async (pkg: string) => ({ target: pkg, changed: true, application: 'restart-required' as const }),
@@ -1087,7 +1087,7 @@ describe('owner console intake agreement availability (scope-free)', () => {
       expect(status.feishu.appId).toBe('cli_1122334455667788')
 
       // Clears `disabled: true` even when patch row id is custom and matched by package name
-      const enableRes = await svc.setBundleEnabled('@dsh-enhanced/personal-assistant', true)
+      const enableRes = await svc.setBundleEnabled('@dsh-ray/personal-assistant', true)
       expect(enableRes.applied).toBe(true)
       expect(await readFile(patchPath, 'utf8')).not.toContain('disabled: true')
     } finally {

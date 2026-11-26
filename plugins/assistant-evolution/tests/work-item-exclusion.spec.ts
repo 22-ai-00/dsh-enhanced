@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { evaluationLearningProjectionDigest, type TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
+import { evaluationLearningProjectionDigest, type TrustedTaskLearningProjectionReceipt } from '@dsh-ray/assistant-evaluation'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

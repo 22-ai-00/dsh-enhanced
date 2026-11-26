@@ -563,12 +563,12 @@ jobs:
           # Report platform fixture, isolation, broker, control-plane, and
           # launchd behavior on macOS before finishing.
           pnpm run build
-          pnpm --filter @dsh-enhanced/plugin-control-plane exec vitest run --testTimeout=15000 tests/source-build.spec.ts tests/runtime-observer.spec.ts tests/in-process-reload.spec.ts tests/adoption-coordinator.spec.ts tests/adoption-coordinator-binding.spec.ts
-          pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run --testTimeout=15000 tests/native-macos.spec.ts tests/native-verifier-runner.spec.ts tests/native-resources.spec.ts tests/controller-startup.spec.ts tests/storage.spec.ts tests/index.spec.ts tests/ledger.spec.ts tests/storage-ledger.spec.ts tests/audit-archive.spec.ts tests/audit-archive-cli.spec.ts tests/diagnostics.spec.ts tests/macos-seatbelt-backend.spec.ts tests/cross-platform-config.spec.ts tests/isolated-subprocess.spec.ts
-          pnpm --filter @dsh-enhanced/assistant-actions test -- --testTimeout=15000
-          pnpm --filter @dsh-enhanced/lark-channel exec vitest run --testTimeout=15000 tests/rsi-native-profile.spec.ts tests/rsi-native-install.spec.ts tests/rsi-native-launchd.spec.ts tests/rsi-native-runtime-bootstrap.spec.ts tests/native-lifecycle-lock.spec.ts tests/rsi-local-install.spec.ts tests/rsi-release-build.spec.ts tests/rsi-source.spec.ts tests/rsi-source-cli.spec.ts tests/setup.spec.ts
-          pnpm --filter @dsh-enhanced/lark-channel exec vitest run --testTimeout=15000 tests/launchd.spec.ts tests/launchd-control.spec.ts
-          pnpm --filter @dsh-enhanced/dsh-rsi-cli exec vitest run --testTimeout=15000
+          pnpm --filter @dsh-ray/plugin-control-plane exec vitest run --testTimeout=15000 tests/source-build.spec.ts tests/runtime-observer.spec.ts tests/in-process-reload.spec.ts tests/adoption-coordinator.spec.ts tests/adoption-coordinator-binding.spec.ts
+          pnpm --filter @dsh-ray/assistant-isolation exec vitest run --testTimeout=15000 tests/native-macos.spec.ts tests/native-verifier-runner.spec.ts tests/native-resources.spec.ts tests/controller-startup.spec.ts tests/storage.spec.ts tests/index.spec.ts tests/ledger.spec.ts tests/storage-ledger.spec.ts tests/audit-archive.spec.ts tests/audit-archive-cli.spec.ts tests/diagnostics.spec.ts tests/macos-seatbelt-backend.spec.ts tests/cross-platform-config.spec.ts tests/isolated-subprocess.spec.ts
+          pnpm --filter @dsh-ray/assistant-actions test -- --testTimeout=15000
+          pnpm --filter @dsh-ray/lark-channel exec vitest run --testTimeout=15000 tests/rsi-native-profile.spec.ts tests/rsi-native-install.spec.ts tests/rsi-native-launchd.spec.ts tests/rsi-native-runtime-bootstrap.spec.ts tests/native-lifecycle-lock.spec.ts tests/rsi-local-install.spec.ts tests/rsi-release-build.spec.ts tests/rsi-source.spec.ts tests/rsi-source-cli.spec.ts tests/setup.spec.ts
+          pnpm --filter @dsh-ray/lark-channel exec vitest run --testTimeout=15000 tests/launchd.spec.ts tests/launchd-control.spec.ts
+          pnpm --filter ./packages/dsh-ray exec vitest run --testTimeout=15000
           pnpm exec vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests tests/macos-launchd-lock.spec.ts tests/macos-launchd-service.spec.ts tests/macos-purge-fallback.spec.ts tests/install-setup-runtime.spec.ts tests/ci-workflows.spec.ts tests/verify-npm-release.spec.ts tests/workspace-version-alignment.spec.ts tests/dsh-compatibility.spec.ts
 
   windows-acp-smoke:
@@ -609,23 +609,23 @@ jobs:
       - name: Test Windows mode policy
         shell: pwsh
         run: |
-          pnpm --filter @dsh-enhanced/acp test -- --testTimeout=15000
-          if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/acp tests failed with exit code $LASTEXITCODE" }
+          pnpm --filter @dsh-ray/acp test -- --testTimeout=15000
+          if ($LASTEXITCODE -ne 0) { throw "@dsh-ray/acp tests failed with exit code $LASTEXITCODE" }
 
       - name: Test Windows cross-platform package suites
         shell: pwsh
         run: |
-          Write-Host "::notice::Running @dsh-enhanced/dsh-rsi-cli Windows suite"
-          pnpm --filter @dsh-enhanced/dsh-rsi-cli exec vitest run --testTimeout=15000 tests/doctor.spec.ts tests/maintenance.spec.ts tests/process-guard.spec.ts tests/services.spec.ts tests/weburl.spec.ts tests/index.spec.ts
-          if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/dsh-rsi-cli Windows suite failed with exit code $LASTEXITCODE" }
+          Write-Host "::notice::Running dsh-ray Windows suite"
+          pnpm --filter ./packages/dsh-ray exec vitest run --testTimeout=15000 tests/doctor.spec.ts tests/maintenance.spec.ts tests/process-guard.spec.ts tests/services.spec.ts tests/weburl.spec.ts tests/index.spec.ts
+          if ($LASTEXITCODE -ne 0) { throw "dsh-ray Windows suite failed with exit code $LASTEXITCODE" }
 
-          Write-Host "::notice::Running @dsh-enhanced/assistant-isolation Windows suite"
-          pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run --testTimeout=15000 tests/index.spec.ts tests/controller-startup.spec.ts tests/grant-discovery.spec.ts tests/scoped-presentation.spec.ts tests/native-macos.spec.ts tests/native-verifier-runner.spec.ts tests/linux-repository-admission-ledger.spec.ts tests/workspace.spec.ts tests/cross-platform-config.spec.ts tests/windows-job-backend.spec.ts
-          if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/assistant-isolation Windows suite failed with exit code $LASTEXITCODE" }
+          Write-Host "::notice::Running @dsh-ray/assistant-isolation Windows suite"
+          pnpm --filter @dsh-ray/assistant-isolation exec vitest run --testTimeout=15000 tests/index.spec.ts tests/controller-startup.spec.ts tests/grant-discovery.spec.ts tests/scoped-presentation.spec.ts tests/native-macos.spec.ts tests/native-verifier-runner.spec.ts tests/linux-repository-admission-ledger.spec.ts tests/workspace.spec.ts tests/cross-platform-config.spec.ts tests/windows-job-backend.spec.ts
+          if ($LASTEXITCODE -ne 0) { throw "@dsh-ray/assistant-isolation Windows suite failed with exit code $LASTEXITCODE" }
 
-          Write-Host "::notice::Running @dsh-enhanced/assistant-actions Windows suite"
-          pnpm --filter @dsh-enhanced/assistant-actions exec vitest run --testTimeout=15000 tests/broker-protocol.spec.ts tests/github-http.spec.ts tests/github.spec.ts tests/repository-event-observation.spec.ts tests/repository-readback.spec.ts tests/verified-delivery.spec.ts tests/compensation-service.spec.ts tests/broker-core.spec.ts tests/broker-ledger.spec.ts tests/broker-ledger-migration.spec.ts tests/broker-peer-linux.spec.ts tests/service.spec.ts tests/broker-protocol-v2.spec.ts tests/broker-policy-wp08.spec.ts tests/broker-peer-cross-platform.spec.ts tests/broker-transport.spec.ts
-          if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/assistant-actions Windows suite failed with exit code $LASTEXITCODE" }
+          Write-Host "::notice::Running @dsh-ray/assistant-actions Windows suite"
+          pnpm --filter @dsh-ray/assistant-actions exec vitest run --testTimeout=15000 tests/broker-protocol.spec.ts tests/github-http.spec.ts tests/github.spec.ts tests/repository-event-observation.spec.ts tests/repository-readback.spec.ts tests/verified-delivery.spec.ts tests/compensation-service.spec.ts tests/broker-core.spec.ts tests/broker-ledger.spec.ts tests/broker-ledger-migration.spec.ts tests/broker-peer-linux.spec.ts tests/service.spec.ts tests/broker-protocol-v2.spec.ts tests/broker-policy-wp08.spec.ts tests/broker-peer-cross-platform.spec.ts tests/broker-transport.spec.ts
+          if ($LASTEXITCODE -ne 0) { throw "@dsh-ray/assistant-actions Windows suite failed with exit code $LASTEXITCODE" }
 
           Write-Host "::notice::Running Windows cross-platform root tests"
           pnpm exec vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests tests/ci-workflows.spec.ts tests/verify-npm-release.spec.ts tests/workspace-version-alignment.spec.ts tests/dsh-compatibility.spec.ts tests/root-test-sequencer.spec.ts tests/require-pnpm-publish.spec.ts
@@ -633,7 +633,7 @@ jobs:
 
       - name: Pack ACP plugin
         shell: pwsh
-        run: pnpm --filter @dsh-enhanced/acp pack --pack-destination $env:RUNNER_TEMP
+        run: pnpm --filter @dsh-ray/acp pack --pack-destination $env:RUNNER_TEMP
 
       - name: Install DSH and packed plugin in a clean profile
         shell: pwsh
@@ -644,7 +644,7 @@ jobs:
           $env:DSH_HOME = Join-Path $env:RUNNER_TEMP "dsh-home"
           $acpPackage = Get-Content "./plugins/acp/package.json" | ConvertFrom-Json
           $acpVersion = $acpPackage.version
-          $tarball = Join-Path $env:RUNNER_TEMP "dsh-enhanced-acp-$acpVersion.tgz"
+          $tarball = Join-Path $env:RUNNER_TEMP "dsh-ray-acp-$acpVersion.tgz"
           $installOutput = (& dsh plugin --profile acp add $tarball 2>&1 | Out-String)
           $installExit = $LASTEXITCODE
           Write-Output $installOutput

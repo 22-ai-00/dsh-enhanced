@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-policy
+# @dsh-ray/assistant-policy
 
 个人助理的统一授权边界：默认拒绝、单调工具 guard、策略自有硬预算、持久审批提案、紧急停止和脱敏审计。后续 Memory、Wiki、Automation、Channel 与 Credential 插件只通过 `ctx.assistantPolicy` 请求授权，不应各自实现一套可绕过的规则。
 
@@ -7,7 +7,7 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-policy
+dsh plugin --profile web add @dsh-ray/assistant-policy
 dsh --profile web --dump-config
 ```
 
@@ -18,8 +18,8 @@ dsh --profile web --dump-config
 下面只允许 `primary` preset 在指定 workspace 的前台会话读取文件；`bash` 和后台任务仍会被拒绝：
 
 ```yaml
-- id: dsh-enhanced-assistant-policy
-  name: '@dsh-enhanced/assistant-policy'
+- id: dsh-ray-assistant-policy
+  name: '@dsh-ray/assistant-policy'
   config:
     databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
     proposalMaintenanceIntervalMs: 15000
@@ -146,7 +146,7 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 - 子进程：无。
 - 凭据：运行时的 Policy service 不读取或保存凭据值。审计按敏感 key/value、shell `command`、授权头、token、password、path/cwd 做脱敏，资源 id 仅保存 SHA-256。自动 reviewer 输入只要需要任何 secret 脱敏就失去自动放行资格并转人工。包另附带三个安装期 CLI（`dsh-permission-setup`、`dsh-model-setup`、`dsh-plugin-setup`），仅供安装器/部署者手动调用，不在 Cordis 运行时加载。`dsh-plugin-setup` 见下方[插件配置 CLI](#插件配置-clidsh-plugin-setup)。安装器始终传 `--profile <name>`：前两个 CLI 先校验所选 DSH Host 并读取目标 profile 的原生 `--dump-config`，再原子改写其 `cordis.patch.yml`，分别写入 `permission.defaultPreset` 与 `agent-default-model`（自定义网关还写入 `llm-pi-ai.providers.<route>`），保留原生有效整段配置中的其它预设、网关、注释和 `!!js`。读取或组合失败时拒绝写入。若省略 `--profile`，CLI 仍写旧版全局 `settings.yaml`；DSH 0.2 在下次启动时把它一次性导入第一个启动的 profile，不适合多 profile 设置。目标配置对应区段尚留在 `settings.yaml` 时，显式 `--profile` 拒绝写入，须先把旧设置迁移至目标 profile，避免首启覆盖。显式 `--store-key` 时 API Key 仅从环境变量读取，原子写入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`），密钥绝不作为命令行参数、缺失时 fail-closed。agent route（如 `traex-agent` / `agy-agent`）不涉及 API Key；`--enable-in-profile` 与 `--profile` 同时使用时必须同名。
 
-自动发现本机 agent 时可调用 `dsh-model-setup --profile web --provider traex-agent --enable-in-profile web --enable-only [--agent-command /absolute/path/to/traex]`（或 `--provider agy-agent` 写入同一包行上的 `config.agyEnabled` / `config.agyCommand`，互不覆盖 `traex` 的 `enabled` / `command`）：仅启用目标 profile 的 route，不改模型选择。若希望在没有显式选择时把它设为该 profile 的默认模型，改用 `--default-if-absent`；CLI 用 YAML AST 检查待导入的 `settings.yaml`、home patch 和目标 profile patch，已有 `agent-default-model` 就保留，三处都没有才在目标 profile patch 添加默认模型行。两个模式互斥且仅适用于带 `--enable-in-profile` 的 agent route；启用 route 时在目标行同时写 `disabled: false` 和对应启用键（`config.enabled: true` 或 `config.agyEnabled: true`），保留 profile 的已有配置；没有 profile 配置时继承 home patch 最后生效的整段配置，并保留 `!!js` 表达式。`--agent-command` 必须是绝对路径，只填缺失的命令键（`config.command` 或 `config.agyCommand`），保留已有命令与 `cwd`；当 `PATH` 缺少 `dsh` 时按 `O_NOFOLLOW` 与宿主校验回退到 `$DSH_HOME/.dsh-rsi-host.json` 绑定的批准 Host。显式 model setup 传 `--profile` 时只设置目标 profile；不传时保留旧版 `settings.yaml` 行为。
+自动发现本机 agent 时可调用 `dsh-model-setup --profile web --provider traex-agent --enable-in-profile web --enable-only [--agent-command /absolute/path/to/traex]`（或 `--provider agy-agent` 写入同一包行上的 `config.agyEnabled` / `config.agyCommand`，互不覆盖 `traex` 的 `enabled` / `command`）：仅启用目标 profile 的 route，不改模型选择。若希望在没有显式选择时把它设为该 profile 的默认模型，改用 `--default-if-absent`；CLI 用 YAML AST 检查待导入的 `settings.yaml`、home patch 和目标 profile patch，已有 `agent-default-model` 就保留，三处都没有才在目标 profile patch 添加默认模型行。两个模式互斥且仅适用于带 `--enable-in-profile` 的 agent route；启用 route 时在目标行同时写 `disabled: false` 和对应启用键（`config.enabled: true` 或 `config.agyEnabled: true`），保留 profile 的已有配置；没有 profile 配置时继承 home patch 最后生效的整段配置，并保留 `!!js` 表达式。`--agent-command` 必须是绝对路径，只填缺失的命令键（`config.command` 或 `config.agyCommand`），保留已有命令与 `cwd`；当 `PATH` 缺少 `dsh` 时按 `O_NOFOLLOW` 与宿主校验回退到 `$DSH_HOME/.dsh-ray-host.json` 绑定的批准 Host。显式 model setup 传 `--profile` 时只设置目标 profile；不传时保留旧版 `settings.yaml` 行为。
 - 浏览器：无。
 - 安装脚本：无 npm 生命周期脚本；上述 CLI 仅在被显式调用时运行。
 
@@ -158,7 +158,7 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 
 ### Finite action broker preauthorization
 
-`evaluateAgent` checks live identity and rules without consuming budgets or recording authorization; the broker charges `authorizeAgent` once before credential acquisition and dispatch with a durable action ID as its idempotency key. Polling must use the read-only method. `registerPreauthorizedTool` accepts only exact definitions from their owning trusted Fibers: the approved GitHub action tools from `dsh-enhanced-assistant-actions`, `isolation_run`/`isolation_grants` from Isolation, the approved Goals tools from Goals, `skill_run`/`skill_status` from Skills, and the explicitly listed WorkItems tools from `AssistantWorkItemsService`. The registration expires with the caller scope; same-name scoped shadows cannot borrow it. This skips native per-call approval only when the owned predicate remains valid. Monotonic policy denials, cancellation, revocation and other tool middleware still apply. It is a trusted Host integration contract, not isolation against malicious plugins in the same Host process.
+`evaluateAgent` checks live identity and rules without consuming budgets or recording authorization; the broker charges `authorizeAgent` once before credential acquisition and dispatch with a durable action ID as its idempotency key. Polling must use the read-only method. `registerPreauthorizedTool` accepts only exact definitions from their owning trusted Fibers: the approved GitHub action tools from `dsh-ray-assistant-actions`, `isolation_run`/`isolation_grants` from Isolation, the approved Goals tools from Goals, `skill_run`/`skill_status` from Skills, and the explicitly listed WorkItems tools from `AssistantWorkItemsService`. The registration expires with the caller scope; same-name scoped shadows cannot borrow it. This skips native per-call approval only when the owned predicate remains valid. Monotonic policy denials, cancellation, revocation and other tool middleware still apply. It is a trusted Host integration contract, not isolation against malicious plugins in the same Host process.
 
 `assistant-isolation` may also register only its exact `isolation_run` ToolDefinition for finite-grant risk preauthorization. This suppresses a redundant approval prompt, while native tool Policy denials and call budgets remain effective. Isolation separately authorizes `tool:isolation:<grant-id>` once per new job with a persistent idempotency key; polling and result replay do not consume that grant-operation budget. A separately configured `tool:isolation_run` budget continues to count tool calls. See the [Isolation authorization contract](../assistant-isolation/README.md).
 
@@ -174,13 +174,13 @@ For native skill benchmark cells, `delegatedSkillToolPreauthorizationVersion() =
 
 ### WorkItem Growth 的有限 create-only 预授权
 
-`workItemGrowthToolPreauthorizationVersion()` 仅在当前 Policy generation 活跃时返回 `1`。`registerPreauthorizedTool` 允许 `dsh-enhanced-assistant-growth-driver` Fiber 为四个精确工具定义注册实时 predicate：`plugin_source_gaps`、`plugin_source_read`、`plugin_source_create`、`plugin_source_job_status`。不接受同名伪造定义、其他 Fiber、`growth_*` 别名、prepare、targets 或 revise 工具；注册随拥有它的 Cordis effect 释放；返回的 disposer 会同时撤销 grant 并移除 Fiber 上的 effect，重复调用仍幂等，常驻 Growth Fiber 的连续 run 不累积捕获旧 Agent/definition 的注册。
+`workItemGrowthToolPreauthorizationVersion()` 仅在当前 Policy generation 活跃时返回 `1`。`registerPreauthorizedTool` 允许 `dsh-ray-assistant-growth-driver` Fiber 为四个精确工具定义注册实时 predicate：`plugin_source_gaps`、`plugin_source_read`、`plugin_source_create`、`plugin_source_job_status`。不接受同名伪造定义、其他 Fiber、`growth_*` 别名、prepare、targets 或 revise 工具；注册随拥有它的 Cordis effect 释放；返回的 disposer 会同时撤销 grant 并移除 Fiber 上的 effect，重复调用仍幂等，常驻 Growth Fiber 的连续 run 不累积捕获旧 Agent/definition 的注册。
 
 Growth 调用方仍须独立核验显式启用的 WorkItem v2 run、真实来源、owner、工具 realm、期限和有限额度。Policy 不由工具名称推定这些授权，也不授予通用 create 权限。带 `denialReason` 的 predicate 拒绝或抛错会直接拒绝，不能转人工审批延长冻结授权；普通独立 Policy deny、预算、紧急停止和工具 guard 始终保留。本入口不修改 Approval 配置、不生成额外批准票据，也不扩大候选工具范围。
 
 ## 插件配置 CLI（dsh-plugin-setup）
 
-`dsh-plugin-setup` 在单个 profile 上列出、启用、停用和修改已安装 `@dsh-enhanced/*` 插件，写入 `$DSH_HOME/profiles/<p>/cordis.patch.yml`。它不安装包（安装用 `dsh plugin --profile <p> add <pkg>`），也不在运行时加载。
+`dsh-plugin-setup` 在单个 profile 上列出、启用、停用和修改已安装 `@dsh-ray/*` 插件，写入 `$DSH_HOME/profiles/<p>/cordis.patch.yml`。它不安装包（安装用 `dsh plugin --profile <p> add <pkg>`），也不在运行时加载。
 
 ```sh
 bin=~/.dsh/profiles/web/node_modules/.bin/dsh-plugin-setup
@@ -198,7 +198,7 @@ $bin preset dogfood --dry-run          # macOS 记忆/偏好通道日常自用�
 $bin preset dogfood --yes
 ```
 
-插件可写短名（`work-items`）、包名或行 id。只有一个 profile 时自动选中，否则需 `--profile`（或 `DSH_PROFILE`）；`--dsh-home` 默认 `DSH_HOME` / `~/.dsh`。`--json` 输出结构化结果，`--dry-run` 不写文件。改动在下次 `dsh-rsi restart --profile <p>` 后生效。
+插件可写短名（`work-items`）、包名或行 id。只有一个 profile 时自动选中，否则需 `--profile`（或 `DSH_PROFILE`）；`--dsh-home` 默认 `DSH_HOME` / `~/.dsh`。`--json` 输出结构化结果，`--dry-run` 不写文件。改动在下次 `dsh-ray restart --profile <p>` 后生效。
 
 行为：
 
@@ -230,13 +230,13 @@ $bin preset dogfood --yes
 两项 `manual` 在每次运行都以 skipped 原因出现，表示"需要显式 owner 动作"，不是失败。预设不改包默认值、不改 Policy/owner routes/密封状态，也不加载已禁用的插件。onboarding 等程序可直接调用：
 
 ```ts
-import { applyRecommendedPluginPreset } from '@dsh-enhanced/assistant-policy/plugin-setup'
+import { applyRecommendedPluginPreset } from '@dsh-ray/assistant-policy/plugin-setup'
 
 const result = await applyRecommendedPluginPreset({ dshHome, profile }, { dryRun: false })
 // result: { profile, patchPath, changed, dryRun, changes: [{ id, key, from, to }], skipped: [{ id, reason }] }
 ```
 
-安装脚本可用 `scripts/install/common.sh` 中的 `dsh_enhanced_apply_plugin_preset <profile> <dsh_home> <dry_run> [preset]`。全新 managed supervised 安装会在 owner 学习配置生成后隐式再应用一次 `recommended`（幂等；显式 `--plugin-preset skip`、引导中选择否或已有 profile 的显式配置优先），其他场景不隐式调用。
+安装脚本可用 `scripts/install/common.sh` 中的 `dsh_ray_apply_plugin_preset <profile> <dsh_home> <dry_run> [preset]`。全新 managed supervised 安装会在 owner 学习配置生成后隐式再应用一次 `recommended`（幂等；显式 `--plugin-preset skip`、引导中选择否或已有 profile 的显式配置优先），其他场景不隐式调用。
 
 ### dogfood 预设（R3 全量自迭代日常自用）
 

@@ -3,7 +3,7 @@ import type { CreationCapabilityForegroundCallWitness, CreationCapabilityObserva
   CreationCapabilityTool } from './creation-capability-types.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import type { PluginCreationVerificationCertificate, PluginRevisionRegressionCertificate,
-  PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+  PluginRevisionVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 
 /** Independent finite rollback authorization; deliberately separate from the adoption grant. */
 export interface RevisionCapabilityRollbackGrant {

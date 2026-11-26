@@ -20,7 +20,7 @@ import { validateSourceRevisionBinding, type SourceRevisionBinding } from './sou
 import { validateSourceCreationFiles, validateSourceCreationGrant, normalizeSourceCreationGrant,
   type CandidatePluginKind, type SourceCreationBinding } from './source-creation.js'
 import { anySourceGrowthRunDigest as sourceGrowthRunDigest, growthObjectDigest, isSourceOwnerContinuation, isPluginRevisionTaskSource, validateAnySourceGrowthRunBinding, validatePluginRevisionRegressionCertificate, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate, validateRevisionAcceptanceAuthorityRef,
-  type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate, type PluginRevisionVerificationCertificate, type RevisionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate, type PluginRevisionVerificationCertificate, type RevisionAcceptanceAuthorityRef } from '@dsh-ray/assistant-growth-contract'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { OwnerInstructionReviewBudget, OwnerInstructionReviewFreeze, OwnerInstructionReviewWindow,
   SourceJobCompletion, SourceJobIntent, SourceJobOwnerReceipt, SourceJobRecord, SourceJobStatus,

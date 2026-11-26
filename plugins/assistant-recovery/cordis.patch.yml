@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-recovery
-      name: '@dsh-enhanced/assistant-recovery'
+    - id: dsh-ray-assistant-recovery
+      name: '@dsh-ray/assistant-recovery'
       inject:
         - assistantAutomations
         - assistantDelivery

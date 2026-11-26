@@ -3,8 +3,8 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { isAbsolute, join } from 'node:path'
-import { acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
-import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import type { NativeAdapterBinding, NativeAdapterFactory, NativeModelConfig } from './native.js'
 import type { BenchmarkBudget } from './types.js'
 import { benchmarkAssert, benchmarkInteger, benchmarkSnapshot } from './schema.js'
@@ -164,7 +164,7 @@ export async function createNativeSkillGoalRuntime(input: NativeSkillGoalOptions
         ...[...tools, 'isolation:benchmark-work'].map(id => ({ id: `allow-${id.replace(':', '-')}`, effect: 'allow' as const, subject, actions: ['execute'], resource: { kind: 'tool' as const, id }, context: { initiators: ['external' as const] } })),
         ...(captured || frozen.source ? [
           { id: 'native-skills-use', effect: 'allow' as const, subject, actions: ['inspect', 'run', ...(frozen.source ? ['draft'] : [])], resource: { kind: 'evolution' as const, id: 'verified-workflows' }, context: { initiators: ['external' as const] } },
-          { id: 'native-skills-compare', effect: 'allow' as const, subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-skills', workspace: input.workspace }, actions: ['compare'], resource: { kind: 'evolution' as const, id: 'verified-workflows' }, context: { initiators: ['background' as const] } },
+          { id: 'native-skills-compare', effect: 'allow' as const, subject: { kind: 'background' as const, id: 'dsh-ray-assistant-skills', workspace: input.workspace }, actions: ['compare'], resource: { kind: 'evolution' as const, id: 'verified-workflows' }, context: { initiators: ['background' as const] } },
           ...(frozen.source ? [{ id: 'native-skills-capture', effect: 'allow' as const, subject, actions: ['draft'], resource: { kind: 'evolution' as const, id: 'verified-workflows' }, context: { initiators: ['background' as const] } }] : []),
         ] : []),
       ] })
@@ -175,7 +175,7 @@ export async function createNativeSkillGoalRuntime(input: NativeSkillGoalOptions
       ...(frozen.source ? { acceptanceValidityMs: frozen.source.validityMs } : {}) })
     goals = services.goals
     if (captured || frozen.source) {
-      const skillsPackage = '@dsh-enhanced/assistant-skills', queryPackage = '@deepseek-ai/dsh-session-query'
+      const skillsPackage = '@dsh-ray/assistant-skills', queryPackage = '@deepseek-ai/dsh-session-query'
       const skillsModule = await import(skillsPackage); live()
       await plugin(ctx, skillsModule.default, { databasePath: join(owner.runtimeRoot, 'skills.sqlite'), allowedTools: ['isolation_run'], maxDurationMs: Math.min(300000, frozen.budget.durationMs), candidateTtlMs: frozen.source?.validityMs ?? frozen.budget.durationMs }); live()
       skills = ctx.get('assistantSkills' as never) as unknown as NativeSkillsHost

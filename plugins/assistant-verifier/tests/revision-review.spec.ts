@@ -7,16 +7,16 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { sourceGrowthEvidenceDigest, sourceGrowthRunDigest, verifyPluginRevisionVerificationCertificate,
-  type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  type SourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { CreationReviewRuntime, compileCreationReviewConfig } from '../src/creation-review.ts'
 import { RevisionReviewRuntime, compileRevisionReviewConfig, type RevisionReviewConfig } from '../src/revision-review.ts'
 import { AssistantVerifierService } from '../src/service.ts'
 
 const observer = vi.hoisted(() => ({ run: vi.fn(), close: vi.fn(async () => {}) }))
-vi.mock('@dsh-enhanced/assistant-isolation', () => ({
+vi.mock('@dsh-ray/assistant-isolation', () => ({
   NativeMacVerifierRunner: class {
     run(...args: unknown[]) { return observer.run(...args) }
     close() { return observer.close() }

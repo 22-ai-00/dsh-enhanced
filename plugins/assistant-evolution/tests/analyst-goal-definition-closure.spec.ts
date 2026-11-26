@@ -13,15 +13,15 @@ import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import {
   acceptanceDigest,
   goalDefinitionSituation,
-} from '@dsh-enhanced/task-acceptance-contract'
-import { AssistantPolicyService, setApprovalReviewer } from '@dsh-enhanced/assistant-policy'
-import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
+} from '@dsh-ray/task-acceptance-contract'
+import { AssistantPolicyService, setApprovalReviewer } from '@dsh-ray/assistant-policy'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-ray/assistant-verifier'
 import type {
   AcceptedExecution,
   AcceptanceTask,
   TaskAcceptanceProducer,
   TaskAcceptanceRegistration,
-} from '@dsh-enhanced/assistant-verifier'
+} from '@dsh-ray/assistant-verifier'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
   AssistantEvolutionService,
@@ -295,7 +295,7 @@ async function fixture(): Promise<Target> {
   ctx.provide('assistantDelivery', {
     prepareAgentApproval: () => Object.freeze({
       routeVersion: 2,
-      sourceId: 'dsh-enhanced-assistant-evolution',
+      sourceId: 'dsh-ray-assistant-evolution',
       bindingId: 'analyst-owner-route',
       bindingVersion: 3,
       bindingGeneration: 2,

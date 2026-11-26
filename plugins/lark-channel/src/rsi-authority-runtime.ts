@@ -42,10 +42,10 @@ const EXECUTABLES: Record<Executable, string> = {
 const MAX_ENTRIES = 512, MAX_FILE = 160_000_000, MAX_TOTAL = 256_000_000
 // A finite budget for long installed paths, shared by every receipt reader and writer.
 export const RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES = 2 * 1024 * 1024
-const CONTRACT_PACKAGE = '@dsh-enhanced/assistant-growth-contract'
-const CONTROL_PACKAGE = '@dsh-enhanced/plugin-control-plane'
+const CONTRACT_PACKAGE = '@dsh-ray/assistant-growth-contract'
+const CONTROL_PACKAGE = '@dsh-ray/plugin-control-plane'
 const CONTRACT_ROOT = `node_modules/${CONTRACT_PACKAGE}`
-const RUNTIME_DIRECTORIES = ['bin', 'lib', 'node_modules', 'node_modules/@dsh-enhanced', CONTRACT_ROOT, `${CONTRACT_ROOT}/lib`]
+const RUNTIME_DIRECTORIES = ['bin', 'lib', 'node_modules', 'node_modules/@dsh-ray', CONTRACT_ROOT, `${CONTRACT_ROOT}/lib`]
 function fail(message: string): never { throw new Error(`rsi authority runtime: ${message}`) }
 function hash(bytes: Buffer | string): string { return createHash('sha256').update(bytes).digest('hex') }
 function serializeReceipt(runtime: RsiAuthorityRuntime, entries: Entry[]): Buffer {
@@ -97,7 +97,7 @@ async function managedHoistedProof(source: ProfileSource, packageRoot: string, c
   manifest: { dependencies?: Record<string, unknown> }, signal: AbortSignal): Promise<SourceProof[] | undefined> {
   const profileRoot = join(source.physicalHome, 'profiles', source.profile)
   const modules = join(profileRoot, 'node_modules')
-  const namespace = join(modules, '@dsh-enhanced')
+  const namespace = join(modules, '@dsh-ray')
   if (packageRoot !== join(namespace, 'plugin-control-plane')
     || contractRoot !== join(namespace, 'assistant-growth-contract')) return undefined
   if (manifest.dependencies?.[CONTRACT_PACKAGE] !== version) fail('managed hoisted contract declaration differs')
@@ -176,7 +176,7 @@ async function sourceAssets(packageRoot: string, nodePath: string, signal: Abort
   const resolvedContract = createRequire(join(packageRoot, 'package.json')).resolve(`${CONTRACT_PACKAGE}/package.json`)
   const contractRoot = dirname(await realpath(resolvedContract))
   const edges = [join(packageRoot, 'node_modules', CONTRACT_PACKAGE)]
-  if (basename(dirname(packageRoot)) === '@dsh-enhanced' && basename(dirname(dirname(packageRoot))) === 'node_modules'
+  if (basename(dirname(packageRoot)) === '@dsh-ray' && basename(dirname(dirname(packageRoot))) === 'node_modules'
     && basename(dirname(dirname(dirname(dirname(packageRoot))))) === '.pnpm') {
     edges.push(join(dirname(packageRoot), 'assistant-growth-contract'))
   }
@@ -315,7 +315,7 @@ export async function replaceRsiAuthorityRuntimeInStage(input: {
   const final = join(input.logicalHome, 'rsi-authority-runtimes', input.profile)
   if (previous.runtime.root !== final) fail('previous runtime root changed')
   const physical = join(parent, input.profile)
-  const packageRoot = options.packageRoot ?? dirname(createRequire(import.meta.url).resolve('@dsh-enhanced/plugin-control-plane/package.json'))
+  const packageRoot = options.packageRoot ?? dirname(createRequire(import.meta.url).resolve('@dsh-ray/plugin-control-plane/package.json'))
   const nodePath = await realpath(options.nodePath ?? process.execPath)
   if (!exactPath(packageRoot) || !exactPath(nodePath)) fail('source paths must be canonical')
   const source = await sourceAssets(packageRoot, nodePath, signal,
@@ -377,7 +377,7 @@ export async function prepareRsiAuthorityRuntime(input: { dshHome: string; profi
   if (!exactPath(input.dshHome) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(input.profile)) fail('invalid home or profile')
   if (process.platform !== 'linux') fail('Linux is required')
   await io.directory(input.dshHome, false)
-  const packageRoot = options.packageRoot ?? dirname(createRequire(import.meta.url).resolve('@dsh-enhanced/plugin-control-plane/package.json'))
+  const packageRoot = options.packageRoot ?? dirname(createRequire(import.meta.url).resolve('@dsh-ray/plugin-control-plane/package.json'))
   const nodePath = await realpath(options.nodePath ?? process.execPath)
   if (!exactPath(packageRoot) || !exactPath(nodePath)) fail('source paths must be canonical')
   const parent = join(input.dshHome, 'rsi-authority-runtimes')

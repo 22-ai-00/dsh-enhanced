@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 // Simulate an installation that omitted the optional Evaluation peer: the
 // guard must fail closed with a readable reason instead of crashing at module load.
-vi.mock('@dsh-enhanced/assistant-evaluation/benchmark', () => {
+vi.mock('@dsh-ray/assistant-evaluation/benchmark', () => {
   throw new Error('evaluation benchmark module unavailable')
 })
 

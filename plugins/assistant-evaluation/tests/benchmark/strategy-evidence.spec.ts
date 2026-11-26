@@ -2,7 +2,7 @@ import { linkSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, s
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
 import { benchmarkSchedule } from '../../src/benchmark/schema.ts'
 import { strategyBenchmarkCapabilityVersions, strategyBenchmarkJournalPlan, strategyBenchmarkProtocol, type StrategyBenchmarkPlan } from '../../src/benchmark/strategy-plan.ts'
 import { StrategyEvidenceStore, strategyEvidenceProtocol, strategyFailureProtocol, type StrategyEvidenceWrite } from '../../src/benchmark/strategy-evidence.ts'

@@ -5,7 +5,7 @@ import Schema from '@deepseek-ai/schemastery'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import type {
   PreferenceMemoryPromotionRegistration,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import {
   PREFERENCE_MEMORY_PROMOTION_PROTOCOL,
   brandPreferenceMemoryPromotionProducer,
@@ -13,7 +13,7 @@ import {
   validatePreferenceMemoryPromotionCancellationReceipt,
   validatePreferenceMemoryPromotionResult,
   validatePreferenceMemoryPromotionSubmissionReceipt,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import {
   DELIVERY_PREFERENCE_PROJECTION_PROTOCOL,
   isTrustedDeliveryPreferenceProducer,
@@ -30,8 +30,8 @@ import {
   type DeliveryPreferenceObservation,
   type DeliveryPreferenceProducer,
   type DeliveryPreferenceRegistration,
-} from '@dsh-enhanced/assistant-delivery'
-import type { AssistantPolicyService, PolicyDecision } from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-delivery'
+import type { AssistantPolicyService, PolicyDecision } from '@dsh-ray/assistant-policy'
 import { PreferenceStore, PreferenceStoreError, canonicalPreferenceScope } from './store.js'
 import type {
   PreferenceForgetResult,
@@ -124,7 +124,7 @@ function serviceIdentity(value: object): object {
 }
 
 /** Fixed Policy subject used by the non-model supervised-growth runbook. */
-export const HOST_RECOVERY_BACKGROUND_ID = 'dsh-enhanced-assistant-recovery'
+export const HOST_RECOVERY_BACKGROUND_ID = 'dsh-ray-assistant-recovery'
 
 const preferenceHostScopeBrand: unique symbol = Symbol('preference-learning.host-scope')
 

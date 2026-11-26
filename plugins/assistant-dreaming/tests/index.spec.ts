@@ -11,9 +11,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 }
 const bundle = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
 
-describe('dsh-enhanced-assistant-dreaming entrypoint', () => {
+describe('dsh-ray-assistant-dreaming entrypoint', () => {
   test('exports stable identity, service and validated config', () => {
-    expect(name).toBe('dsh-enhanced-assistant-dreaming')
+    expect(name).toBe('dsh-ray-assistant-dreaming')
     expect(version).toBe(manifest.version)
     expect(plugin).toBe(AssistantDreamingService)
     expect(Config).toBe(AssistantDreamingService.Config)
@@ -28,8 +28,8 @@ describe('dsh-enhanced-assistant-dreaming entrypoint', () => {
     ])
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(bundle).toContain('- insert:')
-    expect(bundle).toContain('id: dsh-enhanced-assistant-dreaming')
-    expect(bundle).toContain("name: '@dsh-enhanced/assistant-dreaming'")
+    expect(bundle).toContain('id: dsh-ray-assistant-dreaming')
+    expect(bundle).toContain("name: '@dsh-ray/assistant-dreaming'")
     // The bundle row carries no config: installing the package is a dormant,
     // zero-write state and enabling is a separate owner decision.
     expect(bundle).not.toContain('enabled: true')
@@ -44,13 +44,13 @@ describe('dsh-enhanced-assistant-dreaming entrypoint', () => {
       expect(manifest.dependencies?.[peer]).toBeUndefined()
     }
     for (const sibling of [
-      '@dsh-enhanced/assistant-automations',
-      '@dsh-enhanced/assistant-delivery',
-      '@dsh-enhanced/assistant-evaluation',
-      '@dsh-enhanced/assistant-goals',
-      '@dsh-enhanced/assistant-policy',
-      '@dsh-enhanced/assistant-skills',
-      '@dsh-enhanced/personal-memory',
+      '@dsh-ray/assistant-automations',
+      '@dsh-ray/assistant-delivery',
+      '@dsh-ray/assistant-evaluation',
+      '@dsh-ray/assistant-goals',
+      '@dsh-ray/assistant-policy',
+      '@dsh-ray/assistant-skills',
+      '@dsh-ray/personal-memory',
     ]) {
       expect(manifest.peerDependencies?.[sibling]).toBeTruthy()
       expect(manifest.peerDependenciesMeta?.[sibling]?.optional).toBe(true)
@@ -58,7 +58,7 @@ describe('dsh-enhanced-assistant-dreaming entrypoint', () => {
     }
     expect(Object.keys(manifest.dependencies ?? {}).sort()).toEqual([
       '@deepseek-ai/schemastery',
-      '@dsh-enhanced/task-acceptance-contract',
+      '@dsh-ray/task-acceptance-contract',
     ])
   })
 

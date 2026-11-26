@@ -16,11 +16,11 @@ import {
   type EvaluationLearningEvidenceTuple,
   type EvaluationLearningWriterFenceResult,
   type TrustedTaskLearningProjectionReceipt,
-} from '@dsh-enhanced/assistant-evaluation'
+} from '@dsh-ray/assistant-evaluation'
 import type {
   TrustedDeliveryPresentationProducer,
   TrustedDeliveryPresentationRegistration,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import type { AssistantGoalsAdvicePort } from './goals-port.js'
 import type {
   ApprovalDispatchRoute,
@@ -29,11 +29,11 @@ import type {
   ApprovalProposalResult,
   ApprovalProposalSnapshot,
   AssistantPolicyService,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import {
   ApprovalSettlementConflict,
   validateApprovalSettlement,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import { buildGuidance, buildGuidanceSnapshot } from './guidance.js'
 import { evolutionMutationReview } from './review.js'
 import {
@@ -122,7 +122,7 @@ const configSchema = Schema.object({
   autonomousRollback: Schema.boolean().default(true),
 }) as Schema<Config>
 
-const evolutionApprovalSource = 'dsh-enhanced-assistant-evolution'
+const evolutionApprovalSource = 'dsh-ray-assistant-evolution'
 
 interface EvolutionApprovalDelivery {
   prepareAgentApproval(agent: Agent | undefined, input: { sourceId: string }): ApprovalDispatchRoute
@@ -168,7 +168,7 @@ export class AssistantEvolutionError extends Error {
 }
 
 /** Fixed Policy subject used by the non-model supervised-growth runbook. */
-export const HOST_RECOVERY_BACKGROUND_ID = 'dsh-enhanced-assistant-recovery'
+export const HOST_RECOVERY_BACKGROUND_ID = 'dsh-ray-assistant-recovery'
 
 /** The only Automation allowed to use the model-visible analyst capability. */
 export const SUPERVISED_GROWTH_ANALYST_AUTOMATION_ID =

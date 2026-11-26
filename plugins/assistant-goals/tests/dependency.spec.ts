@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { assertGoalDependenciesAchieved, goalDependencies } from '../src/dependency.ts'
 import type { GoalOutcomeView } from '../src/outcome.ts'
 import type { GoalRecord } from '../src/types.ts'

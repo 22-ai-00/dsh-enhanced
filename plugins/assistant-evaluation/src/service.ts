@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type SkillRegistry from '@deepseek-ai/dsh-skill'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import Schema from '@deepseek-ai/schemastery'
-import { acceptanceDigest, goalDefinitionSituation, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest, goalDefinitionSituation, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
 import {
   EvaluationStore,
   EvaluationStoreError,

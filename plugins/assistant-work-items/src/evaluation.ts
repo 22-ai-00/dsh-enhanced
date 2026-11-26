@@ -4,7 +4,7 @@ import type {
   TrustedWorkItemEvaluationRegistration,
   WorkItemEvaluationEvidenceState as WorkItemEvaluationEvidenceStateContract,
   WorkItemSettledBy as WorkItemEvaluationSettledByContract,
-} from '@dsh-enhanced/assistant-evaluation'
+} from '@dsh-ray/assistant-evaluation'
 import type { WorkItemExecutionMetrics, WorkItemStore } from './store.js'
 import type {
   WorkItemEvaluationState,

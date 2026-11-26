@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { defaultHostAttestationPolicy, type LiveQualificationAuthorityConfig, type PluginControlTrustConfig,
   type SourceAdoptionAuthorityConfig, type SourceApprovalAuthorityConfig, type SourceReleaseAuthorityConfig,
-  type SourceReleasePhase, type SystemdHostAuthorityConfig, type TaskObservationAuthorityConfig } from '@dsh-enhanced/plugin-control-plane'
+  type SourceReleasePhase, type SystemdHostAuthorityConfig, type TaskObservationAuthorityConfig } from '@dsh-ray/plugin-control-plane'
 
 import { rsiAuthorityRoles, type RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { Pin, RsiAuthorityRuntime } from './rsi-authority-runtime.js'
@@ -109,7 +109,7 @@ export function compileRsiAuthorityConfigs(input: RsiAuthorityConfigInput): {
     || new Set(reviews.plugins).size !== reviews.plugins.length) fail('source policies must be distinct and finite')
   for (const policy of input.policies) {
     if (policy.targetBranch !== source.baseline.targetBranch || policy.dshBaseline !== executor.version
-      || policy.packageName !== `@dsh-enhanced/${policy.candidateId}` || policy.packagePath !== `plugins/${policy.candidateId}`
+      || policy.packageName !== `@dsh-ray/${policy.candidateId}` || policy.packagePath !== `plugins/${policy.candidateId}`
       || policy.registryId !== resources.registry.id || policy.registryLocator !== resources.registry.locator
       || policy.catalogId !== resources.catalog.id || policy.catalogPath !== resources.catalog.path
       || policy.minimumReproducibleBuilds < 2) fail(`release policy differs from deployment: ${policy.candidateId}`)
@@ -152,7 +152,7 @@ export function compileRsiAuthorityConfigs(input: RsiAuthorityConfigInput): {
     expiresAt: expiry, maxReleases: Math.min(jobs.maxSubmissions, reviews.maxReviews), ...common, versioning: 'patch', policies: input.policies } }
   const ledger = { id: resources.ledgerId, path: ledgerPath }
   const profilePath = join(home, 'profiles', manifest.targetProfile)
-  const packages = reviews.plugins.map(name => `@dsh-enhanced/${name}`)
+  const packages = reviews.plugins.map(name => `@dsh-ray/${name}`)
   const adoptionPolicies = input.policies.map(({ candidateId, packageName, dshBaseline, capabilities, authorities, requires, registryId, registryLocator }) =>
     ({ candidateId, packageName, dshBaseline, capabilities, authorities, requires, registryId, registryLocator }))
   const adoptionConfig: SourceAdoptionAuthorityConfig = { ...base('adoption'), grant: { id: `adoption-${resources.installationId}`,

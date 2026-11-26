@@ -40,8 +40,8 @@ import {
   waitForApprovalReviewerSessionEventReady,
   type ApprovalReviewer,
   type AssistantPolicyService,
-} from '@dsh-enhanced/assistant-policy'
-import { resolveLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+} from '@dsh-ray/assistant-policy'
+import { resolveLlmRouteCapability } from '@dsh-ray/llm-route-capabilities'
 import type {
   InboundPrepareContext,
   InboundPrepareResult,

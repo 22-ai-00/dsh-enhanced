@@ -121,7 +121,7 @@ async function execute(ctx: Context, owner: Agent, name = 'action_github_commit'
   return batch.results[0]!.result
 }
 
-function trustedActionsCaller(ctx: Context, name = 'dsh-enhanced-assistant-actions'): Context {
+function trustedActionsCaller(ctx: Context, name = 'dsh-ray-assistant-actions'): Context {
   const plugin = () => {}
   Object.defineProperty(plugin, 'name', { value: name })
   return ctx.plugin(plugin).ctx
@@ -194,7 +194,7 @@ describe('trusted Host tool preauthorization', () => {
     const tool = definition(name, () => { executions += 1 })
     current.ctx.tools.register(tool)
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, tool, () => true)).toThrow(/reserved/)
-    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-goals'), tool, () => true)).toThrow(/reserved/)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-ray-assistant-goals'), tool, () => true)).toThrow(/reserved/)
     const caller = trustedActionsCaller(current.ctx, 'AssistantWorkItemsService')
     const remove = current.ctx.assistantPolicy.registerPreauthorizedTool(caller, tool, () => active)
     expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
@@ -250,7 +250,7 @@ describe('trusted Host tool preauthorization', () => {
     const tool = definition(name, () => { executions += 1 })
     current.ctx.tools.register(tool)
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx), tool, () => true)).toThrow(/reserved/)
-    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-isolation'), tool, () => active)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-ray-assistant-isolation'), tool, () => active)
     expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
     expect(current.asks()).toBe(0)
     active = false
@@ -267,7 +267,7 @@ describe('trusted Host tool preauthorization', () => {
     const tool = definition(name, () => { executions += 1 })
     current.ctx.tools.register(tool)
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx), tool, () => true)).toThrow(/reserved/)
-    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-goals'), tool, () => active)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-ray-assistant-goals'), tool, () => active)
     expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
     expect(current.asks()).toBe(0)
     active = false
@@ -284,7 +284,7 @@ describe('trusted Host tool preauthorization', () => {
     const tool = definition(name, () => { executions += 1 })
     current.ctx.tools.register(tool)
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, tool, () => true)).toThrow(/reserved/)
-    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-skills'), tool, () => active)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-ray-assistant-skills'), tool, () => active)
     expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
     expect(current.asks()).toBe(0)
     active = false
@@ -295,8 +295,8 @@ describe('trusted Host tool preauthorization', () => {
   })
 
   test.each([
-    ['memory_manage', 'dsh-enhanced-personal-memory'],
-    ['wiki_upsert', 'dsh-enhanced-personal-wiki'],
+    ['memory_manage', 'dsh-ray-personal-memory'],
+    ['wiki_upsert', 'dsh-ray-personal-wiki'],
   ])('reserves %s to its exact personal-domain Fiber', async (name, fiberName) => {
     const current = await fixture()
     let executions = 0
@@ -304,7 +304,7 @@ describe('trusted Host tool preauthorization', () => {
     current.ctx.tools.register(tool)
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, tool, () => true)).toThrow(/reserved/)
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(
-      trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-actions'), tool, () => true,
+      trustedActionsCaller(current.ctx, 'dsh-ray-assistant-actions'), tool, () => true,
     )).toThrow(/reserved/)
     const remove = current.ctx.assistantPolicy.registerPreauthorizedTool(
       trustedActionsCaller(current.ctx, fiberName), tool, () => true,
@@ -363,7 +363,7 @@ describe('trusted Host tool preauthorization', () => {
     const tool = definition('memory_manage', () => { executions += 1 })
     current.ctx.tools.register(tool)
     current.ctx.assistantPolicy.registerPreauthorizedTool(
-      trustedActionsCaller(current.ctx, 'dsh-enhanced-personal-memory'), tool, () => true)
+      trustedActionsCaller(current.ctx, 'dsh-ray-personal-memory'), tool, () => true)
     expect((await execute(current.ctx, current.owner, 'memory_manage')).isError).toBe(false)
     expect((await execute(current.ctx, current.owner, 'memory_manage')).isError).toBe(true)
     expect(current.asks()).toBe(0)
@@ -373,14 +373,14 @@ describe('trusted Host tool preauthorization', () => {
 
   test('reserves proactive_status to its exact mounted tool and revokes read-only admission with the caller', async () => {
     const current = await fixture()
-    const caller = trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-proactive')
+    const caller = trustedActionsCaller(current.ctx, 'dsh-ray-assistant-proactive')
     let active = true; let executions = 0
     const status = definition('proactive_status', () => { executions += 1 })
     const forged = definition('proactive_status', () => { executions += 100 })
     const feedback = definition('proactive_feedback', () => {})
     current.ctx.tools.register(status)
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, status, () => true)).toThrow(/reserved/)
-    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-goals'), status, () => true)).toThrow(/reserved/)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-ray-assistant-goals'), status, () => true)).toThrow(/reserved/)
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(caller, feedback, () => true)).toThrow(/reserved/)
     current.ctx.assistantPolicy.registerPreauthorizedTool(caller, forged, () => true)
     expect((await execute(current.ctx, current.owner, 'proactive_status')).isError).toBe(true)
@@ -435,7 +435,7 @@ describe('trusted Host tool preauthorization', () => {
     let executions = 0, active = true
     const tool = definition('goal_wait_event', () => { executions += 1 })
     current.ctx.tools.register(tool)
-    const caller = trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-goals')
+    const caller = trustedActionsCaller(current.ctx, 'dsh-ray-assistant-goals')
     const remove = current.ctx.assistantPolicy.registerPreauthorizedTool(caller, tool, () => {
       if (active) return true
       if (failure === 'throw') throw new Error('frozen verification window expired')
@@ -461,7 +461,7 @@ describe('trusted Host tool preauthorization', () => {
     const global = definition('goal_wait_event', () => { globalExecutions += 1 })
     const shadow = definition('goal_wait_event', () => { shadowExecutions += 1 })
     current.ctx.tools.register(global)
-    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-goals'), global, () => true)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-ray-assistant-goals'), global, () => true)
     await current.owner.ctx.inject(['tools'], scope => {
       scope.tools.register(shadow)
     })
@@ -590,7 +590,7 @@ describe('trusted Host tool preauthorization', () => {
 
 describe('work-item Growth create-only preauthorization', () => {
   const names = ['plugin_source_gaps', 'plugin_source_read', 'plugin_source_create', 'plugin_source_job_status'] as const
-  const fiberName = 'dsh-enhanced-assistant-growth-driver'
+  const fiberName = 'dsh-ray-assistant-growth-driver'
 
   test('advertises its exact active capability and refuses a disposed Policy generation', async () => {
     const current = await fixture(), policy = current.ctx.assistantPolicy
@@ -636,7 +636,7 @@ describe('work-item Growth create-only preauthorization', () => {
   })
 
   test('permits the revise-created Growth lane tools for the growth-driver Fiber only', async () => {
-    const current = await fixture(), caller = trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-growth-driver')
+    const current = await fixture(), caller = trustedActionsCaller(current.ctx, 'dsh-ray-assistant-growth-driver')
     const removers: Array<() => void> = []
     for (const name of ['plugin_source_revision_targets', 'plugin_source_revision_inspect', 'plugin_source_revise']) {
       const remove = current.ctx.assistantPolicy.registerPreauthorizedTool(caller, definition(name, () => {}), () => true)
@@ -693,7 +693,7 @@ describe('preauthorized tool effect disposal', () => {
   const names = ['plugin_source_gaps', 'plugin_source_read', 'plugin_source_create', 'plugin_source_job_status'] as const
 
   test('returns both Growth runs to the actual Fiber effect baseline and revokes an active final run on disposal', async () => {
-    const current = await fixture(), caller = trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-growth-driver')
+    const current = await fixture(), caller = trustedActionsCaller(current.ctx, 'dsh-ray-assistant-growth-driver')
     const baseline = caller.fiber.getEffects().length, counts: Array<{ during: number; after: number }> = []
     let executions = 0
     const definitions = names.map(name => definition(name, () => { executions += 1 }))
@@ -724,7 +724,7 @@ describe('preauthorized tool effect disposal', () => {
   })
 
   test('removes the grant if its caller effect cannot be registered', async () => {
-    const current = await fixture(), caller = trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-growth-driver')
+    const current = await fixture(), caller = trustedActionsCaller(current.ctx, 'dsh-ray-assistant-growth-driver')
     let executions = 0
     const tool = definition('plugin_source_create', () => { executions += 1 })
     current.ctx.tools.register(tool)

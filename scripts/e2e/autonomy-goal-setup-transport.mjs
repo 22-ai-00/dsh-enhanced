@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 
-export const name = 'dsh-enhanced-autonomy-goal-setup-test-transport'
+export const name = 'dsh-ray-autonomy-goal-setup-test-transport'
 export const inject = ['llm', 'assistantGoals']
 
 // This disposable Host fixture replaces only the paid HTTP response.  The

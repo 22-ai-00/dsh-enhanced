@@ -1,4 +1,4 @@
-import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-ray/assistant-policy'
 
 /** Binary terminal projection. Its quality meaning is determined separately by
  * evidenceKind; execution success alone is never treated as task success. */

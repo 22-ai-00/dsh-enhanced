@@ -18,9 +18,9 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-describe('dsh-enhanced-assistant-evaluation', () => {
+describe('dsh-ray-assistant-evaluation', () => {
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-assistant-evaluation')
+    expect(name).toBe('dsh-ray-assistant-evaluation')
     expect(version).toBe(manifest.version)
   })
 

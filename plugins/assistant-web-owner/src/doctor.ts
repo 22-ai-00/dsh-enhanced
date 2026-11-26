@@ -7,7 +7,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { isMap, isScalar, isSeq, parseDocument, YAMLMap, type YAMLSeq } from 'yaml'
 import { literalAutonomyLinux, validateAutonomyLinuxPaths, type AutonomyLinuxConfig } from './autonomy.js'
 import { dumpEffectiveProfile, globalDshDatabasePath, withinDshHome } from './host-dsh.js'
-import type { IsolationGrant } from '@dsh-enhanced/assistant-isolation'
+import type { IsolationGrant } from '@dsh-ray/assistant-isolation'
 
 interface AutonomyDoctorBase {
   stateRoot: string; databasePath: string
@@ -48,7 +48,7 @@ export function inspectAutonomyProfile(source: string, profile: string, dshHome:
   if (document.errors.length || !isSeq(document.contents)) fail('effective profile must be an unambiguous sequence')
   const rows = document.contents as YAMLSeq
   const config = (slug: string): YAMLMap => {
-    const id = `dsh-enhanced-${slug}`; const name = `@dsh-enhanced/${slug}`
+    const id = `dsh-ray-${slug}`; const name = `@dsh-ray/${slug}`
     const matches = rows.items.filter(item => isMap(item) && (item.get('id') === id || item.get('name') === name)) as YAMLMap[]
     const row = matches[0]
     if (matches.length !== 1 || !row || literal(row.get('id', true), slug) !== id || literal(row.get('name', true), slug) !== name || (row.has('disabled') && literal(row.get('disabled', true), id) !== false)) fail(`missing, disabled or ambiguous ${slug}`)
@@ -110,8 +110,8 @@ export function inspectAutonomyOwner(profile: AutonomyDoctorProfile): { status: 
 
 /** Verify only the persisted backend descriptor; never fetch, prepare or renew. */
 export async function probeAutonomyProfileRuntime(profile: AutonomyDoctorProfile): Promise<void> {
-  const { verifyLinuxRuntime } = await import('@dsh-enhanced/assistant-isolation')
-  const { probeLinuxIsolationRuntime } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  const { verifyLinuxRuntime } = await import('@dsh-ray/assistant-isolation')
+  const { probeLinuxIsolationRuntime } = await import('@dsh-ray/assistant-isolation/native-resources')
   await verifyLinuxRuntime(profile.linux.runtime)
   await probeLinuxIsolationRuntime(profile.linux)
 }
@@ -155,7 +155,7 @@ export interface AutonomyReadinessCheck {
 }
 
 export interface AutonomyReadinessReport {
-  readonly protocol: 'dsh-enhanced/autonomy-readiness/v1'
+  readonly protocol: 'dsh-ray/autonomy-readiness/v1'
   readonly profile: string
   readonly scope: 'ordinary-use-learning'
   readonly ready: boolean
@@ -172,8 +172,8 @@ function readinessRows(source: string): YAMLSeq | undefined {
 }
 
 function readinessRow(rows: YAMLSeq, slug: string): YAMLMap | undefined {
-  const id = `dsh-enhanced-${slug}`
-  const name = `@dsh-enhanced/${slug}`
+  const id = `dsh-ray-${slug}`
+  const name = `@dsh-ray/${slug}`
   const matches = rows.items.filter(item => isMap(item) && (item.get('id') === id || item.get('name') === name)) as YAMLMap[]
   return matches.length === 1 ? matches[0] : undefined
 }
@@ -283,7 +283,7 @@ export function inspectAutonomyReadiness(source: string, profile: string, dshHom
       summary: 'effective profile is not an unambiguous YAML sequence',
       reasons: [{ code: 'profile-unreadable', message: 'the composed profile could not be parsed; doctor reports not-ready instead of crashing' }],
       details: {} }
-    return { protocol: 'dsh-enhanced/autonomy-readiness/v1', profile, scope: 'ordinary-use-learning', ready: false, checks: [check], runtime }
+    return { protocol: 'dsh-ray/autonomy-readiness/v1', profile, scope: 'ordinary-use-learning', ready: false, checks: [check], runtime }
   }
   const checks: AutonomyReadinessCheck[] = []
 
@@ -299,8 +299,8 @@ export function inspectAutonomyReadiness(source: string, profile: string, dshHom
     status: missing.length === 0 && disabled.length === 0 ? 'ready' : 'not-ready',
     summary: `${readinessBundleSlugs.length - missing.length - disabled.length}/${readinessBundleSlugs.length} expected bundles loaded`,
     reasons: [
-      ...missing.map(slug => ({ code: `bundle-missing:${slug}`, message: `@dsh-enhanced/${slug} is not installed in this profile` })),
-      ...disabled.map(slug => ({ code: `bundle-disabled:${slug}`, message: `@dsh-enhanced/${slug} is installed but its loader row is disabled` })),
+      ...missing.map(slug => ({ code: `bundle-missing:${slug}`, message: `@dsh-ray/${slug} is not installed in this profile` })),
+      ...disabled.map(slug => ({ code: `bundle-disabled:${slug}`, message: `@dsh-ray/${slug} is installed but its loader row is disabled` })),
     ],
     details: { expected: readinessBundleSlugs.length, missing, disabled },
   })
@@ -635,7 +635,7 @@ export function inspectAutonomyReadiness(source: string, profile: string, dshHom
   })
 
   const ready = checks.filter(check => check.required).every(check => check.status === 'ready')
-  return { protocol: 'dsh-enhanced/autonomy-readiness/v1', profile, scope: 'ordinary-use-learning', ready, checks, runtime }
+  return { protocol: 'dsh-ray/autonomy-readiness/v1', profile, scope: 'ordinary-use-learning', ready, checks, runtime }
 }
 
 /** Deterministic human-readable form of the same snapshot the JSON line carries. */
@@ -674,7 +674,7 @@ export async function runAutonomyDoctor(argv = process.argv.slice(2)): Promise<v
     let source: string
     try { source = await dump() } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
-      const report: AutonomyReadinessReport = { protocol: 'dsh-enhanced/autonomy-readiness/v1', profile, scope: 'ordinary-use-learning', ready: false,
+      const report: AutonomyReadinessReport = { protocol: 'dsh-ray/autonomy-readiness/v1', profile, scope: 'ordinary-use-learning', ready: false,
         checks: [{ id: 'profile-composition', required: true, status: 'not-ready', summary: 'the profile could not be composed',
           reasons: [{ code: 'profile-composition-failed', message }], details: {} }],
         runtime: { observed: false, note: 'static composed profile only; nothing was activated' } }
@@ -694,7 +694,7 @@ export async function runAutonomyDoctor(argv = process.argv.slice(2)): Promise<v
   // readiness snapshot is an explicit `--readiness` opt-in so an autonomy
   // profile's diagnostic run is unchanged.
   const parsed = inspectAutonomyProfile(source, profile, dshHome)
-  const { inspectIsolationGrant } = await import('@dsh-enhanced/assistant-isolation')
+  const { inspectIsolationGrant } = await import('@dsh-ray/assistant-isolation')
   if (typeof inspectIsolationGrant !== 'function') fail('install the matching assistant-isolation version with grant diagnostics; no state was changed')
   const owner = inspectAutonomyOwner(parsed)
   const grant = inspectIsolationGrant({ stateRoot: parsed.stateRoot, grant: parsed.grant })

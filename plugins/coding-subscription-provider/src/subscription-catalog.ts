@@ -122,7 +122,7 @@ export async function discoverGrokModels(
     params: {
       protocolVersion: 1,
       clientCapabilities: {},
-      clientInfo: { name: 'dsh-enhanced', title: 'DSH Enhanced', version },
+      clientInfo: { name: 'dsh-ray', title: 'DSH Ray', version },
     },
   })}\n`, options)
   const messages = parseJsonLines(result.stdout)

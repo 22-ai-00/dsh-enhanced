@@ -29,10 +29,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test } from 'vitest'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantDeliveryService, type OwnerRouteAuthority } from '@dsh-enhanced/assistant-delivery'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantDeliveryService, type OwnerRouteAuthority } from '@dsh-ray/assistant-delivery'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-ray/assistant-verifier'
 import type { DeliveryStore } from '../../assistant-delivery/lib/store.js'
 import type { Config } from '../src/config.ts'
 import { AssistantWorkItemsService } from '../src/service.ts'
@@ -189,7 +189,7 @@ test('binds a real Automations worker run to its real verifier contract and sett
   // the owner binding to the worker agent and the route resolves through it.
   const runAgent = { session: { id: 'worker-session-1', header: { cwd: root, agentPreset: PRESET } } } as unknown as Agent
   const releaseRoute = delivery.bindAgentApprovalRoute(runAgent, { bindingId: ownerBinding.id })
-  const route = delivery.prepareAgentApproval(runAgent, { sourceId: 'dsh-enhanced-assistant-verifier' })
+  const route = delivery.prepareAgentApproval(runAgent, { sourceId: 'dsh-ray-assistant-verifier' })
   releaseRoute()
   automations.prepareTaskAcceptance({
     taskId, automationId: WORKER, scope: { workspace: root, preset: PRESET }, objective: PROMPT,

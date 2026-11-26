@@ -4,7 +4,7 @@ import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
-const OFFICIAL = 'https://github.com/22-ai-00/dsh-enhanced.git'
+const OFFICIAL = 'https://github.com/22-ai-00/dsh-ray.git'
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/u
 const COMMIT = /^[a-f0-9]{40}$/u
@@ -143,7 +143,7 @@ async function validateSource(repository: string, version: string, commit: strin
   if (!COMMIT.test(commit) || await git(repository, ['cat-file', '-t', commit], signal) !== 'commit') fail('source is not a SHA-1 commit')
   const file = join(repository, 'package.json')
   const value = JSON.parse((await readStable(file, 1_048_576, false)).toString('utf8')) as Record<string, unknown>
-  if (value.name !== 'dsh-enhanced' || value.version !== version) fail('source package name/version differs from installed cohort')
+  if (value.name !== 'dsh-ray' || value.version !== version) fail('source package name/version differs from installed cohort')
 }
 
 async function inspectWorkspace(value: RsiSourceWorkspace, signal: AbortSignal): Promise<void> {
@@ -225,7 +225,7 @@ async function archiveUnusedLegacyMacWorkspace(home: string, profile: string,
     join(home, '.rsi-systemd-capture-journal.json'),
     join(home, `.rsi-coordinator-${createHash('sha256').update(profile).digest('hex').slice(0, 16)}.json`),
     join(home, `.rsi-${createHash('sha256').update(profile).digest('hex').slice(0, 12)}`),
-    join(dirname(home), `.dsh-rsi-local-updates-${createHash('sha256').update(home).digest('hex').slice(0, 16)}`),
+    join(dirname(home), `.dsh-ray-local-updates-${createHash('sha256').update(home).digest('hex').slice(0, 16)}`),
   ]
   for (const path of resourcePaths) if (!await absent(path)) {
     fail(`legacy Mac source may already have prepared or active RSI resources at ${path}; preserve its authority and resolve manually`)

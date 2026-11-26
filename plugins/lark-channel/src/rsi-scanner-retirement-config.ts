@@ -2,12 +2,12 @@ import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { growthObjectDigest, validateMemoryLearningOwner } from '@dsh-enhanced/assistant-growth-contract'
-import type { MemoryLearningOwner } from '@dsh-enhanced/assistant-growth-contract'
-import type { Config as AutomationsConfig } from '@dsh-enhanced/assistant-automations'
-import type { Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
-import type { OwnerRouteAuthority, RevokedOwnerRouteQuery } from '@dsh-enhanced/assistant-delivery'
-import { externalPrincipalId, ownerRouteAuthorityHash } from '@dsh-enhanced/assistant-delivery'
+import { growthObjectDigest, validateMemoryLearningOwner } from '@dsh-ray/assistant-growth-contract'
+import type { MemoryLearningOwner } from '@dsh-ray/assistant-growth-contract'
+import type { Config as AutomationsConfig } from '@dsh-ray/assistant-automations'
+import type { Config as PolicyConfig } from '@dsh-ray/assistant-policy'
+import type { OwnerRouteAuthority, RevokedOwnerRouteQuery } from '@dsh-ray/assistant-delivery'
+import { externalPrincipalId, ownerRouteAuthorityHash } from '@dsh-ray/assistant-delivery'
 import { isAlias, isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import type { Node, YAMLMap } from 'yaml'
 import { getRsiMemoryLearningValidators } from './rsi-memory-learning.js'
@@ -92,7 +92,7 @@ function rows(effective: string): Map<string, YAMLMap> {
   return result
 }
 function configured(entries: Map<string, YAMLMap>, name: string, home: string, required = false): Record<string, unknown> | undefined {
-  const id = `dsh-enhanced-${name}`, packageName = `@dsh-enhanced/${name}`
+  const id = `dsh-ray-${name}`, packageName = `@dsh-ray/${name}`
   const candidates = [...entries.values()].filter(row => row.get('name') === packageName || row.get('id') === id)
   if (candidates.length === 0) { if (required) fail(); return undefined }
   if (candidates.length !== 1) return fail()
@@ -163,8 +163,8 @@ export function deriveScannerRetirementConfiguration(input: ScannerRetirementCon
     if (!/^principal_[0-9a-f-]{8,}$/u.test(owner.principalRecordId)) fail()
     const entries = rows(input.effectiveConfig)
     // Only the existing embedded target-profile composition is supported.
-    if ([...entries.values()].some(row => ['@dsh-enhanced/assistant-policy', '@dsh-enhanced/assistant-automations'].includes(String(row.get('name')))
-      || ['dsh-enhanced-assistant-policy', 'dsh-enhanced-assistant-automations'].includes(String(row.get('id'))))) fail()
+    if ([...entries.values()].some(row => ['@dsh-ray/assistant-policy', '@dsh-ray/assistant-automations'].includes(String(row.get('name')))
+      || ['dsh-ray-assistant-policy', 'dsh-ray-assistant-automations'].includes(String(row.get('id'))))) fail()
     const personal = configured(entries, modules.personal, home, true)!
     const delivery = configured(entries, modules.delivery, home, true)!
     const lark = configured(entries, modules.lark, home, true)!
@@ -196,7 +196,7 @@ export function deriveScannerRetirementConfiguration(input: ScannerRetirementCon
     const targets: ScannerRetirementTarget[] = []
     if (growth) {
       // Growth's normalizer is structural only; no filesystem/time validation.
-      const peer = requirePeer('@dsh-enhanced/assistant-growth-driver') as typeof import('@dsh-enhanced/assistant-growth-driver')
+      const peer = requirePeer('@dsh-ray/assistant-growth-driver') as typeof import('@dsh-ray/assistant-growth-driver')
       const normalized = peer.normalizeConfig(growth)
       if (!normalized.enabled) fail()
       if (normalized.scope !== null) scope(normalized.scope, owner)
@@ -209,7 +209,7 @@ export function deriveScannerRetirementConfiguration(input: ScannerRetirementCon
     }
     if (control) {
       if (control.adoptionCoordinator !== undefined) fail()
-      const peer = requirePeer('@dsh-enhanced/plugin-control-plane') as typeof import('@dsh-enhanced/plugin-control-plane')
+      const peer = requirePeer('@dsh-ray/plugin-control-plane') as typeof import('@dsh-ray/plugin-control-plane')
       if (control.sourceJobs !== undefined) {
         const jobs = object(control.sourceJobs)
         scope({ ownerRouteId: jobs.ownerRouteId, principalId: jobs.principalId, workspace: jobs.workspace, preset: jobs.preset }, owner)

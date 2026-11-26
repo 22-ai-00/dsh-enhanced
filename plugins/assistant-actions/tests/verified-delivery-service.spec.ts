@@ -8,8 +8,8 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { CredentialsKeychainService } from '@dsh-ray/credentials-keychain'
 import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { externalDeliveryFixture } from './external-delivery-fixture.ts'
@@ -18,8 +18,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantActionsService } from '../src/service.ts'
-import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
-import { createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-ray/assistant-verifier'
+import { createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
 import type { ActionGrant } from '../src/types.ts'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -52,11 +52,11 @@ async function fixture(acceptance?: 'goal-step', external = false, direct = fals
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow', rules: [
     { id: 'agent', effect: 'allow', subject: { kind: 'agent', id: 'primary' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:verified' } },
-    { id: 'background', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:verified' } },
+    { id: 'background', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-assistant-actions' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:verified' } },
     { id: 'event-observe', effect: 'allow', subject: { kind: 'background', id: 'event-triggers:trigger', workspace: root, principal: 'owner' }, actions: ['observe'], resource: { kind: 'network', id: 'https://api.github.com/repos/owner/repository' } },
-    { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
+    { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
   ] })
-  if (!external) await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(root, 'secret'), consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }] })
+  if (!external) await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(root, 'secret'), consumers: ['dsh-ray-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }] })
   ctx.provide('agents' as never, { get: (key: string) => agents.get(key) } as never)
   const notifications = vi.fn()
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' }, sessionId: 'owner-session', bindingId: 'binding', bindingVersion: 1, bindingGeneration: 1 }), resolveOwnerRoute: () => ({ binding: { id: 'binding', sessionId: 'owner-session' }, snapshot: { bindingVersion: route.bindingVersion, generation: route.generation } }), validateOwnerRoute: () => ({ ...route, receiptVersion }), enqueueOwnerNotification: notifications } as never)
@@ -79,7 +79,7 @@ async function fixture(acceptance?: 'goal-step', external = false, direct = fals
   const broker = external ? await externalDeliveryFixture(root, grant, { commit, pullRequest, inspect }) : undefined
   if (broker) cleanups.push(() => broker.close())
   let service!: AssistantActionsService
-  const plugin = await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) { service = new AssistantActionsService(runtime, broker?.config ?? { stateRoot: join(root, 'actions'), grants: [grant] }, external ? vi.fn() : commit, external ? { branch: vi.fn(), pullRequest: vi.fn(), inspect: vi.fn() } as any : { branch: vi.fn(), pullRequest, inspect } as any, undefined, broker?.dispatch) } })
+  const plugin = await ctx.plugin({ name: 'dsh-ray-assistant-actions', apply(runtime: Context) { service = new AssistantActionsService(runtime, broker?.config ?? { stateRoot: join(root, 'actions'), grants: [grant] }, external ? vi.fn() : commit, external ? { branch: vi.fn(), pullRequest: vi.fn(), inspect: vi.fn() } as any : { branch: vi.fn(), pullRequest, inspect } as any, undefined, broker?.dispatch) } })
   const execute = async (name: string, args: any) => (await ctx.tools.execute({
     calls: [{ type: 'tool-call', id: ToolCallId(`${name}-${Math.random()}`), name, arguments: JSON.stringify(args) }],
     signal: new AbortController().signal,

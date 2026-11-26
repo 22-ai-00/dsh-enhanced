@@ -1,6 +1,6 @@
 import { createHash, createPublicKey } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
-import { canonicalGrowthJson, validateCreationAcceptanceAuthorityRef, validateRevisionAcceptanceAuthorityRef, validateRevisionRegressionAcceptanceAuthorityRef, type CreationAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, validateCreationAcceptanceAuthorityRef, validateRevisionAcceptanceAuthorityRef, validateRevisionRegressionAcceptanceAuthorityRef, type CreationAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-ray/assistant-growth-contract'
 
 export const lineageHash = (value: unknown): string => createHash('sha256').update(canonicalGrowthJson(value)).digest('hex')
 const SHA = /^[a-f0-9]{64}$/u, ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u

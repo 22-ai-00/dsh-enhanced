@@ -11,7 +11,7 @@ import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import { constants as fsConstants } from 'node:fs'
 import { lstat, mkdir, mkdtemp, open, realpath, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import {
   assertDefinitionProtocolFamilies,
   compensationDirective,
@@ -568,7 +568,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayResult> {
                     },
                     forwardActionId: `replay:${prevId}`,
                     scope: definition.source.scope,
-                    sourcePlugin: 'dsh-enhanced-assistant-skills',
+                    sourcePlugin: 'dsh-ray-assistant-skills',
                     stepId: prevId,
                     ...(pre === undefined ? {} : { preimage: { digest: preimageDigest!, ...(pre.kind === 'snapshot' ? { snapshot: pre.snapshot } : { files: pre.files }) } }),
                   },

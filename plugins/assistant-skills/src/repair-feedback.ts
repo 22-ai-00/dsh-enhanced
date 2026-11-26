@@ -1,4 +1,4 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 
 /** Frozen at repair arm time; it never grants a new notification window. */
 export interface RepairFeedbackAuthority {
@@ -66,7 +66,7 @@ export type RepairFeedbackResult =
   | { outcome: 'queued'; idempotencyKey: string; text: string }
   | { outcome: 'not-queued'; reason: 'expired' | 'route-not-current' | 'delivery-rejected' }
 
-const sourceId = 'dsh-enhanced-assistant-skills'
+const sourceId = 'dsh-ray-assistant-skills'
 const milestones: Readonly<Record<RepairFeedbackMilestone, string>> = {
   'independent-acceptance': 'The repair result received independent acceptance.',
   'candidate-staged': 'An independently accepted repair candidate was staged.',

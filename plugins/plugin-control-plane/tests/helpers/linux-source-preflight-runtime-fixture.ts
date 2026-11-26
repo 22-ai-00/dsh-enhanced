@@ -3,7 +3,7 @@ import { copyFile, chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promi
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { IsolationLedger } from '../../../assistant-isolation/lib/ledger.js'
-import { hashLinuxRuntimeTree, linuxJobResourceReservation, linuxRuntimeDigest, type LinuxRepositoryRunnerConfig, type LinuxRepositoryExecutionContract, type LinuxRuntime, type LinuxCgroupRoots } from '@dsh-enhanced/assistant-isolation'
+import { hashLinuxRuntimeTree, linuxJobResourceReservation, linuxRuntimeDigest, type LinuxRepositoryRunnerConfig, type LinuxRepositoryExecutionContract, type LinuxRuntime, type LinuxCgroupRoots } from '@dsh-ray/assistant-isolation'
 
 const hash = (value: Buffer | string): string => createHash('sha256').update(value).digest('hex')
 /** Real fixed Node; small immutable package/version fixtures, not a full dependency store. */

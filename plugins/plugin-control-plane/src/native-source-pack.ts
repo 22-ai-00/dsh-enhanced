@@ -53,7 +53,7 @@ export function packNativeCreatedPlugin(name: string, fixed: ReadonlyMap<string,
   try { manifest = JSON.parse(fixed.get('package.json')!) as Record<string, unknown> }
   catch { fail('package manifest is invalid') }
   const version = manifest.version
-  if (manifest.name !== `@dsh-enhanced/${name}` || typeof version !== 'string'
+  if (manifest.name !== `@dsh-ray/${name}` || typeof version !== 'string'
     || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u.test(version)
     || manifest.main !== './lib/index.js' || manifest.types !== './lib/index.d.ts'
     || JSON.stringify(manifest.files) !== JSON.stringify(['lib', 'cordis.patch.yml', 'README.md', 'LICENSE'])

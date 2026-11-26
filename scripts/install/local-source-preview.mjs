@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 
-const LARK = 'dsh-enhanced-lark-channel'
-const HEALTH = 'dsh-enhanced-assistant-health'
+const LARK = 'dsh-ray-lark-channel'
+const HEALTH = 'dsh-ray-assistant-health'
 const fail = message => { throw new Error(`Local source preview: ${message}`) }
 
 function signature(node, yaml) {
@@ -33,7 +33,7 @@ function expectedPreview(source, yaml) {
   const parsed = parse(source, yaml)
   for (const [id, row] of parsed.rows) {
     const name = row.get('name', true)
-    for (const [expectedId, expectedName] of [[LARK, '@dsh-enhanced/lark-channel'], [HEALTH, '@dsh-enhanced/assistant-health']]) {
+    for (const [expectedId, expectedName] of [[LARK, '@dsh-ray/lark-channel'], [HEALTH, '@dsh-ray/assistant-health']]) {
       if (id === expectedId && (!yaml.isScalar(name) || name.tag || name.value !== expectedName)
         || yaml.isScalar(name) && name.value === expectedName && id !== expectedId) fail('Lark/Health module identity differs')
     }

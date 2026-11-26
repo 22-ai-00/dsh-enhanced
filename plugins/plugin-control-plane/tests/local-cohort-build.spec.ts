@@ -70,10 +70,10 @@ exit 49
   await writeFile(join(workspace, 'node_modules', 'secret'), 'private module')
   for (const path of ['plugins/alpha', 'packages/helper']) {
     await mkdir(join(workspace, path), { recursive: true, mode: 0o700 })
-    await writeFile(join(workspace, path, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${path.split('/')[1]}`, version: '1.0.0' }))
+    await writeFile(join(workspace, path, 'package.json'), JSON.stringify({ name: `@dsh-ray/${path.split('/')[1]}`, version: '1.0.0' }))
   }
   if (options.binPath !== undefined) {
-    await writeFile(join(workspace, 'plugins/alpha/package.json'), JSON.stringify({ name: '@dsh-enhanced/alpha', version: '1.0.0', bin: { alpha: options.binPath } }))
+    await writeFile(join(workspace, 'plugins/alpha/package.json'), JSON.stringify({ name: '@dsh-ray/alpha', version: '1.0.0', bin: { alpha: options.binPath } }))
     if (options.createBin !== false) {
       await mkdir(join(workspace, 'plugins/alpha/bin'), { mode: 0o700 })
       await writeFile(join(workspace, 'plugins/alpha/bin/alpha.js'), '#!/usr/bin/env node\n', { mode: 0o700 })

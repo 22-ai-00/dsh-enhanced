@@ -26,8 +26,8 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     const report = await collectDeliveryVersionReport({ ctx })
 
     expect(report.schemaVersion).toBe(1)
-    expect(report.protocol).toBe('dsh-rsi/version/v1')
-    expect(report.assistant.name).toBe('dsh-enhanced')
+    expect(report.protocol).toBe('dsh-ray/version/v1')
+    expect(report.assistant.name).toBe('dsh-ray')
     expect(report.assistant.version).toBe(packageVersion)
     expect(report.host.packageName).toBe('@deepseek-ai/dsh')
     expect(report.host.boundStatus).toBe('missing')
@@ -84,7 +84,7 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     const root = await mkdtemp(join(tmpdir(), 'delivery-version-data-'))
     roots.push(root)
     const home = join(root, 'dsh-home')
-    await mkdir(join(home, 'profiles', 'lark', 'node_modules', '@dsh-enhanced', 'assistant-delivery'), { recursive: true })
+    await mkdir(join(home, 'profiles', 'lark', 'node_modules', '@dsh-ray', 'assistant-delivery'), { recursive: true })
     await mkdir(join(home, 'assistant-work-items'), { recursive: true })
     await mkdir(join(home, 'assistant-growth-driver'), { recursive: true })
     await mkdir(join(home, 'assistant-dreaming'), { recursive: true })
@@ -99,21 +99,21 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     await mkdir(join(home, 'preference-learning'), { recursive: true })
     await mkdir(join(home, 'assistant-growth-experiments'), { recursive: true })
     await mkdir(join(home, 'assistant-skills'), { recursive: true })
-    await mkdir(join(home, '.dsh-enhanced'), { recursive: true })
-    await mkdir(join(home, '.dsh-rsi-upgrade-backups', 'snap-1'), { recursive: true })
-    await mkdir(join(home, '.dsh-rsi-upgrade-backups', 'snap-2'), { recursive: true })
+    await mkdir(join(home, '.dsh-ray'), { recursive: true })
+    await mkdir(join(home, '.dsh-ray-upgrade-backups', 'snap-1'), { recursive: true })
+    await mkdir(join(home, '.dsh-ray-upgrade-backups', 'snap-2'), { recursive: true })
 
     await writeFile(
-      join(home, '.dsh-rsi-host.json'),
+      join(home, '.dsh-ray-host.json'),
       JSON.stringify({ schemaVersion: 1, version: '0.2.2-rc.5', cacheRoot: '/tmp/cache', receiptDigest: 'a'.repeat(64) }),
       { mode: 0o600 },
     )
     await writeFile(
-      join(home, 'profiles', 'lark', 'node_modules', '@dsh-enhanced', 'assistant-delivery', 'package.json'),
-      JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: packageVersion }),
+      join(home, 'profiles', 'lark', 'node_modules', '@dsh-ray', 'assistant-delivery', 'package.json'),
+      JSON.stringify({ name: '@dsh-ray/assistant-delivery', version: packageVersion }),
     )
     await writeFile(
-      join(home, '.dsh-enhanced', 'upgrade-history.jsonl'),
+      join(home, '.dsh-ray', 'upgrade-history.jsonl'),
       `${JSON.stringify({ at: 1, to: packageVersion })}\n${JSON.stringify({ at: 2, to: packageVersion })}\n`,
     )
 
@@ -160,9 +160,9 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
       CREATE TABLE source_plans (id TEXT PRIMARY KEY, mode TEXT NOT NULL, status TEXT NOT NULL, plugin_name TEXT NOT NULL) STRICT;
       CREATE TABLE activation_plans (id TEXT PRIMARY KEY, status TEXT NOT NULL) STRICT;
       INSERT INTO source_plans VALUES
-        ('sp1', 'create', 'release-complete', '@dsh-enhanced/evolved-tool-a'),
-        ('sp2', 'modify', 'release-complete', '@dsh-enhanced/evolved-tool-a'),
-        ('sp3', 'create', 'running-local-checks', '@dsh-enhanced/evolved-tool-b');
+        ('sp1', 'create', 'release-complete', '@dsh-ray/evolved-tool-a'),
+        ('sp2', 'modify', 'release-complete', '@dsh-ray/evolved-tool-a'),
+        ('sp3', 'create', 'running-local-checks', '@dsh-ray/evolved-tool-b');
       INSERT INTO activation_plans VALUES
         ('ap1', 'activated'),
         ('ap2', 'rolled-back');
@@ -173,7 +173,7 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     createAdoptDb.exec(`
       CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT NOT NULL, certificate_json TEXT NOT NULL) STRICT;
       INSERT INTO adoptions VALUES
-        ('sp1', 'active', '{"pluginName":"@dsh-enhanced/evolved-tool-a","version":"0.1.0"}');
+        ('sp1', 'active', '{"pluginName":"@dsh-ray/evolved-tool-a","version":"0.1.0"}');
     `)
     createAdoptDb.close()
 
@@ -255,8 +255,8 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     // Loader pointing to the exact same work-items DB should deduplicate by canonical realpath
     ctx.provide('loader' as never, {
       entries: () => [
-        { options: { name: '@dsh-enhanced/assistant-work-items', config: { databasePath: join(home, 'assistant-work-items', 'state.sqlite') } } },
-        { options: { name: '@dsh-enhanced/assistant-delivery', config: {} } },
+        { options: { name: '@dsh-ray/assistant-work-items', config: { databasePath: join(home, 'assistant-work-items', 'state.sqlite') } } },
+        { options: { name: '@dsh-ray/assistant-delivery', config: {} } },
       ],
     } as never)
 
@@ -269,7 +269,7 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     expect(report.plugins.coreCount).toBeGreaterThanOrEqual(2)
     expect(report.plugins.evolvedCount).toBe(1)
     expect(report.plugins.activeEvolvedCount).toBe(1)
-    expect(report.plugins.evolved[0]?.name).toBe('@dsh-enhanced/evolved-tool-a')
+    expect(report.plugins.evolved[0]?.name).toBe('@dsh-ray/evolved-tool-a')
 
     const s = report.selfIteration
     expect(s.dataState).toBe('data')
@@ -299,7 +299,7 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     expect(s.totalIterations).toBe(15)
 
     const summary = formatAssistantVersionSummary(report)
-    expect(summary).toContain('@dsh-enhanced/evolved-tool-a')
+    expect(summary).toContain('@dsh-ray/evolved-tool-a')
     expect(summary).toContain('0.2.2-rc.5')
     expect(summary).toContain('累计自迭代次数：15')
   })
@@ -308,8 +308,8 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     const ctx = new Context()
     ctx.provide('pluginManager' as never, {
       listBundles: async () => [
-        { name: '@dsh-enhanced/assistant-delivery', version: packageVersion, enabled: true },
-        { name: '@dsh-enhanced/personal-memory', version: packageVersion, enabled: true },
+        { name: '@dsh-ray/assistant-delivery', version: packageVersion, enabled: true },
+        { name: '@dsh-ray/personal-memory', version: packageVersion, enabled: true },
       ],
     } as never)
     ctx.provide('assistantDreaming' as never, { health: () => ({ runs: 4 }) } as never)
@@ -346,7 +346,7 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     const roWalDir = join(home, 'assistant-recovery')
     const hlDir = join(home, 'assistant-evolution')
     const cpDir = join(home, 'plugin-control-plane')
-    const scopeDir = join(home, 'profiles', 'lark', 'node_modules', '@dsh-enhanced')
+    const scopeDir = join(home, 'profiles', 'lark', 'node_modules', '@dsh-ray')
     for (const d of [outsideDir, localCheckout, wiDir, gdDir, liveDir, roWalDir, hlDir, cpDir, scopeDir]) {
       await mkdir(d, { recursive: true })
     }
@@ -392,21 +392,21 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
 
     // 6. prepared-revise + cert.plan.name + receipt_json
     const cpDb = new DatabaseSync(join(cpDir, 'control.sqlite'))
-    cpDb.exec("CREATE TABLE source_plans (id TEXT PRIMARY KEY, mode TEXT NOT NULL, status TEXT NOT NULL, plugin_name TEXT NOT NULL) STRICT; INSERT INTO source_plans VALUES ('sp-rev', 'prepared-revise', 'release-complete', '@dsh-enhanced/assistant-delivery');")
+    cpDb.exec("CREATE TABLE source_plans (id TEXT PRIMARY KEY, mode TEXT NOT NULL, status TEXT NOT NULL, plugin_name TEXT NOT NULL) STRICT; INSERT INTO source_plans VALUES ('sp-rev', 'prepared-revise', 'release-complete', '@dsh-ray/assistant-delivery');")
     cpDb.close()
     const caDb = new DatabaseSync(join(cpDir, 'creation-adoptions.sqlite'))
-    caDb.exec(`CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT NOT NULL, certificate_json TEXT NOT NULL, receipt_json TEXT NOT NULL) STRICT; INSERT INTO adoptions VALUES ('sp-c1', 'active', '{"plan":{"name":"@dsh-enhanced/evolved-from-plan"}}', '{"version":"0.2.0"}');`)
+    caDb.exec(`CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT NOT NULL, certificate_json TEXT NOT NULL, receipt_json TEXT NOT NULL) STRICT; INSERT INTO adoptions VALUES ('sp-c1', 'active', '{"plan":{"name":"@dsh-ray/evolved-from-plan"}}', '{"version":"0.2.0"}');`)
     caDb.close()
 
     // 7. Symlinked local package in node_modules + >256 plugins + oversized names/diagnostics + negative now
-    await writeFile(join(localCheckout, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/local-symlinked', version: '0.1.83' }), 'utf8')
+    await writeFile(join(localCheckout, 'package.json'), JSON.stringify({ name: '@dsh-ray/local-symlinked', version: '0.1.83' }), 'utf8')
     await symlink(localCheckout, join(scopeDir, 'local-symlinked'))
     for (let i = 0; i < 260; i += 1) {
       const pDir = join(scopeDir, `plug-${String(i).padStart(3, '0')}`)
       await mkdir(pDir, { recursive: true })
-      await writeFile(join(pDir, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/plug-${String(i).padStart(3, '0')}`, version: '0.1.83' }), 'utf8')
+      await writeFile(join(pDir, 'package.json'), JSON.stringify({ name: `@dsh-ray/plug-${String(i).padStart(3, '0')}`, version: '0.1.83' }), 'utf8')
     }
-    const longPluginName = `@dsh-enhanced/${'x'.repeat(210)}`
+    const longPluginName = `@dsh-ray/${'x'.repeat(210)}`
     const ctx = new Context()
     ctx.provide('loader' as never, {
       entries: () => [
@@ -435,8 +435,8 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
       expect(report.plugins.coreCount).toBeGreaterThan(256)
       expect(report.plugins.core.length).toBeLessThanOrEqual(256)
       expect(report.plugins.core.every(p => p.name.length >= 1 && p.name.length <= 200)).toBe(true)
-      expect(report.plugins.core.some(p => p.name === '@dsh-enhanced/local-symlinked' && p.installKind === 'local' && p.version === '0.1.83')).toBe(true)
-      expect(report.plugins.evolved.find(p => p.name === '@dsh-enhanced/evolved-from-plan')).toMatchObject({ version: '0.2.0', enabled: true })
+      expect(report.plugins.core.some(p => p.name === '@dsh-ray/local-symlinked' && p.installKind === 'local' && p.version === '0.1.83')).toBe(true)
+      expect(report.plugins.evolved.find(p => p.name === '@dsh-ray/evolved-from-plan')).toMatchObject({ version: '0.2.0', enabled: true })
       expect(report.diagnostics!.length).toBeLessThanOrEqual(128)
       expect(report.diagnostics!.every(d => d.length >= 1 && d.length <= 1024)).toBe(true)
     } finally {

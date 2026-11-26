@@ -22,8 +22,8 @@ runtimeObserver:
   keyPath: /absolute/owner-private/observer.key
   profilePath: /absolute/dsh-home/profiles/web
   targets:
-    - entryId: dsh-enhanced-personal-memory
-      module: '@dsh-enhanced/personal-memory'
+    - entryId: dsh-ray-personal-memory
+      module: '@dsh-ray/personal-memory'
       configDigest: <runtimeConfigDigest of the exact raw row config>
       services: [personalMemory]
 ```
@@ -42,7 +42,7 @@ accessors and cycles are rejected. Config content is not returned.
 
 The published package exports `runtimeConfigDigest()` and
 `queryRuntimeObserver({ socketPath, keyPath, signal? })`. An owner script can
-import them from `@dsh-enhanced/plugin-control-plane`; querying needs no Agent,
+import them from `@dsh-ray/plugin-control-plane`; querying needs no Agent,
 session, model or Control Plane mutation. Socket and key must be owned by the
 calling UID, so this channel version is for a trusted Host and caller sharing
 an owner identity. It does not provision users, ACLs, keys or supervisor units.

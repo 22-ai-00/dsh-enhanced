@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-verifier
+# @dsh-ray/assistant-verifier
 
 独立核对事先确定的任务验收条件，分别记录执行状态与目标是否达成。验收契约、验证任务和结果回执保存在本地 SQLite，验证重试不会重新执行原任务。
 
@@ -9,7 +9,7 @@
 本包使用标准 DSH bundle patch，可在同一发布批次可用后安装：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-verifier
+dsh plugin --profile web add @dsh-ray/assistant-verifier
 dsh --profile web --dump-config
 ```
 
@@ -34,7 +34,7 @@ Goals 原生回合使用显式 `task-acceptance/v2` / `task-verification/v2` 和
 | `readback` | 固定 HTTPS 模板，仅替换一个路径段的对象 ID | 目标 ID、可选版本和指定 JSON Pointer 字段符合预期 |
 | `repository-readback` | 通过当前 Actions grant 与 Keychain 读取实际提交的 checks、reviews、PR、branch | 准确 head 的指定 checks/评审符合配置条件 |
 
-通过 `createVerifierAuthorities({ authorities })` 得到冻结配置和每个资源的 `digest`，将 `{ id, digest }` 填入条件的 `authority`。profile 类型为包导出的 `AcceptanceProfile`，条件格式来自 `@dsh-enhanced/task-acceptance-contract`。资源变更会改变摘要，旧契约不能悄悄使用新资源。
+通过 `createVerifierAuthorities({ authorities })` 得到冻结配置和每个资源的 `digest`，将 `{ id, digest }` 填入条件的 `authority`。profile 类型为包导出的 `AcceptanceProfile`，条件格式来自 `@dsh-ray/task-acceptance-contract`。资源变更会改变摘要，旧契约不能悄悄使用新资源。
 
 可信 Host 可用 `inspectAcceptanceProfile({ scope, owner, objective, taskKind })` 查询精确配置，返回独立深冻结的 `{ profile, digest }`，无匹配返回 `null`。参数不允许缺字段、额外字段或 getter；objective 保持精确文本，不默认选择 owner 或 task kind。`inspectAcceptanceObjectives({ scope, owner, taskKind })` 使用相同的严格输入规则，返回该边界内去重并冻结的原始 objective 数组。它不返回 profile、criteria、验证命令或输入，也不越过 scope、owner record/version 或 task kind 发现其他配置。两个入口都不创建契约、不调用执行生产者或验证程序，不是授权或目标达成证明；服务卸载后拒绝查询。可用于安装配置诊断和提交前预检，真实执行仍必须取得绑定到实际任务身份的验收契约。
 
@@ -71,7 +71,7 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 对应 Host authority 保持 `isolated-runner`，固定要求 `backend: 'linux-native'`：只提供已准备的 `runtime: LinuxRuntime` 和当前 UID 已委派的 `cgroupRoots`（已委派 cgroup v1 或统一 cgroup v2 子树），不能混入镜像或 Docker 字段；缺失 `backend` 或提供 `backend: 'docker'` 一律拒绝。固定 `stateRoot`、`command`、绝对 `expiresAt`、`maxRuns`、`maxTotalDurationMs`、`maxDurationMs`、`maxOutputBytes`，以及 `testSets: [{ id, cases: [{ stdin, expectedStdout, expectedExitCode }] }]` 保持不变。例如固定命令 `/bin/sh /workspace/artifact < /workspace/input` 在原生隔离环境运行复制产物。
 
-原生配置编译从非激活的 `@dsh-enhanced/assistant-isolation/native-resources` 复用纯运行时和 cgroup 路径校验，深冻结副本；此时不创建目录、进程、cgroup 或授权，也不准备运行时。拒绝未知后端、非法或跨 UID cgroup 路径、路径别名形状及 state/runtime/cgroup 路径重叠。实际目录、文件内容、委派身份与当前隔离能力由既有 `IsolatedVerifierRunner` → `LinuxVerifierRunner` 在执行时再次核验；静态编译成功不证明 Linux 环境就绪。
+原生配置编译从非激活的 `@dsh-ray/assistant-isolation/native-resources` 复用纯运行时和 cgroup 路径校验，深冻结副本；此时不创建目录、进程、cgroup 或授权，也不准备运行时。拒绝未知后端、非法或跨 UID cgroup 路径、路径别名形状及 state/runtime/cgroup 路径重叠。实际目录、文件内容、委派身份与当前隔离能力由既有 `IsolatedVerifierRunner` → `LinuxVerifierRunner` 在执行时再次核验；静态编译成功不证明 Linux 环境就绪。
 
 authority 摘要覆盖整个运行时描述、cgroup 根、全部有限条款与私有测试向量；验收 profile 必须引用编译后的精确摘要。服务保留按摘要缓存和 Cordis disposer，复用现有 runner/账本，不重置额度、期限或未知历史。Goals 的可信 producer、owner/Session/定义、接受的产物、静止状态、执行 fence 与派发后产物重读保持原边界。不能把模型生成的测试向量或原始工具退出码当作独立验收条件。单元里的录制 runner 仅证明分派合同，不代替 Linux 实机证据。
 
@@ -91,11 +91,11 @@ authority 摘要覆盖整个运行时描述、cgroup 根、全部有限条款与
 
 ## 新插件包的隔离行为观察
 
-从 `@dsh-enhanced/assistant-verifier/plugin-behavior-runner` 显式导入 `PluginBehaviorRunner`，它是供可信 Host 构造的观察器，未自动激活，也不注册模型工具。Verifier 将 Isolation 代码作为正式运行依赖打包安装，但只在使用这个子入口时构造 runner；包依赖不会挂载 Isolation 的 Cordis 服务。观察器只接受原生构造参数（Linux 为完整 `LinuxPluginBehaviorRuntime`，macOS 为固定 `NativeMacRuntime`），无 `command` 字段，命令由实现固定；Docker 时代的 image/dockerPath 形状只能从历史存储读取，运行时拒绝构造。调用方提供私有 `stateRoot`、有限次数与累计时间，`maxOutputBytes` 至少 65536。Host 持有实例并在所属 Cordis effect 的 disposer 中等待 `close()`。
+从 `@dsh-ray/assistant-verifier/plugin-behavior-runner` 显式导入 `PluginBehaviorRunner`，它是供可信 Host 构造的观察器，未自动激活，也不注册模型工具。Verifier 将 Isolation 代码作为正式运行依赖打包安装，但只在使用这个子入口时构造 runner；包依赖不会挂载 Isolation 的 Cordis 服务。观察器只接受原生构造参数（Linux 为完整 `LinuxPluginBehaviorRuntime`，macOS 为固定 `NativeMacRuntime`），无 `command` 字段，命令由实现固定；Docker 时代的 image/dockerPath 形状只能从历史存储读取，运行时拒绝构造。调用方提供私有 `stateRoot`、有限次数与累计时间，`maxOutputBytes` 至少 65536。Host 持有实例并在所属 Cordis effect 的 disposer 中等待 `close()`。
 
 macOS 使用显式 `backend: 'macos-seatbelt'`、私有固定 `runtime` 与相同的持久次数、时长和输出预算；部署配置省略 `authorityDigest`，认证 Host 在构造时注入。`validatePluginBehaviorDeploymentConfig` 与 `validatePluginBehaviorRunnerConfig` 是同步严格校验。固定源码在只读 Seatbelt 单进程中加载 Cordis、SystemPrompt、Tools 和候选，只将操作输入传入候选；预期答案、签名私钥和持久账本留在 Host。Host 安全解析 npm tarball 为普通文件，拒绝链接及越界路径；从已核验的 runtime 填入环境与 `macos-seatbelt-single-process-v1` 边界。候选仍与观察代码同进程，其输出和结果均视为不可信，必须由独立私有 held-out 答案裁决；该边界不声称具备 Linux 双进程隔离的等价防篡改性。v2 创建证书签名绑定运行时摘要和固定构建证据摘要，采用及后续调用再次比对运行时；历史 v1 凭证仅可只读、不能据此构造新观察器。
 
-Linux 原生私有 API 使用 `backend: 'linux-native'`、`runtime: LinuxPluginBehaviorRuntime`、当前用户已委派的 `cgroupRoots` 和相同的有限 authority 字段；调用者不能提供命令、源码、镜像或资源策略。先从 `@dsh-enhanced/assistant-verifier/linux-behavior-runtime` 导入 `prepareLinuxPluginBehaviorRuntime({ runtime: baseLinuxRuntime, root: privateDestination, signal })`，取得独立目录内的固定运行时描述。该目录保存 `behavior.json` 和 `runtime/`，后者只读映射到 `/runtime/0`。原基底、源码身份、安装回执、主人与额度均不被改写。此入口仅供可信 Host 使用。创建验收及有限采用使用专门的 `validateCreationBehaviorDeploymentConfig`，纯校验另从 `./plugin-behavior-config` 导出；通用 `validatePluginBehaviorDeploymentConfig` 仍拒绝 Linux，旧消费方不能据此取得 Linux 创建授权。修订与配对回归已接通同一 Linux 观察器（见下文）；全新安装默认使用原生链路。
+Linux 原生私有 API 使用 `backend: 'linux-native'`、`runtime: LinuxPluginBehaviorRuntime`、当前用户已委派的 `cgroupRoots` 和相同的有限 authority 字段；调用者不能提供命令、源码、镜像或资源策略。先从 `@dsh-ray/assistant-verifier/linux-behavior-runtime` 导入 `prepareLinuxPluginBehaviorRuntime({ runtime: baseLinuxRuntime, root: privateDestination, signal })`，取得独立目录内的固定运行时描述。该目录保存 `behavior.json` 和 `runtime/`，后者只读映射到 `/runtime/0`。原基底、源码身份、安装回执、主人与额度均不被改写。此入口仅供可信 Host 使用。创建验收及有限采用使用专门的 `validateCreationBehaviorDeploymentConfig`，纯校验另从 `./plugin-behavior-config` 导出；通用 `validatePluginBehaviorDeploymentConfig` 仍拒绝 Linux，旧消费方不能据此取得 Linux 创建授权。修订与配对回归已接通同一 Linux 观察器（见下文）；全新安装默认使用原生链路。
 
 原生准备在私有目录中限量复制基底，使用固定 `/usr/bin/cc` 及其已核验的 root-owned 工具链编译已发布 C 资产，不下载依赖、不运行候选或安装脚本。C 字节及父/候选 JavaScript 与原生观察器同源，仅变更固定运行时路径；编译器、依赖、源码和产物摘要绑定到新回执，重用时漂移即拒绝。准备会读基底/系统编译器与头文件、写新私有目录并启动受限编译子进程；运行只接收包和输入，不接触 Host 凭据、浏览器、Host 文件系统或验收答案。独占锁协调本 API；崩溃留下的锁拒绝继续，不自动夺锁。该权限边界不隔离同 UID 的恶意 Host 插件。
 
@@ -146,7 +146,7 @@ Linux 创建验收要求 Control Plane 的双 UID 完整仓库构建。派发前
 
 内部 v2 `planGrantHandoffV2()` / `applyGrantHandoffV2()` 进一步保存三个 lane 各自的完整公开授权身份、Ed25519 公钥与指纹、owner、review/runner 有限额度和已验证配置的证据引用；除 authority digest 外的政策与额度不得变化。每步记录目标 grant 的全部既有 plan 成员及当时合法终态证书的精确封存，最多 1,000 个成员、64 步维护链，并有独立字节上限。后续新任务可以追加；旧 claimed/unknown/rejected 或未取得封存资格的旧成员，不能通过后续换签名获得历史成功资格。原成员必须保留，原终态封存逐项核验，used/maximum 和业务历史不被迁移改写。
 
-安装器使用包子路径 `@dsh-enhanced/assistant-verifier/review-maintenance`：它导出 `reviewPublicIdentity(lane, config)`（由三个 lane 各自的 `compile*ReviewConfig` 推导 v2 公开身份，会读取 `config.keyPath` 指向的私钥以得到公钥）以及上述 `CreationReviewStore` 和 `lineageHash`；插件主入口不导出这些维护接口。
+安装器使用包子路径 `@dsh-ray/assistant-verifier/review-maintenance`：它导出 `reviewPublicIdentity(lane, config)`（由三个 lane 各自的 `compile*ReviewConfig` 推导 v2 公开身份，会读取 `config.keyPath` 指向的私钥以得到公钥）以及上述 `CreationReviewStore` 和 `lineageHash`；插件主入口不导出这些维护接口。
 
 `resolveHistoricalCertificate()` 要求调用方提供数据库之外的可信当前 head、完整当前身份、installation/profile/lane/逻辑角色及当前文件身份；只有精确封存的记录可返回对应旧公开身份和证书。调用方仍须验签并执行原有当前 owner/source/backend 围栏，不能把证书自带的 authority 当作信任根。已有连接的方法使用同一只读事务，支持 live WAL；静态适配器仅支持停止 writer、checkpoint 后的文件。维护和历史读取先校验 SQLite 原始 TEXT 字节，拒绝 NUL、无效 UTF-8 或投影截断，审计文本必须为原始 canonical JSON。v1 的不透明配置摘要不能自动成为 v2 历史信任根。
 

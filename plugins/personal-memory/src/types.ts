@@ -1,4 +1,4 @@
-import type { ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalDispatchRoute } from '@dsh-ray/assistant-policy'
 export type {
   MemoryLearningAdoptionAvailability, MemoryLearningAdoptionCommit, MemoryLearningAdoptionGrant, MemoryLearningAdoptionResult,
   MemoryLearningManagedSource, MemoryLearningReviewReceipt, MemoryLearningSourceInvalidation,
@@ -7,7 +7,7 @@ export type {
 import type {
   PreferenceMemoryPromotionCancellationReceipt,
   PreferenceMemoryPromotionCancellationRequest,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 
 export type MemoryOwner = 'agent' | 'user'
 export type MemoryScope = 'user-global' | 'workspace'

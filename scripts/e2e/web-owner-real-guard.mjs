@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-export const name = 'dsh-enhanced-web-owner-real-run-guard'
+export const name = 'dsh-ray-web-owner-real-run-guard'
 export const inject = ['llm', 'agents', 'goals', 'systemPrompt']
 export const objective = 'Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.'
 

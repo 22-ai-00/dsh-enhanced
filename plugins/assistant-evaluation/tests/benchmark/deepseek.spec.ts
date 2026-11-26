@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { createMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_INPUT_TOKEN_UPPER_BOUND, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
+import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_INPUT_TOKEN_UPPER_BOUND, DEEPSEEK_PROVIDER } from '@dsh-ray/assistant-deepseek-budget'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createNativeAdapter } from '../../src/benchmark/deepseek.js'
 import type { NativeModelConfig } from '../../src/benchmark/native.js'

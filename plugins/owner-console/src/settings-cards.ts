@@ -95,14 +95,14 @@ export function larkConnectionTone(connection: OwnerConsoleStatus['feishu']['con
   return 'warn'
 }
 
-export const OWN_PACKAGE = '@dsh-enhanced/owner-console'
-export const LARK_PACKAGE = '@dsh-enhanced/lark-channel'
-export const TRAEX_PACKAGE = '@dsh-enhanced/traex-acp-provider'
-export const DREAMING_PACKAGE = '@dsh-enhanced/assistant-dreaming'
-export const PROACTIVE_PACKAGE = '@dsh-enhanced/assistant-proactive'
-export const GROWTH_PACKAGE = '@dsh-enhanced/assistant-growth-driver'
-export const MEMORY_LEARNING_PACKAGE = '@dsh-enhanced/assistant-memory-learning'
-const LARK_COMPANION_BUNDLES = ['@dsh-enhanced/assistant-delivery', '@dsh-enhanced/credentials-keychain'] as const
+export const OWN_PACKAGE = '@dsh-ray/owner-console'
+export const LARK_PACKAGE = '@dsh-ray/lark-channel'
+export const TRAEX_PACKAGE = '@dsh-ray/traex-acp-provider'
+export const DREAMING_PACKAGE = '@dsh-ray/assistant-dreaming'
+export const PROACTIVE_PACKAGE = '@dsh-ray/assistant-proactive'
+export const GROWTH_PACKAGE = '@dsh-ray/assistant-growth-driver'
+export const MEMORY_LEARNING_PACKAGE = '@dsh-ray/assistant-memory-learning'
+const LARK_COMPANION_BUNDLES = ['@dsh-ray/assistant-delivery', '@dsh-ray/credentials-keychain'] as const
 
 export function boundedLine(text: string, limit = 240): string {
   const normalized = text.replace(/\s+/gu, ' ').trim()
@@ -1497,19 +1497,19 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const policyMissing = larkState.missing.find(item => item.service === 'assistantPolicy')
   const deliveryMissing = larkState.missing.find(item => item.service === 'assistantDelivery')
   const hasBundleInventory = status !== undefined && status.host.bundles === 'ok' && status.bundles.length > 0
-  const keychainBundle = status?.bundles.find(bundle => bundle.name === '@dsh-enhanced/credentials-keychain')
+  const keychainBundle = status?.bundles.find(bundle => bundle.name === '@dsh-ray/credentials-keychain')
   const keychainNeedsEnable = keychainBundle !== undefined && keychainBundle.installed && !keychainBundle.enabled
   const keychainNeedsInstall = hasBundleInventory && (keychainBundle === undefined || !keychainBundle.installed)
   const qrBlockedBundles = (() => {
     if (!hasBundleInventory || status === undefined) return [] as string[]
     const blocked: string[] = []
-    for (const pkg of [LARK_PACKAGE, '@dsh-enhanced/credentials-keychain', '@dsh-enhanced/assistant-delivery'] as const) {
+    for (const pkg of [LARK_PACKAGE, '@dsh-ray/credentials-keychain', '@dsh-ray/assistant-delivery'] as const) {
       const entry = status.bundles.find(candidate => candidate.name === pkg)
       if (entry === undefined || !entry.installed || !entry.enabled || entry.error !== undefined) {
         blocked.push(pkg)
       }
     }
-    const policyCandidates = ['@dsh-enhanced/personal-assistant', '@dsh-enhanced/assistant-policy']
+    const policyCandidates = ['@dsh-ray/personal-assistant', '@dsh-ray/assistant-policy']
       .map(pkg => status.bundles.find(candidate => candidate.name === pkg))
       .filter((entry): entry is OwnerConsoleStatus['bundles'][number] => entry !== undefined && entry.installed && entry.error?.code !== 'not-bundle')
     if (policyCandidates.length > 0 && !policyCandidates.some(entry => entry.enabled && entry.error === undefined)) {
@@ -1946,10 +1946,10 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
         return '第 1 步：请先点击「启用 lark-channel」启用已安装的飞书通道；启用后即可发起扫码或手动保存凭据，再重启一次 profile 生效。'
       }
       if (keychainNeedsInstall) {
-        return '第 1 步：缺少安全凭据组件 @dsh-enhanced/credentials-keychain，请先点击下方按钮安装后再保存飞书 App Secret。'
+        return '第 1 步：缺少安全凭据组件 @dsh-ray/credentials-keychain，请先点击下方按钮安装后再保存飞书 App Secret。'
       }
       if (keychainNeedsEnable) {
-        return '第 1 步：凭据组件 @dsh-enhanced/credentials-keychain 已安装但未启用，请先启用它以安全保存飞书 App Secret。'
+        return '第 1 步：凭据组件 @dsh-ray/credentials-keychain 已安装但未启用，请先启用它以安全保存飞书 App Secret。'
       }
       if (larkState.stalled) {
         return qrBlockedByBundles
@@ -2053,11 +2053,11 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
           style: btn(primaryButtonStyle),
           disabled: busy || cardRestarting || guidePromoting,
           onClick: () => void ctrl.run(async () => {
-            const res = await remote.installProjectBundle('@dsh-enhanced/credentials-keychain', [])
+            const res = await remote.installProjectBundle('@dsh-ray/credentials-keychain', [])
             if (res.ok && res.value.applied) setFeishuNeedsRestart(true)
             return res
           }),
-        }, '安装 @dsh-enhanced/credentials-keychain')
+        }, '安装 @dsh-ray/credentials-keychain')
         : null,
       keychainNeedsEnable
         ? el('button', {
@@ -2065,11 +2065,11 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
           style: btn(primaryButtonStyle),
           disabled: busy || cardRestarting || guidePromoting,
           onClick: () => void ctrl.run(async () => {
-            const res = await remote.setBundleEnabled('@dsh-enhanced/credentials-keychain', true)
+            const res = await remote.setBundleEnabled('@dsh-ray/credentials-keychain', true)
             if (res.ok && res.value.applied) setFeishuNeedsRestart(true)
             return res
           }),
-        }, '启用 @dsh-enhanced/credentials-keychain')
+        }, '启用 @dsh-ray/credentials-keychain')
         : null,
       showGuideRestartBtn
         ? el('button', {
@@ -2487,7 +2487,7 @@ export function BundlesCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const [bundleEntry, setBundleEntry] = useState('')
   const [customEntryMode, setCustomEntryMode] = useState(false)
   const [bundleJson, setBundleJson] = useState('{}')
-  const [installSpec, setInstallSpec] = useState('@dsh-enhanced/')
+  const [installSpec, setInstallSpec] = useState('@dsh-ray/')
   const pending = status === undefined
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
   const itemStyle = { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, alignItems: 'center', padding: '10px 0', borderTop: `1px solid ${hairline}` }
@@ -2544,10 +2544,10 @@ export function BundlesCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
       el('h4', { style: { ...subheadStyle, marginTop: 6 } }, '已加载条目'),
       pluginRows,
       el('div', { style: { ...actionsStyle, alignItems: 'end', marginTop: 6 } },
-        field('安装本项目 bundle', installSpec, setInstallSpec, '@dsh-enhanced/plugin-name'),
+        field('安装本项目 bundle', installSpec, setInstallSpec, '@dsh-ray/plugin-name'),
         el('button', { style: btn(primaryButtonStyle), disabled: busy,
           onClick: () => void ctrl.runInstall(installSpec) }, '安装')),
-      el('p', { style: hintStyle }, '安装走 DSH 自身的 pnpm 路径，只装该包及其 pnpm 依赖；它的 @dsh-enhanced peer bundle 与 Host 服务不会自动安装，缺失项会显示在卡片里。安装/启用后如提示需要重启 profile，请依提示操作。'),
+      el('p', { style: hintStyle }, '安装走 DSH 自身的 pnpm 路径，只装该包及其 pnpm 依赖；它的 @dsh-ray peer bundle 与 Host 服务不会自动安装，缺失项会显示在卡片里。安装/启用后如提示需要重启 profile，请依提示操作。'),
       el('details', { style: { marginTop: 4, borderTop: `1px solid ${hairline}`, paddingTop: 10 } },
         el('summary', { style: { fontSize: 12, fontWeight: 500, color: muted, cursor: 'pointer' } }, '高级：合并配置（只对声明了 live 字段的条目生效）'),
         el('div', { style: { display: 'grid', gap: 8, marginTop: 10 } },
@@ -2572,7 +2572,7 @@ export function BundlesCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
               `${plugin.entryId} (${plugin.moduleName})`)),
             el('option', { value: CUSTOM_MODEL_OPTION }, '手动输入 entry ID…'))),
           customEntryMode || pluginEntries.length === 0
-            ? field('entry', bundleEntry, setBundleEntry, 'dsh-enhanced-...')
+            ? field('entry', bundleEntry, setBundleEntry, 'dsh-ray-...')
             : null,
           el('textarea', { value: bundleJson, rows: 4, 'aria-label': '合并配置 JSON',
             style: { ...inputStyle, fontFamily: monoFont, fontSize: 12, resize: 'vertical' },
@@ -2886,7 +2886,7 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
 
   return card(
     '版本检查与自助升级',
-    '只读核验当前 @dsh-enhanced 版本、绑定 Host (@deepseek-ai/dsh) 与 npm 最新版本；支持安全预演与明确确认后的带外后台升级',
+    '只读核验当前 @dsh-ray 版本、绑定 Host (@deepseek-ai/dsh) 与 npm 最新版本；支持安全预演与明确确认后的带外后台升级',
     el('div', { 'data-owner-console-card': 'self-upgrade', style: listStyle },
       el('div', { style: actionsStyle },
         pill(upgradeStatus?.enhancedUpdateAvailable ? `发现新版本 ${upgradeStatus.latestEnhancedVersion}` : '已检查版本',
@@ -2897,11 +2897,11 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
       upgradeStatus === undefined
         ? placeholder('尚未获取版本与 Host 绑定状态，点击下方「检查最新版本」可进行有界超时检查。')
         : el('div', { style: listStyle },
-          detailRow('@dsh-enhanced 当前 / 最新',
+          detailRow('@dsh-ray 当前 / 最新',
             el('div', { style: monoMuted }, `${upgradeStatus.currentEnhancedVersion} -> ${upgradeStatus.latestEnhancedVersion ?? '离线未知'}`),
             `来源：${upgradeStatus.checkSource}${upgradeStatus.cached ? '（TTL 缓存）' : ''}`),
           detailRow('绑定 Host (@deepseek-ai/dsh)',
-            el('div', { style: monoMuted }, `绑定 ${upgradeStatus.boundHostVersion ?? '未绑定 (.dsh-rsi-host.json)'} · 运行时 ${upgradeStatus.installedHostVersion ?? '未知'}${upgradeStatus.targetHostVersion ? ` -> ${upgradeStatus.targetHostVersion}` : ''}`),
+            el('div', { style: monoMuted }, `绑定 ${upgradeStatus.boundHostVersion ?? '未绑定 (.dsh-ray-host.json)'} · 运行时 ${upgradeStatus.installedHostVersion ?? '未知'}${upgradeStatus.targetHostVersion ? ` -> ${upgradeStatus.targetHostVersion}` : ''}`),
             upgradeStatus.note),
           upgradeStatus.frozenSystemdProfile
             ? el('div', { style: bannerStyle(muted) }, `受控 Linux systemd profile 引导：${upgradeStatus.upgradeCommand}`)
@@ -2917,7 +2917,7 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
       upgradeArmed && !upgradeStatus?.frozenSystemdProfile && !upgradePreview?.frozenSystemdProfile
         ? el('div', { style: bannerStyle(danger) },
           el('div', { style: { display: 'grid', gap: 8 } },
-            el('span', {}, `即将启动独立后台进程执行：${upgradePreview?.command ?? upgradeStatus?.upgradeCommand ?? 'dsh-rsi upgrade --yes'}（升级期间将先备份并校验账本，完成后需按日志重启 Host）。`),
+            el('span', {}, `即将启动独立后台进程执行：${upgradePreview?.command ?? upgradeStatus?.upgradeCommand ?? 'dsh-ray upgrade --yes'}（升级期间将先备份并校验账本，完成后需按日志重启 Host）。`),
             el('div', { style: actionsStyle },
               el('button', { type: 'button', style: idle(dangerButtonStyle, busy || !canTrigger || !canArmUpgrade), disabled: busy || !canTrigger || !canArmUpgrade, onClick: triggerConfirmedUpgrade }, '确认并启动后台升级'),
               el('button', { type: 'button', style: buttonStyle, disabled: busy, onClick: () => setUpgradeArmed(false) }, '取消'))))
@@ -3020,7 +3020,7 @@ export function GrowthReportCard({ remote }: Readonly<{ remote: ConsoleRemote }>
         }, busy ? '读取中…' : '刷新读数') : null),
       failed !== '' ? el('p', { role: 'alert', style: { margin: 0, fontSize: 12, color: danger } }, `读取计分卡失败：${failed}`) : null,
       typeof remote.growthReport !== 'function'
-        ? placeholder('当前 Host 尚未暴露只读成长计分卡接口；可在终端运行 dsh-rsi growth-report --since 7d。')
+        ? placeholder('当前 Host 尚未暴露只读成长计分卡接口；可在终端运行 dsh-ray growth-report --since 7d。')
         : report === undefined
           ? placeholder(busy ? '正在汇总跨账本成长指标…' : '点击“刷新读数”加载最近窗口的成长指标。')
           : el('div', { style: gridStyle },
@@ -3583,7 +3583,7 @@ export function ModelsProviderSetupCard({ provider, configured, keyConfigured, r
   }
 
   return el('div', {
-    'data-owner-console-models-provider-card': focusId || 'dsh-enhanced-traex-acp-provider',
+    'data-owner-console-models-provider-card': focusId || 'dsh-ray-traex-acp-provider',
     style: { display: 'grid', gap: 10, paddingTop: 6, color: ink, fontSize: 13 },
   },
   jsx(StatusBanners, { ctrl }),

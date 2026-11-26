@@ -3,7 +3,7 @@ import { AssistantRecoveryService, Config } from './service.js'
 import type { Config as ConfigType } from './config.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-recovery'
+export const name = 'dsh-ray-assistant-recovery'
 export const inject = [
   'assistantAutomations',
   'assistantDelivery',

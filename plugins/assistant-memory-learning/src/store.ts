@@ -4,8 +4,8 @@ import { DatabaseSync } from 'node:sqlite'
 import {
   canonicalGrowthJson, growthObjectDigest, validateMemoryLearningOwner,
   validateMemoryLearningReviewRequest,
-} from '@dsh-enhanced/assistant-growth-contract'
-import type { MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
+import type { MemoryLearningReviewRequest } from '@dsh-ray/assistant-growth-contract'
 import type { LearningCursor, LearningIntent, LearningJob, LearningSnapshot, LearningState } from './types.js'
 
 type Feed = 'delivery' | 'evaluation' | 'evaluation-work-items'

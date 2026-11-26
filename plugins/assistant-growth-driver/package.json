@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-growth-driver",
+  "name": "@dsh-ray/assistant-growth-driver",
   "version": "0.1.88",
   "description": "Bounded growth agent with durable reviews driven by owner-verified task feedback and frozen source models.",
   "license": "MIT",
@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-growth-driver"
   },
   "keywords": [
@@ -51,8 +51,8 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/assistant-growth-contract": "workspace:*",
-    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
+    "@dsh-ray/assistant-growth-contract": "workspace:*",
+    "@dsh-ray/task-acceptance-contract": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
@@ -63,14 +63,14 @@
     "@deepseek-ai/dsh-session": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tool-executor-ptc": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-enhanced/assistant-automations": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-dreaming": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-evaluation": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-goals": ">=0.1.25 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-skills": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/plugin-control-plane": ">=0.1.33 <0.2.0"
+    "@dsh-ray/assistant-automations": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-delivery": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-dreaming": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-evaluation": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-goals": ">=0.1.25 <0.2.0",
+    "@dsh-ray/assistant-policy": ">=0.1.0 <0.2.0",
+    "@dsh-ray/assistant-skills": ">=0.1.33 <0.2.0",
+    "@dsh-ray/plugin-control-plane": ">=0.1.33 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -97,28 +97,28 @@
     "@deepseek-ai/dsh-tools": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-delivery": {
+    "@dsh-ray/assistant-delivery": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-dreaming": {
+    "@dsh-ray/assistant-dreaming": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-goals": {
+    "@dsh-ray/assistant-goals": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-policy": {
+    "@dsh-ray/assistant-policy": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-skills": {
+    "@dsh-ray/assistant-skills": {
       "optional": true
     },
-    "@dsh-enhanced/plugin-control-plane": {
+    "@dsh-ray/plugin-control-plane": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-evaluation": {
+    "@dsh-ray/assistant-evaluation": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-automations": {
+    "@dsh-ray/assistant-automations": {
       "optional": true
     }
   },
@@ -138,18 +138,18 @@
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tool-executor-ptc": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
-    "@dsh-enhanced/assistant-automations": "workspace:*",
-    "@dsh-enhanced/assistant-delivery": "workspace:*",
-    "@dsh-enhanced/assistant-dreaming": "workspace:*",
-    "@dsh-enhanced/assistant-evaluation": "workspace:*",
-    "@dsh-enhanced/assistant-goals": "workspace:*",
-    "@dsh-enhanced/assistant-isolation": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
-    "@dsh-enhanced/assistant-skills": "workspace:*",
-    "@dsh-enhanced/assistant-verifier": "workspace:*",
-    "@dsh-enhanced/assistant-work-items": "workspace:*",
-    "@dsh-enhanced/lark-channel": "workspace:*",
-    "@dsh-enhanced/plugin-control-plane": "workspace:*",
+    "@dsh-ray/assistant-automations": "workspace:*",
+    "@dsh-ray/assistant-delivery": "workspace:*",
+    "@dsh-ray/assistant-dreaming": "workspace:*",
+    "@dsh-ray/assistant-evaluation": "workspace:*",
+    "@dsh-ray/assistant-goals": "workspace:*",
+    "@dsh-ray/assistant-isolation": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
+    "@dsh-ray/assistant-skills": "workspace:*",
+    "@dsh-ray/assistant-verifier": "workspace:*",
+    "@dsh-ray/assistant-work-items": "workspace:*",
+    "@dsh-ray/lark-channel": "workspace:*",
+    "@dsh-ray/plugin-control-plane": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",

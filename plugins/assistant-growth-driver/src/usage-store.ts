@@ -2,10 +2,10 @@ import { closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { types as utilTypes } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { sourceGrowthEvidenceDigest, validateSourceGrowthRunBinding, validateAnySourceGrowthRunBinding, anySourceGrowthRunDigest, type AnySourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding, type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import { sourceGrowthEvidenceDigest, validateSourceGrowthRunBinding, validateAnySourceGrowthRunBinding, anySourceGrowthRunDigest, type AnySourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding, type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins, type SourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import { freezeWorkItemData, ownData, workItemRunSource, validateWorkItemUsageLocator, type WorkItemUsageLocator, type WorkItemUsageSource } from './work-item-source.js'
-import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import type { OwnerForegroundLearningTask } from '@dsh-ray/assistant-delivery'
 
 export type UsageModel = Readonly<{ provider: string; model: string; reasoningEffort?: string }>
 export interface ForegroundUsageIntent {

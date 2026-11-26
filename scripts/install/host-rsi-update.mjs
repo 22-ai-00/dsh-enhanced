@@ -91,7 +91,7 @@ async function installations(homePath, physicalHome = homePath) {
 
 async function installedMigrationModules(homePath, profile) {
   const canonicalHome = await realpath(homePath)
-  const root = join(canonicalHome, 'profiles', profile, 'node_modules', '@dsh-enhanced')
+  const root = join(canonicalHome, 'profiles', profile, 'node_modules', '@dsh-ray')
   const cp = await realpath(join(root, 'plugin-control-plane'))
   const lark = await realpath(join(root, 'lark-channel'))
   if (!inside(canonicalHome, cp) || !inside(canonicalHome, lark)) fail('migration code is not materialized inside Home')
@@ -782,11 +782,11 @@ async function scannerSourceObservation(homePath, physicalHome) {
 }
 
 async function scannerSourceModules(homePath, observer, profile) {
-  const root = await realpath(join(observer.physicalRoot, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'lark-channel'))
+  const root = await realpath(join(observer.physicalRoot, 'profiles', profile, 'node_modules', '@dsh-ray', 'lark-channel'))
   if (!inside(observer.physicalRoot, root)) fail('scanner source reader is outside Home')
   const path = join(root, 'lib', 'rsi-host-update.js')
   await observer.read(join(homePath, relative(observer.physicalRoot, path)), 2_097_152, false, false)
-  const contractPath = await realpath(createRequire(join(root, 'package.json')).resolve('@dsh-enhanced/assistant-growth-contract'))
+  const contractPath = await realpath(createRequire(join(root, 'package.json')).resolve('@dsh-ray/assistant-growth-contract'))
   if (!inside(observer.physicalRoot, contractPath)) fail('scanner owner validator is outside Home')
   await observer.read(join(homePath, relative(observer.physicalRoot, contractPath)), 2_097_152, false, false)
   // Fence this explicitly required validator before evaluating hostUpdate, whose
@@ -856,7 +856,7 @@ export async function inspectRsiScannerOwnerSource({ homePath, physicalHome = ho
       sourceAt: observer.sourceAt, boundSourceAt: observer.boundSourceAt, optionalAt: observer.optionalAt, sourceOnly: true,
       watchedPlans: async (...args) => {
         sqliteRead = true
-        const cp = await realpath(join(observer.physicalRoot, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane'))
+        const cp = await realpath(join(observer.physicalRoot, 'profiles', profile, 'node_modules', '@dsh-ray', 'plugin-control-plane'))
         if (!inside(observer.physicalRoot, cp)) fail('scanner source plan reader is outside Home')
         // Validate the same private ledger path and every ancestor before the
         // existing read-only query. Its bytes are checked again at the final

@@ -16,12 +16,12 @@ describe('installer port preflight diagnostics', () => {
       if (!address || typeof address === 'string') throw new Error('no TCP address')
       const result = spawnSync('/bin/bash', [
         '-c', `source "$1"
-dsh_enhanced_reject_incompatible_existing_dsh() { :; }
-dsh_enhanced_effective_lark_is_configured() { return 0; }
-dsh_enhanced_ensure_dsh() { printf 'REACHED_HOST_PREPARATION\\n'; return 77; }
-dsh_enhanced_install local "$2" --profile "$3" --scenario supervised --yes`,
+dsh_ray_reject_incompatible_existing_dsh() { :; }
+dsh_ray_effective_lark_is_configured() { return 0; }
+dsh_ray_ensure_dsh() { printf 'REACHED_HOST_PREPARATION\\n'; return 77; }
+dsh_ray_install local "$2" --profile "$3" --scenario supervised --yes`,
         'profile-port-test', resolve('scripts/install/common.sh'), resolve('.'), profile,
-      ], { encoding: 'utf8', env: { ...process.env, DSH_HOME: root, DSH_ENHANCED_WEB_PORT: String(address.port) } })
+      ], { encoding: 'utf8', env: { ...process.env, DSH_HOME: root, DSH_RAY_WEB_PORT: String(address.port) } })
       if (profile === 'web') {
         expect(result.status).toBe(1)
         expect(result.stderr).toContain('EADDRINUSE')
@@ -59,7 +59,7 @@ require('node:net').createServer = () => {
 };
 `)
       const result = spawnSync('/bin/bash', [
-        '-c', 'source "$1"; dsh_enhanced_check_web_port_available "$2"',
+        '-c', 'source "$1"; dsh_ray_check_web_port_available "$2"',
         'port-test', resolve('scripts/install/common.sh'), '43191',
       ], {
         encoding: 'utf8',

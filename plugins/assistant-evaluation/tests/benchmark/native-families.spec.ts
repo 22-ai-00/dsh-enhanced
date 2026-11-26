@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { familiesDevelopmentCases, familiesDevelopmentCorpus, familiesDevelopmentDataset } from '../../src/benchmark/families-corpus.js'
 import {
   createNativeBenchmarkExecutor,

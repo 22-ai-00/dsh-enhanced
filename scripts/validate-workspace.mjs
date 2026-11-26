@@ -521,9 +521,9 @@ for (const entry of entries) {
     continue
   }
 
-  const expectedSuffix = `/${entry.name}`
-  if (typeof manifest.name !== 'string' || !manifest.name.endsWith(expectedSuffix)) {
-    report(manifestPath, `package name must end with ${expectedSuffix}`)
+  const expectedName = `@dsh-ray/${entry.name}`
+  if (typeof manifest.name !== 'string' || manifest.name !== expectedName) {
+    report(manifestPath, `package name must equal ${expectedName}`)
   } else if (packageNames.has(manifest.name)) {
     report(manifestPath, `duplicate package name ${manifest.name}`)
   } else {
@@ -638,9 +638,9 @@ for (const entry of packageEntries) {
     continue
   }
 
-  const expectedSuffix = `/${entry.name}`
-  if (typeof manifest.name !== 'string' || !manifest.name.endsWith(expectedSuffix)) {
-    report(manifestPath, `package name must end with ${expectedSuffix}`)
+  const expectedName = entry.name === 'dsh-ray' ? 'dsh-ray' : `@dsh-ray/${entry.name}`
+  if (typeof manifest.name !== 'string' || manifest.name !== expectedName) {
+    report(manifestPath, `package name must equal ${expectedName}`)
   } else if (packageNames.has(manifest.name)) {
     report(manifestPath, `duplicate package name ${manifest.name}`)
   } else {
@@ -724,7 +724,7 @@ for (const required of templateRequired) {
 }
 
 // Protection floors: the runtime single source of truth lives in the inert
-// plugin-protection module of @dsh-enhanced/assistant-growth-contract (inside
+// plugin-protection module of @dsh-ray/assistant-growth-contract (inside
 // the sealed RSI bootstrap closure). This build-time check parses that source
 // and pins the declarative `dsh.protection.floor` manifest field to it, so a
 // floor can only rise and a protected plugin cannot silently drop its marker.

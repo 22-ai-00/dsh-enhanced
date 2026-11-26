@@ -13,7 +13,7 @@ function fixture(originalVersion = '0.2.0-rc.2') {
   const binding = (value: typeof original) => JSON.stringify({ schemaVersion: 1,
     cacheRoot: '/private/hosts', version: value.version, receiptDigest: value.receiptDigest }) + '\n'
   const plan = { schemaVersion: 1, status: originalVersion === candidate.version ? 'current' : 'update',
-    canonicalHome: '/private/home', bindingPath: '/private/home/.dsh-rsi-host.json',
+    canonicalHome: '/private/home', bindingPath: '/private/home/.dsh-ray-host.json',
     originalBindingSource: binding(original), originalBindingDigest: digest(binding(original)),
     originalRuntime: original, candidateRuntime: candidate, candidateBindingSource: binding(candidate) }
   const coordinatorProfile = `rsi-assistant-${digest('assistant').slice(0, 12)}`

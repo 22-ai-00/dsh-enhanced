@@ -1,4 +1,4 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { TrustedWorkItemOwnerFeedbackProof } from './types.js'
 
 function invalid(): never { throw new Error('invalid work-item owner feedback proof') }

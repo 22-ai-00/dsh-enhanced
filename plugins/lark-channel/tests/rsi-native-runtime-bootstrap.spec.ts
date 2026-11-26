@@ -73,7 +73,7 @@ test.runIf(process.platform === 'darwin' && nodeArchivePath && pnpmArchivePath)(
 const manifestVersion = '0.1.83'
 function baseManifests(): Record<string, string> {
   return {
-    'package.json': JSON.stringify({ name: 'dsh-enhanced', version: manifestVersion, packageManager: 'pnpm@11.7.0' }),
+    'package.json': JSON.stringify({ name: 'dsh-ray', version: manifestVersion, packageManager: 'pnpm@11.7.0' }),
     'pnpm-workspace.yaml': 'packages:\n  - packages/*\n',
     'packages/fixture/package.json': JSON.stringify({ name: '@fixture/one', version: manifestVersion }),
     'pnpm-lock.yaml': "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      '@fixture/one':\n        specifier: workspace:*\n        version: link:packages/fixture\n  packages/fixture: {}\n",
@@ -149,6 +149,6 @@ test('validateFrozenNativeManifests rejects smuggling, non-string deprecated, YA
 
   expect(() => validateFrozenNativeManifests(manifestSource({
     ...files,
-    'package.json': JSON.stringify({ name: 'dsh-enhanced', version: manifestVersion, packageManager: 'pnpm@11.7.0', pnpm: { pnpmfile: '/tmp/evil.cjs' } }),
+    'package.json': JSON.stringify({ name: 'dsh-ray', version: manifestVersion, packageManager: 'pnpm@11.7.0', pnpm: { pnpmfile: '/tmp/evil.cjs' } }),
   }))).toThrow('rsi native bootstrap: frozen package configuration unsupported')
 })

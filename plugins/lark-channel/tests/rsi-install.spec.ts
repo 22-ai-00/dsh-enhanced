@@ -3,15 +3,15 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { parse, stringify } from 'yaml'
-import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { runtimeConfigDigest } from '@dsh-ray/plugin-control-plane'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { assertRsiMemoryScanActivation, installRsiOwnerDeployment, preflightRsiOwnerReadiness, RsiOwnerPreflightUnavailableError, rsiCoordinatorProfile, rsiInstallPorts, type RsiInstallPorts } from '../src/rsi-install.js'
 import { rsiSetupPorts } from '../src/rsi-setup.js'
 import { collectRsiInstalledInputs, RsiInstalledInputsUnavailableError } from '../src/rsi-install-inputs.js'
 import { applySelfIterationProfileToggle } from '../src/service.js'
 import { LinuxRsiRuntimeUnavailableError } from '../src/rsi-linux-runtime-bootstrap.js'
-import { linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
+import { linuxRuntimeDigest } from '@dsh-ray/assistant-isolation'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
 import { nativePreparedFixture } from './fixtures/rsi-linux-install.js'
 
@@ -39,8 +39,8 @@ async function fixture() {
     snapshot: vi.fn(async () => ({bindings:[f.binding],storageDigest:stops.length ? 'stopped' : 'running'} as unknown as Awaited<ReturnType<typeof rsiSetupPorts.snapshot>>)),
     automationInventory: vi.fn(async (effective: string) => {
       const rows = parse(effective) as Array<{id:string;config:Record<string,any>}>
-      const config = rows.find(row => row.id === 'dsh-enhanced-assistant-automations')?.config
-        ?? rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.assistantAutomations
+      const config = rows.find(row => row.id === 'dsh-ray-assistant-automations')?.config
+        ?? rows.find(row => row.id === 'dsh-ray-personal-assistant')!.config.assistantAutomations
       return {databasePath:config.databasePath ?? join(home,'automations.sqlite'),schedulerEnabled:config.schedulerEnabled === true,records:[]}
     }),
     assertStopped: vi.fn(), start: vi.fn(async (name: string) => { starts.push(name) }),
@@ -63,10 +63,10 @@ async function fixture() {
       executor:f.input.executor,git:f.input.manifest.sourceReviews.git,systemctl:f.input.systemctl,
       plugins:[...f.input.manifest.sourceReviews.plugins],policies:f.input.policies,
       observerTargets:f.input.manifest.controlPlane.runtimeObserver!.targets.filter(target => ![
-        'dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-verifier',
-        'dsh-enhanced-personal-assistant', 'dsh-enhanced-assistant-memory-learning',
+        'dsh-ray-assistant-growth-driver', 'dsh-ray-assistant-verifier',
+        'dsh-ray-personal-assistant', 'dsh-ray-assistant-memory-learning',
       ].includes(target.entryId))
-        .map(target => target.entryId === 'dsh-enhanced-assistant-delivery' ? {...target,
+        .map(target => target.entryId === 'dsh-ray-assistant-delivery' ? {...target,
           configDigest:runtimeConfigDigest((parse(value.targetEffective) as Array<{id:string;config:unknown}>).find(row => row.id === target.entryId)!.config)} : target),
       hostDeploymentInputs:[...f.input.manifest.controlPlane.sourceAdoptions!.hostDeploymentInputs!] })),
     coordinator: vi.fn(async () => {}),
@@ -277,15 +277,15 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
     expect(manifest.memoryLearning).toBeUndefined()
     expect(manifest.ordinaryUseLearning).toBeUndefined()
     expect(manifest.controlPlane.runtimeObserver.targets.map(target => target.entryId))
-      .not.toContain('dsh-enhanced-assistant-memory-learning')
+      .not.toContain('dsh-ray-assistant-memory-learning')
     const rows = parse(await readFile(join(f.home, 'profiles', f.profile, 'cordis.patch.yml'), 'utf8')) as Array<{
       id: string; config?: Record<string, any>; disabled?: boolean }>
-    const personal = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config!
+    const personal = rows.find(row => row.id === 'dsh-ray-personal-assistant')!.config!
     expect(personal.personalMemory.automaticLearning).toBeUndefined()
     expect((personal.assistantPolicy.budgets as Array<{ id?: string }>).filter(budget => String(budget.id).includes('memory'))).toEqual([])
     expect((personal.assistantPolicy.rules as Array<{ id?: string }>).filter(rule => String(rule.id).includes('memory'))).toEqual([])
-    expect(rows.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config!.memoryReviews).toBeUndefined()
-    expect(rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')?.config).toBeUndefined()
+    expect(rows.find(row => row.id === 'dsh-ray-assistant-verifier')!.config!.memoryReviews).toBeUndefined()
+    expect(rows.find(row => row.id === 'dsh-ray-assistant-memory-learning')?.config).toBeUndefined()
     expect(f.starts).toEqual([f.coordinator, f.profile])
     // A retry without the explicit flag keeps exactly the recorded absence and
     // never issues the skipped grants.
@@ -331,7 +331,7 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
     expect(manifest.pluginCreation.reviews.runner).toMatchObject({ backend: 'linux-native' })
     expect(manifest.growthDriver.pluginSourceProposals.allowCreation).toBe(true)
     const rows = parse(await readFile(join(f.home, 'profiles', f.profile, 'cordis.patch.yml'), 'utf8')) as Array<{ id: string; config: Record<string, any> }>
-    expect(rows.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config.creationReviews).toEqual(manifest.pluginCreation.reviews)
+    expect(rows.find(row => row.id === 'dsh-ray-assistant-verifier')!.config.creationReviews).toEqual(manifest.pluginCreation.reviews)
     expect(await installRsiOwnerDeployment(f.input, f.ports)).toEqual(first)
     expect(await readFile(path, 'utf8')).toBe(bytes)
   }, 120_000)
@@ -360,7 +360,7 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
   test('applies real owner/profile/authority transaction, starts coordinator first, and preserves frozen installation on retry', async () => {
     const f = await fixture()
     const original = parse(f.originals[f.profile]!) as Array<{id:string;config:Record<string,any>}>
-    const delivery = original.find(row => row.id === 'dsh-enhanced-assistant-delivery')!
+    const delivery = original.find(row => row.id === 'dsh-ray-assistant-delivery')!
     delivery.config.ownerRoutes = []
     delivery.config.preservedSetting = {exact:'keep'}
     f.originals[f.profile] = stringify(original)
@@ -414,8 +414,8 @@ const fs = require('node:fs'), path = require('node:path');
 const root = path.join(process.env.DSH_HOME,'profiles',process.argv[process.argv.indexOf('--profile')+1]);
 const first = !fs.existsSync(root);
 for (const name of (first ? ['assistant-policy'] : ['assistant-policy','assistant-automations','plugin-control-plane'])) {
-  const dir = path.join(root,'node_modules','@dsh-enhanced',name);fs.mkdirSync(dir,{recursive:true,mode:0o700});
-  fs.writeFileSync(path.join(dir,'package.json'),JSON.stringify({name:'@dsh-enhanced/'+name,version:${JSON.stringify(hostVersion.version)}}));
+  const dir = path.join(root,'node_modules','@dsh-ray',name);fs.mkdirSync(dir,{recursive:true,mode:0o700});
+  fs.writeFileSync(path.join(dir,'package.json'),JSON.stringify({name:'@dsh-ray/'+name,version:${JSON.stringify(hostVersion.version)}}));
 }
 process.exit(first ? 9 : 0);
 `,{mode:0o700})
@@ -424,16 +424,16 @@ process.exit(first ? 9 : 0);
     const signal = new AbortController().signal
     await expect(rsiInstallPorts.coordinator({dshHome:home,profile},coordinator,executor,signal,systemctl)).rejects.toThrow('exit=9')
     await expect(rsiInstallPorts.coordinator({dshHome:home,profile},coordinator,executor,signal,systemctl)).resolves.toBeUndefined()
-    expect(JSON.parse(await readFile(join(home,'profiles',coordinator,'node_modules','@dsh-enhanced','plugin-control-plane','package.json'),'utf8')).name)
-      .toBe('@dsh-enhanced/plugin-control-plane')
+    expect(JSON.parse(await readFile(join(home,'profiles',coordinator,'node_modules','@dsh-ray','plugin-control-plane','package.json'),'utf8')).name)
+      .toBe('@dsh-ray/plugin-control-plane')
     const unowned = rsiCoordinatorProfile('foreign')
     await mkdir(join(home,'profiles',unowned),{mode:0o700})
     await expect(rsiInstallPorts.coordinator({dshHome:home,profile:'foreign'},unowned,executor,signal,systemctl))
       .rejects.toThrow('unregistered coordinator')
     for (const name of ['assistant-policy','assistant-automations','plugin-control-plane']) {
-      const dir = join(home,'profiles',unowned,'node_modules','@dsh-enhanced',name)
+      const dir = join(home,'profiles',unowned,'node_modules','@dsh-ray',name)
       await mkdir(dir,{recursive:true,mode:0o700})
-      await writeFile(join(dir,'package.json'),JSON.stringify({name:`@dsh-enhanced/${name}`,version:hostVersion.version}))
+      await writeFile(join(dir,'package.json'),JSON.stringify({name:`@dsh-ray/${name}`,version:hostVersion.version}))
     }
     await expect(rsiInstallPorts.coordinator({dshHome:home,profile:'foreign'},unowned,executor,signal,systemctl))
       .rejects.toThrow('unregistered coordinator')
@@ -524,7 +524,7 @@ process.exit(first ? 9 : 0);
   test('final unit property drift rolls back profile application before any Host starts', async () => {
     const f = await fixture()
     const original = parse(f.originals[f.profile]!) as Array<{id:string;config:Record<string,any>}>
-    original.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config.ownerRoutes = []
+    original.find(row => row.id === 'dsh-ray-assistant-delivery')!.config.ownerRoutes = []
     f.originals[f.profile] = stringify(original)
     f.ports.readUnit = vi.fn(async () => ({...f.f.input.unitProperties,User:'changed'}))
     await expect(installRsiOwnerDeployment(f.input,f.ports)).rejects.toThrow('final loaded systemd unit differs')
@@ -547,7 +547,7 @@ process.exit(first ? 9 : 0);
   test('requires acknowledgement for existing Recovery/heartbeat rows and rejects post-stop inventory drift before grants', async () => {
     const f = await fixture()
     const inspect = f.ports.setup.automationInventory
-    const active = [{id:'recovery:supervised-growth',owner:'dsh-enhanced-assistant-recovery',status:'active',version:1}] as unknown as Awaited<ReturnType<typeof inspect>>['records']
+    const active = [{id:'recovery:supervised-growth',owner:'dsh-ray-assistant-recovery',status:'active',version:1}] as unknown as Awaited<ReturnType<typeof inspect>>['records']
     f.ports.setup.automationInventory = vi.fn(async (effective,home) => {
       const inventory = await inspect(effective,home)
       return {...inventory,records:inventory.databasePath === join(f.home,'automations.sqlite') ? active : []}
@@ -590,8 +590,8 @@ process.exit(first ? 9 : 0);
     // Upgrade the installed profile bundles (adding assistant-proactive & assistant-work-items) and run upgradeExistingOwner
     const originalRows = parse(f.originals[f.profile]!) as Array<{ id: string; name?: string; config?: Record<string, unknown> }>
     originalRows.push(
-      { id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive', config: {} },
-      { id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
+      { id: 'dsh-ray-assistant-proactive', name: '@dsh-ray/assistant-proactive', config: {} },
+      { id: 'dsh-ray-assistant-work-items', name: '@dsh-ray/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
     )
     f.originals[f.profile] = stringify(originalRows)
     const baseCollect = f.ports.collect
@@ -599,15 +599,15 @@ process.exit(first ? 9 : 0);
       const collected = await baseCollect(value)
       const added = ['assistant-proactive', 'assistant-work-items'] as const
       const extraInputs = added.flatMap(plugin => [
-        `node_modules/@dsh-enhanced/${plugin}/package.json`,
-        `node_modules/@dsh-enhanced/${plugin}/cordis.patch.yml`,
-        `node_modules/@dsh-enhanced/${plugin}/lib/index.js`,
+        `node_modules/@dsh-ray/${plugin}/package.json`,
+        `node_modules/@dsh-ray/${plugin}/cordis.patch.yml`,
+        `node_modules/@dsh-ray/${plugin}/lib/index.js`,
       ])
       const samplePolicy = collected.policies[0]!
       const extraPolicies = added.map(plugin => ({
         ...samplePolicy,
         candidateId: plugin,
-        packageName: `@dsh-enhanced/${plugin}`,
+        packageName: `@dsh-ray/${plugin}`,
         packagePath: `plugins/${plugin}`,
         capabilities: [plugin],
       }))
@@ -643,14 +643,14 @@ process.exit(first ? 9 : 0);
     expect(await readFile(ledgerPath)).toEqual(ledgerBefore)
     const rows = parse(await readFile(join(f.home, 'profiles', f.profile, 'cordis.patch.yml'), 'utf8')) as Array<{
       id: string; config?: Record<string, any> }>
-    expect(rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')?.config?.workItemExperiences).toBe(true)
-    expect(rows.find(row => row.id === 'dsh-enhanced-assistant-proactive')?.config?.intakeEvaluation).toMatchObject({
+    expect(rows.find(row => row.id === 'dsh-ray-assistant-memory-learning')?.config?.workItemExperiences).toBe(true)
+    expect(rows.find(row => row.id === 'dsh-ray-assistant-proactive')?.config?.intakeEvaluation).toMatchObject({
       provider: 'deepseek-official',
       model: 'deepseek-chat',
     })
     const effectiveAfter = parse(f.ports.setup.dump(f.profile, f.home)) as Array<{
       id: string; config?: Record<string, any> }>
-    const delivery = effectiveAfter.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config!
+    const delivery = effectiveAfter.find(row => row.id === 'dsh-ray-assistant-delivery')!.config!
     expect(delivery.ownerRoutes).toHaveLength(1)
   }, 120_000)
 
@@ -670,8 +670,8 @@ process.exit(first ? 9 : 0);
     // Prepare upgraded bundles for the failed upgrade attempt
     const originalRows = parse(f.originals[f.profile]!) as Array<{ id: string; name?: string; config?: Record<string, unknown> }>
     originalRows.push(
-      { id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive', config: {} },
-      { id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
+      { id: 'dsh-ray-assistant-proactive', name: '@dsh-ray/assistant-proactive', config: {} },
+      { id: 'dsh-ray-assistant-work-items', name: '@dsh-ray/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
     )
     f.originals[f.profile] = stringify(originalRows)
     const baseCollect = f.ports.collect
@@ -679,15 +679,15 @@ process.exit(first ? 9 : 0);
       const collected = await baseCollect(value)
       const added = ['assistant-proactive', 'assistant-work-items'] as const
       const extraInputs = added.flatMap(plugin => [
-        `node_modules/@dsh-enhanced/${plugin}/package.json`,
-        `node_modules/@dsh-enhanced/${plugin}/cordis.patch.yml`,
-        `node_modules/@dsh-enhanced/${plugin}/lib/index.js`,
+        `node_modules/@dsh-ray/${plugin}/package.json`,
+        `node_modules/@dsh-ray/${plugin}/cordis.patch.yml`,
+        `node_modules/@dsh-ray/${plugin}/lib/index.js`,
       ])
       const samplePolicy = collected.policies[0]!
       const extraPolicies = added.map(plugin => ({
         ...samplePolicy,
         candidateId: plugin,
-        packageName: `@dsh-enhanced/${plugin}`,
+        packageName: `@dsh-ray/${plugin}`,
         packagePath: `plugins/${plugin}`,
         capabilities: [plugin],
       }))
@@ -751,7 +751,7 @@ process.exit(first ? 9 : 0);
     // Simulate /autonomy disable setting disabled: true while retaining owner config on disk
     const patchPath = join(f.home, 'profiles', f.profile, 'cordis.patch.yml')
     const patchRows = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-    const learner = patchRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!
+    const learner = patchRows.find(row => row.id === 'dsh-ray-assistant-memory-learning')!
     learner.disabled = true
     await writeFile(patchPath, stringify(patchRows), { mode: 0o600 })
 
@@ -763,14 +763,14 @@ process.exit(first ? 9 : 0);
     const upgraded = await installRsiOwnerDeployment({ ...f.input, upgradeExistingOwner: true }, f.ports)
     expect(upgraded.mode).toBe('ready')
     const finalPatchRows = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean }>
-    expect(finalPatchRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')?.disabled).toBe(false)
+    expect(finalPatchRows.find(row => row.id === 'dsh-ray-assistant-memory-learning')?.disabled).toBe(false)
   }, 120_000)
 
   test('accepts disabled === undefined with config after /autonomy disable -> /autonomy enable on bare retry and upgradeExistingOwner', async () => {
     const f = await fixture()
     // Match real plugins/assistant-memory-learning/cordis.patch.yml where base omits `disabled`
     const baseRows = parse(f.originals[f.profile]!) as Array<{ id: string; disabled?: boolean }>
-    delete baseRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.disabled
+    delete baseRows.find(row => row.id === 'dsh-ray-assistant-memory-learning')!.disabled
     f.originals[f.profile] = stringify(baseRows)
 
     const first = await installRsiOwnerDeployment(f.input, f.ports)
@@ -783,7 +783,7 @@ process.exit(first ? 9 : 0);
 
     const patchPath = join(f.home, 'profiles', f.profile, 'cordis.patch.yml')
     const patchRows = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: unknown }>
-    const learnerRow = patchRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!
+    const learnerRow = patchRows.find(row => row.id === 'dsh-ray-assistant-memory-learning')!
     expect(learnerRow.disabled).toBeUndefined()
     expect(learnerRow.config).toBeDefined()
 
@@ -807,13 +807,13 @@ process.exit(first ? 9 : 0);
       'assistant-memory-learning', 'hello', 'assistant-proactive', 'assistant-work-items',
       'assistant-evaluation', 'personal-memory']
     for (const name of allPlugins) {
-      const pkgRoot = join(profileRoot, 'node_modules', '@dsh-enhanced', name)
+      const pkgRoot = join(profileRoot, 'node_modules', '@dsh-ray', name)
       await writeInstalledFile(join(pkgRoot, 'package.json'), JSON.stringify({
-        name: `@dsh-enhanced/${name}`, version, main: './lib/index.js',
+        name: `@dsh-ray/${name}`, version, main: './lib/index.js',
         exports: { '.': { default: './lib/index.js' }, './package.json': './package.json' },
         dsh: { bundle: { patch: './cordis.patch.yml' } },
       }))
-      await writeInstalledFile(join(pkgRoot, 'cordis.patch.yml'), `- insert:\n    - id: dsh-enhanced-${name}\n      name: '@dsh-enhanced/${name}'\n`)
+      await writeInstalledFile(join(pkgRoot, 'cordis.patch.yml'), `- insert:\n    - id: dsh-ray-${name}\n      name: '@dsh-ray/${name}'\n`)
       await writeInstalledFile(join(pkgRoot, 'lib', 'index.js'), 'export default {}\n')
     }
     const dshRoot = join(f.f.root, 'real-dsh')
@@ -828,18 +828,18 @@ process.exit(first ? 9 : 0);
 
     // Add delivery route model, assistant-proactive, assistant-work-items, and an enabled evaluation row to the profile
     const originalRows = parse(f.originals[f.profile]!) as Array<{ id: string; name?: string; config?: Record<string, unknown> }>
-    const deliveryRow = originalRows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!
+    const deliveryRow = originalRows.find(row => row.id === 'dsh-ray-assistant-delivery')!
     deliveryRow.config = { ...deliveryRow.config, agentProvider: 'deepseek-official', agentModel: 'deepseek-v4-flash' }
     originalRows.push(
-      { id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive', config: { enabled: true } },
-      { id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
+      { id: 'dsh-ray-assistant-proactive', name: '@dsh-ray/assistant-proactive', config: { enabled: true } },
+      { id: 'dsh-ray-assistant-work-items', name: '@dsh-ray/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
     )
     f.originals[f.profile] = stringify(originalRows)
     const patchPath = join(profileRoot, 'cordis.patch.yml')
     await writeInstalledFile(patchPath, stringify([
-      { id: 'dsh-enhanced-assistant-evaluation', name: '@dsh-enhanced/assistant-evaluation', config: { enabled: true } },
-      { id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive', config: { enabled: true } },
-      { id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
+      { id: 'dsh-ray-assistant-evaluation', name: '@dsh-ray/assistant-evaluation', config: { enabled: true } },
+      { id: 'dsh-ray-assistant-proactive', name: '@dsh-ray/assistant-proactive', config: { enabled: true } },
+      { id: 'dsh-ray-assistant-work-items', name: '@dsh-ray/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
     ]))
 
     f.ports.collect = vi.fn(async value => {
@@ -863,11 +863,11 @@ process.exit(first ? 9 : 0);
     const toggleOff = await applySelfIterationProfileToggle({ dshHome: f.home, profile: f.profile, enable: false })
     expect(toggleOff).toMatchObject({ ok: true, state: 'disabled' })
     const disabledPatch = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-    for (const id of ['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning',
-      'dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items', 'dsh-enhanced-assistant-evaluation']) {
+    for (const id of ['dsh-ray-assistant-growth-driver', 'dsh-ray-assistant-memory-learning',
+      'dsh-ray-assistant-proactive', 'dsh-ray-assistant-work-items', 'dsh-ray-assistant-evaluation']) {
       expect(disabledPatch.find(row => row.id === id)?.disabled).toBe(true)
     }
-    expect(disabledPatch.find(row => row.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(false)
+    expect(disabledPatch.find(row => row.id === 'dsh-ray-assistant-work-items')?.config?.enabled).toBe(false)
 
     // Bare retry without upgradeExistingOwner still fails closed
     await expect(installRsiOwnerDeployment(f.input, f.ports)).rejects.toThrow()
@@ -876,12 +876,12 @@ process.exit(first ? 9 : 0);
     const upgraded = await installRsiOwnerDeployment({ ...f.input, upgradeExistingOwner: true }, f.ports)
     expect(upgraded.mode).toBe('ready')
     const finalPatch = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-    for (const id of ['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning',
-      'dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items']) {
+    for (const id of ['dsh-ray-assistant-growth-driver', 'dsh-ray-assistant-memory-learning',
+      'dsh-ray-assistant-proactive', 'dsh-ray-assistant-work-items']) {
       expect(finalPatch.find(row => row.id === id)?.disabled).toBe(false)
     }
-    expect(finalPatch.find(row => row.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(true)
-    expect(finalPatch.find(row => row.id === 'dsh-enhanced-assistant-proactive')?.config?.enabled).toBe(true)
-    expect(finalPatch.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')?.config?.enabled).toBe(true)
+    expect(finalPatch.find(row => row.id === 'dsh-ray-assistant-work-items')?.config?.enabled).toBe(true)
+    expect(finalPatch.find(row => row.id === 'dsh-ray-assistant-proactive')?.config?.enabled).toBe(true)
+    expect(finalPatch.find(row => row.id === 'dsh-ray-assistant-growth-driver')?.config?.enabled).toBe(true)
   }, 120_000)
 })

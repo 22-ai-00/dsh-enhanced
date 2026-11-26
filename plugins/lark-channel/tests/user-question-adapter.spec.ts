@@ -3,7 +3,7 @@ import type {
   DeliveryAdapterContext,
   DeliveryUserQuestionRequest,
   InboundEnvelope,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import { LarkDeliveryAdapter } from '../src/adapter.ts'
 import { larkTopLevelSenderThread } from '../src/group-thread.ts'
 import { renderLarkMessage } from '../src/sdk.ts'

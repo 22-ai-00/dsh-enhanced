@@ -33,16 +33,16 @@ async function file(path: string, source: string, mode = 0o600) {
  * use the workspace installation. Migration imports must come from this Home. */
 async function installMigrationModules(home: string) {
   const modules = join(home, 'profiles', 'target', 'node_modules')
-  await mkdir(join(modules, '@dsh-enhanced'), { recursive: true, mode: 0o700 })
+  await mkdir(join(modules, '@dsh-ray'), { recursive: true, mode: 0o700 })
   for (const name of ['plugin-control-plane', 'lark-channel']) {
-    const source = resolve('plugins', name), target = join(modules, '@dsh-enhanced', name)
+    const source = resolve('plugins', name), target = join(modules, '@dsh-ray', name)
     await mkdir(target, { mode: 0o700 })
     for (const entry of ['lib', 'package.json', ...(name === 'plugin-control-plane' ? ['bin'] : [])]) {
       await cp(join(source, entry), join(target, entry), { recursive: true, dereference: true })
     }
     for (const entry of await readdir(join(source, 'node_modules'))) {
       await mkdir(join(target, 'node_modules'), { recursive: true, mode: 0o700 })
-      if (entry === '@dsh-enhanced') {
+      if (entry === '@dsh-ray') {
         await mkdir(join(target, 'node_modules', entry), { mode: 0o700 })
         for (const child of await readdir(join(source, 'node_modules', entry))) {
           await symlink(child === 'plugin-control-plane' ? relative(join(target, 'node_modules', entry), join(modules, entry, child))
@@ -175,7 +175,7 @@ test.skipIf(process.platform !== 'linux')('Host update signs and verifies a gene
   const f = await installedFixture()
   const stageHome = join(f.f.root, 'large-receipt-stage')
   await cp(f.home, stageHome, { recursive: true, verbatimSymlinks: true })
-  const libraries = join(stageHome, 'profiles', 'target', 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'lib')
+  const libraries = join(stageHome, 'profiles', 'target', 'node_modules', '@dsh-ray', 'plugin-control-plane', 'lib')
   for (let index = 0; index < 100; index++) {
     await file(join(libraries, `receipt-fixture-${index}-${'x'.repeat(180)}.js`), 'export {}\n')
   }

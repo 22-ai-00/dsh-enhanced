@@ -3,7 +3,7 @@ import { engineeringContextData, validateWorkItemEngineeringMaterial, frameWorkI
   type OwnerWorkItemEngineeringContextExpectation, type OwnerWorkItemEngineeringContextReadInput, type OwnerWorkItemEngineeringContextPage,
   type OwnerWorkItemEngineeringContext, type OwnerWorkItemEngineeringContextSource } from './work-item-engineering-context.js'
 import type { WorkItemFeedbackIntent, WorkItemFeedbackSource, WorkItemFeedbackSelection, OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'
-import type { TrustedWorkItemOwnerFeedbackProof } from '@dsh-enhanced/assistant-evaluation'
+import type { TrustedWorkItemOwnerFeedbackProof } from '@dsh-ray/assistant-evaluation'
 import { workItemReplyCanonical, workItemReplyDigest, type WorkItemReportTarget, type WorkItemReplySource, type WorkItemReplyConsumerRegistration, type WorkItemReplyReadInput, type WorkItemReplyListInput } from './work-item-replies.js'
 import type { StoredWorkItemReport } from './work-item-replies-store.js'
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs'
@@ -22,20 +22,20 @@ import Schema from '@deepseek-ai/schemastery'
 import { RestartStore, type RestartRecord } from './restart-store.js'
 import { restartDigest, type RestartConfig } from './restart-runtime.js'
 import { version } from './version.js'
-import { acceptanceCanonicalJson, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, goalDefinitionSituation } from '@dsh-ray/task-acceptance-contract'
 import {
   approvalReviewerOf,
   type ApprovalReviewer,
   type ApprovalDispatchRouteV2,
   type AssistantPolicyService,
   type PolicyDecision,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import type {
   AssistantEvaluationService,
   TrustedTaskLearningProjectionReceipt,
   TrustedDeliveryEvaluationClaims,
   TrustedDeliveryEvaluationRegistration,
-} from '@dsh-enhanced/assistant-evaluation'
+} from '@dsh-ray/assistant-evaluation'
 
 // Cross-package wire literal, kept locally so this bundle can load without the
 // optional assistant-evaluation peer installed (a value import would defeat
@@ -57,7 +57,7 @@ import {
   type WorkflowAutomationTemplate,
   type WorkflowScope,
   type WorkflowTraceSink,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import {
   DeliveryAdapterRegistry,
   DeliveryCoordinator,
@@ -733,9 +733,9 @@ export class AttentionRejectedError extends AssistantDeliveryError {
 
 /**
  * Structural mirrors of the Goals Host-only evidence shapes. Delivery must not
- * import `@dsh-enhanced/assistant-goals` types for this seam: goals' public
+ * import `@dsh-ray/assistant-goals` types for this seam: goals' public
  * type surface re-exports Delivery types (its types.ts re-exports from
- * `@dsh-enhanced/assistant-delivery`), which pulls Delivery's own emitted
+ * `@dsh-ray/assistant-delivery`), which pulls Delivery's own emitted
  * lib/*.d.ts back into its build program and fails emit (TS5055). The local
  * goal-wake-types.ts mirror sets the precedent. These are structural only:
  * the live Goals service is obtained through ctx.get and runtime-checked, and
@@ -4172,7 +4172,7 @@ export class AssistantDeliveryService extends Service {
           && typeof record === 'object'
           && !Array.isArray(record)
           && record.schemaVersion === 1
-          && record.protocol === 'dsh-rsi/version/v1'
+          && record.protocol === 'dsh-ray/version/v1'
           && typeof record.assistant === 'object' && record.assistant !== null && !Array.isArray(record.assistant)
           && typeof record.host === 'object' && record.host !== null && !Array.isArray(record.host)
           && typeof record.plugins === 'object' && record.plugins !== null && !Array.isArray(record.plugins)
@@ -4634,7 +4634,7 @@ export class AssistantDeliveryService extends Service {
         })
         return typeof receipt === 'object' && receipt !== null
           && typeof (receipt as Partial<{ ownerFeedbackState: unknown }>).ownerFeedbackState === 'object'
-          ? (receipt as { ownerFeedbackState: import('@dsh-enhanced/assistant-evaluation').OwnerObjectiveState }).ownerFeedbackState
+          ? (receipt as { ownerFeedbackState: import('@dsh-ray/assistant-evaluation').OwnerObjectiveState }).ownerFeedbackState
           : undefined
       }
       if (parsed.kind === 'objective-status') {
@@ -4829,7 +4829,7 @@ export class AssistantDeliveryService extends Service {
     const registration = sink?.registration as unknown as Readonly<{
       ownerRevisionProtocol?: string
       issueCapability(claims: unknown): unknown
-      inspect?(capabilityReceipt: unknown): import('@dsh-enhanced/assistant-evaluation').OwnerObjectiveState | undefined
+      inspect?(capabilityReceipt: unknown): import('@dsh-ray/assistant-evaluation').OwnerObjectiveState | undefined
       append(input: { capabilityReceipt: unknown; runId: string; outboxId: string; chatId: string; principalId: string; bindingId: string; idempotencyKey: string }): unknown
     }> | undefined
     if (sink === undefined || registration?.ownerRevisionProtocol !== 'owner-objective-revision/v2'
@@ -4868,7 +4868,7 @@ export class AssistantDeliveryService extends Service {
       }))
       if (typeof receipt !== 'object' || receipt === null
         || typeof (receipt as Partial<{ idempotencyKey: string }>).idempotencyKey !== 'string') return 'unknown'
-      return (receipt as { ownerFeedbackState?: import('@dsh-enhanced/assistant-evaluation').OwnerObjectiveState })
+      return (receipt as { ownerFeedbackState?: import('@dsh-ray/assistant-evaluation').OwnerObjectiveState })
         .ownerFeedbackState ?? 'recorded'
     } catch (error) {
       if (typeof error === 'object' && error !== null && 'code' in error
@@ -5691,7 +5691,7 @@ export class AssistantDeliveryService extends Service {
       this.workItemFeedbackFence(intent,false,consumer)
       return callback()
     },(intent,result)=>{
-      const value=result as Partial<import('@dsh-enhanced/assistant-evaluation').StoredOutcome>
+      const value=result as Partial<import('@dsh-ray/assistant-evaluation').StoredOutcome>
       const command=intent.command!
       if(!value || typeof value!=='object' || !value.id || !value.ownerFeedbackState || command.kind==='objective-status'
         || value.ownerFeedbackState.objectiveStatus!==claims.objectiveStatus
@@ -8154,8 +8154,8 @@ export class AssistantDeliveryService extends Service {
     }
     const decision = this.policy.evaluateAgent(agent, 'history', { kind: 'message', id: binding.id })
     if (decision.effect !== 'allow') return undefined
-    const memoryRoute = this.prepareAgentApproval(agent, { sourceId: 'dsh-enhanced-personal-memory' })
-    const wikiRoute = this.prepareAgentApproval(agent, { sourceId: 'dsh-enhanced-personal-wiki' })
+    const memoryRoute = this.prepareAgentApproval(agent, { sourceId: 'dsh-ray-personal-memory' })
+    const wikiRoute = this.prepareAgentApproval(agent, { sourceId: 'dsh-ray-personal-wiki' })
     return {
       memory: this.policy.listProposalStatesForRoute(memoryRoute, 5),
       wiki: this.policy.listProposalStatesForRoute(wikiRoute, 5),
@@ -8260,11 +8260,11 @@ export class AssistantDeliveryService extends Service {
       ? caller.fiber.name === 'AssistantDeliveryService'
         && caller.fiber.parent.fiber === this.context.fiber
       : definition.name === 'wiki_read' || definition.name === 'wiki_search'
-        ? caller.fiber.name === 'PersonalWikiService' || caller.fiber.name === 'dsh-enhanced-personal-wiki'
+        ? caller.fiber.name === 'PersonalWikiService' || caller.fiber.name === 'dsh-ray-personal-wiki'
         : definition.name === 'memory_search'
-          ? caller.fiber.name === 'PersonalMemoryService' || caller.fiber.name === 'dsh-enhanced-personal-memory'
+          ? caller.fiber.name === 'PersonalMemoryService' || caller.fiber.name === 'dsh-ray-personal-memory'
           : definition.name === 'assoc_read'
-            && (caller.fiber.name === 'AssistantAssociationService' || caller.fiber.name === 'dsh-enhanced-assistant-association')
+            && (caller.fiber.name === 'AssistantAssociationService' || caller.fiber.name === 'dsh-ray-assistant-association')
     // The installed Cordis fork declares FiberState as an ambient const enum;
     // its ACTIVE and LOADING numeric values are 2 and 1, respectively.
     if (!trusted || caller.fiber.uid === null || (caller.fiber.state !== 1 && caller.fiber.state !== 2)) {

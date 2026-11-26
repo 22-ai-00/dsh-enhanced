@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { DeliveryGoalWakeInput, AssistantDeliveryService, OwnerGoalOutcomeFeedbackTarget } from '@dsh-enhanced/assistant-delivery'
+import type { DeliveryGoalWakeInput, AssistantDeliveryService, OwnerGoalOutcomeFeedbackTarget } from '@dsh-ray/assistant-delivery'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput,
-  HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+  HostAutomationExecutorResult } from '@dsh-ray/assistant-automations'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { GoalWakeStore } from './wake-store.js'
 import type { GoalWake, GoalWakeIntent } from './wake-store.js'
 import type { GoalRecord, GoalScope } from './types.js'

@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-evolution
+# @dsh-ray/assistant-evolution
 
 审批门控的行为自演化。助理观察自己在重复情境下的结果，当证据足够时提出一条行为规则，**经 owner 批准后**该规则才作为顾问性上下文影响后续会话。owner 可随时通过二次审批撤销 exact rule；可选的低风险自治通道也只能撤回一条已证实无效的 exact rule，二者都不能创建、修改或扩权。
 
@@ -11,12 +11,12 @@
 ## 安装
 
 ```sh
-dsh plugin --profile <name> add @dsh-enhanced/assistant-evolution
+dsh plugin --profile <name> add @dsh-ray/assistant-evolution
 ```
 
-依赖 `@dsh-enhanced/assistant-policy` 与 `@dsh-enhanced/assistant-evaluation`。未组合 Policy 或权威
+依赖 `@dsh-ray/assistant-policy` 与 `@dsh-ray/assistant-evaluation`。未组合 Policy 或权威
 Evaluation 账本时**拒绝加载**，而不是降级为无治理运行。
-`@dsh-enhanced/assistant-delivery` 是可选 peer：存在时，插件从当前 Agent 的 authenticated owner route
+`@dsh-ray/assistant-delivery` 是可选 peer：存在时，插件从当前 Agent 的 authenticated owner route
 派生 principal，并让 Policy 在创建提案的同一事务中保存 dispatch；不存在时只允许可信 headless 调用方
 通过 Service API 显式传 principal。模型工具永远不能选择 principal 或审批期限。
 独立 supervised-growth analyst 必须有 Delivery owner route，因此不使用 headless 降级。规则结算时生成的
@@ -24,7 +24,7 @@ application receipt 即使 Delivery 暂时不可用也会留在 Evolution 自己
 该 presentation 不是公开 Delivery service 方法：Delivery 只向当前 Evolution producer generation 签发私有、
 可撤销的进程内 capability。registration 不进入 Agent、tool schema、proposal payload 或 read API；服务替换、
 卸载或 disposer 后旧 capability 立即失效，durable outbox 只会等待有效的新 registration 重试。
-`@dsh-enhanced/assistant-automations` 也是可选 peer：仅当 Evaluation receipt 引用 automation run 时，
+`@dsh-ray/assistant-automations` 也是可选 peer：仅当 Evaluation receipt 引用 automation run 时，
 Evolution 才要求它提供并重新验证 exact production-run proof。普通非自动化 Evaluation 投影不依赖它。
 默认 Cordis patch 会为完整 supervised-growth 组合声明该顺序依赖。
 
@@ -50,7 +50,7 @@ Evaluation 客观/验证结果 → 计算候选 → 提案 → owner 批准 → 
 `canonicalEvolutionHostScope({ workspace, preset })` 创建冻结 branded scope，再调用
 `hostCandidates`、`hostListRules` 或 singular `hostRollbackOne`。每次调用必须携带 authenticated owner
 `principal + operationId`，服务会用固定 background Policy subject
-`dsh-enhanced-assistant-recovery` 对 exact workspace/action/resource 授权。复制/序列化 scope 会移除 brand
+`dsh-ray-assistant-recovery` 对 exact workspace/action/resource 授权。复制/序列化 scope 会移除 brand
 并 fail closed。Host rollback 与模型入口复用同一事务门，因此只有 exact exposure receipt 归因的
 quality-eligible Evaluation evidence 可触发；`recordAutomationOutcome` 的 operational 行永远不算。
 
@@ -132,7 +132,7 @@ v9 开始只接受 Evaluation 的 versioned task projection；v10 增加按 prod
 
 ## 与 assistant-automations 的可选联动
 
-若同时安装 `@dsh-enhanced/assistant-automations`，后台运行结束会成为可信的**运行审计**，但不会自动成为质量证据。Evolution 只在
+若同时安装 `@dsh-ray/assistant-automations`，后台运行结束会成为可信的**运行审计**，但不会自动成为质量证据。Evolution 只在
 `agent/session-start` guidance 注入成功**之后**，持久化 exact
 `sessionId + workspace + Agent preset + situation + ruleId + generation` receipt。Automations 必须在 runner
 返回 actual session ID 后调用 `captureAutomationExposure(...)`；缺 receipt、错 session/scope、未实际注入，
@@ -170,6 +170,6 @@ Automation execution context 安装，post-setup `injectAutomationGuidance` 会�
 - 不做向量检索、自动遗忘、跨设备同步、多用户 ACL。
 - guidance 会进入模型上下文：不要在 guidance 中写入密钥或敏感数据。
 - 自动 rollback 是收缩行为能力的安全阀，不是通用“AI 自批”入口；部署若启用，Policy 只应授予 `rollback`，不要把它复用为 adopt、权限或外部副作用授权。
-- Host 控制面还需 Policy 明确允许 background subject `dsh-enhanced-assistant-recovery` 的 `inspect` 和按需 `rollback`；仅拿到 Cordis service 引用不等于获得权限。
+- Host 控制面还需 Policy 明确允许 background subject `dsh-ray-assistant-recovery` 的 `inspect` 和按需 `rollback`；仅拿到 Cordis service 引用不等于获得权限。
 
 整体目标 v3 验收通过 Evaluation 以 `goal-outcome` subject 投影，不能与步骤验收合并。schema 15 迁移保留旧 task learning state/revisions、retract 与 episode 关联；整体成功仍只是该次独立观测，不代表能力提升已通过比较基线。

@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { lstatSync } from 'node:fs'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { automationDefinitionDigest, type AssistantAutomationsService, type HostAutomationExecutor } from '@dsh-enhanced/assistant-automations'
+import { automationDefinitionDigest, type AssistantAutomationsService, type HostAutomationExecutor } from '@dsh-ray/assistant-automations'
 import { afterAll, afterEach, beforeEach, describe as baseDescribe, expect, it, vi } from 'vitest'
 import { ControlPlaneCliError } from '../src/errors.ts'
 import {
@@ -190,7 +190,7 @@ async function modifyRepositoryFixture(root: string): Promise<{ repository: stri
   await writeFile(join(repository, 'package.json'), `${JSON.stringify({ name: 'modify-fixture', private: true }, null, 2)}\n`)
   await writeFile(join(repository, '.gitignore'), 'node_modules/\npnpm-lock.yaml\n')
   await writeFile(join(repository, 'plugins', 'health-helper', 'package.json'),
-    `${JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '0.1.0' }, null, 2)}\n`)
+    `${JSON.stringify({ name: '@dsh-ray/health-helper', version: '0.1.0' }, null, 2)}\n`)
   await writeFile(join(repository, 'plugins', 'health-helper', 'src', 'index.ts'), '// original health helper\n')
   execFileSync('/usr/bin/git', ['init', repository])
   execFileSync('/usr/bin/git', ['-C', repository, 'config', 'user.name', 'Test'])

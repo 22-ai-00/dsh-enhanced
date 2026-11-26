@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, realpath, readdir, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { afterEach, describe, expect, it } from 'vitest'
 import { HoldoutEvidenceStore } from '../../src/benchmark/holdout-evidence.js'
 import { createHoldoutEvidenceVerifier, runIndependentHoldout, type HoldoutDelegateBinding, type HoldoutDelegateRequest } from '../../src/benchmark/holdout.js'

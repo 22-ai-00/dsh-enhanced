@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { PersonalMemoryService } from '@dsh-enhanced/personal-memory'
+import { PersonalMemoryService } from '@dsh-ray/personal-memory'
 import { query, workItemLearningFixture } from './work-item-feedback.fixture.ts'
 
 type Fixture=Awaited<ReturnType<typeof workItemLearningFixture>>

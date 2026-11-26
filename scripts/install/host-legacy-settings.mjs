@@ -35,7 +35,7 @@ const replayFields = ['protocol', 'method', 'methodSha256', 'hostReceiptSha256',
 
 export function hostLegacySettingsPermitSigningPayload(unsignedPermit) {
   if (!exactKeys(unsignedPermit, permitFields)) fail('invalid unsigned permit fields')
-  return Buffer.from(`dsh-enhanced/native-settings-import/v1\0${canonical(unsignedPermit)}`)
+  return Buffer.from(`dsh-ray/native-settings-import/v1\0${canonical(unsignedPermit)}`)
 }
 
 async function canonicalDirectory(path, privateMode = false) {
@@ -88,8 +88,8 @@ export async function verifyHostLegacySettingsImport({ permit, replayReceipt, ma
   const journaled = migration?.nativeSettingsImport
   const phase = migration?.phase
   if (!exactKeys(permit, [...permitFields, 'signature']) || !exactKeys(replayReceipt, replayFields)
-    || permit.protocol !== 'dsh-enhanced/native-settings-import/v1'
-    || replayReceipt.protocol !== 'dsh-enhanced/native-settings-replay/v1'
+    || permit.protocol !== 'dsh-ray/native-settings-import/v1'
+    || replayReceipt.protocol !== 'dsh-ray/native-settings-replay/v1'
     || !digestPattern.test(String(baseManifestDigest)) || permit.baseManifestDigest !== baseManifestDigest
     || permit.homePath !== homePath || permit.profile !== manifest?.profile
     || permit.transactionId !== manifest?.id || manifest?.homePath !== homePath
@@ -208,7 +208,7 @@ export async function verifyHostLegacySettingsImport({ permit, replayReceipt, ma
   if (!exactKeys(observation, ['protocol', 'root', 'home', 'candidateVersion', 'original', 'overlay',
     'ready', 'nativeImportComplete', 'sectionResults', 'finalPatchSha256', 'importedMarkerSha256',
     'originalSettingsRemoved', 'termination'])
-    || observation.protocol !== 'dsh-enhanced/native-settings-replay/v1'
+    || observation.protocol !== 'dsh-ray/native-settings-replay/v1'
     || observation.candidateVersion !== permit.candidateHostVersion
     || typeof observation.root !== 'string' || !isAbsolute(observation.root)
     || resolve(observation.root) !== observation.root

@@ -1,7 +1,7 @@
 import { lanePublicKey, revisionFixture, regressionFixture } from './lane-fixtures.ts'
 import { createHash, createPublicKey, generateKeyPairSync, sign } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
-import { canonicalGrowthJson, verifyPluginCreationVerificationCertificate, verifyPluginRevisionVerificationCertificate, verifyPluginRevisionRegressionCertificate, validateRevisionAcceptanceAuthorityRef, validateRevisionRegressionAcceptanceAuthorityRef, type PluginCreationVerificationCertificate, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, verifyPluginCreationVerificationCertificate, verifyPluginRevisionVerificationCertificate, verifyPluginRevisionRegressionCertificate, validateRevisionAcceptanceAuthorityRef, validateRevisionRegressionAcceptanceAuthorityRef, type PluginCreationVerificationCertificate, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-ray/assistant-growth-contract'
 import { copyFileSync, lstatSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

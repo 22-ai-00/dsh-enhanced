@@ -4,7 +4,7 @@ import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
-import type { LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { setTimeout as pause } from 'node:timers/promises'
 import { prepareRsiSourceWorkspace } from '../src/rsi-source.js'
 import { NODE_ARCHIVES, prepareLinuxRsiRuntime, readLinuxRsiRuntime } from '../src/rsi-linux-runtime-bootstrap.js'
@@ -32,7 +32,7 @@ async function retainedFixture(nodeVersion = 'v22.23.2', blockProbes = false) {
   const dshHome = join(root, 'home'), repository = join(root, 'source'), profile = 'reader-test'
   await mkdir(dshHome, { mode: 0o700 }); await mkdir(repository, { mode: 0o700 })
   const manifests = {
-    'package.json': JSON.stringify({ name: 'dsh-enhanced', version: '0.1.65', packageManager: 'pnpm@11.7.0' }),
+    'package.json': JSON.stringify({ name: 'dsh-ray', version: '0.1.65', packageManager: 'pnpm@11.7.0' }),
     'pnpm-lock.yaml': "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
     'pnpm-workspace.yaml': 'packages: []\n',
   }
@@ -58,7 +58,7 @@ async function retainedFixture(nodeVersion = 'v22.23.2', blockProbes = false) {
   for (const name of ['typescript', '@deepseek-ai/cordis', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-system-prompt'])
     await write(`node_modules/${name}/package.json`, '{"version":"1.0.0"}')
   await write('store/data', 'retained-store'); await write('cache/data', 'retained-cache')
-  const { hashLinuxRuntimeTree } = await import('@dsh-enhanced/assistant-isolation')
+  const { hashLinuxRuntimeTree } = await import('@dsh-ray/assistant-isolation')
   const info = await lstat(runtimeRoot)
   const runtime: LinuxRuntime = { schemaVersion: 1, backend: 'linux-native', platform: `linux-${process.arch}` as LinuxRuntime['platform'],
     sourceCommit: source.sourceCommit, lockSha256: sha(manifests['pnpm-lock.yaml']),
@@ -107,7 +107,7 @@ test.runIf(process.platform === 'linux')('base reader reopens exact retained ide
   const input = { ...ctx.input, nodeArchivePath: '/missing/node.tgz', pnpmArchivePath: '/missing/pnpm.tgz',
     pnpmExeArchivePath: '/missing/exe.tgz', pnpmNativeArchivePath: '/missing/native.tgz' }
   expect(await readLinuxRsiRuntime(input)).toEqual(ctx.environment)
-  const { freezeLinuxRuntimeSource, readLinuxRuntime } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  const { freezeLinuxRuntimeSource, readLinuxRuntime } = await import('@dsh-ray/assistant-isolation/native-resources')
   const frozen = await freezeLinuxRuntimeSource({ kind: 'git-object', repository: ctx.input.source.repository,
     commit: ctx.input.source.sourceCommit, version: ctx.input.source.version })
   expect(await readLinuxRuntime({ dshHome: ctx.input.dshHome, profile: ctx.input.profile, source: frozen }))
@@ -323,7 +323,7 @@ test.runIf(process.platform === 'linux' && Object.values(archives).every(Boolean
 // The compatibility facade preserves public Error identity and the ordinary
 // Mac platform refusal without preparing a source workspace.
 test.runIf(process.platform !== 'linux')('RSI adapter retains the shared platform error identity', async () => {
-  const { LinuxRsiRuntimeUnavailableError } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  const { LinuxRsiRuntimeUnavailableError } = await import('@dsh-ray/assistant-isolation/native-resources')
   for (const operation of [prepareLinuxRsiRuntime, readLinuxRsiRuntime]) {
     await expect(operation({ dshHome: '/never-created', profile: 'adapter', source: {} as never }))
       .rejects.toBeInstanceOf(LinuxRsiRuntimeUnavailableError)
@@ -335,7 +335,7 @@ test.runIf(process.platform === 'linux')('RSI revalidates authenticated source a
   const sourceReceipt = join(ctx.input.dshHome, 'rsi-sources', ctx.input.profile, 'bootstrap.json')
   // The shared reader also accepts a trusted provenance fence. Mutating the
   // authenticated source receipt on its second invocation must fail closed.
-  const { freezeLinuxRuntimeSource, readLinuxRuntime } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  const { freezeLinuxRuntimeSource, readLinuxRuntime } = await import('@dsh-ray/assistant-isolation/native-resources')
   const source = await freezeLinuxRuntimeSource({ kind: 'git-object', repository: ctx.input.source.repository,
     commit: ctx.input.source.sourceCommit, version: ctx.input.source.version })
   let calls = 0
@@ -352,7 +352,7 @@ test.runIf(process.platform === 'linux')('RSI revalidates authenticated source a
 
 test.runIf(process.platform === 'linux')('ordinary retained reader snapshots caller manifest buffers before the async provenance fence', async () => {
   const ctx = await retainedFixture()
-  const { freezeLinuxRuntimeSource, readLinuxRuntime } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  const { freezeLinuxRuntimeSource, readLinuxRuntime } = await import('@dsh-ray/assistant-isolation/native-resources')
   const source = await freezeLinuxRuntimeSource({ kind: 'git-object', repository: ctx.input.source.repository,
     commit: ctx.input.source.sourceCommit, version: ctx.input.source.version })
   let calls = 0

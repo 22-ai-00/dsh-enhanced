@@ -1,7 +1,7 @@
 import {
   growthObjectDigest, memoryLearningRequestDigest, validateMemoryLearningOwner,
   validateMemoryLearningReviewRequest, type MemoryLearningOwner, type MemoryLearningReviewRequest,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import type { MemoryRecord } from './types.js'
 
 export interface MemoryLearningAdoptionGrant {

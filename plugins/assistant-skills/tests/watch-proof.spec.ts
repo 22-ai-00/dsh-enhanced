@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { OwnerGoalRunProof } from '@dsh-enhanced/assistant-goals'
-import { canonicalEvaluationScope, evaluationLearningProjectionDigest } from '@dsh-enhanced/assistant-evaluation'
-import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
+import type { OwnerGoalRunProof } from '@dsh-ray/assistant-goals'
+import { canonicalEvaluationScope, evaluationLearningProjectionDigest } from '@dsh-ray/assistant-evaluation'
+import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt, goalDefinitionSituation } from '@dsh-ray/task-acceptance-contract'
 import type { SkillRun } from '../src/store.ts'
 import { soleSkillRunTrace, watchObservation, watchObservationResult } from '../src/watch-proof.ts'
 

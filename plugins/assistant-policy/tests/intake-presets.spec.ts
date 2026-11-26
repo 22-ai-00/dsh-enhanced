@@ -44,8 +44,8 @@ afterEach(async () => {
 })
 
 const proactiveBundles = `
-- id: dsh-enhanced-assistant-proactive
-  name: '@dsh-enhanced/assistant-proactive'
+- id: dsh-ray-assistant-proactive
+  name: '@dsh-ray/assistant-proactive'
   config:
     intakeEvaluation:
       enabled: false
@@ -268,11 +268,11 @@ describe('WP20 opt-in inferred intake evaluation rule presets', () => {
   })
 
   test('registers intakeEvaluation.preset in plugin-setup without changing recommended preset defaults', async () => {
-    expect(coerceConfigValue('dsh-enhanced-assistant-proactive', 'intakeEvaluation.preset', 'conservative', undefined))
+    expect(coerceConfigValue('dsh-ray-assistant-proactive', 'intakeEvaluation.preset', 'conservative', undefined))
       .toBe('conservative')
-    expect(coerceConfigValue('dsh-enhanced-assistant-proactive', 'intakeEvaluation.preset', 'balanced', undefined))
+    expect(coerceConfigValue('dsh-ray-assistant-proactive', 'intakeEvaluation.preset', 'balanced', undefined))
       .toBe('balanced')
-    expect(() => coerceConfigValue('dsh-enhanced-assistant-proactive', 'intakeEvaluation.preset', 'aggressive', undefined))
+    expect(() => coerceConfigValue('dsh-ray-assistant-proactive', 'intakeEvaluation.preset', 'aggressive', undefined))
       .toThrow(/intakeEvaluation\.preset must be one of conservative, balanced/u)
 
     const home = await temporaryHome()
@@ -282,7 +282,7 @@ describe('WP20 opt-in inferred intake evaluation rule presets', () => {
     const presetResult = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, opts)
     expect(presetResult.changed).toBe(false)
     expect(presetResult.skipped).toContainEqual({
-      id: 'dsh-enhanced-assistant-proactive',
+      id: 'dsh-ray-assistant-proactive',
       reason: expect.stringMatching(/rules is missing or invalid/u),
     })
 
@@ -295,7 +295,7 @@ describe('WP20 opt-in inferred intake evaluation rule presets', () => {
       value: 'conservative',
     }, opts)
     expect(first.changes).toEqual([
-      { id: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.preset', from: undefined, to: 'conservative' },
+      { id: 'dsh-ray-assistant-proactive', key: 'intakeEvaluation.preset', from: undefined, to: 'conservative' },
     ])
 
     const second = await setPluginConfigValue({
@@ -306,7 +306,7 @@ describe('WP20 opt-in inferred intake evaluation rule presets', () => {
       value: 'balanced',
     }, opts)
     expect(second.changes).toEqual([
-      { id: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.preset', from: 'conservative', to: 'balanced' },
+      { id: 'dsh-ray-assistant-proactive', key: 'intakeEvaluation.preset', from: 'conservative', to: 'balanced' },
     ])
 
     const answers = ['1', 'b', 'q']
@@ -326,7 +326,7 @@ describe('WP20 opt-in inferred intake evaluation rule presets', () => {
       key: 'intakeEvaluation.preset',
     }, opts)
     expect(unset.changes).toEqual([
-      { id: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.preset', from: 'balanced', to: undefined },
+      { id: 'dsh-ray-assistant-proactive', key: 'intakeEvaluation.preset', from: 'balanced', to: undefined },
     ])
   })
 })

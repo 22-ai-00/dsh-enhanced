@@ -1,4 +1,4 @@
-import type { ForegroundTaskIdentity, ForegroundExecution } from '@dsh-enhanced/assistant-delivery'
+import type { ForegroundTaskIdentity, ForegroundExecution } from '@dsh-ray/assistant-delivery'
 import type { DeploymentReadinessBinding } from './deployment-readiness.js'
 import { assertRuntimeObservation, runtimeConfigDigest, type RuntimeObservation } from './runtime-observer-protocol.js'
 

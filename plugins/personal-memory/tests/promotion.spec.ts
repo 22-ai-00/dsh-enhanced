@@ -15,8 +15,8 @@ import {
   type PreferenceMemoryPromotionProducer,
   type PreferenceMemoryPromotionRegistration,
   type PreferenceMemoryPromotionRequest,
-} from '@dsh-enhanced/assistant-growth-contract'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-growth-contract'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, test } from 'vitest'
 import { MemoryProposalManager } from '../src/proposals.ts'
 import { PreferenceMemoryPromotionBridge, preferencePromotionMutation } from '../src/promotion.ts'
@@ -45,7 +45,7 @@ const namespace: MemoryOwnerNamespace = Object.freeze({
 })
 const dispatch = Object.freeze({
   routeVersion: 2 as const,
-  sourceId: 'dsh-enhanced-personal-memory',
+  sourceId: 'dsh-ray-personal-memory',
   bindingId: 'binding-owner',
   bindingVersion: 1,
   bindingGeneration: 1,

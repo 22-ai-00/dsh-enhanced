@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
 import { normalizeConfig } from '../src/config.js'
 import { buildMemoryIndex } from '../src/index-memory.js'
 import {

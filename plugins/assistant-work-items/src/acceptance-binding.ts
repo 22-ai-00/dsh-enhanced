@@ -15,7 +15,7 @@ import {
   validateTaskVerificationReceipt,
   type TaskAcceptanceContract,
   type TaskVerificationReceipt,
-} from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/task-acceptance-contract'
 import type { PeerOwnerRouteReceipt, PeerVerifierService } from './peers.ts'
 import type {
   WorkItemAcceptanceAuthor,

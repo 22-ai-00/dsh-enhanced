@@ -88,7 +88,7 @@ describe('handleOwnerConsoleControlAction', () => {
   it('fails closed without disk writes on unauthorized callers, unknown actions, or unsafe paths', async () => {
     const { root, dshHome, profileDir, patchPath } = makeTempHome()
     mkdirSync(profileDir, { recursive: true, mode: 0o700 })
-    const initial = '- id: dsh-enhanced-assistant-work-items\n  name: "@dsh-enhanced/assistant-work-items"\n  config:\n    enabled: true\n'
+    const initial = '- id: dsh-ray-assistant-work-items\n  name: "@dsh-ray/assistant-work-items"\n  config:\n    enabled: true\n'
     writeFileSync(patchPath, initial, 'utf8')
 
     const ctx = new Context()
@@ -128,7 +128,7 @@ describe('handleOwnerConsoleControlAction', () => {
     expect(readFileSync(patchPath, 'utf8')).toBe(initial)
 
     // Symlink DSH_HOME via env (with request.dshHome omitted) must also fail closed without disk writes
-    const disabledPatch = '- id: dsh-enhanced-assistant-work-items\n  name: "@dsh-enhanced/assistant-work-items"\n  disabled: true\n  config:\n    enabled: false\n'
+    const disabledPatch = '- id: dsh-ray-assistant-work-items\n  name: "@dsh-ray/assistant-work-items"\n  disabled: true\n  config:\n    enabled: false\n'
     writeFileSync(patchPath, disabledPatch, 'utf8')
     const envSymlinkRes = await handleOwnerConsoleControlAction(null, {
       ownerAuthorized: true,
@@ -157,8 +157,8 @@ describe('handleOwnerConsoleControlAction', () => {
     const symlinkHome = join(root, 'home-link-trailing')
     symlinkSync(dshHome, symlinkHome)
 
-    const enabledPatch = '- id: dsh-enhanced-assistant-work-items\n  name: "@dsh-enhanced/assistant-work-items"\n  config:\n    enabled: true\n'
-    const disabledPatch = '- id: dsh-enhanced-assistant-work-items\n  name: "@dsh-enhanced/assistant-work-items"\n  disabled: true\n  config:\n    enabled: false\n'
+    const enabledPatch = '- id: dsh-ray-assistant-work-items\n  name: "@dsh-ray/assistant-work-items"\n  config:\n    enabled: true\n'
+    const disabledPatch = '- id: dsh-ray-assistant-work-items\n  name: "@dsh-ray/assistant-work-items"\n  disabled: true\n  config:\n    enabled: false\n'
 
     const actions = [
       { action: 'enableSelfIteration', seed: disabledPatch },
@@ -238,7 +238,7 @@ describe('handleOwnerConsoleControlAction', () => {
       disabled?: boolean
       config?: { enabled?: boolean }
     }>
-    const workItems = rows.find(r => r.id === 'dsh-enhanced-assistant-work-items')
+    const workItems = rows.find(r => r.id === 'dsh-ray-assistant-work-items')
     expect(workItems).toBeDefined()
     expect(workItems?.disabled).not.toBe(true)
     expect(workItems?.config?.enabled).toBe(true)
@@ -251,7 +251,7 @@ describe('handleOwnerConsoleControlAction', () => {
       ...SELF_ITERATION_TOGGLE_ROWS.map(spec => ({
         id: spec.rowId,
         name: spec.pkgName,
-        config: spec.rowId === 'dsh-enhanced-assistant-dreaming'
+        config: spec.rowId === 'dsh-ray-assistant-dreaming'
           ? {
               enabled: true,
               scope: {
@@ -270,8 +270,8 @@ describe('handleOwnerConsoleControlAction', () => {
       })),
       ...[...PROTECTED_ROW_IDS].map(rowId => ({
         id: rowId,
-        name: `@dsh-enhanced/${rowId.replace(/^dsh-enhanced-/u, '')}`,
-        config: rowId === 'dsh-enhanced-assistant-delivery'
+        name: `@dsh-ray/${rowId.replace(/^dsh-ray-/u, '')}`,
+        config: rowId === 'dsh-ray-assistant-delivery'
           ? { enabled: true, ownerRoutes: [{ id: 'owner-web-primary', policyRef: 'owner-dm' }] }
           : { enabled: true },
       })),
@@ -303,7 +303,7 @@ describe('handleOwnerConsoleControlAction', () => {
       expect(row?.disabled).not.toBe(true)
       expect(row?.config?.enabled).toBe(true)
     }
-    const deliveryAfterDisable = afterDisable.find(r => r.id === 'dsh-enhanced-assistant-delivery')
+    const deliveryAfterDisable = afterDisable.find(r => r.id === 'dsh-ray-assistant-delivery')
     expect(deliveryAfterDisable?.config?.ownerRoutes).toEqual([{ id: 'owner-web-primary', policyRef: 'owner-dm' }])
 
     const enabled = await handleOwnerConsoleControlAction(ctx, {
@@ -331,15 +331,15 @@ describe('handleOwnerConsoleControlAction', () => {
     const { dshHome, profileDir, patchPath } = makeTempHome()
     mkdirSync(profileDir, { recursive: true, mode: 0o700 })
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-dreaming',
-      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '- id: dsh-ray-assistant-dreaming',
+      '  name: "@dsh-ray/assistant-dreaming"',
       '  disabled: true',
       '  config:',
       '    enabled: false',
       '    retired: true',
       '    databasePath: /tmp/dreaming.sqlite',
-      '- id: dsh-enhanced-assistant-work-items',
-      '  name: "@dsh-enhanced/assistant-work-items"',
+      '- id: dsh-ray-assistant-work-items',
+      '  name: "@dsh-ray/assistant-work-items"',
       '  disabled: true',
       '  config:',
       '    enabled: false',
@@ -358,11 +358,11 @@ describe('handleOwnerConsoleControlAction', () => {
       disabled?: boolean
       config?: Record<string, unknown>
     }>
-    const dreaming = rows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')!
+    const dreaming = rows.find(r => r.id === 'dsh-ray-assistant-dreaming')!
     expect(dreaming.disabled).toBeUndefined()
     expect(dreaming.config?.enabled).toBe(false)
     expect(dreaming.config).not.toHaveProperty('retired')
-    expect(rows.find(r => r.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(true)
+    expect(rows.find(r => r.id === 'dsh-ray-assistant-work-items')?.config?.enabled).toBe(true)
   })
 
   it('rejects string scope, relative/non-canonical paths, and out-of-range budgetAmount for dreaming while cleaning up retired: false and allowing !!js paths', async () => {
@@ -373,8 +373,8 @@ describe('handleOwnerConsoleControlAction', () => {
       {
         label: 'string scope + retired: false',
         yaml: [
-          '- id: dsh-enhanced-assistant-dreaming',
-          '  name: "@dsh-enhanced/assistant-dreaming"',
+          '- id: dsh-ray-assistant-dreaming',
+          '  name: "@dsh-ray/assistant-dreaming"',
           '  disabled: true',
           '  config:',
           '    enabled: false',
@@ -390,8 +390,8 @@ describe('handleOwnerConsoleControlAction', () => {
       {
         label: 'relative paths',
         yaml: [
-          '- id: dsh-enhanced-assistant-dreaming',
-          '  name: "@dsh-enhanced/assistant-dreaming"',
+          '- id: dsh-ray-assistant-dreaming',
+          '  name: "@dsh-ray/assistant-dreaming"',
           '  disabled: true',
           '  config:',
           '    enabled: false',
@@ -411,8 +411,8 @@ describe('handleOwnerConsoleControlAction', () => {
       {
         label: 'non-canonical path and budgetAmount > 10_000_000',
         yaml: [
-          '- id: dsh-enhanced-assistant-dreaming',
-          '  name: "@dsh-enhanced/assistant-dreaming"',
+          '- id: dsh-ray-assistant-dreaming',
+          '  name: "@dsh-ray/assistant-dreaming"',
           '  disabled: true',
           '  config:',
           '    enabled: false',
@@ -444,7 +444,7 @@ describe('handleOwnerConsoleControlAction', () => {
         disabled?: boolean
         config?: Record<string, unknown>
       }>
-      const dreaming = rows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')!
+      const dreaming = rows.find(r => r.id === 'dsh-ray-assistant-dreaming')!
       expect(dreaming.disabled, item.label).toBeUndefined()
       expect(dreaming.config?.enabled, item.label).toBe(false)
       expect(dreaming.config, item.label).not.toHaveProperty('retired')
@@ -452,8 +452,8 @@ describe('handleOwnerConsoleControlAction', () => {
 
     // Valid !!js dshHomePath(...) + YAMLMap scope + retired: false enables cleanly
     writeFileSync(patchPath, [
-      '- id: dsh-enhanced-assistant-dreaming',
-      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '- id: dsh-ray-assistant-dreaming',
+      '  name: "@dsh-ray/assistant-dreaming"',
       '  disabled: true',
       '  config:',
       '    enabled: false',
@@ -488,7 +488,7 @@ describe('handleOwnerConsoleControlAction', () => {
     mkdirSync(profileDir, { recursive: true, mode: 0o700 })
     writeFileSync(
       patchPath,
-      '- id: dsh-enhanced-assistant-work-items\n  name: "@dsh-enhanced/assistant-work-items"\n  config:\n    enabled: true\n',
+      '- id: dsh-ray-assistant-work-items\n  name: "@dsh-ray/assistant-work-items"\n  config:\n    enabled: true\n',
       'utf8',
     )
 
@@ -504,11 +504,11 @@ describe('handleOwnerConsoleControlAction', () => {
     expect(minimalOk.healthy).toBe(true)
     // Doctor repair scoped the missing databasePath inside $DSH_HOME
     const repaired = parseDocument(readFileSync(patchPath, 'utf8')).toJS() as Array<{ id: string; config?: { databasePath?: string } }>
-    expect(repaired.find(r => r.id === 'dsh-enhanced-assistant-work-items')?.config?.databasePath)
+    expect(repaired.find(r => r.id === 'dsh-ray-assistant-work-items')?.config?.databasePath)
       .toContain(join('assistant-work-items', 'web.sqlite'))
 
-    // Corrupt .dsh-rsi-host.json must fail closed
-    writeFileSync(join(dshHome, '.dsh-rsi-host.json'), '{not-json', { mode: 0o600 })
+    // Corrupt .dsh-ray-host.json must fail closed
+    writeFileSync(join(dshHome, '.dsh-ray-host.json'), '{not-json', { mode: 0o600 })
     const corruptHost = await handleOwnerConsoleControlAction(ctx, {
       dshHome,
       ownerAuthorized: true,
@@ -517,7 +517,7 @@ describe('handleOwnerConsoleControlAction', () => {
     })
     expect(corruptHost.ok).toBe(false)
     expect(corruptHost.error ?? corruptHost.reason).toBeTruthy()
-    rmSync(join(dshHome, '.dsh-rsi-host.json'))
+    rmSync(join(dshHome, '.dsh-ray-host.json'))
 
     // Frozen Linux systemd profile must fail closed
     mkdirSync(join(dshHome, 'rsi-local-cohorts', 'web'), { recursive: true })
@@ -575,7 +575,7 @@ describe('handleOwnerConsoleControlAction', () => {
           ...healthyDoctor(dshHome),
           healthy: false,
           issues: [{
-            id: 'core-bundle-failed:@dsh-enhanced/assistant-policy',
+            id: 'core-bundle-failed:@dsh-ray/assistant-policy',
             severity: 'error',
             category: 'plugins',
             title: '核心策略加载失败',
@@ -598,7 +598,7 @@ describe('OwnerConsoleService RPC and Host tool wiring', () => {
   it('gates controlSelfIteration confirmation and owner_console_self_iteration_control tool authorization', async () => {
     const { dshHome, profileDir, patchPath } = makeTempHome()
     mkdirSync(profileDir, { recursive: true, mode: 0o700 })
-    const initialPatch = '- id: dsh-enhanced-assistant-work-items\n  name: "@dsh-enhanced/assistant-work-items"\n  config:\n    enabled: true\n'
+    const initialPatch = '- id: dsh-ray-assistant-work-items\n  name: "@dsh-ray/assistant-work-items"\n  config:\n    enabled: true\n'
     writeFileSync(patchPath, initialPatch, 'utf8')
 
     const registeredTools: Array<{
@@ -660,7 +660,7 @@ describe('OwnerConsoleService RPC and Host tool wiring', () => {
       expect(okExec.ok).toBe(true)
       expect(okExec.state).toBe('enabled')
       const finalRows = parseDocument(readFileSync(patchPath, 'utf8')).toJS() as Array<{ id: string; disabled?: boolean }>
-      expect(finalRows.find(r => r.id === 'dsh-enhanced-assistant-work-items')?.disabled).not.toBe(true)
+      expect(finalRows.find(r => r.id === 'dsh-ray-assistant-work-items')?.disabled).not.toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }

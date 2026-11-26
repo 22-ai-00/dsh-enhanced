@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import type { NativeModelConfig } from './native.js'
 import type { BenchmarkBudget } from './types.js'
 import type { BenchmarkStrategyOwnerRuntime } from './strategy-owner.js'
@@ -30,7 +30,7 @@ export async function installNativeGoalServices(input: {
   if (!Number.isSafeInteger(validityMs) || validityMs < 1 || validityMs > 86400000) throw new Error('invalid native acceptance validity')
   const callCounting = limits.observationMode === 'observed-call-count'
   const names = ['@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver', '@deepseek-ai/dsh-subagent',
-    '@dsh-enhanced/assistant-goals', '@dsh-enhanced/assistant-isolation', '@dsh-enhanced/assistant-verifier']
+    '@dsh-ray/assistant-goals', '@dsh-ray/assistant-isolation', '@dsh-ray/assistant-verifier']
   const [native, tools, driver, subagents, goalsModule, isolationModule, verifierModule] = await Promise.all(names.map(name => import(name)))
   assertLive(); await plugin(ctx, native.default); assertLive(); await plugin(ctx, { inject: tools.inject, apply: tools.apply }); assertLive()
   await plugin(ctx, { inject: driver.inject, apply: driver.apply }); assertLive(); await plugin(ctx, subagents.SubagentRuntime); assertLive()

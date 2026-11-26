@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto'
 import { types as utilTypes } from 'node:util'
 import { growthObjectDigest as acceptanceDigest, validateWorkItemSourceGrowthRunBinding,
   validateWorkItemRevisionSourceGrowthRunBinding,
-  type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import type { AssistantDeliveryService, OwnerWorkItemLearningTask, OwnerWorkItemEngineeringManifest } from '@dsh-enhanced/assistant-delivery'
+  type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
+import type { AssistantDeliveryService, OwnerWorkItemLearningTask, OwnerWorkItemEngineeringManifest } from '@dsh-ray/assistant-delivery'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { OwnerWorkItemFailureReference } from './owner-task-gap-types.js'
 

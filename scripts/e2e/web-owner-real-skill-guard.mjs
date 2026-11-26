@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { objective } from './web-owner-real-helpers.mjs'
 
-export const name = 'dsh-enhanced-web-owner-real-skill-guard'
+export const name = 'dsh-ray-web-owner-real-skill-guard'
 export const inject = ['llm', 'agents', 'goals', 'systemPrompt']
 
 function calls(agent, name) {

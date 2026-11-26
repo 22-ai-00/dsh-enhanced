@@ -81,7 +81,7 @@ try {
   if (active.observation.observerId === disabled.observation.observerId
     || active.observation.invocationId === disabled.observation.invocationId) throw new Error('Host instance did not change')
   evidence = { schemaVersion: 1, kind: 'runtime-observer-real-dsh-fixture', observedAt: new Date().toISOString(), dshVersion,
-    dshCliSha256: sha(await readFile(dsh)), candidatePackage: '@dsh-enhanced/assistant-policy',
+    dshCliSha256: sha(await readFile(dsh)), candidatePackage: '@dsh-ray/assistant-policy',
     candidateVersion: JSON.parse(await readFile(new URL('../../plugins/assistant-policy/package.json', import.meta.url), 'utf8')).version,
     runtimeDigests: { observer: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/runtime-observer.js', import.meta.url))),
       controlEntry: sha(await readFile(fileURLToPath(controlUrl))), candidateEntry: sha(await readFile(fileURLToPath(candidateUrl))) },

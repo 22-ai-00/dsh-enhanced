@@ -1,4 +1,4 @@
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { NormalizedConfig } from './config.js'
 import { CONTINUATION_OWNER, continuationItemBasis, parseContinuationActivation, type ContinuationProductionProof } from './continuation-contract.js'
 import { continuationDigest } from './continuation-record.js'

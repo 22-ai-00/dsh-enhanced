@@ -6,10 +6,10 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { createUserMessage, LlmAdapter, ReasoningEffortId, ToolCallId,
   type GenerateOptions, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
 import { DeliveryStore } from '../../assistant-delivery/lib/store.js'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

@@ -1,11 +1,11 @@
 import { join, isAbsolute, resolve } from 'node:path'
 import { controlPlaneDigest, validateSourceBuildConfig,
-  type Config as ControlPlaneConfig, type CreationCapabilityOwner } from '@dsh-enhanced/plugin-control-plane'
+  type Config as ControlPlaneConfig, type CreationCapabilityOwner } from '@dsh-ray/plugin-control-plane'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { LinuxCgroupRoots } from './rsi-linux-cgroup-roots.js'
 import type { LinuxRsiRepositoryBuildEnvironment } from './rsi-linux-repository-bootstrap.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
-import type { LinuxRunnerStateSeal } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRunnerStateSeal } from '@dsh-ray/assistant-isolation'
 
 /** Prepared bytes and kernel roots, before any owner execution grant exists. */
 export interface RsiLinuxSourceBuildPreparation {
@@ -55,7 +55,7 @@ export function compileRsiLinuxSourceBuild(input: {
     workspaceMiB: 8_192, temporaryMiB: 4_096, workspaceInodes: 1_000_000, temporaryInodes: 1_000_000,
   }
   const config: LinuxSourceBuild = { ...structuredClone(body), authorityDigest: controlPlaneDigest({
-    protocol: 'dsh-rsi-linux-source-build-grant/v1', installationId: resources.installationId,
+    protocol: 'dsh-ray-linux-source-build-grant/v1', installationId: resources.installationId,
     owner, source, limitsAndRuntime: body,
   }) }
   // Validate this component here. The complete Control Plane is validated after

@@ -7,9 +7,9 @@ import {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantDeliveryService, type DeliveryAdapter, type OutboundIntent } from '@dsh-enhanced/assistant-delivery'
-import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { AssistantDeliveryService, type DeliveryAdapter, type OutboundIntent } from '@dsh-ray/assistant-delivery'
+import { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
 import {
   growthObjectDigest,
   workflowArgumentShapeDigest,
@@ -17,8 +17,8 @@ import {
   workflowScopeKey,
   type GrowthAutomationProposalRequest,
   type WorkflowTraceRevision,
-} from '@dsh-enhanced/assistant-growth-contract'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-growth-contract'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

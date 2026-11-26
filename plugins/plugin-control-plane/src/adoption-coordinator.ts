@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
-import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
+import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-ray/assistant-automations'
 import { activatePluginPlan, probePluginPlan } from './cli.js'
 import { controlPlaneDigest, type ControlPlaneStore } from './store.js'
 import type { PluginControlTrustConfig } from './trust.js'

@@ -114,7 +114,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     if (!owner) throw new Error('setup did not create Web owner')
     const principal = JSON.parse(owner.principal_json)
     expect(principal).toEqual({ channel: 'web', account: 'web', tenant: 'local', user: 'operator' })
-    const { createVerifierAuthorities } = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-verifier/lib/index.js')).href)
+    const { createVerifierAuthorities } = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-ray/assistant-verifier/lib/index.js')).href)
     const authority = { kind: 'runner', id: 'node', executable: process.execPath, fixedArgs: [], timeoutMs: 5_000, maxOutputBytes: 16_384 }
     const [runner] = createVerifierAuthorities({ authorities: [authority] })
     const profile = taskKind => ({ id: `real-event-${taskKind}`, version: 1, scope: { workspace, preset: 'standard' },
@@ -138,32 +138,32 @@ test('real configured route wakes one browser-owned verified goal from a durable
       return args.goal_id === current.id && args.expected_revision === currentNative.revision
         && args.expires_at === expiresAt
     }
-    setConfig(patch, 'dsh-enhanced-assistant-goals', '@dsh-enhanced/assistant-goals', {
+    setConfig(patch, 'dsh-ray-assistant-goals', '@dsh-ray/assistant-goals', {
       databasePath: goalsPath, eventWaits: true, verifyNativeRounds: true, verifyGoalOutcome: true,
       stepMaxDurationMs: 120_000, preauthorizedCreateMaxRounds: 2, preauthorizedSchedule: true,
       executionBudget: { mode: 'calls', modelCalls: 6, toolCalls: 6, durationMs: 600_000, maxOutputTokensPerCall: 2048,
         routes: [{ provider: route.provider, model: route.model }] },
       backgroundWake: { ownerRouteId: 'real-event-owner', budgetId: 'real-event-goal-runs', maxDelayMs: 600_000, runTimeoutMs: 120_000 },
     })
-    if (opportunityProfile) setConfig(patch, 'dsh-enhanced-assistant-proactive', '@dsh-enhanced/assistant-proactive', {
+    if (opportunityProfile) setConfig(patch, 'dsh-ray-assistant-proactive', '@dsh-ray/assistant-proactive', {
       databasePath: join(home, 'assistant-proactive/opportunities.sqlite'),
       profiles: [{ id: opportunityProfile, mode: preparationMode ? 'prepare' : reminderMode ? 'remind' : 'execute', expectedBenefit: 100, successPpm: 900_000, executionCost: 10, interruptionCost: 5, possibleLoss: 5, minimumUtility: 1, mergeWindowMs: 2000, cooldownMs: 1000, rejectionCooldownMs: 60_000, ...(preparationMode ? { preparation: { provider: route.provider, model: route.model, budgetId: 'real-preparation-runs', maxOutputTokens: 2048, timeoutMs: 120_000 } } : {}), maxDecisionsPerGoal: preparationMode ? 1 : 4, maxExecutionsPerGoal: reminderMode ? 0 : 1, maxRemindersPerGoal: reminderMode ? 1 : 0 }],
     })
-    setConfig(patch, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner', { maxExecutionMs: 300_000 })
-    setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', {
+    setConfig(patch, 'dsh-ray-assistant-web-owner', '@dsh-ray/assistant-web-owner', { maxExecutionMs: 300_000 })
+    setConfig(patch, 'dsh-ray-assistant-verifier', '@dsh-ray/assistant-verifier', {
       databasePath: verifierPath, tickIntervalMs: 500, requireAcceptance: false, authorities: [authority],
       profiles: [profile('goal-step'), profile('goal-outcome')],
     })
-    setNestedConfig(patch, 'dsh-enhanced-personal-assistant', 'assistantAutomations', {
+    setNestedConfig(patch, 'dsh-ray-personal-assistant', 'assistantAutomations', {
       databasePath: join(home, 'assistant-automations/events.sqlite'), runsPath: join(temp, 'automation-runs'),
       schedulerEnabled: true, tickIntervalMs: 1_000, reconcileIntervalMs: 0,
     })
-    setConfig(patch, 'dsh-enhanced-event-triggers', '@dsh-enhanced/event-triggers', {
+    setConfig(patch, 'dsh-ray-event-triggers', '@dsh-ray/event-triggers', {
       databasePath: eventsPath, allowedFileRoots: [temp], pollerEnabled: true, pollIntervalMs: 1_000,
       triggers: [{ id: 'file', automationId: sourceAutomationId, kind: 'file', path: watched, fireWhen: 'changed', mode: 'content-hash', debounceMs: 0, maxFires: 10 }],
     })
-    appendNestedConfig(patch, 'dsh-enhanced-personal-assistant', 'assistantPolicy', 'budgets', [{ id: 'real-preparation-runs', metric: 'automation-runs', limit: 1, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }, { id: 'real-event-source-runs', metric: 'automation-runs', limit: 2, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }, { id: 'real-event-goal-runs', metric: 'automation-runs', limit: 3, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }])
-    appendNestedConfig(patch, 'dsh-enhanced-personal-assistant', 'assistantPolicy', 'rules', [
+    appendNestedConfig(patch, 'dsh-ray-personal-assistant', 'assistantPolicy', 'budgets', [{ id: 'real-preparation-runs', metric: 'automation-runs', limit: 1, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }, { id: 'real-event-source-runs', metric: 'automation-runs', limit: 2, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }, { id: 'real-event-goal-runs', metric: 'automation-runs', limit: 3, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }])
+    appendNestedConfig(patch, 'dsh-ray-personal-assistant', 'assistantPolicy', 'rules', [
       { id: 'real-event-opportunity-prepare', effect: 'allow', subject: { kind: 'background', id: 'assistant-proactive/v1', workspace, principal: 'web/web/local/operator' }, actions: ['prepare'], resource: { kind: 'goal', id: '*' }, context: { initiators: ['background'] } },
       { id: 'real-event-opportunity-reminder', effect: 'allow', subject: { kind: 'background', id: 'assistant-proactive/v1', workspace, principal: 'web/web/local/operator' }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } },
       { id: 'real-event-owner-wait', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['wait-for-event'], resource: { kind: 'automation', id: sourceAutomationId }, context: { initiators: ['external'] } },
@@ -197,7 +197,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     // Arm the exact persisted owner route only after the genuine binding exists.
     env.DSH_WEB_REAL_BOOTSTRAP = '0'
     env.DSH_WEB_REAL_EVENT_BOOTSTRAP = JSON.stringify({ workspace, principal: 'web/web/local/operator', ownerRouteId: 'real-event-owner' })
-    setConfig(patch, 'dsh-enhanced-assistant-delivery', '@dsh-enhanced/assistant-delivery', {
+    setConfig(patch, 'dsh-ray-assistant-delivery', '@dsh-ray/assistant-delivery', {
       agentProvider: route.provider, agentModel: route.model, agentMaxOutputTokens: 2048,
       ownerRoutes: [{ id: 'real-event-owner', conversation: JSON.parse(binding.conversation_json), principal: JSON.parse(binding.principal_json),
         workspace, agentPreset: 'standard', policyRef: binding.policy_ref, minimumGeneration: binding.generation }],

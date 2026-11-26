@@ -4,9 +4,9 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { automationDefinitionDigest, type HostAutomationExecutor, type SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
+import { automationDefinitionDigest, type HostAutomationExecutor, type SystemAutomationReconcileInput } from '@dsh-ray/assistant-automations'
 import { isSourceOwnerContinuation, validateAnySourceGrowthRunBinding, type AnySourceGrowthRunBinding,
-  type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { captureCreationCapabilitySource } from '../src/creation-capability-source.js'
@@ -969,7 +969,7 @@ describe('durable source-job runtime', () => {
         const unsigned = { schemaVersion: 1 as const, kind: 'dsh-source-release-authorization' as const, authorizationId: 'native-release',
           authority: 'release', keyId: 'release', planId: plan.id, planDigest: plan.digest, baseCommit: plan.baseCommit, scope: plan.scope,
           checkedTreeDigest: plan.sourceCheck!.treeDigest, checkedPatchDigest: plan.sourceCheck!.patchDigest,
-          releasePolicy: { targetBranch: 'main', candidateId: plan.name, packageName: `@dsh-enhanced/${plan.name}`, packageVersion: '1.0.0',
+          releasePolicy: { targetBranch: 'main', candidateId: plan.name, packageName: `@dsh-ray/${plan.name}`, packageVersion: '1.0.0',
             packagePath: `plugins/${plan.name}`, dshBaseline: '0.1.5', capabilities: ['health'], authorities: ['filesystem'], requires: [],
             registryId: 'registry', registryLocator: 'file:///registry', registryReference: 'file:///registry/pkg.tgz',
             catalogId: 'catalog', catalogPath: '/catalog.json', minimumReproducibleBuilds: 2 }, authorizedAt: Date.now(), expiresAt: plan.expiresAt }

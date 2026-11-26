@@ -10,9 +10,9 @@ import { createUserMessage, ReasoningEffortId, type GenerateOptions, type Stream
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { matchesIsolatedModelMessages } from '@dsh-enhanced/assistant-growth-contract'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import { matchesIsolatedModelMessages } from '@dsh-ray/assistant-growth-contract'
 import type { SourceReviewConfig, SourceReviewModelSelection, SourceReviewRequest } from './source-review.js'
 
 const instruction = [

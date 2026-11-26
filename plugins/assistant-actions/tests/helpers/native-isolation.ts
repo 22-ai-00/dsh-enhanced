@@ -1,4 +1,4 @@
-import { hashLinuxRuntimeTree, type Config, type IsolationGrant, type LinuxCgroupRoots, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { hashLinuxRuntimeTree, type Config, type IsolationGrant, type LinuxCgroupRoots, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { chmod, copyFile, lstat, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { mkdtemp, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'

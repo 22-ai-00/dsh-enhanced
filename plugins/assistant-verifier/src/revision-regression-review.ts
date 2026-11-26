@@ -8,7 +8,7 @@ import { canonicalGrowthJson, growthObjectDigest, pluginRevisionRegressionSignin
   type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate,
   type PluginRevisionRegressionLinuxExecution, type PluginRevisionRegressionRequest,
   type PluginRevisionRegressionResult, type PluginRevisionParentBinding,
-  type PluginRevisionVerificationCertificate, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginRevisionVerificationCertificate, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-ray/assistant-growth-contract'
 import { CreationReviewStore } from './creation-review-store.js'
 import { COMPARISON_RULES, SCHEMA_RULES, RULES_VERSION, compareCase, compileCreationReviewConfig,
   parseCases, projectCreationSchemas, type Case, type CreationReviewConfig } from './creation-review.js'

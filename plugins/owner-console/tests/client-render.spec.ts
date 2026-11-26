@@ -41,7 +41,7 @@ function render(status?: OwnerConsoleStatus) {
 }
 
 const STATUS = {
-  feishu: { mode: 'env', installed: true, entry: 'dsh-enhanced-lark-channel', connection: 'connected', appIdConfigured: false },
+  feishu: { mode: 'env', installed: true, entry: 'dsh-ray-lark-channel', connection: 'connected', appIdConfigured: false },
   traex: { installed: false, enabled: false, command: '' },
   host: { settings: true, pluginManager: true, bundles: 'ok', plugins: 'ok' },
   dependencies: [{ name: 'assistantDelivery', available: true }],
@@ -50,11 +50,11 @@ const STATUS = {
   plugins: [],
 } as unknown as OwnerConsoleStatus
 
-const LARK = '@dsh-enhanced/lark-channel'
-const TRAEX = '@dsh-enhanced/traex-acp-provider'
+const LARK = '@dsh-ray/lark-channel'
+const TRAEX = '@dsh-ray/traex-acp-provider'
 const bundle = (name: string, overrides: Record<string, unknown> = {}) => ({
   name, enabled: true, installed: true, removable: true,
-  rows: [{ rowId: name.replace('@dsh-enhanced/', 'dsh-enhanced-'), moduleName: name }], ...overrides,
+  rows: [{ rowId: name.replace('@dsh-ray/', 'dsh-ray-'), moduleName: name }], ...overrides,
 })
 const withState = (overrides: Record<string, unknown>) => ({ ...STATUS, ...overrides }) as unknown as OwnerConsoleStatus
 const buttons = (nodes: readonly Node[]) => nodes.filter(node => node.type === 'button')
@@ -150,9 +150,9 @@ describe('owner console panel presentation', () => {
     expect(all).toContain('已启用，等待依赖服务')
     expect(all).toContain('等待依赖服务')
     expect(all).toContain('waiting for assistantDelivery')
-    expect(all).toContain('assistantDelivery（安装 @dsh-enhanced/assistant-delivery）')
+    expect(all).toContain('assistantDelivery（安装 @dsh-ray/assistant-delivery）')
     expect(buttons(pending.nodes)).not.toContain('启用 lark-channel')
-    expect(buttons(pending.nodes)).toContain('安装 @dsh-enhanced/assistant-delivery')
+    expect(buttons(pending.nodes)).toContain('安装 @dsh-ray/assistant-delivery')
     const repair = textareas(pending.nodes).find(node => String(node.props['aria-label']).includes(LARK))
     expect(String(repair?.props['value'])).toContain('disabled: true')
     expect(repair?.props['readOnly']).toBe(true)
@@ -219,12 +219,12 @@ describe('owner console panel presentation', () => {
       status: {
         ...STATUS,
         bundles: [
-          bundle('@dsh-enhanced/personal-assistant', { enabled: true }),
-          bundle('@dsh-enhanced/assistant-policy', { enabled: false, removable: true }),
-          bundle('@dsh-enhanced/assistant-work-items', { enabled: false, removable: true }),
+          bundle('@dsh-ray/personal-assistant', { enabled: true }),
+          bundle('@dsh-ray/assistant-policy', { enabled: false, removable: true }),
+          bundle('@dsh-ray/assistant-work-items', { enabled: false, removable: true }),
         ],
         plugins: [
-          { entryId: 'pa', moduleName: '@dsh-enhanced/personal-assistant', enabled: true, fiberPhase: 'active' },
+          { entryId: 'pa', moduleName: '@dsh-ray/personal-assistant', enabled: true, fiberPhase: 'active' },
         ],
       } as unknown as OwnerConsoleStatus,
       overview: {

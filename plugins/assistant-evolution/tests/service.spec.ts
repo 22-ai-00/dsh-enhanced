@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type UserMessage } from '@deepseek-ai/dsh-session'
-import { goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
+import { goalDefinitionSituation } from '@dsh-ray/task-acceptance-contract'
 import {
   AssistantEvaluationService,
   TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
@@ -13,10 +13,10 @@ import {
   type TrustedAutomationEvaluationRegistration,
   type TrustedDeliveryEvaluationClaims,
   type TrustedDeliveryEvaluationRegistration,
-} from '@dsh-enhanced/assistant-evaluation'
-import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
-import type { AcceptedExecution, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-evaluation'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-ray/assistant-verifier'
+import type { AcceptedExecution, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration } from '@dsh-ray/assistant-verifier'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

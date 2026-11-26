@@ -1,4 +1,4 @@
-import { RECOVERY_CATALOG_DIGEST } from '@dsh-enhanced/assistant-recovery'
+import { RECOVERY_CATALOG_DIGEST } from '@dsh-ray/assistant-recovery'
 import { describe, expect, test } from 'vitest'
 import { parse } from 'yaml'
 import {
@@ -12,7 +12,7 @@ import {
 const activationNonce = 'activation-test-nonce'
 
 const fixture = `
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   config:
     assistantPolicy:
       databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
@@ -56,7 +56,7 @@ const fixture = `
       schedulerEnabled: true
       toolCapableProviders: [deepseek-official]
       unknownRouteToolCalls: deny
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config:
     databasePath: /Users/test/.dsh/assistant-delivery/state.sqlite
     spoolPath: /Users/test/.dsh/assistant-delivery/spool
@@ -67,9 +67,9 @@ const fixture = `
     ownerRoutes: []
     toolCapableProviders: [deepseek-official]
     unknownRouteToolCalls: deny
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config: { enabled: true, account: primary, tenant: personal }
-- id: dsh-enhanced-assistant-heartbeat
+- id: dsh-ray-assistant-heartbeat
   config:
     heartbeats:
       - id: preserve-existing
@@ -102,18 +102,18 @@ const fixture = `
         budgetAmount: 1
         deliveryBindingId: binding-owner-dm
     maxScratchBytes: 2048
-- id: dsh-enhanced-assistant-evolution
+- id: dsh-ray-assistant-evolution
   config: { databasePath: /Users/test/.dsh/assistant-evolution/state.sqlite, autonomousRollback: false }
-- id: dsh-enhanced-assistant-evaluation
+- id: dsh-ray-assistant-evaluation
   config: { databasePath: /Users/test/.dsh/assistant-evaluation/evaluation.sqlite }
-- id: dsh-enhanced-assistant-growth-experiments
+- id: dsh-ray-assistant-growth-experiments
   config: { databasePath: /Users/test/.dsh/assistant-growth-experiments/growth.sqlite }
-- id: dsh-enhanced-preference-learning
+- id: dsh-ray-preference-learning
   config: { enabled: true, databasePath: /Users/test/.dsh/preference-learning/preferences.sqlite }
-- id: dsh-enhanced-assistant-health
+- id: dsh-ray-assistant-health
   config:
     requiredProviders: [assistantPolicy, personalMemory, personalWiki, assistantAutomations, assistantHeartbeat]
-- id: dsh-enhanced-assistant-recovery
+- id: dsh-ray-assistant-recovery
   config:
     databasePath: /Users/test/.dsh/assistant-recovery/recovery.sqlite
     jobs: []
@@ -181,12 +181,12 @@ describe('supervised-growth Recovery profile patch', () => {
     const twice = configured({ profilePatch: once, effectiveConfig: once })
     expect(twice).toBe(once)
 
-    const personal = config(once, 'dsh-enhanced-personal-assistant')
-    const delivery = config(once, 'dsh-enhanced-assistant-delivery')
-    const heartbeat = config(once, 'dsh-enhanced-assistant-heartbeat')
-    const recovery = config(once, 'dsh-enhanced-assistant-recovery')
-    const health = config(once, 'dsh-enhanced-assistant-health')
-    const evolution = config(once, 'dsh-enhanced-assistant-evolution')
+    const personal = config(once, 'dsh-ray-personal-assistant')
+    const delivery = config(once, 'dsh-ray-assistant-delivery')
+    const heartbeat = config(once, 'dsh-ray-assistant-heartbeat')
+    const recovery = config(once, 'dsh-ray-assistant-recovery')
+    const health = config(once, 'dsh-ray-assistant-health')
+    const evolution = config(once, 'dsh-ray-assistant-evolution')
 
     expect(personal.assistantAutomations).toMatchObject({ schedulerEnabled: false })
     expect(personal.assistantAutomations.toolCapableProviders).toBeUndefined()
@@ -367,13 +367,13 @@ describe('supervised-growth Recovery profile patch', () => {
   test('promotes the exact same nonce and catalog plan while enabling the scheduler only in active', () => {
     const preview = configured()
     const active = configured({ profilePatch: preview, effectiveConfig: preview, activationState: 'active' })
-    expect(config(active, 'dsh-enhanced-personal-assistant').assistantAutomations.schedulerEnabled).toBe(true)
-    expect(config(active, 'dsh-enhanced-assistant-recovery').jobs[0]).toMatchObject({
+    expect(config(active, 'dsh-ray-personal-assistant').assistantAutomations.schedulerEnabled).toBe(true)
+    expect(config(active, 'dsh-ray-assistant-recovery').jobs[0]).toMatchObject({
       activationState: 'active', activationNonce, catalogDigest: RECOVERY_CATALOG_DIGEST,
     })
-    expect(config(active, 'dsh-enhanced-assistant-heartbeat').heartbeats
+    expect(config(active, 'dsh-ray-assistant-heartbeat').heartbeats
       .find((value: { id: string }) => value.id === 'supervised-growth').enabled).toBe(false)
-    expect(config(active, 'dsh-enhanced-assistant-heartbeat').heartbeats
+    expect(config(active, 'dsh-ray-assistant-heartbeat').heartbeats
       .find((value: { id: string }) => value.id === 'supervised-growth-analyst')).toMatchObject({
         enabled: true,
         approvalBindingId: binding.id,
@@ -382,7 +382,7 @@ describe('supervised-growth Recovery profile patch', () => {
   })
 
   test('fails closed when a supervised install omitted its required analyst Heartbeat provider', () => {
-    const freshEffective = rows(fixture).filter(entry => entry.id !== 'dsh-enhanced-assistant-heartbeat')
+    const freshEffective = rows(fixture).filter(entry => entry.id !== 'dsh-ray-assistant-heartbeat')
     const yaml = JSON.stringify(freshEffective)
     expect(() => configured({ profilePatch: '[]\n', effectiveConfig: yaml })).toThrow(/assistant-heartbeat.*missing/i)
   })
@@ -399,8 +399,8 @@ describe('supervised-growth Recovery profile patch', () => {
         principal: lark/primary/personal/ou_owner
 `, '')
     const output = configured({ profilePatch: '[]\n', effectiveConfig: onlyLegacy })
-    expect(config(output, 'dsh-enhanced-assistant-health').requiredProviders).toContain('assistantHeartbeat')
-    expect(config(configured(), 'dsh-enhanced-assistant-health').requiredProviders).toContain('assistantHeartbeat')
+    expect(config(output, 'dsh-ray-assistant-health').requiredProviders).toContain('assistantHeartbeat')
+    expect(config(configured(), 'dsh-ray-assistant-health').requiredProviders).toContain('assistantHeartbeat')
   })
 
   test('reads all three guarded local databases from the effective tree', () => {
@@ -415,15 +415,15 @@ describe('supervised-growth Recovery profile patch', () => {
     'assistant-evolution', 'assistant-evaluation', 'assistant-growth-experiments', 'preference-learning',
     'assistant-health', 'assistant-recovery',
   ])('fails closed when required effective %s is disabled', plugin => {
-    const id = `dsh-enhanced-${plugin}`
+    const id = `dsh-ray-${plugin}`
     const disabled = fixture.replace(`- id: ${id}\n  config:`, `- id: ${id}\n  disabled: true\n  config:`)
     expect(() => configured({ profilePatch: '[]\n', effectiveConfig: disabled })).toThrow(/disabled/i)
   })
 
   test('fails closed if an upgrade has a durable legacy profile but its Heartbeat bundle is disabled', () => {
     const disabled = fixture.replace(
-      '- id: dsh-enhanced-assistant-heartbeat\n  config:',
-      '- id: dsh-enhanced-assistant-heartbeat\n  disabled: true\n  config:',
+      '- id: dsh-ray-assistant-heartbeat\n  config:',
+      '- id: dsh-ray-assistant-heartbeat\n  disabled: true\n  config:',
     )
     expect(() => configured({ profilePatch: '[]\n', effectiveConfig: disabled })).toThrow(/heartbeat.*disabled/i)
   })
@@ -465,16 +465,16 @@ describe('supervised-growth Recovery profile patch', () => {
 // F9：preview 隔离 overlay 必须从持久化的 Lark-enabled 基线确定性派生，
 // 逐字节锚定，并且只能造成两处白名单差异。
 const overlayBaseline = `
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config: { enabled: true, account: primary, tenant: personal }
-- id: dsh-enhanced-assistant-health
+- id: dsh-ray-assistant-health
   config:
     requiredProviders:
       - assistantPolicy
       - larkChannel
       - credentialsKeychain
       - assistantRecovery
-- id: dsh-enhanced-assistant-heartbeat
+- id: dsh-ray-assistant-heartbeat
   config:
     scratchPath: /Users/test/.dsh/assistant-heartbeat/supervised-growth.md
 `
@@ -495,12 +495,12 @@ describe('supervised-growth preview overlay derivation (F9)', () => {
     const overlay = buildSupervisedGrowthPreviewOverlay(overlayBaseline)
     const overlayRows = parse(overlay) as any[]
     expect(overlayRows.map(row => row.id).sort()).toEqual([
-      'dsh-enhanced-assistant-health',
-      'dsh-enhanced-lark-channel',
+      'dsh-ray-assistant-health',
+      'dsh-ray-lark-channel',
     ])
-    const lark = overlayRows.find(row => row.id === 'dsh-enhanced-lark-channel')
+    const lark = overlayRows.find(row => row.id === 'dsh-ray-lark-channel')
     expect(lark.config).toEqual({ enabled: false, account: 'primary', tenant: 'personal' })
-    const health = overlayRows.find(row => row.id === 'dsh-enhanced-assistant-health')
+    const health = overlayRows.find(row => row.id === 'dsh-ray-assistant-health')
     expect(health.config.requiredProviders).toEqual([
       'assistantPolicy', 'credentialsKeychain', 'assistantRecovery',
     ])
@@ -551,18 +551,18 @@ describe('supervised-growth preview overlay derivation (F9)', () => {
       /Health requiredProviders/],
     ['Lark row stays enabled',
       (text: string) => text.replace(
-        '- id: dsh-enhanced-lark-channel\n  config: {"enabled":false',
-        '- id: dsh-enhanced-lark-channel\n  config: {"enabled":true'),
+        '- id: dsh-ray-lark-channel\n  config: {"enabled":false',
+        '- id: dsh-ray-lark-channel\n  config: {"enabled":true'),
       /disable the Lark row/],
     ['Lark row mutates beyond enabled (account rewrite)',
       (text: string) => text.replace('"account":"primary"', '"account":"attacker"'),
       /preview Lark row/],
     ['an unrelated row changes',
       (text: string) => text.replace('supervised-growth.md', 'tampered.md'),
-      /preview row dsh-enhanced-assistant-heartbeat/],
+      /preview row dsh-ray-assistant-heartbeat/],
     ['a whole row disappears from the preview',
       (text: string) => text.replace(
-        /- id: dsh-enhanced-assistant-heartbeat\n  config: \{[^\n]*\}\n/u, ''),
+        /- id: dsh-ray-assistant-heartbeat\n  config: \{[^\n]*\}\n/u, ''),
       /preview profile row id set/],
     ['larkChannel survives in the preview providers',
       (text: string) => text.replace(

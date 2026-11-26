@@ -73,7 +73,7 @@ async function fixture() {
   }
   for (const name of ['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml', 'pnpm-lock.yaml']) {
     await writeFile(join(homePath, 'profiles/assistant', name), name === 'package.json'
-      ? JSON.stringify({ dependencies: { '@dsh-enhanced/assistant-policy': '0.1.48' } }) : 'metadata', { mode: 0o644 })
+      ? JSON.stringify({ dependencies: { '@dsh-ray/assistant-policy': '0.1.48' } }) : 'metadata', { mode: 0o644 })
   }
   const marker = `.rsi-coordinator-${(await import('node:crypto')).createHash('sha256').update(profile).digest('hex').slice(0, 16)}.json`
   await rm(join(homePath, '.rsi-coordinator-54a0e8c17b9b8aee.json'))
@@ -82,7 +82,7 @@ async function fixture() {
   await cp(homePath, stageHome, { recursive: true })
   await chmod(disposableHome, 0o700)
   await chmod(stageHome, 0o700)
-  await mkdir(join(stageHome, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane'),
+  await mkdir(join(stageHome, 'profiles', profile, 'node_modules', '@dsh-ray', 'plugin-control-plane'),
     { recursive: true, mode: 0o700 })
   const originalSource = { workspace: { version: '0.1.48', sourceCommit: '1'.repeat(40) },
     originalBootstrapDigest: 'a'.repeat(64), records: [], anchor: { installationId: 'installation' } }
@@ -90,7 +90,7 @@ async function fixture() {
     workspace: originalSource.workspace, preparedCoordinator: { profile: 'rsi-assistant', receiptDigest: 'b'.repeat(64), cohortDigest: 'c'.repeat(64) } }
   const originalCohort = { receiptDigest: 'c'.repeat(64), version: '0.1.48', sourceRepository: join(root, 'source') }
   const candidateHome = join(preparationRoot, 'home')
-  const candidatePackage = { name: '@dsh-enhanced/assistant-policy', sha256: 'd'.repeat(64),
+  const candidatePackage = { name: '@dsh-ray/assistant-policy', sha256: 'd'.repeat(64),
     runtimeDependencies: [], files: [{ path: 'package.json', sha256: 'e'.repeat(64), mode: 0o644 }] }
   const preparedCohort = { root: join(candidateHome, 'rsi-local-cohorts', profile), receiptDigest: 'f'.repeat(64),
     version: '0.1.49', sourceCommit: '2'.repeat(40), packages: [{ ...candidatePackage,
@@ -133,7 +133,7 @@ async function fixture() {
       return { cohort: stagedCohort, family: { runtime: nativeRuntimeCandidate, release: nativeReleaseCandidate },
         proof: { schemaVersion: 1, backend: 'linux-native', logicalHome, physicalHome: stagePhysicalHome,
           profile, preparationDigest: preparation.receiptDigest, cohortDigest: stagedCohort.receiptDigest,
-          relocation: { protocol: 'dsh-enhanced/linux-rsi-native-relocation/v1', logicalHome,
+          relocation: { protocol: 'dsh-ray/linux-rsi-native-relocation/v1', logicalHome,
             physicalHome: stagePhysicalHome } } }
     }),
     verifyLinuxRsiNativeResources: vi.fn(async () => undefined),
@@ -155,7 +155,7 @@ test('binds a reviewed native owner program and rebases authenticated artifacts 
   const setup = await fixture()
   await mkdir(join(setup.homePath, 'profiles', 'node_modules'), { mode: 0o755 })
   const proof = await nativeProgramProof(setup)
-  expect(proof.protocol).toBe('dsh-enhanced/host-owner-program-update/v1')
+  expect(proof.protocol).toBe('dsh-ray/host-owner-program-update/v1')
   expect(Object.keys(proof.candidateArtifacts)).toEqual([setup.candidatePackage.name])
   const result = await stageResourcesForPreparation({ proof: JSON.parse(JSON.stringify(proof)),
     homePath: setup.homePath, disposableHome: setup.disposableHome })
@@ -181,7 +181,7 @@ test('owner repair appends the real owner-ledger record and binds finalization t
   mocks.stageOwner.mockResolvedValue(ownerRepairNext)
   const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerRepairPreset: 'workspace-write',
     dshPath: '/private/host/dsh', dshEnvironment: { PATH: '/private/host/bin' } })
-  expect(proof.protocol).toBe('dsh-enhanced/host-owner-source-repair/v1')
+  expect(proof.protocol).toBe('dsh-ray/host-owner-source-repair/v1')
   expect(setup.api.assertRsiPreOwnerInstallation).not.toHaveBeenCalled()
   expect(mocks.captureOwner).toHaveBeenCalledWith(expect.objectContaining({
     permissionPreset: 'workspace-write', dshPath: '/private/host/dsh',
@@ -219,7 +219,7 @@ test('owner repair appends the real owner-ledger record and binds finalization t
 
 test('owner successor uses the dedicated predecessor capture without enabling ordinary repair', async () => {
   const setup = await fixture()
-  const predecessorProof = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', record: 'previous' }
+  const predecessorProof = { protocol: 'dsh-ray/host-owner-source-repair/v1', record: 'previous' }
   const ownerRepair = { homePath: setup.homePath, profile: setup.profile, permissionPreset: 'danger-full-access' }
   mocks.captureSuccessor.mockResolvedValue(ownerRepair)
   mocks.prepareCreation.mockResolvedValue({ receiptSha256: 'a'.repeat(64) })
@@ -268,7 +268,7 @@ test('owner prestart recovery rejects changed Home, owner, profile roots and sou
   await expect(verifyHostLocalSourceOriginalForPrestartRecovery({ ...input, homePath: setup.root }))
     .rejects.toThrow('owner prestart recovery Home differs')
   await expect(verifyHostLocalSourceOriginalForPrestartRecovery({ ...input,
-    proof: { ...proof, protocol: 'dsh-enhanced/host-local-source-update/v1', ownerRepair: undefined } }))
+    proof: { ...proof, protocol: 'dsh-ray/host-local-source-update/v1', ownerRepair: undefined } }))
     .rejects.toThrow('owner prestart recovery Home differs')
   for (const changedOwner of [{ ...ownerRepair, homePath: setup.root },
     { ...ownerRepair, profile: 'other' }]) {
@@ -280,11 +280,11 @@ test('owner prestart recovery rejects changed Home, owner, profile roots and sou
   mocks.verifyOwner.mockRejectedValueOnce(new Error('owner binding changed'))
   await expect(verifyHostLocalSourceOriginalForPrestartRecovery(input)).rejects.toThrow('owner binding changed')
   await writeFile(join(setup.homePath, 'profiles', setup.profile, 'package.json'),
-    JSON.stringify({ dependencies: { '@dsh-enhanced/other': '0.1.48' } }), { mode: 0o644 })
+    JSON.stringify({ dependencies: { '@dsh-ray/other': '0.1.48' } }), { mode: 0o644 })
   await expect(verifyHostLocalSourceOriginalForPrestartRecovery(input))
     .rejects.toThrow('original Home profile roots changed')
   await writeFile(join(setup.homePath, 'profiles', setup.profile, 'package.json'),
-    JSON.stringify({ dependencies: { '@dsh-enhanced/assistant-policy': '0.1.48' } }), { mode: 0o644 })
+    JSON.stringify({ dependencies: { '@dsh-ray/assistant-policy': '0.1.48' } }), { mode: 0o644 })
   setup.stagedSources.set(setup.homePath, { workspace: { version: '0.1.48', sourceCommit: '0'.repeat(40) } })
   await expect(verifyHostLocalSourceOriginalForPrestartRecovery(input))
     .rejects.toThrow('original owner recovery identity changed')
@@ -317,7 +317,7 @@ test('signs host-null source maintenance before package changes and verifies can
   expect(finalized.candidateRuntime.receiptDigest).toBe('6'.repeat(64))
   expect(setup.api.replaceRsiAuthorityRuntimeInStage).toHaveBeenCalledWith(expect.objectContaining({
     logicalHome: setup.homePath, physicalHome: setup.stageHome }), expect.objectContaining({
-    packageRoot: join(setup.stageHome, 'profiles', setup.profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane'),
+    packageRoot: join(setup.stageHome, 'profiles', setup.profile, 'node_modules', '@dsh-ray', 'plugin-control-plane'),
   }))
 })
 
@@ -337,7 +337,7 @@ test('requires an explicit auxiliary preparation for enhanced roots absent from 
   const setup = await fixture()
   await mkdir(join(setup.homePath, 'profiles', 'acp'), { mode: 0o700 })
   await writeFile(join(setup.homePath, 'profiles', 'acp', 'package.json'), JSON.stringify({
-    dependencies: { '@dsh-enhanced/acp': '0.1.48' },
+    dependencies: { '@dsh-ray/acp': '0.1.48' },
   }), { mode: 0o644 })
   await expect(prepareHostLocalSourceUpdate(setup)).rejects.toThrow(/explicit auxiliary preparation root/u)
 })
@@ -376,11 +376,11 @@ test('retains the primary locator for byte-identical auxiliary closure packages'
 })
 
 test.each([
-  ['package name', { name: '@dsh-enhanced/other' }],
+  ['package name', { name: '@dsh-ray/other' }],
   ['version', { version: '0.1.50' }],
   ['archive digest', { sha256: '0'.repeat(64) }],
   ['file inventory', { files: [{ path: 'package.json', sha256: '0'.repeat(64), mode: 0o644 }] }],
-  ['runtime dependencies', { runtimeDependencies: ['@dsh-enhanced/other'] }],
+  ['runtime dependencies', { runtimeDependencies: ['@dsh-ray/other'] }],
 ])('rejects overlapping auxiliary packages with different %s', async (_label, changed) => {
   const setup = await fixture()
   const prepared = await nativeProgramProof(setup)
@@ -415,7 +415,7 @@ test('installer prepares a linux-native candidate through the native creation se
   mocks.captureProgram.mockResolvedValue(ownerUpdate)
   mocks.prepareProgramCreation.mockResolvedValue(candidateCreation)
   const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true })
-  expect(proof.protocol).toBe('dsh-enhanced/host-owner-program-update/v1')
+  expect(proof.protocol).toBe('dsh-ray/host-owner-program-update/v1')
   expect(proof.candidateCreation).toEqual(candidateCreation)
   expect(buildMocks.native).toHaveBeenCalledWith(expect.objectContaining({
     dshHome: candidateHome, profile: setup.profile }))
@@ -450,7 +450,7 @@ test('a Docker candidate keeps its historical Docker receipt on the installer pa
   mocks.captureProgram.mockResolvedValue(ownerUpdate)
   mocks.prepareProgramCreation.mockResolvedValue(candidateCreation)
   const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true })
-  expect(proof.protocol).toBe('dsh-enhanced/host-owner-program-update/v1')
+  expect(proof.protocol).toBe('dsh-ray/host-owner-program-update/v1')
   expect(proof.candidateCreation).toEqual(candidateCreation)
   expect(buildMocks.docker).toHaveBeenCalledWith(expect.objectContaining({
     dshHome: candidateHome, profile: setup.profile,
@@ -467,7 +467,7 @@ test('an older installer without the backend-agnostic reader falls back to the D
   mocks.captureProgram.mockResolvedValue(ownerUpdate)
   mocks.prepareProgramCreation.mockResolvedValue({ schemaVersion: 1, receiptSha256: 'a'.repeat(64) })
   const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true })
-  expect(proof.protocol).toBe('dsh-enhanced/host-owner-program-update/v1')
+  expect(proof.protocol).toBe('dsh-ray/host-owner-program-update/v1')
   expect(setup.api.readRsiBuildEnvironment).toHaveBeenCalledWith(expect.objectContaining({
     dshHome: join(setup.preparationRoot, 'home'), profile: setup.profile }))
   expect(mocks.prepareProgramCreation).toHaveBeenCalledWith(expect.objectContaining({
@@ -487,7 +487,7 @@ async function nativeProgramProof(setup: Awaited<ReturnType<typeof fixture>>) {
 test('stages a linux-native candidate through the native resource seam and binds the relocation proof', async () => {
   const setup = await fixture()
   const proof = await nativeProgramProof(setup)
-  expect(proof.protocol).toBe('dsh-enhanced/host-owner-program-update/v1')
+  expect(proof.protocol).toBe('dsh-ray/host-owner-program-update/v1')
   const prepared = await stageResourcesForPreparation({ proof: JSON.parse(JSON.stringify(proof)),
     homePath: setup.homePath, disposableHome: setup.disposableHome })
   expect(setup.api.stageRsiLocalUpdateResources).not.toHaveBeenCalled()
@@ -499,7 +499,7 @@ test('stages a linux-native candidate through the native resource seam and binds
   expect(setup.api.verifyLinuxRsiNativeResources).not.toHaveBeenCalled()
 
   const signed = await stageHostLocalSourceUpdate({ proof, homePath: setup.homePath, stageHome: setup.stageHome })
-  const relocation = { protocol: 'dsh-enhanced/linux-rsi-native-relocation/v1', logicalHome: setup.homePath,
+  const relocation = { protocol: 'dsh-ray/linux-rsi-native-relocation/v1', logicalHome: setup.homePath,
     physicalHome: setup.stageHome }
   expect(setup.api.stageLinuxRsiNativeResources).toHaveBeenLastCalledWith(expect.objectContaining({
     stagePhysicalHome: setup.stageHome }))
@@ -554,8 +554,8 @@ test('forwards explicit stopped acceptance only for a finalized owner program ca
 })
 
 test('refuses stopped empty acceptance on repair or non-owner modes before contacting an installer', async () => {
-  for (const proof of [{ protocol: 'dsh-enhanced/host-owner-source-repair/v1', ownerRepair: {} },
-    { protocol: 'dsh-enhanced/host-local-source-update/v1' }]) {
+  for (const proof of [{ protocol: 'dsh-ray/host-owner-source-repair/v1', ownerRepair: {} },
+    { protocol: 'dsh-ray/host-local-source-update/v1' }]) {
     mocks.assert.mockClear()
     await expect(verifyHostLocalSourceUpdate({ proof, homePath: '/home/test', physicalHome: '/home/stage',
       selection: 'candidate', stoppedEmptyAdoption: true })).rejects.toThrow('requires a stopped program candidate')

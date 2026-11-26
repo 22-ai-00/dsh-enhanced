@@ -5,7 +5,7 @@ import { lstat, mkdir, open, readdir, realpath, writeFile } from 'node:fs/promis
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtemp, rm } from 'node:fs/promises'
-import type { AnySourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import type { AnySourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import { ControlPlaneCliError } from './errors.js'
 import { awaitSourceSignal, type SourceInspection } from './source-context.js'
 import { changedSourcePaths, linkedWorktrees, runLocalBuffer, runLocalCommand, writeCreatedPluginFiles,
@@ -262,7 +262,7 @@ function validateControlledManifestShape(content: string): Record<string, unknow
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: peerDependencies requires peerDependenciesMeta')
     }
     for (const [peerName, range] of Object.entries(parsed.peerDependencies)) {
-      if ((!peerName.startsWith('@deepseek-ai/') && !peerName.startsWith('@dsh-enhanced/'))
+      if ((!peerName.startsWith('@deepseek-ai/') && !peerName.startsWith('@dsh-ray/'))
         || !VALID_PKG_NAME.test(peerName) || typeof range !== 'string' || !isSafePeerDependencyRange(range)) {
         throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: invalid peer ${peerName}`)
       }
@@ -288,7 +288,7 @@ function validateControlledManifestShape(content: string): Record<string, unknow
 export function validateCandidatePackageJson(name: string, baseManifestText: string, candidateText: string): Record<string, unknown> {
   const base = JSON.parse(baseManifestText) as Record<string, unknown>
   const cand = validateControlledManifestShape(candidateText)
-  if (cand.name !== `@dsh-enhanced/${name}` || cand.name !== base.name) {
+  if (cand.name !== `@dsh-ray/${name}` || cand.name !== base.name) {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'candidate package.json cannot alter package name')
   }
   for (const field of ['version', 'license', 'type', 'main', 'types', 'files', 'scripts', 'engines', 'publishConfig', 'repository'] as const) {
@@ -574,8 +574,8 @@ export function parseControlledPatchYaml(content: string): ControlledPatchRow {
 
 export function validateCandidateCordisPatch(name: string, _basePatchText: string, candidateText: string): void {
   const row = parseControlledPatchYaml(candidateText)
-  if (row.id !== `dsh-enhanced-${name}` || row.name !== `@dsh-enhanced/${name}`) {
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', `candidate cordis.patch.yml must mount @dsh-enhanced/${name} with id dsh-enhanced-${name}`)
+  if (row.id !== `dsh-ray-${name}` || row.name !== `@dsh-ray/${name}`) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', `candidate cordis.patch.yml must mount @dsh-ray/${name} with id dsh-ray-${name}`)
   }
 }
 
@@ -739,7 +739,7 @@ async function assertFreshName(assets: BaseAssets, name: string, environment: No
   { capture: true, maximumOutput: 4_096, timeoutMs: 15_000, signal })
   if (listed !== '') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'new plugin name already exists at base')
   const catalog = (await gitBlob(assets.repository, assets.blobs.get('plugins/README.md')!, environment, signal)).toString('utf8')
-  if (catalog.includes(`@dsh-enhanced/${name}`) || catalog.includes(`](${name})`)) {
+  if (catalog.includes(`@dsh-ray/${name}`) || catalog.includes(`](${name})`)) {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'new plugin identity collides with catalog')
   }
   // A published package can retain its identity after its directory is renamed.
@@ -757,7 +757,7 @@ async function assertFreshName(assets: BaseAssets, name: string, environment: No
     }
     const manifest = JSON.parse((await gitBlob(assets.repository,
       { path, mode: match[1]!, hash: match[2]!, bytes: Number(match[3]) }, environment, signal)).toString('utf8')) as { name?: unknown }
-    if (manifest?.name === `@dsh-enhanced/${name}`) {
+    if (manifest?.name === `@dsh-ray/${name}`) {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'new plugin package identity already exists at base')
     }
   }
@@ -1127,7 +1127,7 @@ async function hostScaffold(assets: BaseAssets, name: string, environment: NodeJ
   signal: AbortSignal): Promise<SourceCreationHostScaffold> {
   return isolatedGenerator(assets, name, environment, signal, async (capsule, files) => {
     const manifest = JSON.parse(files.find(file => file.path === 'package.json')!.content) as Record<string, unknown>
-    if (manifest.name !== `@dsh-enhanced/${name}` || typeof manifest.version !== 'string'
+    if (manifest.name !== `@dsh-ray/${name}` || typeof manifest.version !== 'string'
       || !record(manifest.dsh) || !record(manifest.dsh.bundle) || manifest.dsh.bundle.patch !== './cordis.patch.yml') {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'public generator emitted invalid plugin identity')
     }
@@ -1263,7 +1263,7 @@ export async function prepareCreatedPluginWorkspace(input: {
   const baseManifestText = generated.find(file => file.path === 'package.json')!.content
   const basePatchText = generated.find(file => file.path === 'cordis.patch.yml')!.content
   const manifest = JSON.parse(baseManifestText) as Record<string, unknown>
-  if (manifest.name !== `@dsh-enhanced/${input.name}` || typeof manifest.version !== 'string'
+  if (manifest.name !== `@dsh-ray/${input.name}` || typeof manifest.version !== 'string'
     || !record(manifest.dsh) || !record(manifest.dsh.bundle) || manifest.dsh.bundle.patch !== './cordis.patch.yml') {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'public generator emitted invalid plugin identity')
   }

@@ -11,9 +11,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
   devDependencies: Record<string, string>
 }
 
-describe('dsh-enhanced-lark-channel entrypoint', () => {
+describe('dsh-ray-lark-channel entrypoint', () => {
   test('exports stable identity, injection, service, and config', () => {
-    expect(name).toBe('dsh-enhanced-lark-channel')
+    expect(name).toBe('dsh-ray-lark-channel')
     expect(version).toBe(manifest.version)
     expect(inject).toEqual(['assistantDelivery'])
     expect(plugin).toMatchObject({ name, inject, Config, apply })
@@ -24,7 +24,7 @@ describe('dsh-enhanced-lark-channel entrypoint', () => {
     expect(manifest.bin).toEqual({
       'dsh-lark-setup': './bin/dsh-lark-setup.js',
       'dsh-supervised-growth-setup': './bin/dsh-supervised-growth-setup.js',
-      'dsh-rsi-setup': './bin/dsh-rsi-setup.js',
+      'dsh-ray-setup': './bin/dsh-ray-setup.js',
     })
     expect(manifest.files).toContain('bin')
     for (const path of Object.values(manifest.bin)) {
@@ -33,8 +33,8 @@ describe('dsh-enhanced-lark-channel entrypoint', () => {
   })
 
   test('does not couple the channel or supervised activator to a specific model provider', () => {
-    expect(manifest.peerDependencies).not.toHaveProperty('@dsh-enhanced/traex-acp-provider')
-    expect(manifest.devDependencies).not.toHaveProperty('@dsh-enhanced/traex-acp-provider')
+    expect(manifest.peerDependencies).not.toHaveProperty('@dsh-ray/traex-acp-provider')
+    expect(manifest.devDependencies).not.toHaveProperty('@dsh-ray/traex-acp-provider')
   })
 
   test('marks only the owner-editable fields as live settings and still returns plain values', () => {
@@ -83,7 +83,7 @@ describe('dsh-enhanced-lark-channel entrypoint', () => {
       credentialHandle: 'lark-app-secret',
     })
 
-    expect(callerName).toBe('dsh-enhanced-lark-channel')
+    expect(callerName).toBe('dsh-ray-lark-channel')
     await fiber.dispose()
     await ctx.fiber.dispose()
   })

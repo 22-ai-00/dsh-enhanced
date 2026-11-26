@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { AssistantPolicyService, Config } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-policy'
+export const name = 'dsh-ray-assistant-policy'
 export { AssistantPolicyService, Config, version }
 export { compilePolicy, evaluatePolicy } from './evaluator.js'
 export {

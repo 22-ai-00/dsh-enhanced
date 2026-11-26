@@ -19,13 +19,13 @@
     defaultPreset: danger-full-access
 
 - insert:
-    - id: dsh-enhanced-personal-assistant
-      name: '@dsh-enhanced/personal-assistant'
+    - id: dsh-ray-personal-assistant
+      name: '@dsh-ray/personal-assistant'
       config:
         assistantPolicy:
           databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
           rules:
-            - id: dsh-enhanced-foreground-capability-*
+            - id: dsh-ray-foreground-capability-*
               effect: allow
               subject:
                 kind: agent

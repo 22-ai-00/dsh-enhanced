@@ -1,7 +1,7 @@
 import { appendFileSync, readFileSync } from 'node:fs'
 import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
 
-export const name = 'dsh-enhanced-autonomy-e2e-model'
+export const name = 'dsh-ray-autonomy-e2e-model'
 export const inject = ['llm']
 
 const provider = 'browser-e2e'

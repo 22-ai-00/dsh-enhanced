@@ -1,5 +1,5 @@
 import type { AutomationSchedule } from './schedule.js'
-import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-ray/assistant-policy'
 
 export type MisfirePolicy =
   | { kind: 'skip' }

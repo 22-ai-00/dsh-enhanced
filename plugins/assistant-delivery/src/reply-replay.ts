@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 
 export const replyReplayBlockContract = 'assistant-delivery/reply-replay-block/v1' as const
 

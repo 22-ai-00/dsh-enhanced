@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-growth-experiments
-      name: '@dsh-enhanced/assistant-growth-experiments'
+    - id: dsh-ray-assistant-growth-experiments
+      name: '@dsh-ray/assistant-growth-experiments'
       inject:
         - assistantAutomations
         - assistantDelivery

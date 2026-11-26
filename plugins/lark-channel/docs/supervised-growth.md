@@ -35,7 +35,7 @@ Recovery，只能把一个 Host 选出的候选转为 owner 审批卡。
 3. 只有 preview 通过，才用同一 nonce、catalog digest、owner authority 和完整计划写入
    `activationState: active`，打开 scheduler 并再次重启。
 4. active 阶段同样要求本次持久 bootstrap 成功，并从 Automations SQLite 证明
-   `recovery:supervised-growth` 由 `dsh-enhanced-assistant-recovery` 持有、处于 active，且完整
+   `recovery:supervised-growth` 由 `dsh-ray-assistant-recovery` 持有、处于 active，且完整
    production definition 与当前编译计划逐项一致；analyst 必须由 `assistant-heartbeat` 持有、处于
    active，且仍与同一 exact definition 相等。
 

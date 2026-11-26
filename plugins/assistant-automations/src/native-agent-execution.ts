@@ -1,4 +1,4 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { hostAgentToolSchemaDigest } from './host-agent-execution.js'
 import type { HostAgentExecutionContract } from './types.js'
 declare module '@deepseek-ai/dsh-llm' {
@@ -17,9 +17,9 @@ import {
 import type { AgentPresetRegistry as AgentPresets } from '@deepseek-ai/dsh-agent-preset-registry'
 import { ReasoningEffortId, createUserMessage, type GenerateOptions, type LlmRuntime, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { appendPluginRecord, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantPolicyService, PolicyBudgetConfig } from '@dsh-enhanced/assistant-policy'
-import { resolveLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import type { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
+import type { AssistantPolicyService, PolicyBudgetConfig } from '@dsh-ray/assistant-policy'
+import { resolveLlmRouteCapability } from '@dsh-ray/llm-route-capabilities'
 import {
   HostAutomationExecutorRegistry,
   HostExecutorRegistryError,
@@ -576,9 +576,9 @@ class NativeAgentExecution implements AutomationRunner {
         if (hostAcceptance === undefined && typeof delivery?.prepareAgentApproval === 'function') {
           try {
             const route = delivery.prepareAgentApproval(agent, {
-              sourceId: 'dsh-enhanced-assistant-verifier',
+              sourceId: 'dsh-ray-assistant-verifier',
             })
-            if (route.routeVersion !== 2 || route.sourceId !== 'dsh-enhanced-assistant-verifier'
+            if (route.routeVersion !== 2 || route.sourceId !== 'dsh-ray-assistant-verifier'
               || route.workspace !== definition.workspace || route.bindingId.trim() === ''
               || !Number.isSafeInteger(route.bindingVersion) || route.bindingVersion < 1
               || !Number.isSafeInteger(route.bindingGeneration) || route.bindingGeneration < 1

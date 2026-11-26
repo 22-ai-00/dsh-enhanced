@@ -213,7 +213,7 @@ async function managedInstalled(toolsRoot: string): Promise<{ command: string; v
 }
 
 async function managedRoot(dshHome: string): Promise<string> {
-  const first = resolve(dshHome, '.dsh-enhanced')
+  const first = resolve(dshHome, '.dsh-ray')
   const second = join(first, 'tools')
   const third = join(second, 'lark-cli')
   for (const path of [first, second, third]) {

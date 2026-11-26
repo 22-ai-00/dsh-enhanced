@@ -1,5 +1,5 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
-import type {} from '@dsh-enhanced/personal-memory'
+import type {} from '@dsh-ray/personal-memory'
 import { Config, DEFAULT_LEARNING_OPERATIONAL_CONFIG, parseLearningServiceConfig, validateLearningConfig } from './config.js'
 import { MemoryLearningRuntime } from './runtime.js'
 import { runNativeMemoryExtraction } from './extractor.js'
@@ -23,7 +23,7 @@ const ZERO_COUNTS: Readonly<Record<LearningState, number>> = Object.freeze({
 function isDormantConfig(value: unknown): value is DormantLearningServiceConfig {
   return value !== null && typeof value === 'object' && 'configured' in value && (value as { configured?: unknown }).configured === false
 }
-export const name = 'dsh-enhanced-assistant-memory-learning'
+export const name = 'dsh-ray-assistant-memory-learning'
 export { Config, DEFAULT_LEARNING_OPERATIONAL_CONFIG, version, validateLearningConfig }
 export type { DormantLearningServiceConfig, LearningConfig, LearningConfigInput, LearningServiceConfig } from './types.js'
 export class AssistantMemoryLearningService extends Service {

@@ -3,12 +3,12 @@ import {
   freezeLinuxRuntimeSource, prepareLinuxRuntime, readLinuxRuntime,
   LinuxRsiRuntimeUnavailableError,
   type FrozenLinuxRuntimeSource, type LinuxRuntimeInput, type PreparedLinuxRuntime,
-} from '@dsh-enhanced/assistant-isolation/native-resources'
+} from '@dsh-ray/assistant-isolation/native-resources'
 import { readRsiSourceWorkspace, type RsiSourceWorkspace } from './rsi-source.js'
 
 // Existing RSI import paths, constants, error identity and schema-3 receipts stay compatible.
 export { NODE_VERSION, NODE_ARCHIVES, LinuxRsiRuntimeUnavailableError,
-  officialArchive, extractExact } from '@dsh-enhanced/assistant-isolation/native-resources'
+  officialArchive, extractExact } from '@dsh-ray/assistant-isolation/native-resources'
 export type LinuxRsiBuildEnvironment = PreparedLinuxRuntime
 export interface LinuxRsiBootstrapInput extends Omit<LinuxRuntimeInput, 'source' | 'revalidateSource'> {
   source: RsiSourceWorkspace

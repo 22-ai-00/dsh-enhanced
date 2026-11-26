@@ -2,7 +2,7 @@ import { chmod, lstat, readFile, realpath, rename, rm, symlink } from 'node:fs/p
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { hashLinuxRuntimeTree, linuxRuntimeDigest, verifyLinuxRuntime,
-  type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+  type LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { openLinuxRsiNativeRelocatedFamily, relocateLinuxRsiNativeFamily, verifyLinuxRsiNativeRelocation,
   type LinuxRsiNativeRelocationElement, type LinuxRsiNativeRelocationProof } from '../src/rsi-linux-native-relocation.js'
 import { readRsiReleaseBuildEnvironment } from '../src/rsi-release-build.js'
@@ -11,7 +11,7 @@ import { elementMap, fixture, hex, homePath, privateDirectory, PROFILE, readJson
   writeReceipt } from './fixtures/linux-native-home-fixture.js'
 
 const mocks = vi.hoisted(() => ({ validateBehavior: vi.fn(), behaviorDigest: vi.fn() }))
-const PEER = '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+const PEER = '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 vi.mock('node:module', async importOriginal => {
   const actual = await importOriginal<typeof import('node:module')>()
   // Only the optional behavior peer is faked; every other resolution (the

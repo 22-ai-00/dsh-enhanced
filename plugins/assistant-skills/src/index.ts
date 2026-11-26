@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { AssistantSkillsService, Config } from './service.js'
 import { version } from './version.js'
-export const name = 'dsh-enhanced-assistant-skills'
+export const name = 'dsh-ray-assistant-skills'
 export { version, AssistantSkillsService, Config }
 export type * from './definition.js'
 export {

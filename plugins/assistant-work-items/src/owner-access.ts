@@ -1,6 +1,6 @@
 import { symbols } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { NormalizedConfig } from './config.js'
 import type { PeerDeliveryService, PeerOwnerAliasReceipt, PeerOwnerRouteReceipt, PeerPolicyService } from './peers.js'
 import type { WorkItemStore } from './store.js'

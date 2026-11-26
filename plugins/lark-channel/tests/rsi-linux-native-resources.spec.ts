@@ -18,7 +18,7 @@ import { fixture, privateDirectory, PROFILE, readJson, removeFixtureDirectories,
 // these tests drive the native handover over real cohort trees, real copies and a
 // real rename(2) cutover. Only the optional behavior peer and the reader are faked.
 const mocks = vi.hoisted(() => ({ validateBehavior: vi.fn(), behaviorDigest: vi.fn() }))
-const PEER = '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+const PEER = '@dsh-ray/assistant-verifier/linux-behavior-runtime'
 vi.mock('node:module', async importOriginal => {
   const actual = await importOriginal<typeof import('node:module')>()
   return { ...actual,
@@ -79,7 +79,7 @@ async function seedCohort(seed: CohortSeed): Promise<RsiLocalCohort> {
     sourceRepository: seed.sourceRepository,
     allowBuilds: { koffi: true },
     bundles: ['target'],
-    packages: [{ name: '@dsh-enhanced/target', path: 'plugins/target', bundle: true,
+    packages: [{ name: '@dsh-ray/target', path: 'plugins/target', bundle: true,
       runtimeDependencies: [], tarball: join(seed.root, 'artifacts', 'target.tgz'),
       sha256: sha(seed.tarball),
       files: [{ path: 'lib/index.js', mode: 0o644, sha256: sha('export {}') }] }],
@@ -316,7 +316,7 @@ describe('rsi Linux native resources handover', () => {
     await chmod(tarball, 0o600)
     await writeFile(tarball, 'tampered')
     await refusal(verifyLinuxRsiNativeResources({ proof, physicalHome: ctx.physicalHome }),
-      'staged cohort package differs: @dsh-enhanced/target')
+      'staged cohort package differs: @dsh-ray/target')
     const unrebased = await readJson(join(ctx.physicalHome, COHORT, PROFILE, 'receipt.json'))
     expect(JSON.stringify(unrebased)).not.toContain(ctx.physicalHome)
     const stagedRoot = join(ctx.physicalHome, COHORT, PROFILE)

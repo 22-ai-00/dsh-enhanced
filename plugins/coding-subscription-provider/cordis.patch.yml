@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-coding-subscription-provider
-      name: '@dsh-enhanced/coding-subscription-provider'
+    - id: dsh-ray-coding-subscription-provider
+      name: '@dsh-ray/coding-subscription-provider'
       config:
         cwd: !!js dshHomePath('assistant-workspace')
         codex:

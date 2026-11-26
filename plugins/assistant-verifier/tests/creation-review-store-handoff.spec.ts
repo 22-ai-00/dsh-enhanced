@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
-import { canonicalGrowthJson, growthObjectDigest as digest, verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, growthObjectDigest as digest, verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { chmodSync, copyFileSync, existsSync, linkSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'

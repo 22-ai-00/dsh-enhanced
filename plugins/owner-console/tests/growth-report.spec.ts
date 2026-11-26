@@ -114,7 +114,7 @@ describe('owner-console growth report scorecard', () => {
       expect(OwnerConsoleGrowthReportSchema.parse(viaService)).toEqual(viaService)
       expect(codec).toBeDefined()
       expect(viaService.overallState).toBe('data')
-      expect(viaService.cliCommand).toBe('dsh-rsi growth-report --profile web --since 14d')
+      expect(viaService.cliCommand).toBe('dsh-ray growth-report --profile web --since 14d')
       expect(viaService.tasks.totalTasks).toBe(3)
       expect(viaService.tasks.ownerWithdrawals).toBe(1)
       expect(viaService.tasks.reworkTasks).toBe(1)
@@ -129,7 +129,7 @@ describe('owner-console growth report scorecard', () => {
     const baseReport = readOwnerConsoleGrowthReport({ get: () => undefined } as never, '', '', 7, 1_800_000_000_000)
     const growthReportMock = vi.fn(async (_ws: string, _pr: string, days: number) => ({
       ok: true as const,
-      value: { ...baseReport, sinceDays: days, cliCommand: `dsh-rsi growth-report --since ${days}d` },
+      value: { ...baseReport, sinceDays: days, cliCommand: `dsh-ray growth-report --since ${days}d` },
     }))
     const remote = { growthReport: growthReportMock } as unknown as ConsoleRemote
 
@@ -143,7 +143,7 @@ describe('owner-console growth report scorecard', () => {
     expect(growthReportMock).toHaveBeenCalledWith('', '', 7)
     expect(container.textContent).toContain('成长计分卡（只读）')
     expect(container.textContent).toContain('无数据（未启用/无账本）')
-    expect(container.textContent).toContain('dsh-rsi growth-report --since 7d')
+    expect(container.textContent).toContain('dsh-ray growth-report --since 7d')
 
     const btn14 = [...container.querySelectorAll('button')].find(b => b.textContent?.includes('最近 14 天'))
     expect(btn14).toBeDefined()
@@ -151,7 +151,7 @@ describe('owner-console growth report scorecard', () => {
       btn14!.click()
     })
     expect(growthReportMock).toHaveBeenCalledWith('', '', 14)
-    expect(container.textContent).toContain('dsh-rsi growth-report --since 14d')
+    expect(container.textContent).toContain('dsh-ray growth-report --since 14d')
 
     await act(async () => {
       root.unmount()
@@ -333,7 +333,7 @@ describe('owner-console growth report scorecard', () => {
       // 2. File-backed SQLite fast path (with profileContext + loader.entries() exposing databasePath, even when workspace='' preset='')
       ctx.provide('profileContext' as never, { home: tempDir, name: 'web' } as never)
       ctx.provide('loader' as never, {
-        entries: () => [{ options: { name: '@dsh-enhanced/assistant-evaluation', config: { databasePath: dbPath } } }],
+        entries: () => [{ options: { name: '@dsh-ray/assistant-evaluation', config: { databasePath: dbPath } } }],
       } as never)
       const viaSqlite = await svc.growthReport('', '', 14)
       expect(OwnerConsoleGrowthReportSchema.parse(viaSqlite)).toEqual(viaSqlite)
@@ -451,10 +451,10 @@ describe('owner-console growth report scorecard', () => {
           if (name === 'loader') {
             return {
               entries: () => [
-                { options: { name: '@dsh-enhanced/personal-memory', config: { databasePath: join(homeDir, 'linked-memory', 'memory.sqlite') } } },
-                { options: { name: '@dsh-enhanced/preference-learning', config: { databasePath: leakedMemPath } } },
-                { options: { name: '@dsh-enhanced/assistant-evaluation', config: { databasePath: evalPath } } },
-                { options: { name: '@dsh-enhanced/plugin-control-plane', config: { statePath: cpStateDir } } },
+                { options: { name: '@dsh-ray/personal-memory', config: { databasePath: join(homeDir, 'linked-memory', 'memory.sqlite') } } },
+                { options: { name: '@dsh-ray/preference-learning', config: { databasePath: leakedMemPath } } },
+                { options: { name: '@dsh-ray/assistant-evaluation', config: { databasePath: evalPath } } },
+                { options: { name: '@dsh-ray/plugin-control-plane', config: { statePath: cpStateDir } } },
               ],
             }
           }
@@ -492,8 +492,8 @@ describe('owner-console growth report scorecard', () => {
             if (name === 'loader') {
               return {
                 entries: () => [
-                  { options: { name: '@dsh-enhanced/personal-memory', config: { databasePath: leakedMemPath } } },
-                  { options: { name: '@dsh-enhanced/preference-learning', config: { databasePath: join(homeDir, 'linked-memory', 'memory.sqlite') } } },
+                  { options: { name: '@dsh-ray/personal-memory', config: { databasePath: leakedMemPath } } },
+                  { options: { name: '@dsh-ray/preference-learning', config: { databasePath: join(homeDir, 'linked-memory', 'memory.sqlite') } } },
                 ],
               }
             }
@@ -556,7 +556,7 @@ describe('owner-console growth report scorecard', () => {
               entries: () => [
                 {
                   options: {
-                    name: '@dsh-enhanced/personal-assistant',
+                    name: '@dsh-ray/personal-assistant',
                     config: {
                       personalMemory: { databasePath: { __jsExpr: "dshHomePath('personal-memory/memory.sqlite')" } },
                     },
@@ -564,7 +564,7 @@ describe('owner-console growth report scorecard', () => {
                 },
                 {
                   options: {
-                    name: '@dsh-enhanced/preference-learning',
+                    name: '@dsh-ray/preference-learning',
                     config: {
                       databasePath: { __jsExpr: "dshHomePath('preference-learning/preferences.sqlite')" },
                     },

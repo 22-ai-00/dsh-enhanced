@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { isMap, isSeq, parseDocument, stringify, type YAMLMap, type YAMLSeq } from 'yaml'
-import { applyRecommendedPluginPreset } from '@dsh-enhanced/assistant-policy/plugin-setup'
-import type { MemoryLearningOwner } from '@dsh-enhanced/assistant-growth-contract'
+import { applyRecommendedPluginPreset } from '@dsh-ray/assistant-policy/plugin-setup'
+import type { MemoryLearningOwner } from '@dsh-ray/assistant-growth-contract'
 
 import { createRsiMemoryLearningSetup } from '../src/rsi-memory-learning.js'
 import {
@@ -81,30 +81,30 @@ describe('RSI ordinary-use evaluator setup', () => {
     const memory = createRsiMemoryLearningSetup({ installationId: 'preset-fixture', stateRoot: '/tmp/rsi-state',
       owner, now, expiresAt: now + 60_000, workItemExperiences: true })
     const source = stringify([
-      { id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items',
+      { id: 'dsh-ray-assistant-work-items', name: '@dsh-ray/assistant-work-items',
         config: { enabled: true, mode: 'observe', intakeLedger: { enabled: true } } },
-      { id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive',
+      { id: 'dsh-ray-assistant-proactive', name: '@dsh-ray/assistant-proactive',
         config: { intakeEvaluation: { rules: evaluator.rules, provider: evaluator.provider, model: evaluator.model } } },
-      { id: 'dsh-enhanced-assistant-memory-learning', name: '@dsh-enhanced/assistant-memory-learning',
+      { id: 'dsh-ray-assistant-memory-learning', name: '@dsh-ray/assistant-memory-learning',
         config: { databasePath: '/tmp/rsi-learning.sqlite' } },
-      { id: 'dsh-enhanced-assistant-verifier', name: '@dsh-enhanced/assistant-verifier',
+      { id: 'dsh-ray-assistant-verifier', name: '@dsh-ray/assistant-verifier',
         config: { memoryReviews: memory.reviews } },
-      { id: 'dsh-enhanced-personal-assistant', name: '@dsh-enhanced/personal-assistant',
+      { id: 'dsh-ray-personal-assistant', name: '@dsh-ray/personal-assistant',
         config: { personalMemory: { automaticLearning: memory.adoption } } },
     ])
     const options = { readDump: dumpFixture(source) }
     const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, options)
     expect(result.changes).toEqual([
-      { id: 'dsh-enhanced-assistant-work-items', key: 'intakeLedger.evaluation.enabled', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.enabled', from: undefined, to: true },
-      { id: 'dsh-enhanced-assistant-memory-learning', key: 'workItemExperiences', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-work-items', key: 'intakeLedger.evaluation.enabled', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-proactive', key: 'intakeEvaluation.enabled', from: undefined, to: true },
+      { id: 'dsh-ray-assistant-memory-learning', key: 'workItemExperiences', from: undefined, to: true },
     ])
     const patch = parseDocument(await readFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')).toJSON() as
       Array<{ id: string; config?: Record<string, any> }>
     const configOf = (id: string) => patch.find(row => row.id === id)?.config
-    expect(configOf('dsh-enhanced-assistant-work-items')).toMatchObject({ intakeLedger: { evaluation: { enabled: true } } })
-    expect(configOf('dsh-enhanced-assistant-proactive')).toMatchObject({ intakeEvaluation: { enabled: true } })
-    expect(configOf('dsh-enhanced-assistant-memory-learning')).toMatchObject({ workItemExperiences: true })
+    expect(configOf('dsh-ray-assistant-work-items')).toMatchObject({ intakeLedger: { evaluation: { enabled: true } } })
+    expect(configOf('dsh-ray-assistant-proactive')).toMatchObject({ intakeEvaluation: { enabled: true } })
+    expect(configOf('dsh-ray-assistant-memory-learning')).toMatchObject({ workItemExperiences: true })
     const again = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, options)
     expect(again.changes).toEqual([])
   }, 30_000)

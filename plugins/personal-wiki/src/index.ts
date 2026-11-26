@@ -3,7 +3,7 @@ import { PersonalWikiService } from './service.js'
 import type { Config } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-personal-wiki'
+export const name = 'dsh-ray-personal-wiki'
 export { PersonalWikiService, version }
 export type { Config }
 export type * from './types.js'

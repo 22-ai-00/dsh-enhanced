@@ -2,10 +2,10 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:f
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { isMap, isSeq, parse, parseDocument, stringify, type Node } from 'yaml'
-import { controlPlaneDigest, normalizeControlPlaneConfig, runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
-import { normalizeConfig } from '@dsh-enhanced/assistant-growth-driver'
-import { validateSourceReviewConfig } from '@dsh-enhanced/assistant-verifier'
+import { controlPlaneDigest, normalizeControlPlaneConfig, runtimeConfigDigest } from '@dsh-ray/plugin-control-plane'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
+import { normalizeConfig } from '@dsh-ray/assistant-growth-driver'
+import { validateSourceReviewConfig } from '@dsh-ray/assistant-verifier'
 
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.ts'
 import { createRsiBootstrapManifest, rawLoaderConfig, type RsiBootstrapManifestInput } from '../src/rsi-bootstrap-manifest.ts'
@@ -26,9 +26,9 @@ const owner = {
 }
 const coordinatorBase = '- insert:\n    - id: tool-web\n      name: "@deepseek-ai/tool-web"\n    - id: agent-loop\n      name: "@deepseek-ai/agent-loop"\n'
 const coordinatorEffective = [
-  { id: 'dsh-enhanced-assistant-policy', name: '@dsh-enhanced/assistant-policy', config: { budgets: [], rules: [] } },
-  { id: 'dsh-enhanced-assistant-automations', name: '@dsh-enhanced/assistant-automations', config: { schedulerEnabled: false, allowUnbudgetedExecution: false } },
-  { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {} },
+  { id: 'dsh-ray-assistant-policy', name: '@dsh-ray/assistant-policy', config: { budgets: [], rules: [] } },
+  { id: 'dsh-ray-assistant-automations', name: '@dsh-ray/assistant-automations', config: { schedulerEnabled: false, allowUnbudgetedExecution: false } },
+  { id: 'dsh-ray-plugin-control-plane', name: '@dsh-ray/plugin-control-plane', config: {} },
   { id: 'tool-web', name: '@deepseek-ai/tool-web', config: {} },
 ]
 
@@ -63,22 +63,22 @@ async function fixture() {
     workspace, agentPreset: 'primary', policyRef: 'owner-policy', minimumGeneration: 2 }
   const row = (id: string, name: string, config: object) => ({ id, name, config })
   const targetEffective = stringify([
-    row('dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant',
+    row('dsh-ray-personal-assistant', '@dsh-ray/personal-assistant',
       { assistantPolicy: { databasePath: join(home, 'policy.sqlite'), budgets: [{ id: 'existing-global', metric: 'automation-runs', limit: 9, periodMs: 86_400_000, scope: 'global' }], rules: [] },
         personalMemory: { databasePath: join(home, 'memory.sqlite') },
         assistantAutomations: { schedulerEnabled: false, allowUnbudgetedExecution: false } }),
-    row('dsh-enhanced-assistant-delivery', '@dsh-enhanced/assistant-delivery',
+    row('dsh-ray-assistant-delivery', '@dsh-ray/assistant-delivery',
       { defaultWorkspace: workspace, defaultAgentPreset: 'primary', ownerRoutes: [route] }),
-    row('dsh-enhanced-lark-channel', '@dsh-enhanced/lark-channel', { enabled: true }),
-    row('dsh-enhanced-assistant-evaluation', '@dsh-enhanced/assistant-evaluation', {}),
-    row('dsh-enhanced-assistant-goals', '@dsh-enhanced/assistant-goals', {}),
-    row('dsh-enhanced-assistant-health', '@dsh-enhanced/assistant-health', {}),
-    row('dsh-enhanced-assistant-skills', '@dsh-enhanced/assistant-skills', {}),
-    row('dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', { databasePath: join(home, 'verifier.sqlite') }),
-    row('dsh-enhanced-assistant-growth-driver', '@dsh-enhanced/assistant-growth-driver',
+    row('dsh-ray-lark-channel', '@dsh-ray/lark-channel', { enabled: true }),
+    row('dsh-ray-assistant-evaluation', '@dsh-ray/assistant-evaluation', {}),
+    row('dsh-ray-assistant-goals', '@dsh-ray/assistant-goals', {}),
+    row('dsh-ray-assistant-health', '@dsh-ray/assistant-health', {}),
+    row('dsh-ray-assistant-skills', '@dsh-ray/assistant-skills', {}),
+    row('dsh-ray-assistant-verifier', '@dsh-ray/assistant-verifier', { databasePath: join(home, 'verifier.sqlite') }),
+    row('dsh-ray-assistant-growth-driver', '@dsh-ray/assistant-growth-driver',
       { provider: 'owner-provider', model: 'owner-model', reasoningEffort: 'high' }),
-    { id: 'dsh-enhanced-assistant-memory-learning', name: '@dsh-enhanced/assistant-memory-learning', disabled: true },
-    row('dsh-enhanced-plugin-control-plane', '@dsh-enhanced/plugin-control-plane', {}),
+    { id: 'dsh-ray-assistant-memory-learning', name: '@dsh-ray/assistant-memory-learning', disabled: true },
+    row('dsh-ray-plugin-control-plane', '@dsh-ray/plugin-control-plane', {}),
   ])
   const source = { schemaVersion: 1 as const, version: '0.1.48', origin: { kind: 'local-head' as const, locator: root, ref: 'HEAD' },
     sourceCommit: 'a'.repeat(40), repository: join(root, 'source'),
@@ -91,13 +91,13 @@ async function fixture() {
     sourceBuild: native.sourceBuild, runnerStates: { sourceBuild: runnerStates.sourceBuild }, enableRevision: false,
     git: { path: '/usr/bin/git', sha256: 'a'.repeat(64) }, now, expiresAt: now + 30 * 86_400_000,
     plugins: ['personal-assistant', 'assistant-goals', 'assistant-health', 'assistant-growth-driver', 'assistant-memory-learning'],
-    observerTargets: [{ entryId: 'dsh-enhanced-lark-channel', module: '@dsh-enhanced/lark-channel',
+    observerTargets: [{ entryId: 'dsh-ray-lark-channel', module: '@dsh-ray/lark-channel',
       configDigest: runtimeConfigDigest({ enabled: true }), services: [] }],
     hostDeploymentInputs: ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml',
       ...['personal-assistant', 'assistant-goals', 'assistant-health', 'assistant-growth-driver', 'assistant-memory-learning', 'personal-memory'].flatMap(name => [
-        `node_modules/@dsh-enhanced/${name}/package.json`,
-        `node_modules/@dsh-enhanced/${name}/cordis.patch.yml`,
-        `node_modules/@dsh-enhanced/${name}/lib/index.js`,
+        `node_modules/@dsh-ray/${name}/package.json`,
+        `node_modules/@dsh-ray/${name}/cordis.patch.yml`,
+        `node_modules/@dsh-ray/${name}/lib/index.js`,
       ])] }
   return { root, input, native, runnerStates }
 }
@@ -105,18 +105,18 @@ async function fixture() {
 /** Add the two ordinary-use rows and the deployment model route to the base fixture. */
 function addOrdinaryUseLearning(input: RsiBootstrapManifestInput): void {
   const rows = parse(input.targetEffective) as Array<{ id: string; name?: string; disabled?: boolean; config?: Record<string, any> }>
-  const delivery = rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!
+  const delivery = rows.find(row => row.id === 'dsh-ray-assistant-delivery')!
   delivery.config = { ...delivery.config, agentProvider: 'deepseek-official', agentModel: 'deepseek-v4-flash' }
-  rows.push({ id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive' })
-  rows.push({ id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items',
+  rows.push({ id: 'dsh-ray-assistant-proactive', name: '@dsh-ray/assistant-proactive' })
+  rows.push({ id: 'dsh-ray-assistant-work-items', name: '@dsh-ray/assistant-work-items',
     config: { enabled: true, mode: 'observe', intakeLedger: { enabled: true } } })
   input.targetEffective = stringify(rows)
   input.plugins = [...input.plugins, 'assistant-proactive', 'assistant-work-items']
   input.hostDeploymentInputs = [...input.hostDeploymentInputs,
     ...['assistant-proactive', 'assistant-work-items'].flatMap(name => [
-      `node_modules/@dsh-enhanced/${name}/package.json`,
-      `node_modules/@dsh-enhanced/${name}/cordis.patch.yml`,
-      `node_modules/@dsh-enhanced/${name}/lib/index.js`,
+      `node_modules/@dsh-ray/${name}/package.json`,
+      `node_modules/@dsh-ray/${name}/cordis.patch.yml`,
+      `node_modules/@dsh-ray/${name}/lib/index.js`,
     ])]
   input.enableOrdinaryUseLearning = true
 }
@@ -142,11 +142,11 @@ describe('ordinary-use RSI manifest factory', () => {
         coordinatorBase, owner: input.owner })
       const compiled = await compile()
       const rows = parse(compiled.targetPatch) as Array<{ id: string; config: Record<string, any> }>
-      const verifier = rows.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config
+      const verifier = rows.find(row => row.id === 'dsh-ray-assistant-verifier')!.config
       expect(verifier.creationReviews).toEqual(creation.reviews)
       expect(manifest.controlPlane.runtimeObserver!.targets.find(target =>
-        target.entryId === 'dsh-enhanced-assistant-verifier')!.configDigest).toBe(runtimeConfigDigest(verifier))
-      const cp = rows.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config
+        target.entryId === 'dsh-ray-assistant-verifier')!.configDigest).toBe(runtimeConfigDigest(verifier))
+      const cp = rows.find(row => row.id === 'dsh-ray-plugin-control-plane')!.config
       expect(cp.creationCapabilities).toEqual(creation.capabilities)
       expect(cp.creationCapabilities.retention).toEqual({ maximumLifetimeMs: 30 * 86_400_000 })
       expect(cp.creationVerifications).toEqual(creation.verifications)
@@ -156,7 +156,7 @@ describe('ordinary-use RSI manifest factory', () => {
       delete legacy.controlPlane.creationCapabilities!.retention
       const legacyCompiled = await compile(legacy)
       const legacyRows = parse(legacyCompiled.targetPatch) as Array<{ id: string; config: Record<string, any> }>
-      expect(legacyRows.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config
+      expect(legacyRows.find(row => row.id === 'dsh-ray-plugin-control-plane')!.config
         .creationCapabilities.retention).toBeUndefined()
       const partial = structuredClone(manifest)
       delete partial.pluginCreation
@@ -176,15 +176,15 @@ describe('ordinary-use RSI manifest factory', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
   test('cold bootstrap import does not resolve optional memory bundles', async () => {
-    vi.doMock('@dsh-enhanced/assistant-memory-learning', () => { throw new Error('unexpected learner import') })
-    vi.doMock('@dsh-enhanced/personal-memory', () => { throw new Error('unexpected memory import') })
+    vi.doMock('@dsh-ray/assistant-memory-learning', () => { throw new Error('unexpected learner import') })
+    vi.doMock('@dsh-ray/personal-memory', () => { throw new Error('unexpected memory import') })
     vi.resetModules()
     try {
       const module = await import('../src/rsi-bootstrap-manifest.ts')
       expect(typeof module.createRsiBootstrapManifest).toBe('function')
     } finally {
-      vi.doUnmock('@dsh-enhanced/assistant-memory-learning')
-      vi.doUnmock('@dsh-enhanced/personal-memory')
+      vi.doUnmock('@dsh-ray/assistant-memory-learning')
+      vi.doUnmock('@dsh-ray/personal-memory')
       vi.resetModules()
     }
   })
@@ -193,25 +193,25 @@ describe('ordinary-use RSI manifest factory', () => {
     const {root,input} = await fixture()
     try {
       const original = parse(input.targetEffective) as Array<{id:string;config:Record<string,any>}>
-      original.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config.ownerRoutes = []
+      original.find(row => row.id === 'dsh-ray-assistant-delivery')!.config.ownerRoutes = []
       const targetEffective = stringify(original).replace('ownerRoutes: []', "ownerRoutes: []\n    databasePath: !!js dshHomePath('delivery/state.sqlite')")
       const source = parseDocument(targetEffective)
       if (!isSeq(source.contents)) throw new Error('invalid fixture')
-      const delivery = source.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-assistant-delivery')
+      const delivery = source.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-ray-assistant-delivery')
       if (!isMap(delivery)) throw new Error('missing Delivery')
       const originalDigest = runtimeConfigDigest(rawLoaderConfig(delivery.get('config',true) as Node,'Delivery'))
-      const observerTargets = [...input.observerTargets,{entryId:'dsh-enhanced-assistant-delivery',module:'@dsh-enhanced/assistant-delivery',configDigest:originalDigest,services:['assistantDelivery']}]
+      const observerTargets = [...input.observerTargets,{entryId:'dsh-ray-assistant-delivery',module:'@dsh-ray/assistant-delivery',configDigest:originalDigest,services:['assistantDelivery']}]
       const manifest = createRsiBootstrapManifest({...input,targetEffective,observerTargets})
       expect(targetEffective).toContain('ownerRoutes: []')
-      expect(() => createRsiBootstrapManifest({...input,targetEffective,observerTargets:observerTargets.map(target => target.entryId === 'dsh-enhanced-assistant-delivery' ? {...target,configDigest:'a'.repeat(64)} : target)})).toThrow('config digest differs')
+      expect(() => createRsiBootstrapManifest({...input,targetEffective,observerTargets:observerTargets.map(target => target.entryId === 'dsh-ray-assistant-delivery' ? {...target,configDigest:'a'.repeat(64)} : target)})).toThrow('config digest differs')
       const compiled = await compileRsiProfiles({manifest,dshHome:input.dshHome,targetPatch:'[]\n',targetEffective,
         coordinatorPatch:'[]\n',coordinatorEffective:stringify(coordinatorEffective),coordinatorBase,owner:input.owner})
       const final = parseDocument(compiled.targetPatch)
       if (!isSeq(final.contents)) throw new Error('invalid final')
-      const row = final.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-assistant-delivery')
+      const row = final.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-ray-assistant-delivery')
       if (!isMap(row)) throw new Error('missing compiled Delivery')
       expect(compiled.targetPatch).toContain("databasePath: !!js dshHomePath('delivery/state.sqlite')")
-      const digest = manifest.controlPlane.runtimeObserver!.targets.find(target => target.entryId === 'dsh-enhanced-assistant-delivery')!.configDigest
+      const digest = manifest.controlPlane.runtimeObserver!.targets.find(target => target.entryId === 'dsh-ray-assistant-delivery')!.configDigest
       expect(digest).not.toBe(originalDigest)
       expect(digest).toBe(runtimeConfigDigest(rawLoaderConfig(row.get('config',true) as Node,'Delivery')))
       expect((row.toJSON() as {config:{ownerRoutes:unknown[]}}).config.ownerRoutes).toHaveLength(1)
@@ -245,21 +245,21 @@ describe('ordinary-use RSI manifest factory', () => {
       const patch = parseDocument(compiled.targetPatch)
       expect(isSeq(patch.contents)).toBe(true)
       if (!isSeq(patch.contents)) throw new Error('invalid patch')
-      for (const id of ['dsh-enhanced-assistant-growth-driver','dsh-enhanced-assistant-verifier',
-        'dsh-enhanced-personal-assistant', 'dsh-enhanced-assistant-memory-learning']) {
+      for (const id of ['dsh-ray-assistant-growth-driver','dsh-ray-assistant-verifier',
+        'dsh-ray-personal-assistant', 'dsh-ray-assistant-memory-learning']) {
         const row = patch.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === id)
         if (!isMap(row)) throw new Error('missing derived row')
         expect(manifest.controlPlane.runtimeObserver!.targets.find(target => target.entryId === id)!.configDigest)
           .toBe(runtimeConfigDigest(rawLoaderConfig(row.get('config',true) as Node,id)))
       }
-      const personal = patch.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-personal-assistant')
+      const personal = patch.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-ray-personal-assistant')
       if (!isMap(personal)) throw new Error('missing personal assistant')
       const personalConfig = personal.toJSON() as { config: { assistantPolicy: { budgets: Array<{id:string;metric:string;scope:string;limit:number}>, rules: unknown[] }; personalMemory: { automaticLearning: unknown } } }
       expect(personalConfig.config.personalMemory.automaticLearning).toEqual(learning.adoption)
       for (const [id, limit, scope] of [[learning.learning.budgetId, 7, 'workspace'], [learning.learning.scanBudgetId, 1440, 'subject']] as const) {
         expect(personalConfig.config.assistantPolicy.budgets).toContainEqual(expect.objectContaining({ id, metric: 'automation-runs', scope, limit }))
       }
-      const learner = patch.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-assistant-memory-learning')
+      const learner = patch.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-ray-assistant-memory-learning')
       if (!isMap(learner)) throw new Error('missing learner')
       expect(learner.get('disabled')).toBe(false)
       expect(compiled.targetPatch).toContain('sourceAdoptions')
@@ -271,16 +271,16 @@ describe('ordinary-use RSI manifest factory', () => {
     const { root, input } = await fixture()
     try {
       const rows = parse(input.targetEffective) as Array<{ id: string; config: Record<string, any> }>
-      const delivery = rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!
+      const delivery = rows.find(row => row.id === 'dsh-ray-assistant-delivery')!
       delivery.config.ownerRoutes.push({ ...structuredClone(delivery.config.ownerRoutes[0]), id: 'other-route' })
       expect(() => createRsiBootstrapManifest({ ...input, targetEffective: stringify(rows) })).toThrow('no unique effective route')
-      expect(() => createRsiBootstrapManifest({ ...input, observerTargets: [{ ...input.observerTargets[0]!, entryId: 'dsh-enhanced-plugin-control-plane', module: '@dsh-enhanced/plugin-control-plane', configDigest: runtimeConfigDigest({}) }] })).toThrow('stable effective Loader')
+      expect(() => createRsiBootstrapManifest({ ...input, observerTargets: [{ ...input.observerTargets[0]!, entryId: 'dsh-ray-plugin-control-plane', module: '@dsh-ray/plugin-control-plane', configDigest: runtimeConfigDigest({}) }] })).toThrow('stable effective Loader')
       expect(() => createRsiBootstrapManifest({ ...input, hostDeploymentInputs: input.hostDeploymentInputs.slice(0, 3) })).toThrow('does not cover installed package')
       expect(() => createRsiBootstrapManifest({ ...input, hostDeploymentInputs: input.hostDeploymentInputs.filter(path => !path.includes('/personal-memory/')) })).toThrow('embedded Personal Memory package')
       expect(() => createRsiBootstrapManifest({ ...input, plugins: ['plugin-control-plane'] })).toThrow('protected')
       expect(() => createRsiBootstrapManifest({ ...input, plugins: ['assistant-health'] })).toThrow('scope differs from all installed')
-      expect(() => createRsiBootstrapManifest({ ...input, observerTargets: [{ entryId: 'dsh-enhanced-assistant-memory-learning',
-        module: '@dsh-enhanced/assistant-memory-learning', configDigest: runtimeConfigDigest(null), services: [] }] })).toThrow('stable effective Loader')
+      expect(() => createRsiBootstrapManifest({ ...input, observerTargets: [{ entryId: 'dsh-ray-assistant-memory-learning',
+        module: '@dsh-ray/assistant-memory-learning', configDigest: runtimeConfigDigest(null), services: [] }] })).toThrow('stable effective Loader')
       const tagged = input.targetEffective.replace('enabled: true', 'enabled: !!js true')
       expect(() => createRsiBootstrapManifest({ ...input, targetEffective: tagged })).toThrow('config digest differs')
       expect(() => createRsiBootstrapManifest({ ...input, targetEffective: input.targetEffective.replace('enabled: true', 'enabled: !unknown true') })).toThrow('unsupported YAML tag')
@@ -291,7 +291,7 @@ describe('ordinary-use RSI manifest factory', () => {
     const { root, input } = await fixture()
     try {
       const rows = parse(input.targetEffective) as Array<{ id: string; config: Record<string, any> }>
-      rows.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')!.config = {}
+      rows.find(row => row.id === 'dsh-ray-assistant-growth-driver')!.config = {}
       const manifest = createRsiBootstrapManifest({ ...input, targetEffective: stringify(rows) })
       expect(manifest.growthDriver.provider).toBeUndefined()
       expect(manifest.growthDriver.model).toBeUndefined()
@@ -315,7 +315,7 @@ describe('ordinary-use RSI manifest factory', () => {
       const active = stringify(effective.map(row => ({ ...row, ...overrides.find(value => value.id === row.id) })))
       expect(createRsiBootstrapManifest({ ...input, targetEffective: active }).memoryLearning).toEqual(original.memoryLearning)
       const changed = parse(active) as typeof effective
-      changed.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.config!.maxExtractions = 999
+      changed.find(row => row.id === 'dsh-ray-assistant-memory-learning')!.config!.maxExtractions = 999
       expect(() => createRsiBootstrapManifest({ ...input, targetEffective: stringify(changed) })).toThrow('existing memory learner config differs')
       expect(() => createRsiBootstrapManifest({ ...input, targetEffective: active,
         owner: { ...input.owner, owner: { ...input.owner.owner, version: input.owner.owner.version + 1 } } })).toThrow('existing memory learner config differs')
@@ -326,11 +326,11 @@ describe('ordinary-use RSI manifest factory', () => {
     const { root, input } = await fixture()
     try {
       const rows = parse(input.targetEffective) as Array<{ id: string; config?: Record<string, unknown> }>
-      delete rows.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')!.config
-      delete rows.find(row => row.id === 'dsh-enhanced-assistant-health')!.config
+      delete rows.find(row => row.id === 'dsh-ray-assistant-growth-driver')!.config
+      delete rows.find(row => row.id === 'dsh-ray-assistant-health')!.config
       const targetEffective = stringify(rows)
       const manifest = createRsiBootstrapManifest({ ...input, targetEffective,
-        observerTargets: [{ entryId: 'dsh-enhanced-assistant-health', module: '@dsh-enhanced/assistant-health',
+        observerTargets: [{ entryId: 'dsh-ray-assistant-health', module: '@dsh-ray/assistant-health',
           configDigest: runtimeConfigDigest(null), services: [] }] })
       expect(manifest.growthDriver.provider).toBeUndefined()
       const compiled = await compileRsiProfiles({ manifest, dshHome: input.dshHome, targetPatch: '[]\n',
@@ -372,18 +372,18 @@ describe('ordinary-use RSI manifest factory', () => {
         coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: input.owner })
       const patched = parse(compiled.targetPatch) as Array<{ id: string; config: Record<string, any> }>
       const configOf = (id: string) => patched.find(row => row.id === id)!.config
-      expect(configOf('dsh-enhanced-assistant-proactive').intakeEvaluation).toEqual(manifest.ordinaryUseLearning!.intakeEvaluation)
-      expect(configOf('dsh-enhanced-assistant-work-items').intakeLedger).toMatchObject({
+      expect(configOf('dsh-ray-assistant-proactive').intakeEvaluation).toEqual(manifest.ordinaryUseLearning!.intakeEvaluation)
+      expect(configOf('dsh-ray-assistant-work-items').intakeLedger).toMatchObject({
         enabled: true, evaluation: { enabled: true } })
-      expect(configOf('dsh-enhanced-assistant-verifier').memoryReviews.workItemExperiences).toBe(true)
-      expect(configOf('dsh-enhanced-personal-assistant').personalMemory.automaticLearning.workItemExperiences).toBe(true)
-      expect(configOf('dsh-enhanced-assistant-memory-learning').workItemExperiences).toBe(true)
+      expect(configOf('dsh-ray-assistant-verifier').memoryReviews.workItemExperiences).toBe(true)
+      expect(configOf('dsh-ray-personal-assistant').personalMemory.automaticLearning.workItemExperiences).toBe(true)
+      expect(configOf('dsh-ray-assistant-memory-learning').workItemExperiences).toBe(true)
       const targets = manifest.controlPlane.runtimeObserver!.targets
-      for (const id of ['dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items']) {
+      for (const id of ['dsh-ray-assistant-proactive', 'dsh-ray-assistant-work-items']) {
         expect(targets.find(target => target.entryId === id)?.configDigest).toBe(runtimeConfigDigest(configOf(id)))
       }
-      expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-proactive')?.services).toEqual(['assistantProactive'])
-      expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-work-items')?.services).toEqual(['assistantWorkItems'])
+      expect(targets.find(target => target.entryId === 'dsh-ray-assistant-proactive')?.services).toEqual(['assistantProactive'])
+      expect(targets.find(target => target.entryId === 'dsh-ray-assistant-work-items')?.services).toEqual(['assistantWorkItems'])
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
@@ -399,7 +399,7 @@ describe('ordinary-use RSI manifest factory', () => {
       expect(manifest.memoryLearning).toBeUndefined()
       expect(manifest.ordinaryUseLearning).toBeUndefined()
       expect(manifest.controlPlane.runtimeObserver!.targets.map(target => target.entryId))
-        .not.toContain('dsh-enhanced-assistant-memory-learning')
+        .not.toContain('dsh-ray-assistant-memory-learning')
       expect(() => createRsiBootstrapManifest({ ...input, skipMemoryLearning: true, enableOrdinaryUseLearning: true }))
         .toThrow('mutually exclusive')
       const compiled = await compileRsiProfiles({ manifest, dshHome: input.dshHome, targetPatch: '[]\n',
@@ -407,19 +407,19 @@ describe('ordinary-use RSI manifest factory', () => {
         coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: input.owner })
       const rows = parse(compiled.targetPatch) as Array<{ id: string; config?: Record<string, any>; disabled?: boolean }>
       const configOf = (id: string) => rows.find(row => row.id === id)!.config!
-      const personal = configOf('dsh-enhanced-personal-assistant')
+      const personal = configOf('dsh-ray-personal-assistant')
       expect(personal.personalMemory.automaticLearning).toBeUndefined()
       expect((personal.assistantPolicy.budgets as Array<{ id?: string }>).filter(budget => String(budget.id).includes('memory'))).toEqual([])
       expect((personal.assistantPolicy.rules as Array<{ id?: string }>).filter(rule => String(rule.id).includes('memory'))).toEqual([])
-      expect(configOf('dsh-enhanced-assistant-verifier').memoryReviews).toBeUndefined()
-      expect(rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')?.config).toBeUndefined()
+      expect(configOf('dsh-ray-assistant-verifier').memoryReviews).toBeUndefined()
+      expect(rows.find(row => row.id === 'dsh-ray-assistant-memory-learning')?.config).toBeUndefined()
       const targets = manifest.controlPlane.runtimeObserver!.targets
       // The skipped manifest still binds the final observer digests of the rows
       // it does configure, now without any memory review grant.
-      expect(targets.find(target => target.entryId === 'dsh-enhanced-personal-assistant')!.configDigest)
+      expect(targets.find(target => target.entryId === 'dsh-ray-personal-assistant')!.configDigest)
         .toBe(runtimeConfigDigest(personal))
-      expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-verifier')!.configDigest)
-        .toBe(runtimeConfigDigest(configOf('dsh-enhanced-assistant-verifier')))
+      expect(targets.find(target => target.entryId === 'dsh-ray-assistant-verifier')!.configDigest)
+        .toBe(runtimeConfigDigest(configOf('dsh-ray-assistant-verifier')))
       // Persist the compiled patch as the profile file a skipped install would
       // leave behind and prove, from the real bytes, that no learning grant,
       // automation or configuration row is written.
@@ -438,21 +438,21 @@ describe('ordinary-use RSI manifest factory', () => {
     try {
       addOrdinaryUseLearning(input)
       const rows = parse(input.targetEffective) as Array<{ id: string; config?: Record<string, any>; disabled?: boolean }>
-      rows.find(row => row.id === 'dsh-enhanced-assistant-proactive')!.config = {
+      rows.find(row => row.id === 'dsh-ray-assistant-proactive')!.config = {
         intakeEvaluation: { enabled: true, rules: [{ ruleId: 'owner-rule', ceiling: 'notify' }],
           provider: 'owner-provider', model: 'owner-model' },
       }
       expect(() => createRsiBootstrapManifest({ ...input, targetEffective: stringify(rows) }))
         .toThrow('existing assistant-proactive intake evaluation differs')
-      rows.find(row => row.id === 'dsh-enhanced-assistant-proactive')!.config = {}
-      const learner = rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!
+      rows.find(row => row.id === 'dsh-ray-assistant-proactive')!.config = {}
+      const learner = rows.find(row => row.id === 'dsh-ray-assistant-memory-learning')!
       learner.disabled = false
       learner.config = { authorityId: 'foreign', owner: { authorityId: 'foreign' } }
       expect(() => createRsiBootstrapManifest({ ...input, targetEffective: stringify(rows) }))
         .toThrow('existing memory learner config differs from frozen owner grant')
       delete learner.config
       learner.disabled = true
-      const workItems = rows.find(row => row.id === 'dsh-enhanced-assistant-work-items')!
+      const workItems = rows.find(row => row.id === 'dsh-ray-assistant-work-items')!
       workItems.config = { ...workItems.config, intakeLedger: { enabled: true, evaluation: { enabled: false } } }
       expect(() => createRsiBootstrapManifest({ ...input, targetEffective: stringify(rows) }))
         .toThrow('existing assistant-work-items intake evaluation is disabled')
@@ -473,7 +473,7 @@ describe('ordinary-use RSI manifest factory', () => {
       const disabledActive = stringify(effectiveRows.map(row => {
         const patched = patchRows.find(p => p.id === row.id)
         const merged = patched ? { ...row, ...patched } : { ...row }
-        if (merged.id === 'dsh-enhanced-assistant-memory-learning') merged.disabled = true
+        if (merged.id === 'dsh-ray-assistant-memory-learning') merged.disabled = true
         return merged
       }))
 
@@ -492,11 +492,11 @@ describe('ordinary-use RSI manifest factory', () => {
         upgradeExistingOwner: true,
       })
       const finalRows = parse(upgradedProfiles.targetPatch) as Array<{ id: string; disabled?: boolean }>
-      expect(finalRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')?.disabled).toBe(false)
+      expect(finalRows.find(r => r.id === 'dsh-ray-assistant-memory-learning')?.disabled).toBe(false)
 
       // Foreign config with disabled: true still fails closed even under upgradeExistingOwner: true
       const foreignRows = parse(disabledActive) as Array<{ id: string; config?: Record<string, unknown> }>
-      foreignRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!.authorityId = 'foreign-authority'
+      foreignRows.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config!.authorityId = 'foreign-authority'
       expect(() => createRsiBootstrapManifest({
         ...input, targetEffective: stringify(foreignRows), upgradeExistingOwner: true,
       })).toThrow('existing memory learner config differs from frozen owner grant')
@@ -504,7 +504,7 @@ describe('ordinary-use RSI manifest factory', () => {
       // disabled === undefined with config (after /autonomy disable -> /autonomy enable) succeeds on both bare retry and upgradeExistingOwner,
       // while disabled === false without config remains rejected
       const deletedDisabledRows = parse(disabledActive) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-      delete deletedDisabledRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.disabled
+      delete deletedDisabledRows.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.disabled
       const deletedDisabledEffective = stringify(deletedDisabledRows)
       await expect(compileRsiProfiles({
         manifest: initial, dshHome: input.dshHome, targetPatch: compiled.targetPatch,
@@ -519,7 +519,7 @@ describe('ordinary-use RSI manifest factory', () => {
       })).resolves.toMatchObject({ targetPatch: expect.any(String) })
 
       const enabledWithoutConfigRows = parse(disabledActive) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-      const learnerNoConfig = enabledWithoutConfigRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!
+      const learnerNoConfig = enabledWithoutConfigRows.find(r => r.id === 'dsh-ray-assistant-memory-learning')!
       learnerNoConfig.disabled = false
       delete learnerNoConfig.config
       await expect(compileRsiProfiles({

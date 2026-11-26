@@ -13,9 +13,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 }
 const bundle = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
 
-describe('dsh-enhanced-assistant-policy', () => {
+describe('dsh-ray-assistant-policy', () => {
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-assistant-policy')
+    expect(name).toBe('dsh-ray-assistant-policy')
     expect(version).toBe(manifest.version)
     expect(entrypoint).not.toHaveProperty('PolicyLedger')
     expect(entrypoint).not.toHaveProperty('PolicyLedgerError')

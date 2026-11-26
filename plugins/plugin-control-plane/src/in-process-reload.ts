@@ -73,8 +73,8 @@ const PACKAGE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]{0,213}$/u
 
 /** Plugins that must never be replaced inside a live Host process. */
 export const IN_PROCESS_RELOAD_DENYLIST: readonly string[] = Object.freeze([
-  '@dsh-enhanced/plugin-control-plane',
-  '@dsh-enhanced/assistant-delivery',
+  '@dsh-ray/plugin-control-plane',
+  '@dsh-ray/assistant-delivery',
 ])
 
 function canonical(value: unknown): string {
@@ -226,7 +226,7 @@ export interface InProcessReloadHostRollbackResult {
 }
 
 /**
- * Host-side capability seam. `@dsh-enhanced/assistant-delivery`'s
+ * Host-side capability seam. `@dsh-ray/assistant-delivery`'s
  * `in-process-reload-runtime` exports a structurally compatible implementation;
  * the Host wires it in. When it is absent, no reload happens.
  */

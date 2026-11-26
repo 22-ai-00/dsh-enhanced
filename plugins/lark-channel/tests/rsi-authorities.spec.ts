@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { readFile, realpath } from 'node:fs/promises'
 import { validateRsiAuthorities } from '../src/rsi-setup.js'
 import { createRsiAuthorityFixture, type RsiAuthorityFixture } from './fixtures/rsi-authorities.js'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { growthObjectDigest } from '@dsh-ray/assistant-growth-contract'
 import type { RsiMemoryLearningSetup } from '../src/rsi-memory-learning.js'
 
 const fixtures: RsiAuthorityFixture[] = []
@@ -100,20 +100,20 @@ describe('RSI finite authority deployment binding', () => {
     const host = await value.standingHost()
     for (const name of ['approvals', 'releases', 'adoptions', 'observations', 'qualifications'] as const) {
       const authority = await value.readAuthority(name)
-      if (name === 'observations' || name === 'qualifications') authority.grant.packages.push('@dsh-enhanced/other-helper')
+      if (name === 'observations' || name === 'qualifications') authority.grant.packages.push('@dsh-ray/other-helper')
       else if (name === 'adoptions') authority.grant.policies.push({ ...authority.grant.policies[0],
-        candidateId: 'other-helper', packageName: '@dsh-enhanced/other-helper' })
+        candidateId: 'other-helper', packageName: '@dsh-ray/other-helper' })
       else {
         authority.grant.plugins.push('other-helper')
         if (name === 'releases') authority.grant.policies.push({ ...authority.grant.policies[0],
-          candidateId: 'other-helper', packageName: '@dsh-enhanced/other-helper', packagePath: 'plugins/other-helper' })
+          candidateId: 'other-helper', packageName: '@dsh-ray/other-helper', packagePath: 'plugins/other-helper' })
       }
       await value.writeAuthority(name, authority)
     }
     const reviewPlugins = value.manifest.sourceReviews.plugins as string[]
     reviewPlugins.push('other-helper')
     const config = await host.readResolver()
-    config.grant.packages = ['@dsh-enhanced/other-helper', '@dsh-enhanced/health-helper']
+    config.grant.packages = ['@dsh-ray/other-helper', '@dsh-ray/health-helper']
     await host.writeResolver(config)
     const wrapper = await host.readWrapper()
     wrapper.resolver.configSha256 = createHash('sha256').update(await readFile(host.resolverConfigPath)).digest('hex')

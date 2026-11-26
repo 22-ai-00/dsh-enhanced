@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-verifier
-      name: '@dsh-enhanced/assistant-verifier'
+    - id: dsh-ray-assistant-verifier
+      name: '@dsh-ray/assistant-verifier'
       config:
         databasePath: !!js dshHomePath('assistant-verifier/verification.sqlite')
         tickIntervalMs: 5000

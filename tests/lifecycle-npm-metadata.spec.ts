@@ -2,27 +2,27 @@ import { describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
 import { assertLifecycleNpmMetadataSafe, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata } from '../scripts/install/lifecycle-config.mjs'
 
-const target = '@dsh-enhanced/assistant-actions@0.1.31'
+const target = '@dsh-ray/assistant-actions@0.1.31'
 
 function packageJson(version: string, unmanaged = '1.0.0') {
   return `${JSON.stringify({ name: 'profile', private: true, dependencies: {
-    '@dsh-enhanced/assistant-actions': version,
+    '@dsh-ray/assistant-actions': version,
     'left-pad': unmanaged,
   }, marker: { retained: true } }, null, 2)}\n`
 }
 
 function lockfile(version: string, { unmanaged = '1.0.0', includeTarget = true } = {}) {
   const dependencies: Record<string, unknown> = { 'left-pad': { specifier: unmanaged, version: unmanaged } }
-  if (includeTarget) dependencies['@dsh-enhanced/assistant-actions'] = { specifier: version, version }
+  if (includeTarget) dependencies['@dsh-ray/assistant-actions'] = { specifier: version, version }
   const packages: Record<string, unknown> = { [`left-pad@${unmanaged}`]: { resolution: { integrity: 'sha512-left' } } }
   const snapshots: Record<string, unknown> = { [`left-pad@${unmanaged}`]: {} }
   if (includeTarget) {
-    packages[`@dsh-enhanced/assistant-actions@${version}`] = { resolution: { integrity: 'sha512-actions' } }
-    packages[`@dsh-enhanced/assistant-automations@${version}`] = { resolution: { integrity: 'sha512-automations' } }
-    snapshots[`@dsh-enhanced/assistant-actions@${version}`] = {
-      dependencies: { '@dsh-enhanced/assistant-automations': version },
+    packages[`@dsh-ray/assistant-actions@${version}`] = { resolution: { integrity: 'sha512-actions' } }
+    packages[`@dsh-ray/assistant-automations@${version}`] = { resolution: { integrity: 'sha512-automations' } }
+    snapshots[`@dsh-ray/assistant-actions@${version}`] = {
+      dependencies: { '@dsh-ray/assistant-automations': version },
     }
-    snapshots[`@dsh-enhanced/assistant-automations@${version}`] = {}
+    snapshots[`@dsh-ray/assistant-automations@${version}`] = {}
   }
   return stringify({ lockfileVersion: '9.0', importers: { '.': { dependencies } }, packages, snapshots })
 }
@@ -34,15 +34,15 @@ function workspace(excludes: string[], strict = false) {
 
 function metadata({
   originalVersion = '0.1.30', preparedVersion = '0.1.31', originalExcludes = [
-    '@dsh-enhanced/assistant-actions@0.1.30',
-    '@dsh-enhanced/assistant-automations@0.1.30',
+    '@dsh-ray/assistant-actions@0.1.30',
+    '@dsh-ray/assistant-automations@0.1.30',
     'left-pad@1.0.0',
   ], excludes = [
-    '@dsh-enhanced/assistant-actions@0.1.30',
-    '@dsh-enhanced/assistant-automations@0.1.30',
+    '@dsh-ray/assistant-actions@0.1.30',
+    '@dsh-ray/assistant-automations@0.1.30',
     'left-pad@1.0.0',
-    '@dsh-enhanced/assistant-actions@0.1.31',
-    '@dsh-enhanced/assistant-automations@0.1.31',
+    '@dsh-ray/assistant-actions@0.1.31',
+    '@dsh-ray/assistant-automations@0.1.31',
   ], strict = false,
 } = {}) {
   return {
@@ -60,36 +60,36 @@ describe('prepareLifecycleNpmMetadata', () => {
     expect(result.packageJson).toBe(input.prepared.packageJson)
     expect(result.lockfile).toBe(input.prepared.lockfile)
     expect(preparedWorkspace.minimumReleaseAgeExclude).toEqual([
-      '@dsh-enhanced/assistant-actions@0.1.30 || 0.1.31',
-      '@dsh-enhanced/assistant-automations@0.1.30 || 0.1.31',
+      '@dsh-ray/assistant-actions@0.1.30 || 0.1.31',
+      '@dsh-ray/assistant-automations@0.1.30 || 0.1.31',
       'left-pad@1.0.0',
-      '@dsh-enhanced/assistant-actions@0.1.31',
-      '@dsh-enhanced/assistant-automations@0.1.31',
+      '@dsh-ray/assistant-actions@0.1.31',
+      '@dsh-ray/assistant-automations@0.1.31',
     ])
     expect(preparedWorkspace.opaque).toEqual({ keep: ['this'] })
   })
 
   test('does not activate pre-existing shadowed versions while promoting only this cohort version', async () => {
     const input = metadata({ excludes: [
-      '@dsh-enhanced/assistant-actions@0.1.29',
-      '@dsh-enhanced/assistant-actions@0.1.30',
-      '@dsh-enhanced/assistant-automations@0.1.30 || 0.1.29',
-      '@dsh-enhanced/assistant-actions@0.1.31',
-      '@dsh-enhanced/assistant-automations@0.1.31',
+      '@dsh-ray/assistant-actions@0.1.29',
+      '@dsh-ray/assistant-actions@0.1.30',
+      '@dsh-ray/assistant-automations@0.1.30 || 0.1.29',
+      '@dsh-ray/assistant-actions@0.1.31',
+      '@dsh-ray/assistant-automations@0.1.31',
     ], originalExcludes: [
-      '@dsh-enhanced/assistant-actions@0.1.29',
-      '@dsh-enhanced/assistant-actions@0.1.30',
-      '@dsh-enhanced/assistant-automations@0.1.30 || 0.1.29',
+      '@dsh-ray/assistant-actions@0.1.29',
+      '@dsh-ray/assistant-actions@0.1.30',
+      '@dsh-ray/assistant-automations@0.1.30 || 0.1.29',
     ] })
     const result = await prepareLifecycleNpmMetadata({ ...input, targets: [target] })
     const excludes = (parse(result.workspace) as { minimumReleaseAgeExclude: string[] }).minimumReleaseAgeExclude
 
     expect(excludes).toEqual([
-      '@dsh-enhanced/assistant-actions@0.1.29 || 0.1.31',
-      '@dsh-enhanced/assistant-actions@0.1.30',
-      '@dsh-enhanced/assistant-automations@0.1.30 || 0.1.29 || 0.1.31',
-      '@dsh-enhanced/assistant-actions@0.1.31',
-      '@dsh-enhanced/assistant-automations@0.1.31',
+      '@dsh-ray/assistant-actions@0.1.29 || 0.1.31',
+      '@dsh-ray/assistant-actions@0.1.30',
+      '@dsh-ray/assistant-automations@0.1.30 || 0.1.29 || 0.1.31',
+      '@dsh-ray/assistant-actions@0.1.31',
+      '@dsh-ray/assistant-automations@0.1.31',
     ])
   })
 
@@ -112,13 +112,13 @@ describe('prepareLifecycleNpmMetadata', () => {
 
   test('rejects unsupported wildcard policy on an authorized closure package', async () => {
     const input = metadata({ excludes: [
-      '@dsh-enhanced/assistant-actions@*',
-      '@dsh-enhanced/assistant-automations@0.1.30',
-      '@dsh-enhanced/assistant-actions@0.1.31',
-      '@dsh-enhanced/assistant-automations@0.1.31',
+      '@dsh-ray/assistant-actions@*',
+      '@dsh-ray/assistant-automations@0.1.30',
+      '@dsh-ray/assistant-actions@0.1.31',
+      '@dsh-ray/assistant-automations@0.1.31',
     ], originalExcludes: [
-      '@dsh-enhanced/assistant-actions@*',
-      '@dsh-enhanced/assistant-automations@0.1.30',
+      '@dsh-ray/assistant-actions@*',
+      '@dsh-ray/assistant-automations@0.1.30',
     ] })
     await expect(prepareLifecycleNpmMetadata({ ...input, targets: [target] }))
       .rejects.toThrow('unsupported age exclusion')
@@ -134,14 +134,14 @@ describe('prepareLifecycleNpmMetadata', () => {
   test('rejects deletion, reordering, and unauthorized additions to original age exclusions', async () => {
     const input = metadata()
     const withoutOriginal = { ...input.prepared, workspace: workspace([
-      '@dsh-enhanced/assistant-automations@0.1.30', 'left-pad@1.0.0',
-      '@dsh-enhanced/assistant-actions@0.1.31', '@dsh-enhanced/assistant-automations@0.1.31',
+      '@dsh-ray/assistant-automations@0.1.30', 'left-pad@1.0.0',
+      '@dsh-ray/assistant-actions@0.1.31', '@dsh-ray/assistant-automations@0.1.31',
     ]) }
     await expect(prepareLifecycleNpmMetadata({ original: input.original, prepared: withoutOriginal, targets: [target] }))
       .rejects.toThrow('ordered prefix')
     const thirdParty = { ...input.prepared, workspace: workspace([
-      '@dsh-enhanced/assistant-actions@0.1.30', '@dsh-enhanced/assistant-automations@0.1.30', 'left-pad@1.0.0',
-      '@dsh-enhanced/assistant-actions@0.1.31', '@dsh-enhanced/assistant-automations@0.1.31', 'left-pad@2.0.0',
+      '@dsh-ray/assistant-actions@0.1.30', '@dsh-ray/assistant-automations@0.1.30', 'left-pad@1.0.0',
+      '@dsh-ray/assistant-actions@0.1.31', '@dsh-ray/assistant-automations@0.1.31', 'left-pad@2.0.0',
     ]) }
     await expect(prepareLifecycleNpmMetadata({ original: input.original, prepared: thirdParty, targets: [target] }))
       .rejects.toThrow('adds unauthorized age exclusion')
@@ -150,7 +150,7 @@ describe('prepareLifecycleNpmMetadata', () => {
   test('requires target dependencies in original manifest and exact root importer', async () => {
     const input = metadata()
     const originalManifest = JSON.parse(input.original.packageJson) as { dependencies: Record<string, string> }
-    delete originalManifest.dependencies['@dsh-enhanced/assistant-actions']
+    delete originalManifest.dependencies['@dsh-ray/assistant-actions']
     const absentOriginal = { ...input.original, packageJson: `${JSON.stringify(originalManifest)}\n` }
     await expect(prepareLifecycleNpmMetadata({ original: absentOriginal, prepared: input.prepared, targets: [target] }))
       .rejects.toThrow('original package.json does not contain authorized target')
@@ -184,20 +184,20 @@ describe('prepareLifecycleNpmMetadata', () => {
 describe('lifecycleWorkspacePaths', () => {
   test('returns deduplicated ordinary absolute workspaces only from active web owner rows', async () => {
     await expect(lifecycleWorkspacePaths(`
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
   config:
     workspace: /opt/owner-workspace
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
   config:
     workspace: /opt/owner-workspace
 - id: unrelated
-  name: '@dsh-enhanced/assistant-policy'
+  name: '@dsh-ray/assistant-policy'
   config:
     workspace: /not-collected
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
   disabled: true
   config:
     workspace: /disabled
@@ -206,8 +206,8 @@ describe('lifecycleWorkspacePaths', () => {
 
   test('allows fixture web rows with no workspace and rejects dynamic or relative workspace values', async () => {
     await expect(lifecycleWorkspacePaths(`
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
   config: {}
 `)).resolves.toEqual([])
     await expect(lifecycleWorkspacePaths(`
@@ -216,19 +216,19 @@ describe('lifecycleWorkspacePaths', () => {
   disabled: !!js process.platform !== 'linux'
   config:
     statePath: !!js dshHomePath('sandbox/state')
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
   config: {}
 `)).resolves.toEqual([])
     await expect(lifecycleWorkspacePaths(`
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
   config:
     workspace: relative/path
 `)).rejects.toThrow('ordinary absolute web owner workspace paths')
     await expect(lifecycleWorkspacePaths(`
-- id: dsh-enhanced-assistant-web-owner
-  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-ray-assistant-web-owner
+  name: '@dsh-ray/assistant-web-owner'
   config:
     workspace: !!js dshHomePath('workspace')
 `)).rejects.toThrow('ordinary absolute web owner workspace paths')

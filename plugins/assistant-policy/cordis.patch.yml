@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-assistant-policy
-      name: '@dsh-enhanced/assistant-policy'
+    - id: dsh-ray-assistant-policy
+      name: '@dsh-ray/assistant-policy'
       config:
         databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
         proposalMaintenanceIntervalMs: 15000

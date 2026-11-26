@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { basename, resolve } from 'node:path'
 import { templateRenderCanaryTask } from './real-canary-helpers.mjs'
 
-export const name = 'dsh-enhanced-web-owner-real-canary-guard'
+export const name = 'dsh-ray-web-owner-real-canary-guard'
 export const inject = ['llm', 'agents', 'goals', 'systemPrompt']
 
 const phases = new Set([

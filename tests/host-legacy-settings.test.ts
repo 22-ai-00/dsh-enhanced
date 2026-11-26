@@ -71,7 +71,7 @@ async function fixture() {
   await writeFile(join(originalPhysicalHome, 'rsi-authorities', 'assistant', 'bootstrap.json'), bootstrap, { mode: 0o600 })
   await writeFile(join(homePath, 'rsi-authorities', 'assistant', 'bootstrap.json'), bootstrap, { mode: 0o600 })
   const replayMethod = 'native replay method\n'
-  const replayReceipt = { protocol: 'dsh-enhanced/native-settings-replay/v1',
+  const replayReceipt = { protocol: 'dsh-ray/native-settings-replay/v1',
     method: 'native-settings-bwrap-replay/v1', methodSha256: sha256(replayMethod),
     hostReceiptSha256: sha256(hostReceipt), candidateHostReceiptDigest: sha256('host'),
     settingsModuleSha256: sha256(settingsModule),
@@ -80,7 +80,7 @@ async function fixture() {
   const replayReceiptFile = `${JSON.stringify(replayReceipt)}\n`
   await writeFile(join(archiveRoot, 'replay-method.mjs'), replayMethod, { mode: 0o600 })
   await writeFile(join(archiveRoot, 'replay-receipt.json'), replayReceiptFile, { mode: 0o600 })
-  const rawReplay = { protocol: 'dsh-enhanced/native-settings-replay/v1', root: join(root, 'replay'),
+  const rawReplay = { protocol: 'dsh-ray/native-settings-replay/v1', root: join(root, 'replay'),
     home: homePath, candidateVersion: '0.2.0-rc.2', original: {
       hostReceiptSha256: sha256(hostReceipt), canonicalSettingsModule: settingsModulePath,
       settingsModuleSha256: sha256(settingsModule), originalPatchSha256: sha256(originalPatch),
@@ -103,7 +103,7 @@ async function fixture() {
       originalDigests: { 'cordis.patch.yml': sha256(originalPatch) } }] }
   const sourceProof = { homePath, profile: 'assistant', installer: { root: installer },
     original: { ownerInventory: { authorityBootstrap: sha256(bootstrap) } } }
-  const unsignedPermit = { protocol: 'dsh-enhanced/native-settings-import/v1', homePath, profile: 'assistant',
+  const unsignedPermit = { protocol: 'dsh-ray/native-settings-import/v1', homePath, profile: 'assistant',
     transactionId: manifest.id, baseManifestDigest: sha256('manifest'), archiveRoot,
     candidateHostReceiptDigest: manifest.hostMigration.plan.candidateRuntime.receiptDigest,
     candidateHostVersion: manifest.hostMigration.plan.candidateRuntime.version,

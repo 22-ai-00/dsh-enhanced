@@ -57,8 +57,8 @@ describe('prepared source creation using the real public generator and base lock
     expect(view.baseCommit).toBe(baseCommit)
     expect(view.generatorDigest).toMatch(/^[a-f0-9]{64}$/u)
     expect(view.files.map(file => file.path)).toContain('cordis.patch.yml')
-    expect(view.contents[0]?.content).toContain("dsh-enhanced-rsi-created-example")
-    expect(JSON.parse(view.contents[1]!.content)).toMatchObject({ name: '@dsh-enhanced/rsi-created-example', version: '0.1.0' })
+    expect(view.contents[0]?.content).toContain("dsh-ray-rsi-created-example")
+    expect(JSON.parse(view.contents[1]!.content)).toMatchObject({ name: '@dsh-ray/rsi-created-example', version: '0.1.0' })
     expect(execFileSync('/usr/bin/git', ['worktree', 'list', '--porcelain'], { cwd: repository, encoding: 'utf8' })).toBe(before)
   }, 20_000)
 
@@ -105,7 +105,7 @@ describe('prepared source creation using the real public generator and base lock
     if (process.env.DSH_CREATION_REAL_FROZEN === '1') {
       let output: string
       try {
-        output = execFileSync('pnpm', ['--filter', `@dsh-enhanced/${view.name}`, 'install', '--offline', '--frozen-lockfile', '--ignore-scripts'], {
+        output = execFileSync('pnpm', ['--filter', `@dsh-ray/${view.name}`, 'install', '--offline', '--frozen-lockfile', '--ignore-scripts'], {
           cwd: current, encoding: 'utf8', timeout: 180_000, maxBuffer: 4_194_304,
           env: { ...process.env, CI: '1', NPM_CONFIG_OFFLINE: 'true', COREPACK_ENABLE_NETWORK: '0' },
         })
@@ -184,7 +184,7 @@ describe('prepared source creation using the real public generator and base lock
     const current = await worktree()
     const alias = join(current, 'packages', 'different-directory')
     await mkdir(alias)
-    await writeFile(join(alias, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/rsi-created-example', version: '1.0.0' }))
+    await writeFile(join(alias, 'package.json'), JSON.stringify({ name: '@dsh-ray/rsi-created-example', version: '1.0.0' }))
     execFileSync('/usr/bin/git', ['add', '--', 'packages/different-directory/package.json'], { cwd: current })
     execFileSync('/usr/bin/git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
       'commit', '-m', 'colliding package fixture'], { cwd: current })
@@ -341,17 +341,17 @@ describe('prepared source creation using the real public generator and base lock
         },
         peerDependencies: {
           ...(baseManifest.peerDependencies as Record<string, string> | undefined),
-          '@dsh-enhanced/assistant-delivery': '>=0.1.0',
+          '@dsh-ray/assistant-delivery': '>=0.1.0',
         },
         peerDependenciesMeta: {
           ...(baseManifest.peerDependenciesMeta as Record<string, { optional: boolean }> | undefined),
-          '@dsh-enhanced/assistant-delivery': { optional: true },
+          '@dsh-ray/assistant-delivery': { optional: true },
         },
       }
       const updatedPatch = [
         '- insert:',
-        `    - id: dsh-enhanced-${pluginName}`,
-        `      name: '@dsh-enhanced/${pluginName}'`,
+        `    - id: dsh-ray-${pluginName}`,
+        `      name: '@dsh-ray/${pluginName}'`,
         '      inject:',
         '        - assistantAutomations',
         '      config:',
@@ -398,7 +398,7 @@ describe('prepared source creation using the real public generator and base lock
       },
       {
         label: 'altering package name',
-        files: [{ path: 'package.json', content: JSON.stringify({ ...tamperBase, name: '@dsh-enhanced/hijacked' }) }],
+        files: [{ path: 'package.json', content: JSON.stringify({ ...tamperBase, name: '@dsh-ray/hijacked' }) }],
         pattern: /cannot alter package name/u,
       },
       {
@@ -418,17 +418,17 @@ describe('prepared source creation using the real public generator and base lock
       },
       {
         label: 'non-optional peerDependency',
-        files: [{ path: 'package.json', content: JSON.stringify({ ...tamperBase, peerDependencies: { '@dsh-enhanced/assistant-delivery': '*' }, peerDependenciesMeta: { '@dsh-enhanced/assistant-delivery': { optional: false } } }) }],
+        files: [{ path: 'package.json', content: JSON.stringify({ ...tamperBase, peerDependencies: { '@dsh-ray/assistant-delivery': '*' }, peerDependenciesMeta: { '@dsh-ray/assistant-delivery': { optional: false } } }) }],
         pattern: /must be marked optional/u,
       },
       {
         label: 'cordis.patch.yml wrong package name',
-        files: [{ path: 'cordis.patch.yml', content: '- insert:\n    - id: dsh-enhanced-rsi-created-tamper\n      name: "@dsh-enhanced/other"\n' }],
-        pattern: /must mount @dsh-enhanced\/rsi-created-tamper/u,
+        files: [{ path: 'cordis.patch.yml', content: '- insert:\n    - id: dsh-ray-rsi-created-tamper\n      name: "@dsh-ray/other"\n' }],
+        pattern: /must mount @dsh-ray\/rsi-created-tamper/u,
       },
       {
         label: 'cordis.patch.yml multiple insert entries',
-        files: [{ path: 'cordis.patch.yml', content: '- insert:\n    - id: dsh-enhanced-rsi-created-tamper\n      name: "@dsh-enhanced/rsi-created-tamper"\n    - id: extra\n      name: "@dsh-enhanced/extra"\n' }],
+        files: [{ path: 'cordis.patch.yml', content: '- insert:\n    - id: dsh-ray-rsi-created-tamper\n      name: "@dsh-ray/rsi-created-tamper"\n    - id: extra\n      name: "@dsh-ray/extra"\n' }],
         pattern: /insert must contain exactly one entry/u,
       },
     ]
@@ -463,17 +463,17 @@ describe('prepared source creation using the real public generator and base lock
       },
       peerDependencies: {
         ...(baseManifest.peerDependencies as Record<string, string>),
-        '@dsh-enhanced/assistant-delivery': 'workspace:*',
+        '@dsh-ray/assistant-delivery': 'workspace:*',
       },
       peerDependenciesMeta: {
         ...(baseManifest.peerDependenciesMeta as Record<string, { optional: boolean }>),
-        '@dsh-enhanced/assistant-delivery': { optional: true },
+        '@dsh-ray/assistant-delivery': { optional: true },
       },
     }
     const uiPatch = [
       '- insert:',
-      '    - id: dsh-enhanced-rsi-created-verifier-ui',
-      "      name: '@dsh-enhanced/rsi-created-verifier-ui'",
+      '    - id: dsh-ray-rsi-created-verifier-ui',
+      "      name: '@dsh-ray/rsi-created-verifier-ui'",
       '      inject: [typert]',
       '      ui:',
       '        panel: true',
@@ -530,9 +530,9 @@ describe('prepared source creation using the real public generator and base lock
       JSON.stringify({ ...baseManifest, exports: { ...baseExports, './client': './src/client.js' } }),
       JSON.stringify({ ...baseManifest, exports: { ...baseExports, './secret': './package.json' } }),
       JSON.stringify({ ...baseManifest, exports: { ...baseExports, '.': './lib/hijack.js' } }),
-      JSON.stringify({ ...baseManifest, peerDependencies: { '@dsh-enhanced/assistant-delivery': 'file:../evil' }, peerDependenciesMeta: { '@dsh-enhanced/assistant-delivery': { optional: true } } }),
-      JSON.stringify({ ...baseManifest, peerDependencies: { '@dsh-enhanced/assistant-delivery': 'http://evil.invalid/pkg.tgz' }, peerDependenciesMeta: { '@dsh-enhanced/assistant-delivery': { optional: true } } }),
-      JSON.stringify({ ...baseManifest, peerDependencies: { '@dsh-enhanced/assistant-delivery': 'git+https://evil.invalid/repo.git' }, peerDependenciesMeta: { '@dsh-enhanced/assistant-delivery': { optional: true } } }),
+      JSON.stringify({ ...baseManifest, peerDependencies: { '@dsh-ray/assistant-delivery': 'file:../evil' }, peerDependenciesMeta: { '@dsh-ray/assistant-delivery': { optional: true } } }),
+      JSON.stringify({ ...baseManifest, peerDependencies: { '@dsh-ray/assistant-delivery': 'http://evil.invalid/pkg.tgz' }, peerDependenciesMeta: { '@dsh-ray/assistant-delivery': { optional: true } } }),
+      JSON.stringify({ ...baseManifest, peerDependencies: { '@dsh-ray/assistant-delivery': 'git+https://evil.invalid/repo.git' }, peerDependenciesMeta: { '@dsh-ray/assistant-delivery': { optional: true } } }),
     ]
     for (const content of badManifests) {
       const wt = await worktree()
@@ -544,15 +544,15 @@ describe('prepared source creation using the real public generator and base lock
     }
 
     const badYamls = [
-      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      ui: !!js/function 'function(){}'\n",
-      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      routes: &a [1]\n",
-      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      routes: *a\n",
-      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      <<: *a\n",
-      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n\tdisabled: false\n",
-      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      ui: '{{secret}}'\n",
-      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\r\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\r\n",
-      "---\n- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n",
-      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      ui:\n        __proto__: {}\n",
+      "- insert:\n    - id: dsh-ray-rsi-created-verifier-ui\n      name: '@dsh-ray/rsi-created-verifier-ui'\n      ui: !!js/function 'function(){}'\n",
+      "- insert:\n    - id: dsh-ray-rsi-created-verifier-ui\n      name: '@dsh-ray/rsi-created-verifier-ui'\n      routes: &a [1]\n",
+      "- insert:\n    - id: dsh-ray-rsi-created-verifier-ui\n      name: '@dsh-ray/rsi-created-verifier-ui'\n      routes: *a\n",
+      "- insert:\n    - id: dsh-ray-rsi-created-verifier-ui\n      name: '@dsh-ray/rsi-created-verifier-ui'\n      <<: *a\n",
+      "- insert:\n    - id: dsh-ray-rsi-created-verifier-ui\n      name: '@dsh-ray/rsi-created-verifier-ui'\n\tdisabled: false\n",
+      "- insert:\n    - id: dsh-ray-rsi-created-verifier-ui\n      name: '@dsh-ray/rsi-created-verifier-ui'\n      ui: '{{secret}}'\n",
+      "- insert:\n    - id: dsh-ray-rsi-created-verifier-ui\r\n      name: '@dsh-ray/rsi-created-verifier-ui'\r\n",
+      "---\n- insert:\n    - id: dsh-ray-rsi-created-verifier-ui\n      name: '@dsh-ray/rsi-created-verifier-ui'\n",
+      "- insert:\n    - id: dsh-ray-rsi-created-verifier-ui\n      name: '@dsh-ray/rsi-created-verifier-ui'\n      ui:\n        __proto__: {}\n",
     ]
     for (const content of badYamls) {
       expect(() => validateSourceCreationFiles([{ path: 'cordis.patch.yml', content }])).toThrow(/outside candidate authority|forbidden|unsafe|invalid key/u)

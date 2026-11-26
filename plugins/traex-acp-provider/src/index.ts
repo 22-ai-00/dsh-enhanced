@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { LlmConfigurableProvider, LlmRuntime } from '@deepseek-ai/dsh-llm'
-import { createAgentLoopRequestAttestor, registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import { createAgentLoopRequestAttestor, registerLlmRouteCapability } from '@dsh-ray/llm-route-capabilities'
 import {
   ACP_PROVIDER_ROUTES,
   AGY_PROVIDER_ROUTE,
@@ -27,7 +27,7 @@ import {
 import type { LiveSessionLookup } from './session-cwd.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-traex-acp-provider'
+export const name = 'dsh-ray-traex-acp-provider'
 export const inject = ['llm', 'sessions', 'agents']
 
 export {
@@ -93,9 +93,9 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
 
   if (routes.length === 0) {
     if (disposeConfigurable !== undefined) {
-      ctx.effect(() => () => { disposeConfigurable() }, 'dsh-enhanced-traex-acp-provider.directory')
+      ctx.effect(() => () => { disposeConfigurable() }, 'dsh-ray-traex-acp-provider.directory')
     }
-    ctx.logger.warn('dsh-enhanced-traex-acp-provider: disabled until config.enabled or config.agyEnabled is true')
+    ctx.logger.warn('dsh-ray-traex-acp-provider: disabled until config.enabled or config.agyEnabled is true')
     return
   }
 
@@ -152,6 +152,6 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
     disposeAll()
     throw error
   }
-  ctx.effect(() => disposeAll, 'dsh-enhanced-traex-acp-provider.processes')
+  ctx.effect(() => disposeAll, 'dsh-ray-traex-acp-provider.processes')
   ctx.logger.info(`Local ACP providers registered: ${routes.join(', ')}`)
 }

@@ -187,7 +187,7 @@ export async function prepareRealRoute({ env = { ...process.env }, home, workspa
       bundles: ['coding-subscription-provider'],
       configurePatch(patch, setConfig) {
         if (typeof setConfig !== 'function') fail('setConfig must be a function')
-        setConfig(patch, 'dsh-enhanced-coding-subscription-provider', '@dsh-enhanced/coding-subscription-provider', {
+        setConfig(patch, 'dsh-ray-coding-subscription-provider', '@dsh-ray/coding-subscription-provider', {
           cwd: workspace, timeoutMs: 120_000,
           codex: { enabled: true, transport: 'direct-responses', directModel: model },
           claude: { enabled: false }, cursor: { enabled: false }, grok: { enabled: false },
@@ -208,7 +208,7 @@ export async function prepareRealRoute({ env = { ...process.env }, home, workspa
       bundles: ['traex-acp-provider'],
       configurePatch(patch, setConfig) {
         if (typeof setConfig !== 'function') fail('setConfig must be a function')
-        setConfig(patch, 'dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', {
+        setConfig(patch, 'dsh-ray-traex-acp-provider', '@dsh-ray/traex-acp-provider', {
           enabled: true, cwd, models: [model],
         })
         appendDefaultModel(patch, provider, model)
@@ -227,7 +227,7 @@ export async function prepareRealRoute({ env = { ...process.env }, home, workspa
       bundles: ['traex-acp-provider'],
       configurePatch(patch, setConfig) {
         if (typeof setConfig !== 'function') fail('setConfig must be a function')
-        setConfig(patch, 'dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', {
+        setConfig(patch, 'dsh-ray-traex-acp-provider', '@dsh-ray/traex-acp-provider', {
           enabled: false, agyEnabled: true, cwd, agyModels: [model],
         })
         appendDefaultModel(patch, provider, model)

@@ -9,7 +9,7 @@ import {
   recoveryBootstrapAttestationSetDigest,
   type RecoveryBootstrapAttestation,
   type RecoveryHealth,
-} from '@dsh-enhanced/assistant-recovery'
+} from '@dsh-ray/assistant-recovery'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
   assertSupervisedGrowthAutomationGuard,
@@ -45,7 +45,7 @@ async function startProductionLifecycleLockHolder(root: string, dshHome: string)
     'for argument in "$@"; do last=$argument; done',
     'if [ "$last" = 5 ]; then',
     "  printf 'rendezvous-ready\\n'",
-    '  /bin/cat "$DSH_ENHANCED_TEST_LOCK_GATE" >/dev/null',
+    '  /bin/cat "$DSH_RAY_TEST_LOCK_GATE" >/dev/null',
     'fi',
     '',
   ].join('\n'), { mode: 0o700 })
@@ -54,8 +54,8 @@ async function startProductionLifecycleLockHolder(root: string, dshHome: string)
   ], {
     env: {
       ...process.env,
-      DSH_ENHANCED_LIFECYCLE_FLOCK: flockWrapper,
-      DSH_ENHANCED_TEST_LOCK_GATE: gatePath,
+      DSH_RAY_LIFECYCLE_FLOCK: flockWrapper,
+      DSH_RAY_TEST_LOCK_GATE: gatePath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -230,7 +230,7 @@ describe('supervised-growth setup guards', () => {
     expect(() => assertSupervisedGrowthAutomationGuard([
       { id: 'heartbeat:supervised-growth', owner: 'assistant-heartbeat', status: 'active' },
       { id: 'heartbeat:supervised-growth-analyst', owner: 'assistant-heartbeat', status: 'active' },
-      { id: 'recovery:supervised-growth', owner: 'dsh-enhanced-assistant-recovery', status: 'active' },
+      { id: 'recovery:supervised-growth', owner: 'dsh-ray-assistant-recovery', status: 'active' },
     ], false)).not.toThrow()
     expect(() => assertSupervisedGrowthAutomationGuard([
       {
@@ -255,7 +255,7 @@ describe('supervised-growth setup guards', () => {
     roots.push(root)
     await chmod(root, 0o700)
     const missing = join(root, 'automations.sqlite')
-    const automations = await import('@dsh-enhanced/assistant-automations')
+    const automations = await import('@dsh-ray/assistant-automations')
     expect(thrownCode(() => automations.inspectAutomationsOperatorSnapshot(missing)))
       .toBe('database-missing')
     expect(automations.listAutomationsLocally(missing)).toEqual([])
@@ -425,7 +425,7 @@ describe('supervised-growth setup guards', () => {
       listAutomations: async () => [
         {
           id: 'recovery:supervised-growth', status: 'active',
-          owner: 'dsh-enhanced-assistant-recovery', definition,
+          owner: 'dsh-ray-assistant-recovery', definition,
         },
         analystSnapshot('active'),
       ],
@@ -455,7 +455,7 @@ describe('supervised-growth setup guards', () => {
         ...analystSnapshot('active'), definition: { prompt: 'drifted analyst' },
       }, {
         id: 'recovery:supervised-growth', status: 'active',
-        owner: 'dsh-enhanced-assistant-recovery', definition,
+        owner: 'dsh-ray-assistant-recovery', definition,
       }],
       expectedProductionDefinition: async () => definition,
       expectedAnalystDefinition,
@@ -718,7 +718,7 @@ describe('supervised-growth setup guards', () => {
         { id: 'heartbeat:supervised-growth', owner: 'assistant-heartbeat', status: 'active' },
         analystSnapshot('active'),
         {
-          id: 'recovery:supervised-growth', owner: 'dsh-enhanced-assistant-recovery',
+          id: 'recovery:supervised-growth', owner: 'dsh-ray-assistant-recovery',
           status: 'active', definition,
         },
       ],
@@ -732,7 +732,7 @@ describe('supervised-growth setup guards', () => {
 
   test('deterministically derives the complete canonical proof from Recovery jobs and owner routes', async () => {
     const effectiveConfig = `
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config:
     ownerRoutes:
       - id: route-zeta
@@ -749,7 +749,7 @@ describe('supervised-growth setup guards', () => {
         agentPreset: standard
         policyRef: owner-dm
         minimumGeneration: 2
-- id: dsh-enhanced-assistant-recovery
+- id: dsh-ray-assistant-recovery
   config:
     databasePath: /tmp/configured-recovery.sqlite
     maxStepDurationMs: 1000
@@ -782,8 +782,8 @@ describe('supervised-growth setup guards', () => {
       '/tmp/effective-recovery.sqlite',
     )
     const [delivery, recovery] = await Promise.all([
-      import('@dsh-enhanced/assistant-delivery'),
-      import('@dsh-enhanced/assistant-recovery'),
+      import('@dsh-ray/assistant-delivery'),
+      import('@dsh-ray/assistant-recovery'),
     ])
     const ownerRouteAuthorityHash = (delivery as unknown as {
       ownerRouteAuthorityHash: (input: unknown) => string
@@ -883,12 +883,12 @@ describe('supervised-growth setup guards', () => {
     const profileDirectory = join(dshHome, 'profiles', 'web')
     const nodeModules = join(profileDirectory, 'node_modules')
     const patchPath = join(profileDirectory, 'cordis.patch.yml')
-    await mkdir(join(nodeModules, '@dsh-enhanced'), { recursive: true })
+    await mkdir(join(nodeModules, '@dsh-ray'), { recursive: true })
     await writeFile(patchPath, '[]\n', 'utf8')
-    await symlink(join(repoRoot, 'plugins', 'lark-channel'), join(nodeModules, '@dsh-enhanced', 'lark-channel'), 'dir')
+    await symlink(join(repoRoot, 'plugins', 'lark-channel'), join(nodeModules, '@dsh-ray', 'lark-channel'), 'dir')
     await mkdir(join(nodeModules, '.bin'))
     const binary = join(nodeModules, '.bin', 'dsh-supervised-growth-setup')
-    await symlink('../@dsh-enhanced/lark-channel/bin/dsh-supervised-growth-setup.js', binary, 'file')
+    await symlink('../@dsh-ray/lark-channel/bin/dsh-supervised-growth-setup.js', binary, 'file')
 
     const result = spawnSync(binary, ['--help'], {
       cwd: repoRoot,

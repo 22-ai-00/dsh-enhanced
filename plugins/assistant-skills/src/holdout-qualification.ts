@@ -1,9 +1,9 @@
 import { fileObservationSteps } from './definition.js'
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { GoalScope } from '@dsh-enhanced/assistant-goals'
-import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import type { GoalScope } from '@dsh-ray/assistant-goals'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import type { SkillDefinition } from './definition.js'
 import { instantiate } from './definition.js'
 import { replaySkill, validateReplayTrace, type ReplayDomainToolPolicy, type ReplayInput, type ReplayResult } from './replay.js'
@@ -288,7 +288,7 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
   if (expectedDatasetDigest !== undefined && begin.datasetDigest !== expectedDatasetDigest) fail('dataset does not match the pinned plan')
   if (expectedGeneratorDigest !== undefined && !prospectiveBinding(begin, frozen, pinnedPublicKey, expectedGeneratorDigest)) fail('prospective certificate does not match the frozen plan')
   revalidate()
-  const { IsolatedVerifierRunner } = await import('@dsh-enhanced/assistant-isolation')
+  const { IsolatedVerifierRunner } = await import('@dsh-ray/assistant-isolation')
   // Construct the isolated runner lazily on the first verified cell so pre-cell
   // protocol checks (e.g. an empty run or an unsigned next cell) fail closed on
   // their exact protocol error without opening an unused verification ledger.

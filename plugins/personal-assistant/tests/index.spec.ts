@@ -17,28 +17,28 @@ const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf
 
 describe('personal-assistant core meta-bundle', () => {
   test('has a stable package entrypoint and exact four core dependencies', () => {
-    expect(name).toBe('dsh-enhanced-personal-assistant')
+    expect(name).toBe('dsh-ray-personal-assistant')
     expect(version).toBe(manifest.version)
     expect(manifest.dependencies).toMatchObject({
-      '@dsh-enhanced/assistant-automations': 'workspace:*',
-      '@dsh-enhanced/assistant-policy': 'workspace:*',
-      '@dsh-enhanced/personal-memory': 'workspace:*',
-      '@dsh-enhanced/personal-wiki': 'workspace:*',
+      '@dsh-ray/assistant-automations': 'workspace:*',
+      '@dsh-ray/assistant-policy': 'workspace:*',
+      '@dsh-ray/personal-memory': 'workspace:*',
+      '@dsh-ray/personal-wiki': 'workspace:*',
     })
   })
 
   test('mounts one unique meta row and grants local foreground Agents every mounted capability by default', () => {
     expect([...patch.matchAll(/^(?:- id:| {4}- id:) (\S+)$/gm)].map(match => match[1]))
-      .toEqual(['permission', 'dsh-enhanced-personal-assistant'])
-    expect(patch).toContain("name: '@dsh-enhanced/personal-assistant'")
-    expect(patch).toContain('id: dsh-enhanced-foreground-capability-*')
+      .toEqual(['permission', 'dsh-ray-personal-assistant'])
+    expect(patch).toContain("name: '@dsh-ray/personal-assistant'")
+    expect(patch).toContain('id: dsh-ray-foreground-capability-*')
     expect(patch).toMatch(/subject:\s+kind: agent\s+id: ['"]\*['"]\s+workspace: ['"]\*['"]/u)
     expect(patch).toMatch(/actions:\s+- ['"]\*['"]\s+resource:\s+kind: ['"]\*['"]\s+id: ['"]\*['"]/u)
     expect(patch).toMatch(/context:\s+initiators:\s+- foreground/u)
     expect(patch).toContain('budgets: []')
     expect(patch).toContain('schedulerEnabled: false')
-    expect(patch).not.toContain('@dsh-enhanced/assistant-delivery')
-    expect(patch).not.toContain('@dsh-enhanced/lark-channel')
+    expect(patch).not.toContain('@dsh-ray/assistant-delivery')
+    expect(patch).not.toContain('@dsh-ray/lark-channel')
   })
 
   test('configures native ask and full, leaving reserved Auto to live Policy registration', () => {
@@ -56,7 +56,7 @@ describe('personal-assistant core meta-bundle', () => {
     const ctx = new Context()
     await apply(ctx, {
       assistantPolicy: { databasePath: join(root, 'policy.sqlite'), rules: [{
-        id: 'dsh-enhanced-foreground-capability-*',
+        id: 'dsh-ray-foreground-capability-*',
         effect: 'allow',
         subject: { kind: 'agent', id: '*', workspace: '*' },
         actions: ['*'],
@@ -82,7 +82,7 @@ describe('personal-assistant core meta-bundle', () => {
       action: 'execute',
       resource: { kind: 'tool', id: 'skill' },
       context: { initiator: 'foreground' },
-    })).toMatchObject({ effect: 'allow', ruleId: 'dsh-enhanced-foreground-capability-*' })
+    })).toMatchObject({ effect: 'allow', ruleId: 'dsh-ray-foreground-capability-*' })
     expect(ctx.assistantPolicy.evaluate({
       subject: { kind: 'agent', id: 'standard', workspace: '/work/local' },
       action: 'execute',

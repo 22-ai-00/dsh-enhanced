@@ -28,7 +28,7 @@ async function startProductionLifecycleLockHolder(root: string, dshHome: string)
     'for argument in "$@"; do last=$argument; done',
     'if [ "$last" = 5 ]; then',
     "  printf 'rendezvous-ready\\n'",
-    '  /bin/cat "$DSH_ENHANCED_TEST_LOCK_GATE" >/dev/null',
+    '  /bin/cat "$DSH_RAY_TEST_LOCK_GATE" >/dev/null',
     'fi',
     '',
   ].join('\n'), { mode: 0o700 })
@@ -37,8 +37,8 @@ async function startProductionLifecycleLockHolder(root: string, dshHome: string)
   ], {
     env: {
       ...process.env,
-      DSH_ENHANCED_LIFECYCLE_FLOCK: flockWrapper,
-      DSH_ENHANCED_TEST_LOCK_GATE: gatePath,
+      DSH_RAY_LIFECYCLE_FLOCK: flockWrapper,
+      DSH_RAY_TEST_LOCK_GATE: gatePath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -97,8 +97,8 @@ const directMessage = {
 
 function effectiveDeliveryProfile(databasePath: string): string {
   return `
-- id: dsh-enhanced-assistant-delivery
-  name: '@dsh-enhanced/assistant-delivery'
+- id: dsh-ray-assistant-delivery
+  name: '@dsh-ray/assistant-delivery'
   config:
     databasePath: ${JSON.stringify(databasePath)}
 `
@@ -106,8 +106,8 @@ function effectiveDeliveryProfile(databasePath: string): string {
 
 function effectiveLarkDeliveryProfile(databasePath: string): string {
   return `${effectiveDeliveryProfile(databasePath)}
-- id: dsh-enhanced-lark-channel
-  name: '@dsh-enhanced/lark-channel'
+- id: dsh-ray-lark-channel
+  name: '@dsh-ray/lark-channel'
   config:
     enabled: true
     account: primary
@@ -117,10 +117,10 @@ function effectiveLarkDeliveryProfile(databasePath: string): string {
 
 function asEffectiveProfile(profilePatch: string): string {
   const rows = [
-    ['dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant'],
-    ['dsh-enhanced-assistant-delivery', '@dsh-enhanced/assistant-delivery'],
-    ['dsh-enhanced-credentials-keychain', '@dsh-enhanced/credentials-keychain'],
-    ['dsh-enhanced-lark-channel', '@dsh-enhanced/lark-channel'],
+    ['dsh-ray-personal-assistant', '@dsh-ray/personal-assistant'],
+    ['dsh-ray-assistant-delivery', '@dsh-ray/assistant-delivery'],
+    ['dsh-ray-credentials-keychain', '@dsh-ray/credentials-keychain'],
+    ['dsh-ray-lark-channel', '@dsh-ray/lark-channel'],
   ] as const
   let effective = profilePatch
   for (const [id, name] of rows) {
@@ -134,7 +134,7 @@ function asEffectiveProfile(profilePatch: string): string {
 
 function baseAssistantProfile(dshHome: string, databasePath: string): string {
   return `
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   config:
     assistantPolicy:
       databasePath: ${JSON.stringify(join(dshHome, 'assistant-policy/policy.sqlite'))}
@@ -147,7 +147,7 @@ function baseAssistantProfile(dshHome: string, databasePath: string): string {
     assistantAutomations:
       databasePath: ${JSON.stringify(join(dshHome, 'assistant-automations/state.sqlite'))}
       runsPath: ${JSON.stringify(join(dshHome, 'assistant-automations/runs'))}
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config:
     databasePath: ${JSON.stringify(databasePath)}
     spoolPath: ${JSON.stringify(join(dshHome, 'assistant-delivery/spool'))}
@@ -896,17 +896,17 @@ setInterval(() => {}, 1000)`,
         readEffectiveProfile() {
           const current = readFileSync(patchPath, 'utf8')
           let effective = asEffectiveProfile(current)
-          if (!current.includes('dsh-enhanced-lark-channel')) return effective
+          if (!current.includes('dsh-ray-lark-channel')) return effective
           if (drift === 'wrong-lark-package') {
-            effective = effective.replace("name: '@dsh-enhanced/lark-channel'", "name: '@example/other-lark'")
+            effective = effective.replace("name: '@dsh-ray/lark-channel'", "name: '@example/other-lark'")
           } else if (drift === 'disabled-credentials-package') {
             effective = effective.replace(
-              "- id: dsh-enhanced-credentials-keychain\n  name: '@dsh-enhanced/credentials-keychain'",
-              "- id: dsh-enhanced-credentials-keychain\n  name: '@dsh-enhanced/credentials-keychain'\n  disabled: true",
+              "- id: dsh-ray-credentials-keychain\n  name: '@dsh-ray/credentials-keychain'",
+              "- id: dsh-ray-credentials-keychain\n  name: '@dsh-ray/credentials-keychain'\n  disabled: true",
             )
           } else if (drift === 'wrong-credentials-package') {
             effective = effective.replace(
-              "name: '@dsh-enhanced/credentials-keychain'",
+              "name: '@dsh-ray/credentials-keychain'",
               "name: '@example/shared-credentials'",
             )
           } else {
@@ -1285,7 +1285,7 @@ setInterval(() => {}, 1000)`,
     const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
     const originalPatch = configuredLarkProfile({ dshHome, databasePath, ownerUserId: 'ou_owner' })
     const updatedPatch = `${originalPatch}
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config: { enabled: true, account: primary }
 `
     await writeFile(patchPath, updatedPatch, 'utf8')
@@ -1711,7 +1711,7 @@ setInterval(() => {}, 1000)`,
     }
 
     expect(validateCalls).toBe(1)
-    expect(await readFile(patchPath, 'utf8')).toContain('dsh-enhanced-lark-channel')
+    expect(await readFile(patchPath, 'utf8')).toContain('dsh-ray-lark-channel')
     await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -1725,15 +1725,15 @@ setInterval(() => {}, 1000)`,
     await mkdir(fakeBin, { recursive: true })
     const patchPath = join(profileDirectory, 'cordis.patch.yml')
     const originalPatch = `
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   config:
     assistantPolicy: { rules: [] }
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config:
     databasePath: ${join(dshHome, 'assistant-delivery/state.sqlite')}
     defaultWorkspace: ${join(dshHome, 'assistant-workspace')}
     defaultAgentPreset: standard
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config:
     enabled: true
     account: primary
@@ -2035,12 +2035,12 @@ setInterval(() => {}, 1000)`,
     const dshHome = join(root, 'dsh-home')
     const { findManagedLarkCredentialLocator } = await import('../src/setup.ts')
     const profile = (consumers: string, purposes = '[connect]', maxLeaseMs = '86400000') => `
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config:
     enabled: true
     account: primary
     credentialHandle: lark-app-secret-primary
-- id: dsh-enhanced-credentials-keychain
+- id: dsh-ray-credentials-keychain
   config:
     handles:
       - id: lark-app-secret-primary
@@ -2055,23 +2055,23 @@ setInterval(() => {}, 1000)`,
       profilePatch, dshHome, profile: 'web',
     })
 
-    expect(inspect(profile('[dsh-enhanced-lark-channel]'))).toMatchObject({
+    expect(inspect(profile('[dsh-ray-lark-channel]'))).toMatchObject({
       provider: 'macos-keychain',
       service: 'dsh/lark/web/primary/versions/11111111111111111111111111111111',
     })
-    expect(inspect(profile('[dsh-enhanced-lark-channel, another-consumer]'))).toBeUndefined()
-    expect(inspect(profile('[dsh-enhanced-lark-channel]', '[connect, export]'))).toBeUndefined()
-    expect(inspect(profile('[dsh-enhanced-lark-channel]', '[connect]', '1'))).toBeUndefined()
-    expect(inspect(`${profile('[dsh-enhanced-lark-channel]')}
+    expect(inspect(profile('[dsh-ray-lark-channel, another-consumer]'))).toBeUndefined()
+    expect(inspect(profile('[dsh-ray-lark-channel]', '[connect, export]'))).toBeUndefined()
+    expect(inspect(profile('[dsh-ray-lark-channel]', '[connect]', '1'))).toBeUndefined()
+    expect(inspect(`${profile('[dsh-ray-lark-channel]')}
       - id: lark-app-secret-primary
-        consumers: [dsh-enhanced-lark-channel]
+        consumers: [dsh-ray-lark-channel]
         purposes: [connect]
         maxLeaseMs: 86400000
         provider: macos-keychain
         service: dsh/lark/web/primary/versions/22222222222222222222222222222222
         account: primary
 `)).toBeUndefined()
-    expect(inspect(`${profile('[dsh-enhanced-lark-channel]')}
+    expect(inspect(`${profile('[dsh-ray-lark-channel]')}
       - id: user-backup-secret
         consumers: [user-plugin]
         purposes: [connect]
@@ -2084,16 +2084,16 @@ setInterval(() => {}, 1000)`,
     const windowsPath = join(dshHome, 'credentials-keychain',
       'lark-web-primary-11111111111111111111111111111111.clixml')
     const windowsProfile = `
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config:
     enabled: true
     account: primary
     credentialHandle: lark-app-secret-primary
-- id: dsh-enhanced-credentials-keychain
+- id: dsh-ray-credentials-keychain
   config:
     handles:
       - id: lark-app-secret-primary
-        consumers: [dsh-enhanced-lark-channel]
+        consumers: [dsh-ray-lark-channel]
         purposes: [connect]
         maxLeaseMs: 86400000
         provider: windows-dpapi
@@ -2613,7 +2613,7 @@ setInterval(() => {}, 1000)`,
       if (mode !== 'default') {
         other = other.replace('    databasePath:', `    schedulerEnabled: ${mode === 'invalid-scheduler' ? 'unknown' : 'true'}\n    databasePath:`)
       }
-      if (mode === 'custom-row') other = other.replace('id: dsh-enhanced-assistant-delivery', 'id: custom-delivery')
+      if (mode === 'custom-row') other = other.replace('id: dsh-ray-assistant-delivery', 'id: custom-delivery')
       const staged = vi.fn()
       const paired = vi.fn()
       const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
@@ -2757,7 +2757,7 @@ setInterval(() => {}, 1000)`,
           'utf8',
         )
         const databasePath = profile === 'web' ? realDatabasePath : aliasDatabasePath
-        return profilePatch.includes('dsh-enhanced-lark-channel')
+        return profilePatch.includes('dsh-ray-lark-channel')
           ? asEffectiveProfile(profilePatch)
           : effectiveDeliveryProfile(databasePath).replace('    databasePath:', '    schedulerEnabled: false\n    databasePath:')
       },
@@ -2845,9 +2845,9 @@ setInterval(() => {}, 1000)`,
         readEffectiveProfile(profile) {
           if (profile === 'web') return asEffectiveProfile(readFileSync(webPatchPath, 'utf8'))
           const current = readFileSync(fooPatchPath, 'utf8')
-          return current.includes('dsh-enhanced-lark-channel')
+          return current.includes('dsh-ray-lark-channel')
             ? asEffectiveProfile(current)
-            : `- id: dsh-enhanced-assistant-delivery\n  name: '@dsh-enhanced/assistant-delivery'\n  config:\n    databasePath: !!js dshHomePath('custom/delivery-foo.sqlite')\n`
+            : `- id: dsh-ray-assistant-delivery\n  name: '@dsh-ray/assistant-delivery'\n  config:\n    databasePath: !!js dshHomePath('custom/delivery-foo.sqlite')\n`
         },
         storeCredential() {},
         readCredential() { return 'secret' },
@@ -2873,7 +2873,7 @@ setInterval(() => {}, 1000)`,
     await mkdir(fakeBin, { recursive: true })
     const patchPath = join(profileDirectory, 'cordis.patch.yml')
     await writeFile(patchPath, `
-- id: dsh-enhanced-personal-assistant
+- id: dsh-ray-personal-assistant
   config:
     assistantPolicy:
       databasePath: ${join(dshHome, 'assistant-policy/policy.sqlite')}
@@ -2898,13 +2898,13 @@ setInterval(() => {}, 1000)`,
     assistantAutomations:
       databasePath: ${join(dshHome, 'assistant-automations/state.sqlite')}
       runsPath: ${join(dshHome, 'assistant-automations/runs')}
-- id: dsh-enhanced-assistant-delivery
+- id: dsh-ray-assistant-delivery
   config:
     databasePath: ${join(dshHome, 'assistant-delivery/state.sqlite')}
     spoolPath: ${join(dshHome, 'assistant-delivery/spool')}
     defaultWorkspace: ${join(dshHome, 'assistant-workspace')}
     defaultAgentPreset: standard
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config:
     enabled: true
     account: secondary
@@ -2939,7 +2939,7 @@ setInterval(() => {}, 1000)`,
     expect(output).toContain('lark-owner-reply-secondary')
     expect(output).toContain('lark-owner-tool-*-secondary')
     expect(output).toContain('principal: lark/secondary/personal/ou_owner')
-    expect(output).toContain('dsh-enhanced-foreground-capability-*')
+    expect(output).toContain('dsh-ray-foreground-capability-*')
   })
 
   test('refreshes an effective-only enabled Lark owner without materializing or deleting raw channel credentials', async () => {
@@ -2974,8 +2974,8 @@ setInterval(() => {}, 1000)`,
     const output = await readFile(patchPath, 'utf8')
     expect(output).toContain('lark-owner-tool-*-primary')
     expect(output).toContain('principal: lark/primary/personal/ou_owner')
-    expect(output).not.toMatch(/^- id: dsh-enhanced-lark-channel$/mu)
-    expect(output).not.toMatch(/^- id: dsh-enhanced-credentials-keychain$/mu)
+    expect(output).not.toMatch(/^- id: dsh-ray-lark-channel$/mu)
+    expect(output).not.toMatch(/^- id: dsh-ray-credentials-keychain$/mu)
   })
 
   test('uses effective disabled Lark semantics and preserves raw channel credentials during refresh', async () => {
@@ -3039,28 +3039,28 @@ setInterval(() => {}, 1000)`,
     let corruptedPatch = validPatch
     if (corruption === 'duplicate-lark') {
       corruptedPatch += `
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config: { enabled: true, account: primary }
 `
     } else if (corruption === 'disabled-lark') {
       corruptedPatch = validPatch.replace(
-        '- id: dsh-enhanced-lark-channel\n',
-        '- id: dsh-enhanced-lark-channel\n  disabled: true\n',
+        '- id: dsh-ray-lark-channel\n',
+        '- id: dsh-ray-lark-channel\n  disabled: true\n',
       )
     } else if (corruption === 'dynamic-disabled-lark') {
       corruptedPatch = validPatch.replace(
-        '- id: dsh-enhanced-lark-channel\n',
-        "- id: dsh-enhanced-lark-channel\n  disabled: !!js process.env('LARK_DISABLED')\n",
+        '- id: dsh-ray-lark-channel\n',
+        "- id: dsh-ray-lark-channel\n  disabled: !!js process.env('LARK_DISABLED')\n",
       )
     } else if (corruption === 'wrong-package-lark') {
       corruptedPatch = validPatch.replace(
-        '- id: dsh-enhanced-lark-channel\n',
-        "- id: dsh-enhanced-lark-channel\n  name: '@example/other-lark'\n",
+        '- id: dsh-ray-lark-channel\n',
+        "- id: dsh-ray-lark-channel\n  name: '@example/other-lark'\n",
       )
     } else {
       corruptedPatch = validPatch.replace(
-        '- id: dsh-enhanced-credentials-keychain\n',
-        "- id: dsh-enhanced-credentials-keychain\n  name: '@example/shared-credentials'\n",
+        '- id: dsh-ray-credentials-keychain\n',
+        "- id: dsh-ray-credentials-keychain\n  name: '@example/shared-credentials'\n",
       )
     }
     await writeFile(patchPath, corruptedPatch, 'utf8')
@@ -3288,7 +3288,7 @@ setInterval(() => {}, 1000)`,
     expect(options).toMatchObject({
       domain: 'accounts.feishu.cn',
       larkDomain: 'accounts.larksuite.com',
-      source: 'dsh-enhanced/lark-channel',
+      source: 'dsh-ray/lark-channel',
       appPreset: {
         name: 'DSH Personal Assistant',
       },

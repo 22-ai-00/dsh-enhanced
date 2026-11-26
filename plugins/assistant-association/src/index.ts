@@ -11,7 +11,7 @@ import {
 import { AssistantAssociationService } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-association'
+export const name = 'dsh-ray-assistant-association'
 export {
   AssistantAssociationService,
   Config,

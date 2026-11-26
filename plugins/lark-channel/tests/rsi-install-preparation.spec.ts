@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
-import { inspectLinuxRunnerState, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { inspectLinuxRunnerState, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import { parse } from 'yaml'
 import * as sources from '../src/rsi-source.js'
 import * as authorityRuntime from '../src/rsi-authority-runtime.js'
@@ -18,7 +18,7 @@ import * as runnerState from '../src/rsi-linux-runner-states.js'
 import { createRsiBootstrapManifest } from '../src/rsi-bootstrap-manifest.js'
 import { installRsiOwnerDeployment, rsiInstallPorts } from '../src/rsi-install.js'
 import type { RsiSetupManifest } from '../src/rsi-profile.js'
-import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
+import { runtimeConfigDigest } from '@dsh-ray/plugin-control-plane'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
 import { nativePreparedFixture } from './fixtures/rsi-linux-install.js'
 
@@ -109,9 +109,9 @@ async function fixture() {
     expiresAt: base.input.manifest.controlPlane.sourceJobs!.expiresAt,
     plugins: base.input.manifest.sourceReviews.plugins,
     hostDeploymentInputs: base.input.manifest.controlPlane.sourceAdoptions!.hostDeploymentInputs!,
-    observerTargets: [{ entryId: 'dsh-enhanced-assistant-delivery', module: '@dsh-enhanced/assistant-delivery', services: ['assistantDelivery'],
+    observerTargets: [{ entryId: 'dsh-ray-assistant-delivery', module: '@dsh-ray/assistant-delivery', services: ['assistantDelivery'],
       configDigest: runtimeConfigDigest((parse(base.profiles.targetEffective) as Array<{ id: string; config: unknown }>)
-        .find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config) }],
+        .find(row => row.id === 'dsh-ray-assistant-delivery')!.config) }],
   }
   const save = async (manifest: RsiSetupManifest): Promise<string> => {
     const bytes = JSON.stringify(manifest)

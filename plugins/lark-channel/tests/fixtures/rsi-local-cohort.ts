@@ -22,19 +22,19 @@ export async function localCohortFixture(peerGraph = false) {
   const home = join(root, 'home'), sourceRepository = join(root, 'source'), profile = 'owner', version = '0.1.48'
   await mkdir(home, { mode: 0o700 }); await mkdir(sourceRepository)
   run('git', ['init', '--object-format=sha1', '--initial-branch=main', '.'], sourceRepository)
-  await writeFile(join(sourceRepository, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version }, null, 2) + '\n')
+  await writeFile(join(sourceRepository, 'package.json'), JSON.stringify({ name: 'dsh-ray', version }, null, 2) + '\n')
   await writeFile(join(sourceRepository, 'pnpm-workspace.yaml'), 'packages:\n  - plugins/*\n  - packages/*\nallowBuilds:\n  esbuild: true\n  koffi: true\n  protobufjs: false\n')
   const names = ['target', 'assistant-policy', 'assistant-automations', 'plugin-control-plane', 'optional-plugin', 'dev-only', 'peer-only', 'shared-lib']
   for (const slug of names) {
     const base = slug === 'shared-lib' ? 'packages' : 'plugins', directory = join(sourceRepository, base, slug)
     await mkdir(join(directory, 'lib'), { recursive: true })
-    const name = `@dsh-enhanced/${slug}`
-    const runtime = slug === 'target' ? ['@dsh-enhanced/shared-lib'] : []
-    const optional = slug === 'target' ? ['@dsh-enhanced/optional-plugin'] : []
-    const dev = slug === 'target' ? ['@dsh-enhanced/dev-only'] : []
-    const peer = slug === 'target' ? ['@dsh-enhanced/peer-only', ...(peerGraph ? ['@dsh-enhanced/shared-lib', '@dsh-enhanced/assistant-policy'] : [])]
-      : peerGraph && slug === 'assistant-automations' ? ['@dsh-enhanced/assistant-policy']
-        : peerGraph && slug === 'optional-plugin' ? ['@dsh-enhanced/shared-lib'] : []
+    const name = `@dsh-ray/${slug}`
+    const runtime = slug === 'target' ? ['@dsh-ray/shared-lib'] : []
+    const optional = slug === 'target' ? ['@dsh-ray/optional-plugin'] : []
+    const dev = slug === 'target' ? ['@dsh-ray/dev-only'] : []
+    const peer = slug === 'target' ? ['@dsh-ray/peer-only', ...(peerGraph ? ['@dsh-ray/shared-lib', '@dsh-ray/assistant-policy'] : [])]
+      : peerGraph && slug === 'assistant-automations' ? ['@dsh-ray/assistant-policy']
+        : peerGraph && slug === 'optional-plugin' ? ['@dsh-ray/shared-lib'] : []
     const pkg = { ...manifest(name, version, runtime, dev, peer, optional),
       peerDependenciesMeta: Object.fromEntries(peer.map(name => [name, { optional: true }])) }
     if (base === 'plugins') pkg.dsh = { bundle: { patch: './cordis.patch.yml' } }
@@ -76,11 +76,11 @@ export async function localCohortFixture(peerGraph = false) {
 export async function installFixture(f: Awaited<ReturnType<typeof localCohortFixture>>, cohort: Awaited<ReturnType<typeof prepareRsiLocalCohort>>,
   slugs = cohort.packages.map(pkg => pkg.name.split('/')[1]!), profile = 'profile') {
   const profilePath = join(f.root, profile)
-  await mkdir(join(profilePath, 'node_modules', '@dsh-enhanced'), { recursive: true })
+  await mkdir(join(profilePath, 'node_modules', '@dsh-ray'), { recursive: true })
   await writeFile(join(profilePath, 'package.json'), JSON.stringify({ name: 'owner-profile', private: true }))
   for (const pkg of cohort.packages) {
     if (!slugs.includes(pkg.name.split('/')[1]!)) continue
-    const destination = join(profilePath, 'node_modules', '@dsh-enhanced', pkg.name.split('/')[1]!)
+    const destination = join(profilePath, 'node_modules', '@dsh-ray', pkg.name.split('/')[1]!)
     await mkdir(destination)
     run('/usr/bin/tar', ['-xzf', pkg.tarball, '--strip-components=1', '-C', destination], f.root)
   }

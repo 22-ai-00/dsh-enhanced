@@ -15,7 +15,7 @@ import type { RuntimeObserverConfig } from './runtime-observer-protocol.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const DIGEST = /^[a-f0-9]{64}$/u
-const PACKAGE = /^@dsh-enhanced\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/u
+const PACKAGE = /^@dsh-ray\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/u
 const MAX_REQUEST_BYTES = 65_536
 const MAX_CONFIG_BYTES = 65_536
 
@@ -106,7 +106,7 @@ export function validateSystemdHostAuthorityConfig(value: unknown): asserts valu
   text(grant.coordinatorId)
   if (!Array.isArray(grant.packages) || grant.packages.length < 1 || grant.packages.length > 32) fail()
   const packages = grant.packages.map(item => text(item, PACKAGE, 128))
-  if (new Set(packages).size !== packages.length || packages.some(item => OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(item.slice('@dsh-enhanced/'.length)))) fail()
+  if (new Set(packages).size !== packages.length || packages.some(item => OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(item.slice('@dsh-ray/'.length)))) fail()
   validateHostDeploymentInputs(grant.hostDeploymentInputs)
   validateLiveQualificationTerms(grant.liveQualification)
   const template = object(item.template)

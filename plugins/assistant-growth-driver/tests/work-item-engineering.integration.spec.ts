@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import GrowthPlugin, { AssistantGrowthDriverService } from '../src/index.ts'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { verifyPluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { verifyPluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { CreationCapabilityRuntime } from '../../plugin-control-plane/lib/creation-capability-runtime.js'
 import { engineeringScanBudgetId, matchesApprovalSource, query, workItemEngineeringFixture } from './work-item-engineering.fixture.ts'
 
@@ -15,7 +15,7 @@ test('native fixture mounts the published Growth plugin identity rather than the
     const constructorFork=context.plugin(AssistantGrowthDriverService,{enabled:false})
     const publishedFork=context.plugin(GrowthPlugin,{enabled:false})
     expect(constructorFork.name).toBe('AssistantGrowthDriverService')
-    expect(publishedFork.name).toBe('dsh-enhanced-assistant-growth-driver')
+    expect(publishedFork.name).toBe('dsh-ray-assistant-growth-driver')
   } finally {await context.fiber.dispose()}
 })
 

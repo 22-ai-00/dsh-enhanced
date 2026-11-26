@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-enhanced-preference-learning
-      name: '@dsh-enhanced/preference-learning'
+    - id: dsh-ray-preference-learning
+      name: '@dsh-ray/preference-learning'
       inject:
         - assistantPolicy
         - systemPrompt

@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpa
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 
 import { lineageFail, validateScope, validateRequest, same, type LineageScope, type ReviewPublicIdentity, type RowSeal, type TrustedHistoryRequest } from './review-authority-lineage.js'
 

@@ -30,12 +30,12 @@ const COMMAND_TAIL_BYTES = 4_096
 /**
  * T3 安全根插件绝不允许经成长执行体的隔离区窄口改写——即使产物只是待批
  * pending plan。命中即拒绝，不进入 worktree 流程。名单的唯一事实来源是
- * @dsh-enhanced/assistant-growth-contract（模型提案边界 23 项 / owner 修复边界 12 项）。
+ * @dsh-ray/assistant-growth-contract（模型提案边界 23 项 / owner 修复边界 12 项）。
  */
-import { MODEL_PROPOSAL_PROTECTED_PLUGINS, OWNER_REPAIR_PROTECTED_PLUGINS } from '@dsh-enhanced/assistant-growth-contract'
+import { MODEL_PROPOSAL_PROTECTED_PLUGINS, OWNER_REPAIR_PROTECTED_PLUGINS } from '@dsh-ray/assistant-growth-contract'
 export const PROTECTED_PLUGIN_DENYLIST = MODEL_PROPOSAL_PROTECTED_PLUGINS
 export const OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST = OWNER_REPAIR_PROTECTED_PLUGINS
-export { assertProtectedSetsConsistent as assertProtectedPluginSetsConsistent } from '@dsh-enhanced/assistant-growth-contract'
+export { assertProtectedSetsConsistent as assertProtectedPluginSetsConsistent } from '@dsh-ray/assistant-growth-contract'
 
 export interface ScopedPluginFile {
   /** 相对于 plugins/<name>/ 的 POSIX 相对路径，不允许 .. 或绝对路径。 */

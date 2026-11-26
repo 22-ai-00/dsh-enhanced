@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { access, chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import ts from 'typescript'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'

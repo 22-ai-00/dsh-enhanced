@@ -1,6 +1,6 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
 import { chmodSync, mkdtempSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'

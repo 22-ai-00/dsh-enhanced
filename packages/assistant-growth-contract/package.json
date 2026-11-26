@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-growth-contract",
+  "name": "@dsh-ray/assistant-growth-contract",
   "version": "0.1.88",
   "description": "Strict shared workflow-growth wire contracts for DSH assistant plugins.",
   "license": "MIT",
@@ -33,7 +33,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "packages/assistant-growth-contract"
   },
   "keywords": [

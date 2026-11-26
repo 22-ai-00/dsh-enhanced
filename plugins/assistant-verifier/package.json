@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/assistant-verifier",
+  "name": "@dsh-ray/assistant-verifier",
   "version": "0.1.88",
   "description": "Independent, bounded task acceptance verification with durable contracts and receipts.",
   "license": "MIT",
@@ -52,7 +52,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/assistant-verifier"
   },
   "keywords": [
@@ -75,27 +75,27 @@
     "@deepseek-ai/dsh-session": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-enhanced/assistant-actions": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-automations": ">=0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">=0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-evaluation": ">=0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/plugin-control-plane": ">=0.1.0 <0.2.0"
+    "@dsh-ray/assistant-actions": ">=0.1.0 <0.2.0",
+    "@dsh-ray/assistant-automations": ">=0.1.24 <0.2.0",
+    "@dsh-ray/assistant-delivery": ">=0.1.24 <0.2.0",
+    "@dsh-ray/assistant-evaluation": ">=0.1.24 <0.2.0",
+    "@dsh-ray/assistant-policy": ">=0.1.0 <0.2.0",
+    "@dsh-ray/plugin-control-plane": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-automations": {
+    "@dsh-ray/assistant-automations": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-delivery": {
+    "@dsh-ray/assistant-delivery": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-evaluation": {
+    "@dsh-ray/assistant-evaluation": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-actions": {
+    "@dsh-ray/assistant-actions": {
       "optional": true
     },
     "@deepseek-ai/dsh-agent": {
@@ -113,10 +113,10 @@
     "@deepseek-ai/dsh-system-prompt": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-policy": {
+    "@dsh-ray/assistant-policy": {
       "optional": true
     },
-    "@dsh-enhanced/plugin-control-plane": {
+    "@dsh-ray/plugin-control-plane": {
       "optional": true
     }
   },
@@ -132,18 +132,18 @@
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tool-executor-native": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
-    "@dsh-enhanced/assistant-automations": "workspace:*",
-    "@dsh-enhanced/assistant-delivery": "workspace:*",
-    "@dsh-enhanced/assistant-evaluation": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
+    "@dsh-ray/assistant-automations": "workspace:*",
+    "@dsh-ray/assistant-delivery": "workspace:*",
+    "@dsh-ray/assistant-evaluation": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/assistant-growth-contract": "workspace:*",
-    "@dsh-enhanced/assistant-isolation": "workspace:*",
-    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
+    "@dsh-ray/assistant-growth-contract": "workspace:*",
+    "@dsh-ray/assistant-isolation": "workspace:*",
+    "@dsh-ray/task-acceptance-contract": "workspace:*"
   }
 }

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createTaskAcceptanceContract, type TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import { createTaskAcceptanceContract, type TaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
 import { createVerifierAuthorities, verifyAcceptanceCriteria, type IsolatedRunnerAuthority, type IsolatedVerificationContext } from '../src/drivers.ts'
 
 const sha = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex')

@@ -10,7 +10,7 @@ import { type EffectiveProfileDumpReader, findRow, readEffectiveProfileDump } fr
 
 /**
  * `dsh-plugin-setup`: list, enable, disable and configure installed
- * `@dsh-enhanced/*` plugins of one DSH profile without hand-editing YAML.
+ * `@dsh-ray/*` plugins of one DSH profile without hand-editing YAML.
  *
  * Every write goes to `$DSH_HOME/profiles/<profile>/cordis.patch.yml` only.
  * A profile row `config` replaces the inherited config as a whole, so the
@@ -28,18 +28,18 @@ import { type EffectiveProfileDumpReader, findRow, readEffectiveProfileDump } fr
 const tag = 'assistant-policy plugin setup'
 const profileNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const keySegmentPattern = /^[A-Za-z0-9_-]{1,64}$/u
-const rowPrefix = 'dsh-enhanced-'
-const packageScope = '@dsh-enhanced/'
+const rowPrefix = 'dsh-ray-'
+const packageScope = '@dsh-ray/'
 
 /** Rows whose config/authorization surface this CLI refuses to edit. */
 const protectedRows: ReadonlyMap<string, string> = new Map([
-  ['dsh-enhanced-assistant-policy', 'Policy rules, default-deny and auto-review are access controls; edit them deliberately in the profile patch'],
-  ['dsh-enhanced-plugin-control-plane', 'sealed-plugin trust and approval state is managed by dsh-plugin-control'],
+  ['dsh-ray-assistant-policy', 'Policy rules, default-deny and auto-review are access controls; edit them deliberately in the profile patch'],
+  ['dsh-ray-plugin-control-plane', 'sealed-plugin trust and approval state is managed by dsh-plugin-control'],
 ])
 
 /** Rows whose config keys this CLI refuses to edit (authorization-bearing keys). */
 const protectedKeys: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-  ['dsh-enhanced-assistant-delivery', new Set(['ownerRoutes', 'policyRef'])],
+  ['dsh-ray-assistant-delivery', new Set(['ownerRoutes', 'policyRef'])],
 ])
 
 type KnownType = 'boolean' | 'number' | 'string' | 'path' | 'string[]' | readonly string[]
@@ -49,10 +49,10 @@ type KnownType = 'boolean' | 'number' | 'string' | 'path' | 'string[]' | readonl
  * them without `--force` and validates their type.
  */
 const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = new Map([
-  ['dsh-enhanced-owner-console', new Map<string, KnownType>([
+  ['dsh-ray-owner-console', new Map<string, KnownType>([
     ['feishuAppId', 'string'],
   ])],
-  ['dsh-enhanced-assistant-proactive', new Map<string, KnownType>([
+  ['dsh-ray-assistant-proactive', new Map<string, KnownType>([
     ['databasePath', 'path'],
     ['intakeEvaluation.enabled', 'boolean'],
     ['intakeEvaluation.preset', INTAKE_RULE_PRESET_TIERS],
@@ -62,7 +62,7 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['intakeEvaluation.timeoutMs', 'number'],
     ['intakeEvaluation.maxConsecutiveFailures', 'number'],
   ])],
-  ['dsh-enhanced-assistant-dreaming', new Map<string, KnownType>([
+  ['dsh-ray-assistant-dreaming', new Map<string, KnownType>([
     ['enabled', 'boolean'],
     ['retired', 'boolean'],
     ['databasePath', 'path'],
@@ -95,7 +95,7 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['reasoningEffort', 'string'],
     ['retentionDays', 'number'],
   ])],
-  ['dsh-enhanced-assistant-growth-driver', new Map<string, KnownType>([
+  ['dsh-ray-assistant-growth-driver', new Map<string, KnownType>([
     ['enabled', 'boolean'],
     ['intervalMs', 'number'],
     ['maxReviewsPerWake', 'number'],
@@ -141,7 +141,7 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['usageLearning.scanBudgetId', 'string'],
     ['usageLearning.scanBudgetAmount', 'number'],
   ])],
-  ['dsh-enhanced-assistant-memory-learning', new Map<string, KnownType>([
+  ['dsh-ray-assistant-memory-learning', new Map<string, KnownType>([
     ['enabled', 'boolean'],
     ['databasePath', 'path'],
     ['workItemExperiences', 'boolean'],
@@ -159,7 +159,7 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['model.model', 'string'],
     ['model.reasoningEffort', 'string'],
   ])],
-  ['dsh-enhanced-assistant-work-items', new Map<string, KnownType>([
+  ['dsh-ray-assistant-work-items', new Map<string, KnownType>([
     ['mode', ['observe', 'active']],
     ['databasePath', 'path'],
     ['workRoot', 'path'],
@@ -192,7 +192,7 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['acceptance.holdReport.enabled', 'boolean'],
     ['acceptance.holdReport.holdTimeoutMs', 'number'],
   ])],
-  ['dsh-enhanced-assistant-delivery', new Map<string, KnownType>([
+  ['dsh-ray-assistant-delivery', new Map<string, KnownType>([
     ['attentionEnforce', 'boolean'],
     ['attentionAttachOverCap', 'boolean'],
     ['inProcessReload.enabled', 'boolean'],
@@ -200,21 +200,21 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['naturalFeedback.mixedIntent', 'boolean'],
     ['ownerReportRouting.orderAcrossLanes', 'boolean'],
   ])],
-  ['dsh-enhanced-assistant-evolution', new Map<string, KnownType>([
+  ['dsh-ray-assistant-evolution', new Map<string, KnownType>([
     ['autonomousRollback', 'boolean'],
     ['databasePath', 'path'],
   ])],
-  ['dsh-enhanced-assistant-verifier', new Map<string, KnownType>([
+  ['dsh-ray-assistant-verifier', new Map<string, KnownType>([
     ['requireAcceptance', 'boolean'],
     ['tickIntervalMs', 'number'],
     ['databasePath', 'path'],
   ])],
-  ['dsh-enhanced-preference-learning', new Map<string, KnownType>([
+  ['dsh-ray-preference-learning', new Map<string, KnownType>([
     ['enabled', 'boolean'],
     ['autonomousT1Enabled', 'boolean'],
     ['databasePath', 'path'],
   ])],
-  ['dsh-enhanced-assistant-evaluation', new Map<string, KnownType>([
+  ['dsh-ray-assistant-evaluation', new Map<string, KnownType>([
     ['notificationOutcomesEnabled', 'boolean'],
     ['notificationSyncIntervalMs', 'number'],
     ['attentionTuningAutoAdopt', 'boolean'],
@@ -226,7 +226,7 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['attentionOwnerQuestionDeliveryEnabled', 'boolean'],
     ['attentionOwnerQuestionNoticeTtlMs', 'number'],
   ])],
-  ['dsh-enhanced-assistant-goals', new Map<string, KnownType>([
+  ['dsh-ray-assistant-goals', new Map<string, KnownType>([
     ['databasePath', 'path'],
     ['eventWaits', 'boolean'],
     ['ownerIntent', 'boolean'],
@@ -237,8 +237,8 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['verifyGoalOutcome', 'boolean'],
     ['stepMaxDurationMs', 'number'],
   ])],
-  ['dsh-enhanced-event-triggers', new Map<string, KnownType>([['pollerEnabled', 'boolean']])],
-  ['dsh-enhanced-assistant-association', new Map<string, KnownType>([
+  ['dsh-ray-event-triggers', new Map<string, KnownType>([['pollerEnabled', 'boolean']])],
+  ['dsh-ray-assistant-association', new Map<string, KnownType>([
     ['enabled', 'boolean'],
     ['localOnly', 'boolean'],
     ['databasePath', 'path'],
@@ -335,10 +335,10 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['webLearning.budgetId', 'string'],
     ['webLearning.budgetAmount', 'number'],
   ])],
-  ['dsh-enhanced-personal-memory', new Map<string, KnownType>([
+  ['dsh-ray-personal-memory', new Map<string, KnownType>([
     ['automaticLearning', 'boolean'],
   ])],
-  ['dsh-enhanced-personal-assistant', new Map<string, KnownType>([
+  ['dsh-ray-personal-assistant', new Map<string, KnownType>([
     ['personalMemory.automaticLearning', 'boolean'],
   ])],
 ])
@@ -508,7 +508,7 @@ async function readInstalled(target: PluginSetupTarget, readDump: EffectiveProfi
   return { profile, dump, rows }
 }
 
-/** Map `work-items`, `assistant-work-items`, `@dsh-enhanced/assistant-work-items` or the row id to an installed row id. */
+/** Map `work-items`, `assistant-work-items`, `@dsh-ray/assistant-work-items` or the row id to an installed row id. */
 export function resolvePluginId(name: string, installed: Iterable<string>): string | undefined {
   const ids = new Set(installed)
   const trimmed = name.trim()
@@ -522,7 +522,7 @@ export function resolvePluginId(name: string, installed: Iterable<string>): stri
 function requireInstalled(name: string, installed: InstalledPlugins): string {
   const id = resolvePluginId(name, installed.rows.keys())
   if (id !== undefined) return id
-  const base = name.startsWith(packageScope) ? name.slice(packageScope.length) : name.replace(/^dsh-enhanced-/u, '')
+  const base = name.startsWith(packageScope) ? name.slice(packageScope.length) : name.replace(/^dsh-ray-/u, '')
   return fail(`plugin ${JSON.stringify(name)} is not installed in profile ${installed.profile}; `
     + `add it first: dsh plugin --profile ${installed.profile} add ${packageScope}${base}`)
 }
@@ -549,7 +549,7 @@ function summarize(id: string, row: YAMLMap, overridden: boolean): ProfilePlugin
   const flags: Record<string, boolean> = {}
   const rawEnabled = config.get('enabled')
   let enabled = typeof rawEnabled === 'boolean' ? rawEnabled : undefined
-  if (id === 'dsh-enhanced-assistant-dreaming' && enabled === undefined) enabled = false
+  if (id === 'dsh-ray-assistant-dreaming' && enabled === undefined) enabled = false
   collectBooleanFlags(config, '', flags, 0)
   const slug = id.slice(rowPrefix.length)
   return {
@@ -859,12 +859,12 @@ export async function setPluginEnabled(
 ): Promise<PluginWriteResult> {
   const installed = await readInstalled(target, options.readDump ?? readEffectiveProfileDump)
   const id = requireInstalled(target.plugin, installed)
-  if (!target.enabled && id === 'dsh-enhanced-assistant-policy') {
+  if (!target.enabled && id === 'dsh-ray-assistant-policy') {
     fail('refusing to disable assistant-policy: it is the access-control layer other plugins inject; remove the plugin explicitly if that is really intended')
   }
   const effectiveRow = installed.rows.get(id)!
   const effective = rowConfig(effectiveRow)
-  if (target.enabled && id === 'dsh-enhanced-lark-channel' && larkPlaceholder(effective)) {
+  if (target.enabled && id === 'dsh-ray-lark-channel' && larkPlaceholder(effective)) {
     fail('lark-channel still has placeholder credentials; run dsh-lark-setup for this profile first (it enables the channel after onboarding)')
   }
   const patch = await loadProfilePatch(target.dshHome, installed.profile)
@@ -876,15 +876,15 @@ export async function setPluginEnabled(
     changes.push({ id, key: 'disabled', from: !wasLoaded, to: !target.enabled })
   }
   const gate = effective.get('enabled')
-  const shouldSetDreamingEnabled = id === 'dsh-enhanced-assistant-dreaming' && (target.enabled || gate === true)
-  if (id === 'dsh-enhanced-assistant-dreaming') {
+  const shouldSetDreamingEnabled = id === 'dsh-ray-assistant-dreaming' && (target.enabled || gate === true)
+  if (id === 'dsh-ray-assistant-dreaming') {
     if (target.enabled) assertDreamingEnableAllowed(effective)
     else if (effective.get('retired') === true) {
       fail('assistant-dreaming.retired is true; set retired=false before disabling dreaming')
     }
   }
   if ((typeof gate === 'boolean' || shouldSetDreamingEnabled) && gate !== target.enabled && !protectedRows.has(id)) {
-    if (target.enabled && id === 'dsh-enhanced-assistant-work-items' && effective.get('mode') === 'active'
+    if (target.enabled && id === 'dsh-ray-assistant-work-items' && effective.get('mode') === 'active'
       && (effective.get('workerAutomationId') === undefined || effective.get('scope') === undefined)) {
       fail('assistant-work-items mode: active needs workerAutomationId and scope; set mode observe first or complete the active config')
     }
@@ -909,7 +909,7 @@ export async function setPluginConfigValue(
   const parent = segments.length > 1 ? effective.getIn(segments.slice(0, -1), true) : effective
   if (parent !== undefined && !isMap(parent)) fail(`${segments.slice(0, -1).join('.')} is not a mapping`)
   const value = coerceConfigValue(id, target.key, target.value, current, target.force === true)
-  if (id === 'dsh-enhanced-assistant-dreaming') {
+  if (id === 'dsh-ray-assistant-dreaming') {
     if (target.key === 'enabled' && value === true) assertDreamingEnableAllowed(effective)
     if (target.key === 'enabled' && value === false && effective.get('retired') === true) {
       fail('assistant-dreaming.retired is true; set retired=false before setting enabled=false')
@@ -1034,27 +1034,27 @@ function canonicalAbsolutePath(value: unknown): boolean {
 }
 
 const dreamingAuthorization: readonly PresetRequirement[] = [
-  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'retired', optional: true, validate: value => value !== true,
+  { plugin: 'dsh-ray-assistant-dreaming', key: 'retired', optional: true, validate: value => value !== true,
     reason: 'assistant-dreaming.retired is true; clear retired before enabling dreaming' },
-  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'scope.workspace', validate: canonicalAbsolutePath,
+  { plugin: 'dsh-ray-assistant-dreaming', key: 'scope.workspace', validate: canonicalAbsolutePath,
     reason: 'assistant-dreaming.scope.workspace is missing; dreaming requires an explicit canonical owner workspace' },
-  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'scope.preset', validate: nonEmptyText,
+  { plugin: 'dsh-ray-assistant-dreaming', key: 'scope.preset', validate: nonEmptyText,
     reason: 'assistant-dreaming.scope.preset is missing; dreaming requires an explicit owner preset' },
-  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'scope.principalId', validate: nonEmptyText,
+  { plugin: 'dsh-ray-assistant-dreaming', key: 'scope.principalId', validate: nonEmptyText,
     reason: 'assistant-dreaming.scope.principalId is missing; dreaming requires an explicit owner principalId' },
-  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'scope.ownerRouteId', validate: nonEmptyText,
+  { plugin: 'dsh-ray-assistant-dreaming', key: 'scope.ownerRouteId', validate: nonEmptyText,
     reason: 'assistant-dreaming.scope.ownerRouteId is missing; dreaming requires an explicit ownerRouteId' },
-  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'databasePath',
+  { plugin: 'dsh-ray-assistant-dreaming', key: 'databasePath',
     validate: (value, dshHome) => canonicalAbsolutePath(value)
       && (value !== join(homedir(), '.dsh', 'assistant-dreaming.sqlite') || normalize(resolve(dshHome)) === normalize(resolve(join(homedir(), '.dsh')))),
     reason: 'assistant-dreaming.databasePath is missing or points outside $DSH_HOME; dreaming requires an explicit $DSH_HOME-scoped databasePath' },
-  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'provider', validate: nonEmptyText,
+  { plugin: 'dsh-ray-assistant-dreaming', key: 'provider', validate: nonEmptyText,
     reason: 'assistant-dreaming.provider is missing; the preset never guesses a dreaming model route' },
-  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'model', validate: nonEmptyText,
+  { plugin: 'dsh-ray-assistant-dreaming', key: 'model', validate: nonEmptyText,
     reason: 'assistant-dreaming.model is missing; the preset never guesses a dreaming model route' },
-  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'budgetId', validate: nonEmptyText,
+  { plugin: 'dsh-ray-assistant-dreaming', key: 'budgetId', validate: nonEmptyText,
     reason: 'assistant-dreaming.budgetId is missing; dreaming requires an explicit finite Policy budget' },
-  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'budgetAmount', validate: positiveInteger,
+  { plugin: 'dsh-ray-assistant-dreaming', key: 'budgetAmount', validate: positiveInteger,
     reason: 'assistant-dreaming.budgetAmount is missing; dreaming requires an explicit finite Policy budget amount' },
 ]
 
@@ -1074,11 +1074,11 @@ function validIntakeEvaluationRules(value: unknown): boolean {
 }
 
 const intakeEvaluationAuthorization: readonly PresetRequirement[] = [
-  { plugin: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.rules', validate: validIntakeEvaluationRules,
+  { plugin: 'dsh-ray-assistant-proactive', key: 'intakeEvaluation.rules', validate: validIntakeEvaluationRules,
     reason: 'assistant-proactive.intakeEvaluation.rules is missing or invalid; the preset never invents evaluation rules or ceilings' },
-  { plugin: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.provider',
+  { plugin: 'dsh-ray-assistant-proactive', key: 'intakeEvaluation.provider',
     reason: 'assistant-proactive.intakeEvaluation.provider is not configured; the preset never guesses a model route' },
-  { plugin: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.model',
+  { plugin: 'dsh-ray-assistant-proactive', key: 'intakeEvaluation.model',
     reason: 'assistant-proactive.intakeEvaluation.model is not configured; the preset never guesses a model route' },
 ]
 
@@ -1095,75 +1095,75 @@ const intakeEvaluationAuthorization: readonly PresetRequirement[] = [
  */
 export const recommendedPluginPreset: readonly PresetItem[] = Object.freeze([
   {
-    id: 'dsh-enhanced-assistant-work-items',
+    id: 'dsh-ray-assistant-work-items',
     purpose: 'work-item ledger in observe mode plus the deterministic intake ledger (WP20); no admission, worker wake, Delivery or model calls',
     set: [['enabled', true], ['intakeLedger.enabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-work-items',
+    id: 'dsh-ray-assistant-work-items',
     purpose: 'let an owner-authorized intake evaluator evaluate stored inferred rows; the model route and rule ceilings remain explicit assistant-proactive configuration',
     requires: intakeEvaluationAuthorization,
     set: [['intakeLedger.evaluation.enabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-proactive',
+    id: 'dsh-ray-assistant-proactive',
     purpose: 'scope assistant-proactive databasePath to $DSH_HOME instead of leaking to global ~/.dsh',
     whenInstalled: true,
     set: [],
     resolveSet: scopedDatabaseResolver({
-      id: 'dsh-enhanced-assistant-proactive',
+      id: 'dsh-ray-assistant-proactive',
       subdir: 'assistant-proactive',
       publishedDefault: join(homedir(), '.dsh', 'assistant-proactive.sqlite'),
       companion: true,
     }),
   },
   {
-    id: 'dsh-enhanced-assistant-goals',
+    id: 'dsh-ray-assistant-goals',
     purpose: 'scope assistant-goals databasePath to $DSH_HOME instead of leaking to global ~/.dsh',
     whenInstalled: true,
     set: [],
     resolveSet: scopedDatabaseResolver({
-      id: 'dsh-enhanced-assistant-goals',
+      id: 'dsh-ray-assistant-goals',
       subdir: 'assistant-goals',
       publishedDefault: join(homedir(), '.dsh', 'assistant-goals.sqlite'),
     }),
   },
   {
-    id: 'dsh-enhanced-assistant-dreaming',
+    id: 'dsh-ray-assistant-dreaming',
     purpose: 'scope assistant-dreaming databasePath to $DSH_HOME while keeping dreaming dormant until explicit scope, model and budget are provided',
     whenInstalled: true,
     set: [],
     resolveSet: scopedDatabaseResolver({
-      id: 'dsh-enhanced-assistant-dreaming',
+      id: 'dsh-ray-assistant-dreaming',
       subdir: 'assistant-dreaming',
       publishedDefault: join(homedir(), '.dsh', 'assistant-dreaming.sqlite'),
       setWhenMissing: true,
     }),
   },
   {
-    id: 'dsh-enhanced-assistant-proactive',
+    id: 'dsh-ray-assistant-proactive',
     purpose: 'register the production intake evaluator in observe-only mode using the provider, model and rule ceilings already declared by the owner (WS1)',
     requires: intakeEvaluationAuthorization,
     set: [['intakeEvaluation.enabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-dreaming',
+    id: 'dsh-ray-assistant-dreaming',
     purpose: 'enable bounded idle dreaming only when owner scope, $DSH_HOME databasePath, model route and finite budget are explicitly declared',
     requires: dreamingAuthorization,
     set: [['enabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-delivery',
+    id: 'dsh-ray-assistant-delivery',
     purpose: 'over-cap background notices become a short body plus one text attachment (WP19 stage 2b)',
     set: [['attentionAttachOverCap', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-delivery',
+    id: 'dsh-ray-assistant-delivery',
     purpose: 'recognize natural owner replies — synonyms, a reason after a result, and one reply carrying both a result and a continuation — as trusted work-item feedback',
     set: [['naturalFeedback.coverage', true], ['naturalFeedback.mixedIntent', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-evaluation',
+    id: 'dsh-ray-assistant-evaluation',
     purpose: 'sync Delivery notification outcome facts, record intake agreement, auto-adopt bounded attention tightening and enable holdout-verified loosening (WP22)',
     set: [
       ['notificationOutcomesEnabled', true],
@@ -1174,31 +1174,31 @@ export const recommendedPluginPreset: readonly PresetItem[] = Object.freeze([
     ],
   },
   {
-    id: 'dsh-enhanced-event-triggers',
+    id: 'dsh-ray-event-triggers',
     purpose: 'run the trigger poller so configured triggers fire without a second switch (allowlists stay empty until configured)',
     set: [['pollerEnabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-memory-learning',
+    id: 'dsh-ray-assistant-memory-learning',
     purpose: 'ordinary background work-item outcomes become experiences; the owner-signed review and adoption grants must already carry the same flag',
     requires: [
-      { plugin: 'dsh-enhanced-assistant-verifier', key: 'memoryReviews.workItemExperiences', equals: true,
+      { plugin: 'dsh-ray-assistant-verifier', key: 'memoryReviews.workItemExperiences', equals: true,
         reason: 'assistant-verifier.memoryReviews.workItemExperiences is not enabled; work-item experience review needs a fresh explicit grant' },
-      { plugin: 'dsh-enhanced-personal-assistant', key: 'personalMemory.automaticLearning.workItemExperiences', equals: true,
+      { plugin: 'dsh-ray-personal-assistant', key: 'personalMemory.automaticLearning.workItemExperiences', equals: true,
         reason: 'personal-assistant.personalMemory.automaticLearning.workItemExperiences is not enabled; work-item experience adoption needs a fresh explicit grant' },
-      { plugin: 'dsh-enhanced-assistant-memory-learning', key: 'databasePath',
+      { plugin: 'dsh-ray-assistant-memory-learning', key: 'databasePath',
         reason: 'assistant-memory-learning has no finite owner learning configuration; run the owner RSI setup first' },
     ],
     set: [['workItemExperiences', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-growth-driver',
+    id: 'dsh-ray-assistant-growth-driver',
     purpose: 'background work-item failures as an engineering growth source',
     set: [],
     manual: 'usageLearning.workItemFailures requires signed workItemAuthorities pins (source, creation, acceptance and adoption grants); the preset never invents or extends those grants, so the owner/RSI setup must issue them explicitly',
   },
   {
-    id: 'dsh-enhanced-plugin-control-plane',
+    id: 'dsh-ray-plugin-control-plane',
     purpose: 'verified revision adoption and exact parent rollback',
     set: [],
     manual: 'revision adoption requires owner-generated ed25519 key material and explicit adoption/rollback grants; the preset never writes credentials or authority material',
@@ -1216,18 +1216,18 @@ export const recommendedPluginPreset: readonly PresetItem[] = Object.freeze([
  */
 export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
   {
-    id: 'dsh-enhanced-preference-learning',
+    id: 'dsh-ray-preference-learning',
     purpose: 'enable authenticated preference learning and T1 prompt overlays for daily memory/preference dogfooding',
     whenInstalled: true,
     set: [['enabled', true], ['autonomousT1Enabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-delivery',
+    id: 'dsh-ray-assistant-delivery',
     purpose: 'capture natural owner corrections/withdrawals and over-cap text attachments',
     set: [['attentionAttachOverCap', true], ['naturalFeedback.coverage', true], ['naturalFeedback.mixedIntent', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-evaluation',
+    id: 'dsh-ray-assistant-evaluation',
     purpose: 'record notification outcomes and intake agreement, auto-adopt bounded tightening and enable holdout-verified loosening (WP22)',
     set: [
       ['notificationOutcomesEnabled', true],
@@ -1238,18 +1238,18 @@ export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
     ],
   },
   {
-    id: 'dsh-enhanced-assistant-work-items',
+    id: 'dsh-ray-assistant-work-items',
     purpose: 'enable work-items intake ledger while keeping existing active/observe mode intact',
     whenInstalled: true,
     set: [['enabled', true], ['intakeLedger.enabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-work-items',
+    id: 'dsh-ray-assistant-work-items',
     purpose: 'enable bounded intake admission when an explicit owner originBindingId is already configured',
     whenInstalled: true,
     requires: [
       {
-        plugin: 'dsh-enhanced-assistant-work-items',
+        plugin: 'dsh-ray-assistant-work-items',
         key: 'intakeLedger.evaluation.admit.originBindingId',
         validate: nonEmptyText,
         reason: 'assistant-work-items.intakeLedger.evaluation.admit.originBindingId is not configured; automatic admission requires an explicit owner originBindingId',
@@ -1258,75 +1258,75 @@ export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
     set: [['intakeLedger.evaluation.admit.enabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-work-items',
+    id: 'dsh-ray-assistant-work-items',
     purpose: 'enable inferred intake evaluation when owner rules and model route are already configured',
     whenInstalled: true,
     requires: intakeEvaluationAuthorization,
     set: [['intakeLedger.evaluation.enabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-proactive',
+    id: 'dsh-ray-assistant-proactive',
     purpose: 'scope assistant-proactive databasePath to $DSH_HOME',
     whenInstalled: true,
     set: [],
     resolveSet: scopedDatabaseResolver({
-      id: 'dsh-enhanced-assistant-proactive',
+      id: 'dsh-ray-assistant-proactive',
       subdir: 'assistant-proactive',
       publishedDefault: join(homedir(), '.dsh', 'assistant-proactive.sqlite'),
       companion: true,
     }),
   },
   {
-    id: 'dsh-enhanced-assistant-proactive',
+    id: 'dsh-ray-assistant-proactive',
     purpose: 'enable intake evaluation when owner rules and model route are already configured',
     whenInstalled: true,
     requires: intakeEvaluationAuthorization,
     set: [['intakeEvaluation.enabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-goals',
+    id: 'dsh-ray-assistant-goals',
     purpose: 'scope assistant-goals databasePath to $DSH_HOME',
     whenInstalled: true,
     set: [],
     resolveSet: scopedDatabaseResolver({
-      id: 'dsh-enhanced-assistant-goals',
+      id: 'dsh-ray-assistant-goals',
       subdir: 'assistant-goals',
       publishedDefault: join(homedir(), '.dsh', 'assistant-goals.sqlite'),
     }),
   },
   {
-    id: 'dsh-enhanced-assistant-dreaming',
+    id: 'dsh-ray-assistant-dreaming',
     purpose: 'scope assistant-dreaming databasePath to $DSH_HOME and enable dreaming once owner scope, model route and budget are declared',
     whenInstalled: true,
     set: [],
     resolveSet: scopedDatabaseResolver({
-      id: 'dsh-enhanced-assistant-dreaming',
+      id: 'dsh-ray-assistant-dreaming',
       subdir: 'assistant-dreaming',
       publishedDefault: join(homedir(), '.dsh', 'assistant-dreaming.sqlite'),
       setWhenMissing: true,
     }),
   },
   {
-    id: 'dsh-enhanced-event-triggers',
+    id: 'dsh-ray-event-triggers',
     purpose: 'enable event-triggers poller per R3 defaults so configured triggers run without a second switch',
     whenInstalled: true,
     set: [['pollerEnabled', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-memory-learning',
+    id: 'dsh-ray-assistant-memory-learning',
     purpose: 'enable work-item experience extraction when owner review and adoption grants already carry workItemExperiences',
     requires: [
-      { plugin: 'dsh-enhanced-assistant-verifier', key: 'memoryReviews.workItemExperiences', equals: true,
+      { plugin: 'dsh-ray-assistant-verifier', key: 'memoryReviews.workItemExperiences', equals: true,
         reason: 'assistant-verifier.memoryReviews.workItemExperiences is not enabled; run dsh-web-owner-setup --autonomy-setup or owner RSI setup for background work-item experiences (foreground memory learning remains active once authorized)' },
-      { plugin: 'dsh-enhanced-personal-assistant', key: 'personalMemory.automaticLearning.workItemExperiences', equals: true,
+      { plugin: 'dsh-ray-personal-assistant', key: 'personalMemory.automaticLearning.workItemExperiences', equals: true,
         reason: 'personal-assistant.personalMemory.automaticLearning.workItemExperiences is not enabled; foreground memory learning remains active once authorized' },
-      { plugin: 'dsh-enhanced-assistant-memory-learning', key: 'databasePath',
+      { plugin: 'dsh-ray-assistant-memory-learning', key: 'databasePath',
         reason: 'assistant-memory-learning has no finite owner learning configuration; run dsh-web-owner-setup --autonomy-setup or owner RSI setup first' },
     ],
     set: [['workItemExperiences', true]],
   },
   {
-    id: 'dsh-enhanced-assistant-association',
+    id: 'dsh-ray-assistant-association',
     purpose: 'enable local associative recall, S3 dreaming/intakeSignal, S4 webLearning and scope databasePath to $DSH_HOME per R3 defaults',
     whenInstalled: true,
     set: [
@@ -1336,7 +1336,7 @@ export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
       ['webLearning.enabled', true],
     ],
     resolveSet: scopedDatabaseResolver({
-      id: 'dsh-enhanced-assistant-association',
+      id: 'dsh-ray-assistant-association',
       subdir: 'assistant-association',
       publishedDefault: join(homedir(), '.dsh', 'assistant-association.sqlite'),
       setWhenMissing: true,
@@ -1372,7 +1372,7 @@ function unmetRequirement(requirement: PresetRequirement, installed: InstalledPl
  * single verified write. Intended for onboarding flows:
  *
  * ```ts
- * import { applyRecommendedPluginPreset } from '@dsh-enhanced/assistant-policy/plugin-setup'
+ * import { applyRecommendedPluginPreset } from '@dsh-ray/assistant-policy/plugin-setup'
  * const result = await applyRecommendedPluginPreset({ dshHome, profile: 'web' })
  * ```
  *
@@ -1403,7 +1403,7 @@ export async function applyPluginPreset(
       continue
     }
     const effective = rowConfig(row)
-    if (item.id === 'dsh-enhanced-assistant-work-items' && effective.get('mode') === 'active' && effective.get('enabled') !== true) {
+    if (item.id === 'dsh-ray-assistant-work-items' && effective.get('mode') === 'active' && effective.get('enabled') !== true) {
       addPresetSkip(skipped, item.id, 'mode is active but not enabled; complete the active config deliberately')
       continue
     }
@@ -1513,7 +1513,7 @@ export function pluginSetupUsage(): string {
     '',
     'Commands:',
     '  (none)                         guided menu on a terminal; plain list otherwise',
-    '  list                           installed @dsh-enhanced plugins, loader state and feature flags',
+    '  list                           installed @dsh-ray plugins, loader state and feature flags',
     '  show <plugin>                  effective config (secret-like values redacted)',
     '  enable <plugin>                load the plugin and turn on its `enabled` gate if it has one',
     '  disable <plugin>               stop loading the plugin',
@@ -1533,9 +1533,9 @@ export function pluginSetupUsage(): string {
     '  --yes              apply a preset without the confirmation prompt',
     '  --json             machine-readable output',
     '',
-    '<plugin> accepts work-items, assistant-work-items, @dsh-enhanced/assistant-work-items or the row id.',
+    '<plugin> accepts work-items, assistant-work-items, @dsh-ray/assistant-work-items or the row id.',
     'Writes only $DSH_HOME/profiles/<profile>/cordis.patch.yml, verifies with dsh --dump-config and restores',
-    'the previous file if verification fails. Restart the profile afterwards (dsh-rsi restart --profile <name>).',
+    'the previous file if verification fails. Restart the profile afterwards (dsh-ray restart --profile <name>).',
     'Never writes secrets and never edits Policy, owner routes or sealed plugin state.',
   ].join('\n')
 }
@@ -1565,7 +1565,7 @@ function formatValue(value: unknown): string {
 
 function formatList(profile: string, patchPath: string, plugins: readonly ProfilePluginSummary[]): string {
   const lines = [`Profile ${profile} (${patchPath})`]
-  if (plugins.length === 0) lines.push('  no @dsh-enhanced plugins installed; add one with dsh plugin --profile <name> add @dsh-enhanced/<plugin>')
+  if (plugins.length === 0) lines.push('  no @dsh-ray plugins installed; add one with dsh plugin --profile <name> add @dsh-ray/<plugin>')
   const width = Math.max(10, ...plugins.map(plugin => plugin.slug.length))
   plugins.forEach((plugin, index) => {
     const state = !plugin.loaded ? 'off' : plugin.enabled === false ? 'idle' : 'on'
@@ -1584,7 +1584,7 @@ function formatWrite(result: PluginWriteResult): string {
   if (result.changes.length === 0) lines.unshift(`No change for profile ${result.profile}.`)
   else if (result.dryRun) lines.unshift(`Dry run, would update ${result.patchPath}:`)
   else lines.unshift(`Updated ${result.patchPath}:`)
-  if (result.changed && !result.dryRun) lines.push(`Restart the profile to apply: dsh-rsi restart --profile ${result.profile}`)
+  if (result.changed && !result.dryRun) lines.push(`Restart the profile to apply: dsh-ray restart --profile ${result.profile}`)
   return `${lines.join('\n')}\n`
 }
 
@@ -1627,7 +1627,7 @@ async function guided(args: PluginSetupArgs, io: PluginSetupIo, options: PluginS
       io.write(`\n${shown.summary.id}:\n${shown.config.replace(/^/gmu, '  ')}\n`)
       const keysHint = formatKnownKeysHint(shown.summary.id)
       if (keysHint !== undefined) io.write(keysHint)
-      if (shown.summary.id === 'dsh-enhanced-assistant-dreaming') {
+      if (shown.summary.id === 'dsh-ray-assistant-dreaming') {
         io.write('  Note: enabling assistant-dreaming requires explicit scope, $DSH_HOME databasePath, provider, model, budgetId and budgetAmount.\n')
       }
       const action = (await ask('[e]nable, [d]isable, [s]et key, [u]nset key, [b]ack: ')).toLowerCase()

@@ -16,22 +16,22 @@ import {
   type SessionHeader,
   type SessionLogOffset,
 } from '@deepseek-ai/dsh-session'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
 import {
   AssistantDeliveryService,
   pairPrincipalLocally,
   type DeliveryPreferenceEvent,
-} from '@dsh-enhanced/assistant-delivery'
-import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import { AssistantEvolutionService } from '@dsh-enhanced/assistant-evolution'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { PreferenceLearningService } from '@dsh-enhanced/preference-learning'
+} from '@dsh-ray/assistant-delivery'
+import { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import { AssistantEvolutionService } from '@dsh-ray/assistant-evolution'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { PreferenceLearningService } from '@dsh-ray/preference-learning'
 import { normalizeConfig as normalizeGrowthConfig } from '../plugins/assistant-growth-driver/src/config.ts'
 import { UsageLearningRuntime } from '../plugins/assistant-growth-driver/src/usage-runtime.ts'
 import {
   CodingSubscriptionAdapter,
   Config as CodingSubscriptionConfig,
-} from '@dsh-enhanced/coding-subscription-provider'
+} from '@dsh-ray/coding-subscription-provider'
 import {
   LarkChannelService,
   type LarkCardAction,
@@ -42,7 +42,7 @@ import {
   type LarkSendOptions,
   type LarkTransport,
   type LarkTransportHandlers,
-} from '@dsh-enhanced/lark-channel'
+} from '@dsh-ray/lark-channel'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 const ACCOUNT = 'bot-1'
@@ -299,7 +299,7 @@ function policyRules(workspace: string) {
     },
     {
       id: 'evolution-card', effect: 'allow' as const,
-      subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-evolution', workspace },
+      subject: { kind: 'background' as const, id: 'dsh-ray-assistant-evolution', workspace },
       actions: ['approval.send'], resource: { kind: 'message' as const, id: '*' },
       context: { initiators: ['background' as const] },
     },

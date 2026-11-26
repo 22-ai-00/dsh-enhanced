@@ -1,4 +1,4 @@
-# dsh-enhanced agent guide
+# dsh-ray agent guide
 
 ## Mission
 

@@ -5,7 +5,7 @@
 // need a structurally valid descriptor, so these fixtures avoid touching the
 // filesystem. Live execution tests must provide a real prepared runtime via
 // DSH_ISOLATION_TEST_NATIVE_RUNTIME and stay skipped otherwise.
-import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
 
 const hex = (letter: string): string => letter.repeat(64)
 

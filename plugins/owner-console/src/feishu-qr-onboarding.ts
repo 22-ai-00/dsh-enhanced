@@ -36,9 +36,9 @@ const MAX_POLL_INTERVAL_MS = 60_000
 const MAX_CONSECUTIVE_NETWORK_ERRORS = 3
 
 const REQUIRED_FEISHU_BUNDLES = [
-  '@dsh-enhanced/lark-channel',
-  '@dsh-enhanced/credentials-keychain',
-  '@dsh-enhanced/assistant-delivery',
+  '@dsh-ray/lark-channel',
+  '@dsh-ray/credentials-keychain',
+  '@dsh-ray/assistant-delivery',
 ] as const
 
 const BASE_TENANT_SCOPES = [
@@ -110,7 +110,7 @@ export function buildFeishuRegistrationUrl(input: Readonly<{
   }
   const url = new URL(input.verificationUriComplete)
   url.searchParams.set('from', 'sdk')
-  url.searchParams.set('source', 'node-sdk/dsh-enhanced/lark-channel')
+  url.searchParams.set('source', 'node-sdk/dsh-ray/lark-channel')
   url.searchParams.set('tp', 'sdk')
   url.searchParams.set('name', input.appName)
   url.searchParams.set('desc', DEFAULT_APP_DESC)
@@ -411,7 +411,7 @@ async function checkRequiredFeishuBundles(
       errored.push(`${pkg}（${entry.error.code ?? 'error'}）`)
     }
   }
-  const policyCandidates = ['@dsh-enhanced/personal-assistant', '@dsh-enhanced/assistant-policy']
+  const policyCandidates = ['@dsh-ray/personal-assistant', '@dsh-ray/assistant-policy']
     .map(pkg => bundles.find(candidate => candidate.name === pkg))
     .filter((entry): entry is BundleInfoLike => entry !== undefined && entry.installed && entry.error?.code !== 'not-bundle')
   if (policyCandidates.length > 0 && !policyCandidates.some(entry => entry.enabled && entry.error === undefined)) {
@@ -1075,7 +1075,7 @@ export class FeishuQrOnboardingManager {
       ? `dsh-lark-setup --profile ${paths.profileName} --app-id ${input.appId}`
       : undefined
     const bindingSummary = ownerBindingDetail(result.ownerBinding)
-    const finalNote = `飞书一键扫码接入配置已保存（App ID ${input.appId}；${bindingSummary}）。App Secret 已加密存入本机凭据库，通道与策略已写入 cordis.patch.yml；请重启一次 profile（重启 DeepSeek Harness.app 或运行 dsh-rsi restart）以加载新凭据句柄与策略并建立新的飞书长连接。`
+    const finalNote = `飞书一键扫码接入配置已保存（App ID ${input.appId}；${bindingSummary}）。App Secret 已加密存入本机凭据库，通道与策略已写入 cordis.patch.yml；请重启一次 profile（重启 DeepSeek Harness.app 或运行 dsh-ray restart）以加载新凭据句柄与策略并建立新的飞书长连接。`
 
     this.commitSnapshot(input.gen, Object.freeze({
       ...this.snapshot,

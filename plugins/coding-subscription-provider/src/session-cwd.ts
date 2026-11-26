@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { isAgentLoopRequest, type GenerateOptions } from '@deepseek-ai/dsh-llm'
-import type { AgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
+import type { AgentLoopRequestAttestor } from '@dsh-ray/llm-route-capabilities'
 
 export interface LiveSessionCwd {
   readonly id: NonNullable<GenerateOptions['sessionId']>

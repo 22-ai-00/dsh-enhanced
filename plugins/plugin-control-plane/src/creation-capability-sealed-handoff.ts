@@ -4,7 +4,7 @@ import { chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, link
 import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { validatePluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { validatePluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-ray/assistant-growth-contract'
 import { SOURCE_ARCHIVE_DOMAIN, SOURCE_ARCHIVE_LIMIT, verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
 import { validateCreationCapabilitySource } from './creation-capability-source.js'
 import { RESERVED_OUTPUTS, validateSourceCreationFiles } from './source-creation.js'

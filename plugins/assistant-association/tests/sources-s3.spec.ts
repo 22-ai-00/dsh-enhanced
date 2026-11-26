@@ -14,22 +14,22 @@ import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
-import { AssistantDeliveryService, type OwnerRouteAuthority } from '@dsh-enhanced/assistant-delivery'
+import { AssistantDeliveryService, type OwnerRouteAuthority } from '@dsh-ray/assistant-delivery'
 import {
   AssistantEvaluationService,
   evaluationLearningProjectionDigest,
   type TrustedTaskLearningProjectionReceipt,
-} from '@dsh-enhanced/assistant-evaluation'
-import { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
+} from '@dsh-ray/assistant-evaluation'
+import { AssistantGoalsService } from '@dsh-ray/assistant-goals'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { AssistantSkillsService } from '@dsh-ray/assistant-skills'
 import {
   AssistantWorkItemsService,
   type Config as WorkItemsConfig,
   type WorkItemIntakeEvaluatorRegistration,
-} from '@dsh-enhanced/assistant-work-items'
-import { EventTriggersService } from '@dsh-enhanced/event-triggers'
-import { PersonalWikiService } from '@dsh-enhanced/personal-wiki'
+} from '@dsh-ray/assistant-work-items'
+import { EventTriggersService } from '@dsh-ray/event-triggers'
+import { PersonalWikiService } from '@dsh-ray/personal-wiki'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   AssistantAssociationError,

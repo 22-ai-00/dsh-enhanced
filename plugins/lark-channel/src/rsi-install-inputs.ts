@@ -5,7 +5,7 @@ import { createRequire } from 'node:module'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST, resolveLocalExecutable, runtimeConfigDigest,
   validateHostDeploymentInputs, type PluginControlTrustConfig, type RuntimeObserverTarget,
-  type SourceReleaseAuthorityConfig } from '@dsh-enhanced/plugin-control-plane'
+  type SourceReleaseAuthorityConfig } from '@dsh-ray/plugin-control-plane'
 import { isMap, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 
 import { rawLoaderConfig } from './rsi-bootstrap-manifest.js'
@@ -19,8 +19,8 @@ const pluginPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const versionPattern = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/u
 const stableObserverRows = [
-  { entryId: 'dsh-enhanced-assistant-delivery', module: '@dsh-enhanced/assistant-delivery', services: ['assistantDelivery'] },
-  { entryId: 'dsh-enhanced-lark-channel', module: '@dsh-enhanced/lark-channel', services: ['larkChannel'] },
+  { entryId: 'dsh-ray-assistant-delivery', module: '@dsh-ray/assistant-delivery', services: ['assistantDelivery'] },
+  { entryId: 'dsh-ray-lark-channel', module: '@dsh-ray/lark-channel', services: ['larkChannel'] },
 ] as const
 
 function fail(message: string): never { throw new Error(`rsi installed inputs: ${message}`) }
@@ -86,8 +86,8 @@ function assertPackagePatch(bytes: Buffer, plugin: string): void {
     const entries = isSeq(insert) ? insert.items : [operation]
     for (const value of entries) {
       if (!isMap(value)) continue
-      if (value.get('id') === `dsh-enhanced-${plugin}`) {
-        if (value.get('name') !== `@dsh-enhanced/${plugin}`) fail(`${plugin} package patch mounts the wrong package`)
+      if (value.get('id') === `dsh-ray-${plugin}`) {
+        if (value.get('name') !== `@dsh-ray/${plugin}`) fail(`${plugin} package patch mounts the wrong package`)
         matches++
       }
     }
@@ -172,7 +172,7 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
   const rows = new Map<string, YAMLMap>()
   const plugins: string[] = []
   const activeBundles: string[] = []
-  const learnerId = 'dsh-enhanced-assistant-memory-learning'
+  const learnerId = 'dsh-ray-assistant-memory-learning'
   for (const value of document.contents.items) {
     if (!isMap(value)) fail('effective entry is not a mapping')
     const row = value as YAMLMap
@@ -184,12 +184,12 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     const allowDisabled = id === learnerId
       || (input.includeDisabledManagedRows === true && SELF_ITERATION_MANAGED_ROW_IDS.has(id))
     if (row.get('disabled') === true && !allowDisabled) continue
-    if (typeof name !== 'string' || !name.startsWith('@dsh-enhanced/')) {
-      if (id.startsWith('dsh-enhanced-')) fail(`installed ${id} has no package name`)
+    if (typeof name !== 'string' || !name.startsWith('@dsh-ray/')) {
+      if (id.startsWith('dsh-ray-')) fail(`installed ${id} has no package name`)
       continue
     }
-    const plugin = name.slice('@dsh-enhanced/'.length)
-    if (!pluginPattern.test(plugin) || id !== `dsh-enhanced-${plugin}`) fail(`installed ${id} has inconsistent package identity`)
+    const plugin = name.slice('@dsh-ray/'.length)
+    if (!pluginPattern.test(plugin) || id !== `dsh-ray-${plugin}`) fail(`installed ${id} has inconsistent package identity`)
     activeBundles.push(plugin)
     if (!OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(plugin)) plugins.push(plugin)
   }
@@ -209,11 +209,11 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     }
   }
   const learner = rows.get(learnerId)
-  if (!learner || learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
+  if (!learner || learner.get('name') !== '@dsh-ray/assistant-memory-learning'
     || input.includeDisabledManagedRows !== true && learner.get('disabled') === true && learner.has('config')) fail('installed memory learning row must be the unconfigured bundle entry')
-  const personal = rows.get('dsh-enhanced-personal-assistant')
+  const personal = rows.get('dsh-ray-personal-assistant')
   const personalConfig = personal?.get('config', true)
-  if (!personal || personal.get('disabled') === true || personal.get('name') !== '@dsh-enhanced/personal-assistant'
+  if (!personal || personal.get('disabled') === true || personal.get('name') !== '@dsh-ray/personal-assistant'
     || !isMap(personalConfig) || !isMap(personalConfig.get('personalMemory', true))) {
     fail('enabled embedded Personal Memory is required')
   }
@@ -222,7 +222,7 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     const row = rows.get(expected.entryId)
     if (!row || row.get('disabled') === true || row.get('name') !== expected.module) fail(`required ${expected.entryId} is unavailable`)
     const raw = rawLoaderConfig(row.get('config', true) as Node | undefined, expected.entryId)
-    if (expected.entryId === 'dsh-enhanced-lark-channel'
+    if (expected.entryId === 'dsh-ray-lark-channel'
       && (!raw || typeof raw !== 'object' || Array.isArray(raw) || (raw as Record<string, unknown>).enabled !== true)) {
       fail('installed Lark channel is not enabled')
     }
@@ -236,7 +236,7 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     await bytes(path, 64 * 1024 * 1024, entry)
   }
   for (const plugin of plugins) {
-    const prefix = `node_modules/@dsh-enhanced/${plugin}/`, packageRoot = join(profile, 'node_modules', '@dsh-enhanced', plugin)
+    const prefix = `node_modules/@dsh-ray/${plugin}/`, packageRoot = join(profile, 'node_modules', '@dsh-ray', plugin)
     const physical = await realpath(packageRoot)
     const child = relative(profile, physical)
     if (!child || child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child)) {
@@ -250,7 +250,7 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     const exportMain = exported && typeof exported === 'object' && !Array.isArray(exported)
       ? (exported as Record<string, unknown>).default : undefined
     const main = relativeJs(manifest.main, `${plugin} main`, true)
-    if (manifest.name !== `@dsh-enhanced/${plugin}` || manifest.version !== input.source.version
+    if (manifest.name !== `@dsh-ray/${plugin}` || manifest.version !== input.source.version
       || exportMain !== manifest.main || (manifest.dsh as { bundle?: { patch?: string } } | undefined)?.bundle?.patch !== './cordis.patch.yml') {
       fail(`${plugin} installed package identity or entry differs from source cohort`)
     }
@@ -266,9 +266,9 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
   // it actually resolves, and require the learner's peer to resolve to the same
   // physical provider. The embedded package is not an independent Loader row.
   const resolvedMemory = async (parent: 'personal-assistant' | 'assistant-memory-learning') => {
-    const parentManifest = await realpath(join(profile, 'node_modules', '@dsh-enhanced', parent, 'package.json'))
+    const parentManifest = await realpath(join(profile, 'node_modules', '@dsh-ray', parent, 'package.json'))
     within(profile, parentManifest, `${parent} manifest`)
-    const resolved = createRequire(parentManifest).resolve('@dsh-enhanced/personal-memory/package.json')
+    const resolved = createRequire(parentManifest).resolve('@dsh-ray/personal-memory/package.json')
     const path = await realpath(resolved)
     within(profile, path, `${parent} Personal Memory dependency`)
     return path
@@ -281,7 +281,7 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
   const memoryMain = memoryExport && typeof memoryExport === 'object' && !Array.isArray(memoryExport)
     ? (memoryExport as Record<string, unknown>).default : undefined
   const memoryEntry = relativeJs(memoryManifest.main, 'embedded Personal Memory main', true)
-  if (memoryManifest.name !== '@dsh-enhanced/personal-memory' || memoryManifest.version !== input.source.version
+  if (memoryManifest.name !== '@dsh-ray/personal-memory' || memoryManifest.version !== input.source.version
     || memoryMain !== memoryManifest.main
     || (memoryManifest.dsh as { bundle?: { patch?: string } } | undefined)?.bundle?.patch !== './cordis.patch.yml') {
     fail('embedded Personal Memory package identity or entry differs from source cohort')
@@ -314,7 +314,7 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
   const systemctl = { ...await pin(systemctlPath, 'systemctl'), interpreter: null }
   const policies: SourceReleaseAuthorityConfig['grant']['policies'] = plugins.map(plugin => ({
     targetBranch: input.source.baseline.targetBranch, candidateId: plugin,
-    packageName: `@dsh-enhanced/${plugin}`, packagePath: `plugins/${plugin}`,
+    packageName: `@dsh-ray/${plugin}`, packagePath: `plugins/${plugin}`,
     dshBaseline: dsh.version, capabilities: ['owner-installed'], authorities: ['owner-installed'], requires: [],
     registryId: input.resources.registry.id, registryLocator: input.resources.registry.locator,
     catalogId: input.resources.catalog.id, catalogPath: input.resources.catalog.path,

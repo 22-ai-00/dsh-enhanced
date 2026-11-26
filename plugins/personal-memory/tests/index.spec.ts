@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -17,9 +17,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 }
 const bundle = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
 
-describe('dsh-enhanced-personal-memory entrypoint', () => {
+describe('dsh-ray-personal-memory entrypoint', () => {
   test('exports the service contract but not the internal store or proposal manager', () => {
-    expect(entrypoint.name).toBe('dsh-enhanced-personal-memory')
+    expect(entrypoint.name).toBe('dsh-ray-personal-memory')
     expect(entrypoint.version).toBe(manifest.version)
     expect(entrypoint.PersonalMemoryService).toBeTypeOf('function')
     expect((entrypoint as Record<string, unknown>)['MemoryStore']).toBeUndefined()
@@ -33,17 +33,17 @@ describe('dsh-enhanced-personal-memory entrypoint', () => {
     expect(bundle).toContain('- assistantPolicy')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
     expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.2.2-rc.5 <0.3.0')
-    expect(manifest.peerDependencies['@dsh-enhanced/assistant-policy']).toBe('>=0.1.0 <0.2.0')
-    expect(manifest.dependencies['@dsh-enhanced/assistant-growth-contract']).toBe('workspace:*')
-    expect(manifest.peerDependencies).not.toHaveProperty('@dsh-enhanced/preference-learning')
-    expect(manifest.peerDependenciesMeta).not.toHaveProperty('@dsh-enhanced/preference-learning')
-    expect(manifest.devDependencies).not.toHaveProperty('@dsh-enhanced/preference-learning')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-policy']).toBe('>=0.1.0 <0.2.0')
+    expect(manifest.dependencies['@dsh-ray/assistant-growth-contract']).toBe('workspace:*')
+    expect(manifest.peerDependencies).not.toHaveProperty('@dsh-ray/preference-learning')
+    expect(manifest.peerDependenciesMeta).not.toHaveProperty('@dsh-ray/preference-learning')
+    expect(manifest.devDependencies).not.toHaveProperty('@dsh-ray/preference-learning')
   })
 
   test('loads the built package root when optional learning peers are unavailable', () => {
     const loader = [
       'export async function resolve(specifier, context, nextResolve) {',
-      "  if (['@dsh-enhanced/preference-learning', '@dsh-enhanced/assistant-evaluation', '@dsh-enhanced/assistant-verifier'].includes(specifier)) {",
+      "  if (['@dsh-ray/preference-learning', '@dsh-ray/assistant-evaluation', '@dsh-ray/assistant-verifier'].includes(specifier)) {",
       "    const error = new Error('blocked optional peer')",
       "    error.code = 'ERR_MODULE_NOT_FOUND'",
       '    throw error',
@@ -52,8 +52,8 @@ describe('dsh-enhanced-personal-memory entrypoint', () => {
       '}',
     ].join('\n')
     const probe = [
-      "const entrypoint = await import('@dsh-enhanced/personal-memory')",
-      "if (entrypoint.name !== 'dsh-enhanced-personal-memory') process.exit(2)",
+      "const entrypoint = await import('@dsh-ray/personal-memory')",
+      "if (entrypoint.name !== 'dsh-ray-personal-memory') process.exit(2)",
       "if (typeof entrypoint.PersonalMemoryService !== 'function') process.exit(3)",
     ].join('\n')
     const result = spawnSync(process.execPath, [

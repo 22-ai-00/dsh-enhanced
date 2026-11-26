@@ -1,7 +1,7 @@
 import { chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from 'node:fs'
 import { isAbsolute, dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-ray/task-acceptance-contract'
 import { BenchmarkError, benchmarkInteger, benchmarkPlanDigest, benchmarkResultParser, benchmarkSchedule, benchmarkSnapshot, parseBenchmarkPlan } from './schema.js'
 import type { BenchmarkCell, BenchmarkPlan, BenchmarkResult } from './types.js'
 

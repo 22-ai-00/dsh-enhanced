@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import { validateWorkItemGrowthAuthorityPins, validateWorkItemRevisionAuthorityPins,
-  type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
+  type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins } from '@dsh-ray/assistant-growth-contract'
 
 /**
  * The growth driver is enabled by default with fail-closed standby when
@@ -51,7 +51,7 @@ export interface PluginSourceProposalsConfig {
   allowRevision?: boolean
   /** Inline builds during the model wake; durable queues Host-owned work. */
   preparationMode?: 'inline' | 'durable'
-  /** Canonical absolute path of the dsh-enhanced repository the patches target. Required when enabled. */
+  /** Canonical absolute path of the dsh-ray repository the patches target. Required when enabled. */
   repository?: string
   /** Hard cap on prepared modify plans in one wake (rate limit); idempotent replays are cheap. */
   maxPlansPerWake?: number

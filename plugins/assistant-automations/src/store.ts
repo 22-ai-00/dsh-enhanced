@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { WORKFLOW_OWNER_ANCHORED_PLACEHOLDER_SCHEDULE } from '@dsh-enhanced/assistant-growth-contract'
+import { WORKFLOW_OWNER_ANCHORED_PLACEHOLDER_SCHEDULE } from '@dsh-ray/assistant-growth-contract'
 import {
   dueOccurrences,
   nextOccurrence,

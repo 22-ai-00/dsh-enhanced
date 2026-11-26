@@ -1,13 +1,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
-import type { GoalBudgetMeter } from '@dsh-enhanced/assistant-goals'
+import type { GoalBudgetMeter } from '@dsh-ray/assistant-goals'
 import { DeepSeekGoalMeteredAdapter, type DeepSeekCredentialResolver } from './adapter.js'
 import { Config, normalizeConfig, type DeepSeekGoalMeteredConfig } from './config.js'
 import { assertCurrentContract, DEEPSEEK_INPUT_TOKEN_UPPER_BOUND, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER } from './contract.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-assistant-deepseek-budget'
+export const name = 'dsh-ray-assistant-deepseek-budget'
 export const inject = ['llm', 'assistantGoals']
 export { Config, DeepSeekGoalMeteredAdapter, DEEPSEEK_INPUT_TOKEN_UPPER_BOUND, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER, version }
 export { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT } from './contract.js'
@@ -40,7 +40,7 @@ export function apply(ctx: Context, input?: DeepSeekGoalMeteredConfig): void {
       unregisterAdapter()
       for (const release of releases.splice(0).reverse()) release()
       adapter.shutdown()
-    }, 'dsh-enhanced-assistant-deepseek-budget.lifecycle')
+    }, 'dsh-ray-assistant-deepseek-budget.lifecycle')
   } catch (error) {
     for (const release of releases.reverse()) release()
     adapter.shutdown()

@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { createAgentLoopRequestAttestor, registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import { createAgentLoopRequestAttestor, registerLlmRouteCapability } from '@dsh-ray/llm-route-capabilities'
 import {
   CodingSubscriptionAdapter,
   enabledRoutes,
@@ -10,7 +10,7 @@ import { Config, normalizeConfig, type CodingSubscriptionProviderConfig } from '
 import type { LiveSessionLookup } from './session-cwd.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-coding-subscription-provider'
+export const name = 'dsh-ray-coding-subscription-provider'
 export const inject = ['llm', 'sessions', 'agents']
 
 export { CodingSubscriptionAdapter, Config, version }
@@ -20,7 +20,7 @@ export function apply(ctx: Context, input?: CodingSubscriptionProviderConfig): v
   const config = normalizeConfig(input)
   const routes = enabledRoutes(config)
   if (routes.length === 0) {
-    ctx.logger.warn('dsh-enhanced-coding-subscription-provider: every provider is disabled')
+    ctx.logger.warn('dsh-ray-coding-subscription-provider: every provider is disabled')
     return
   }
 
@@ -70,6 +70,6 @@ export function apply(ctx: Context, input?: CodingSubscriptionProviderConfig): v
   ctx.effect(() => () => {
     for (const dispose of [...capabilityDisposers].reverse()) dispose()
     adapter.shutdown()
-  }, 'dsh-enhanced-coding-subscription-provider.processes')
+  }, 'dsh-ray-coding-subscription-provider.processes')
   ctx.logger.info(`Coding subscription providers registered: ${routes.join(', ')}`)
 }

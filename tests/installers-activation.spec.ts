@@ -41,12 +41,12 @@ if (patchIndex < 0) throw new Error('missing readiness overlay')
 const overlayPath = args[patchIndex + 1]
 const rows = JSON.parse(readFileSync(overlayPath, 'utf8'))
 if (rows.length !== 1 || rows[0].insert?.length !== 1
-  || rows[0].insert[0].id !== 'dsh-enhanced-installer-readiness') throw new Error('invalid readiness overlay')
+  || rows[0].insert[0].id !== 'dsh-ray-installer-readiness') throw new Error('invalid readiness overlay')
 const modulePath = rows[0].insert[0].name
 if (typeof modulePath !== 'string' || !modulePath.startsWith('/')) throw new Error('readiness module is not absolute')
 if (dirname(modulePath) !== dirname(overlayPath)) throw new Error('readiness module escaped probe directory')
 const plugin = (await import(pathToFileURL(modulePath).href)).default
-if (plugin.name !== 'dsh-enhanced-installer-readiness' || JSON.stringify(plugin.inject) !== JSON.stringify(['appReady'])) {
+if (plugin.name !== 'dsh-ray-installer-readiness' || JSON.stringify(plugin.inject) !== JSON.stringify(['appReady'])) {
   throw new Error('invalid mounted readiness plugin')
 }
 record('loaded:' + basename(dirname(modulePath)))
@@ -87,7 +87,7 @@ setInterval(() => {}, 1000)
 }
 
 function runProbe(f: Awaited<ReturnType<typeof fixture>>, mode: string, profile = 'custom') {
-  return spawnSync('/bin/bash', ['-c', 'source "$ACTIVATION_COMMON"; dsh_enhanced_verify_profile_activation "$ACTIVATION_PROFILE" "$DSH_HOME" 0'], {
+  return spawnSync('/bin/bash', ['-c', 'source "$ACTIVATION_COMMON"; dsh_ray_verify_profile_activation "$ACTIVATION_PROFILE" "$DSH_HOME" 0'], {
     cwd: repoRoot,
     encoding: 'utf8',
     timeout: 12_000,
@@ -104,7 +104,7 @@ function runProbe(f: Awaited<ReturnType<typeof fixture>>, mode: string, profile 
 }
 
 async function expectProbeCleaned(root: string) {
-  expect((await readdir(root)).filter(name => name.startsWith('dsh-enhanced-activation.'))).toEqual([])
+  expect((await readdir(root)).filter(name => name.startsWith('dsh-ray-activation.'))).toEqual([])
 }
 
 describe('custom profile activation through the installer readiness overlay', () => {
@@ -116,7 +116,7 @@ describe('custom profile activation through the installer readiness overlay', ()
     expect(result.stdout).not.toContain('dsh web:')
     const events = (await readFile(f.log, 'utf8')).trim().split('\n')
     expect(events).toEqual([
-      expect.stringMatching(/^loaded:dsh-enhanced-activation\./u),
+      expect.stringMatching(/^loaded:dsh-ray-activation\./u),
       'listener-registered', 'fiber-active', 'ready-callback-invoked', 'listener-disposed',
       'listeners-after-dispose:0', 'fiber-disposed',
     ])
@@ -137,7 +137,7 @@ describe('custom profile activation through the installer readiness overlay', ()
     await expectProbeCleaned(f.root)
   }, 15_000)
 
-  test.each(['dsh web: http://127.0.0.1:43210/probe', 'dsh-enhanced host ready: v1'])('the Web-named profile accepts native readiness without a custom overlay: %s', async marker => {
+  test.each(['dsh web: http://127.0.0.1:43210/probe', 'dsh-ray host ready: v1'])('the Web-named profile accepts native readiness without a custom overlay: %s', async marker => {
     const f = await fixture()
     await mkdir(join(f.home, 'profiles', 'web'))
     await writeFile(join(f.home, 'profiles', 'web', 'cordis.patch.yml'), '[]\n')

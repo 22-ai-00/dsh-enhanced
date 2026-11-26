@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { validatePluginCreationVerificationCertificate, validatePluginRevisionParentBinding,
   validateSourceGrowthRunBinding,
   type PluginCreationVerificationCertificate, type PluginRevisionParentBinding,
-  type SourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  type SourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import { ControlPlaneCliError } from './errors.js'
 import { IMMUTABLE_OUTPUTS, computeLockImporter, inspectCreationHostScaffold, prepareCreationHostScaffold,

@@ -2,15 +2,15 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { isAbsolute, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
-import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
+import type { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
 import {
   canonicalExternalEventEnvelope,
   externalEventDigest,
   parseExternalEventEnvelope,
   type ExternalEventEnvelope,
-} from '@dsh-enhanced/assistant-automations/external-event'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import type { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
+} from '@dsh-ray/assistant-automations/external-event'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import type { CredentialsKeychainService } from '@dsh-ray/credentials-keychain'
 import {
   ConfigSchema,
   normalizeEventTriggersConfig,

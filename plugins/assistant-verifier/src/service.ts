@@ -3,22 +3,22 @@ import { isAbsolute, normalize, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import {
   acceptanceCanonicalJson, acceptanceDigest, acceptanceProtocolForTask, createTaskAcceptanceContract, createTaskVerificationReceipt,
-} from '@dsh-enhanced/task-acceptance-contract'
-import type { CriterionResult, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/task-acceptance-contract'
+import type { CriterionResult, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
 import { Config, assertCriteriaDecidable, compileAcceptanceProfiles } from './config.js'
 import type { AcceptanceProfile } from './config.js'
 import { verifyAcceptanceCriteria, type IsolatedVerificationContext, type VerifierAuthority } from './drivers.js'
-import type { IsolatedVerifierRunner } from '@dsh-enhanced/assistant-isolation'
+import type { IsolatedVerifierRunner } from '@dsh-ray/assistant-isolation'
 import type { AcceptanceAuthorityCatalog, AcceptanceAuthorityCatalogEntry, AcceptanceHandle, AcceptanceTask, OwnerPreparedContractInput, TaskAcceptanceProducer, TaskAcceptanceRegistration, VerifierEvaluationRegistration } from './host.js'
 import { AcceptanceStore } from './store.js'
 import type { Execution } from './store.js'
 import { SourceReviewRuntime, validateSourceReviewConfig, type SourceReviewInput, type SourceReviewSelection } from './source-review.js'
 import { MemoryReviewRuntime, validateMemoryReviewConfig } from './memory-review.js'
 import type { MemoryReviewConfig, MemoryReviewAvailability } from './memory-review.js'
-import type { MemoryLearningOwner, MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
+import type { MemoryLearningOwner, MemoryLearningReviewRequest } from '@dsh-ray/assistant-growth-contract'
 import type { PluginCreationVerificationRequest, PluginCreationVerificationResult,
   PluginRevisionVerificationRequest, PluginRevisionVerificationResult,
-  PluginRevisionRegressionRequest, PluginRevisionRegressionResult } from '@dsh-enhanced/assistant-growth-contract'
+  PluginRevisionRegressionRequest, PluginRevisionRegressionResult } from '@dsh-ray/assistant-growth-contract'
 import { CreationReviewRuntime, validateCreationReviewConfig } from './creation-review.js'
 import type { CreationReviewConfig, CreationReviewAuthorityInspection } from './creation-review.js'
 import { RevisionReviewRuntime, validateRevisionReviewConfig } from './revision-review.js'
@@ -723,7 +723,7 @@ export class AssistantVerifierService extends Service<Config> {
         current()
         let pending = this.#isolatedRunners.get(authority.digest)
         if (pending === undefined) {
-          pending = import('@dsh-enhanced/assistant-isolation').then(({ IsolatedVerifierRunner }) => {
+          pending = import('@dsh-ray/assistant-isolation').then(({ IsolatedVerifierRunner }) => {
             this.#assertActive()
             if (authority.backend !== 'linux-native') {
               throw new Error('assistant-verifier: only the linux-native isolation backend is supported')

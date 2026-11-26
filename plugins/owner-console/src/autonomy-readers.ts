@@ -48,11 +48,11 @@ export function resolveOverviewScope(
   if (ws !== '' && pr !== '') return Object.freeze({ workspace: ws, preset: pr })
 
   const candidateModules = [
-    '@dsh-enhanced/assistant-dreaming',
-    '@dsh-enhanced/assistant-work-items',
-    '@dsh-enhanced/assistant-growth-driver',
-    '@dsh-enhanced/assistant-memory-learning',
-    '@dsh-enhanced/assistant-web-owner',
+    '@dsh-ray/assistant-dreaming',
+    '@dsh-ray/assistant-work-items',
+    '@dsh-ray/assistant-growth-driver',
+    '@dsh-ray/assistant-memory-learning',
+    '@dsh-ray/assistant-web-owner',
   ]
   for (const mod of candidateModules) {
     const entry = findLoaderConfig(host, mod)
@@ -90,7 +90,7 @@ function readDreamingOverview(
   host: Context,
   installedModules: ReadonlySet<string>,
 ): OwnerConsoleAssistantOverview['dreaming'] {
-  const pkg = '@dsh-enhanced/assistant-dreaming'
+  const pkg = '@dsh-ray/assistant-dreaming'
   const svc = host.get('assistantDreaming' as never) as Record<string, unknown> | undefined
   const loaderEntry = findLoaderConfig(host, pkg)
   if (svc === undefined || svc === null) {
@@ -189,11 +189,11 @@ function readProactiveOverview(
   scope: Readonly<{ workspace: string; preset: string }> | undefined,
   installedModules: ReadonlySet<string>,
 ): OwnerConsoleAssistantOverview['proactive'] {
-  const pkg = '@dsh-enhanced/assistant-proactive'
+  const pkg = '@dsh-ray/assistant-proactive'
   const proactive = host.get('assistantProactive' as never) as Record<string, unknown> | undefined
   const evaluation = host.get('assistantEvaluation' as never) as Record<string, unknown> | undefined
   const proactiveEntry = findLoaderConfig(host, pkg)
-  const evalEntry = findLoaderConfig(host, '@dsh-enhanced/assistant-evaluation')
+  const evalEntry = findLoaderConfig(host, '@dsh-ray/assistant-evaluation')
 
   const attentionQuestions: Array<OwnerConsoleAssistantOverview['proactive']['attentionQuestions'][number]> = []
   let populatedQuestionsViaProactive = false
@@ -372,7 +372,7 @@ function readWorkItemsOverview(
   host: Context,
   installedModules: ReadonlySet<string>,
 ): OwnerConsoleAssistantOverview['workItems'] {
-  const pkg = '@dsh-enhanced/assistant-work-items'
+  const pkg = '@dsh-ray/assistant-work-items'
   const svc = host.get('assistantWorkItems' as never) as Record<string, unknown> | undefined
   const loaderEntry = findLoaderConfig(host, pkg)
   if (svc === undefined || svc === null) {
@@ -509,7 +509,7 @@ function readMemoryLearningOverview(
   host: Context,
   installedModules: ReadonlySet<string>,
 ): OwnerConsoleAssistantOverview['memoryLearning'] {
-  const pkg = '@dsh-enhanced/assistant-memory-learning'
+  const pkg = '@dsh-ray/assistant-memory-learning'
   const svc = host.get('assistantMemoryLearning' as never) as Record<string, unknown> | undefined
   const loaderEntry = findLoaderConfig(host, pkg)
   if (svc === undefined || svc === null) {
@@ -550,7 +550,7 @@ function readGrowthDriverOverview(
   host: Context,
   installedModules: ReadonlySet<string>,
 ): OwnerConsoleAssistantOverview['growthDriver'] {
-  const pkg = '@dsh-enhanced/assistant-growth-driver'
+  const pkg = '@dsh-ray/assistant-growth-driver'
   const svc = host.get('assistantGrowthDriver' as never) as Record<string, unknown> | undefined
   const loaderEntry = findLoaderConfig(host, pkg)
   if (svc === undefined || svc === null) {
@@ -642,7 +642,7 @@ export function executeDreamingIdeaAction(
   action: DreamingIdeaAction,
   note: string,
 ): OwnerConsoleWriteResult {
-  const entry = 'dsh-enhanced-assistant-dreaming'
+  const entry = 'dsh-ray-assistant-dreaming'
   const svc = host.get('assistantDreaming' as never) as Record<string, unknown> | undefined
   if (svc === undefined || svc === null) {
     return Object.freeze({ applied: false, entry, note: 'assistant-dreaming 未加载，无法执行想法状态变更' })
@@ -707,7 +707,7 @@ export function executeAttentionQuestionReply(
   const sourceId = cohortSourceId.trim()
   const qid = questionId.trim()
   if (ws === '' || pr === '' || qid === '') {
-    return Object.freeze({ applied: false, entry: 'dsh-enhanced-assistant-evaluation', note: 'workspace、preset 与 questionId 均不能为空' })
+    return Object.freeze({ applied: false, entry: 'dsh-ray-assistant-evaluation', note: 'workspace、preset 与 questionId 均不能为空' })
   }
   try {
     if (proactive !== undefined && proactive !== null && typeof proactive['resolveAttentionQuestion'] === 'function') {
@@ -718,16 +718,16 @@ export function executeAttentionQuestionReply(
       if (status === 'applied' || status === 'recorded' || status === 'accepted') {
         return Object.freeze({
           applied: true,
-          entry: 'dsh-enhanced-assistant-proactive',
+          entry: 'dsh-ray-assistant-proactive',
           note: choice === 'authorize-once'
             ? `已记录问题 ${qid} 的单次授权（后续仍需 holdout 复核）`
             : `已拒绝问题 ${qid} 的放宽建议`,
         })
       }
       const reason = str(result['reason'], 120) ?? status ?? '未记录'
-      return Object.freeze({ applied: false, entry: 'dsh-enhanced-assistant-proactive', note: `拒绝本次回复：${reason}` })
+      return Object.freeze({ applied: false, entry: 'dsh-ray-assistant-proactive', note: `拒绝本次回复：${reason}` })
     }
-    const entry = 'dsh-enhanced-assistant-evaluation'
+    const entry = 'dsh-ray-assistant-evaluation'
     if (evaluation === undefined || evaluation === null
       || typeof evaluation['applyAttentionOwnerQuestionReply'] !== 'function') {
       return Object.freeze({ applied: false, entry, note: 'assistant-evaluation 未加载，无法响应注意力授权问题' })
@@ -756,7 +756,7 @@ export function executeAttentionQuestionReply(
   } catch (error) {
     return Object.freeze({
       applied: false,
-      entry: 'dsh-enhanced-assistant-evaluation',
+      entry: 'dsh-ray-assistant-evaluation',
       note: str(error instanceof Error ? error.message : String(error), 400) ?? '注意力授权操作失败',
     })
   }
@@ -769,7 +769,7 @@ export function executeProactiveDraftAction(
   workspace: string,
   preset: string,
 ): OwnerConsoleWriteResult {
-  const entry = 'dsh-enhanced-assistant-proactive'
+  const entry = 'dsh-ray-assistant-proactive'
   const proactive = host.get('assistantProactive' as never) as Record<string, unknown> | undefined
   if (proactive === undefined || proactive === null) {
     return Object.freeze({ applied: false, entry, note: 'assistant-proactive 未加载' })

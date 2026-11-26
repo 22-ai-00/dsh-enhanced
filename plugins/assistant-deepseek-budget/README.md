@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-deepseek-budget
+# @dsh-ray/assistant-deepseek-budget
 
 为 `assistant-goals` 提供固定的 DeepSeek v4 文本与工具调用路由，以及同生命周期的保守 token 预算计量。它只注册 `deepseek-goal-metered`，并且只接受 `deepseek-v4-flash` 和 `deepseek-v4-pro`；不能改 endpoint、模型别名或 context window。
 
@@ -9,8 +9,8 @@
 先安装并配置 `assistant-goals` 的有限 `executionBudget`。本插件仅在 `enabled: true` 时启用；此时若 Goals 预算能力不存在，整个路由不会注册。
 
 ```yaml
-- id: dsh-enhanced-assistant-deepseek-budget
-  name: '@dsh-enhanced/assistant-deepseek-budget'
+- id: dsh-ray-assistant-deepseek-budget
+  name: '@dsh-ray/assistant-deepseek-budget'
   config:
     enabled: true
     apiKeyEnv: DEEPSEEK_API_KEY

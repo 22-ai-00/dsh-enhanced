@@ -1,12 +1,12 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool, type ToolExecution } from '@deepseek-ai/dsh-tools'
-import type {} from '@dsh-enhanced/assistant-delivery'
-import type {} from '@dsh-enhanced/assistant-policy'
-import type {} from '@dsh-enhanced/credentials-keychain'
-import type { GoalExecutionRun } from '@dsh-enhanced/assistant-goals'
-import type { RepositoryOutcomeAuthority } from '@dsh-enhanced/assistant-verifier'
-import { validateTaskAcceptanceContract, validateTaskVerificationReceipt, type TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import type {} from '@dsh-ray/assistant-delivery'
+import type {} from '@dsh-ray/assistant-policy'
+import type {} from '@dsh-ray/credentials-keychain'
+import type { GoalExecutionRun } from '@dsh-ray/assistant-goals'
+import type { RepositoryOutcomeAuthority } from '@dsh-ray/assistant-verifier'
+import { validateTaskAcceptanceContract, validateTaskVerificationReceipt, type TaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
 import { createHash, createPrivateKey, createPublicKey, randomUUID, type KeyObject } from 'node:crypto'
 import { chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -540,7 +540,7 @@ export class AssistantActionsService extends Service {
     if (!policy) throw new Error('assistant-actions: repository event policy unavailable')
     const eventPolicy = () => policy.evaluate({ subject: { kind: 'background' as const, id: `event-triggers:${input.triggerId}`, workspace: input.owner.workspace, principal: input.owner.principalId },
       action: 'observe', resource: { kind: 'network' as const, id: `https://api.github.com/repos/${input.repository}` }, context: { initiator: 'background' as const } }).effect === 'allow'
-    const actionPolicy = () => policy.evaluate({ subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-actions', workspace: input.owner.workspace, principal: input.owner.principalId },
+    const actionPolicy = () => policy.evaluate({ subject: { kind: 'background' as const, id: 'dsh-ray-assistant-actions', workspace: input.owner.workspace, principal: input.owner.principalId },
       action: 'execute', resource: { kind: 'tool' as const, id: `action:github:${grant.id}` }, context: { initiator: 'background' as const } }).effect === 'allow'
     if (!eventPolicy() || !actionPolicy()) throw new Error('assistant-actions: repository event policy denied')
     let selected: { intent: DeliveryIntent; outcome: DeliveryOutcome } | undefined
@@ -567,7 +567,7 @@ export class AssistantActionsService extends Service {
           if (current.snapshot !== snapshot) return false
           const livePolicy = this.ctx.get('assistantPolicy')
           if (!livePolicy) return false
-          return livePolicy.authorize({ subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions', workspace: input.owner.workspace, principal: input.owner.principalId },
+          return livePolicy.authorize({ subject: { kind: 'background', id: 'dsh-ray-assistant-actions', workspace: input.owner.workspace, principal: input.owner.principalId },
             action: 'execute', resource: { kind: 'tool', id: `action:github:${grant.id}` }, context: { initiator: 'background' } }, { idempotencyKey: `external-action:${actionId}` }).effect === 'allow'
         } catch { return false }
       },
@@ -912,7 +912,7 @@ export class AssistantActionsService extends Service {
   }
 
   #deliveryPolicy(security: DeliverySecurity) {
-    return { subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-actions', workspace: security.identity.workspace, principal: security.principalId },
+    return { subject: { kind: 'background' as const, id: 'dsh-ray-assistant-actions', workspace: security.identity.workspace, principal: security.principalId },
       action: 'execute' as const, resource: { kind: 'tool' as const, id: `action:github:${security.grantId}` }, context: { initiator: 'background' as const } }
   }
   #deliveryIdentity(security: DeliverySecurity): ActionIdentity {

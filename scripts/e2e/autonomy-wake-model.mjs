@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
 
-export const name = 'dsh-enhanced-autonomy-wake-e2e-model'
+export const name = 'dsh-ray-autonomy-wake-e2e-model'
 export const inject = ['llm', 'agents', 'assistantGoals', 'assistantDelivery']
 export const objective = 'Schedule a verified shell program that reads two integers and prints their sum'
 export const preparation = 'Prepare this session for a scheduled calculation'

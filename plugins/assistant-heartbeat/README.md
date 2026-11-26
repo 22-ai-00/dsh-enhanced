@@ -1,13 +1,13 @@
-# @dsh-enhanced/assistant-heartbeat
+# @dsh-ray/assistant-heartbeat
 
 在 `assistant-automations` 上收敛“有 checklist 才运行”的主动巡检。它不创建第二套 timer、task 表或数据库；每个配置项只拥有一份 Markdown scratch，并创建一个 `assistant-heartbeat` system-owned automation row。
 
 ## 安装
 
-先安装并配置 `@dsh-enhanced/assistant-policy` 与 `@dsh-enhanced/assistant-automations`，再安装本包：
+先安装并配置 `@dsh-ray/assistant-policy` 与 `@dsh-ray/assistant-automations`，再安装本包：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-heartbeat
+dsh plugin --profile web add @dsh-ray/assistant-heartbeat
 dsh --profile web --dump-config
 ```
 

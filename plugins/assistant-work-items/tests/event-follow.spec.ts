@@ -1,6 +1,6 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { externalEventDigest, type ExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
+import { externalEventDigest, type ExternalEventEnvelope } from '@dsh-ray/assistant-automations/external-event'
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'

@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { generateKeyPairSync } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'

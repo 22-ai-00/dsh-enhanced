@@ -13,7 +13,7 @@ import {
   loadAssistantDreaming,
   loadAssistantGrowthDriver,
   loadAssistantPolicy,
-  loadDshRsiUpgrade,
+  loadDshRayUpgrade,
   loadPackageModule,
 } from './helpers/packages.ts'
 import { createWorkspaceTracker } from './helpers/workspace.ts'
@@ -355,10 +355,10 @@ describe('Tier 5 — Adversarial Hardening Regressions (Gaps 1 & 3–9)', () => 
     }
   }, 15_000)
 
-  test('T5-GAP8-01 & T5-GAP9-01: assistant-growth-driver rejects whitespace scope/budgetId & dsh-rsi runUpgrade rejects symlink dshHome', async () => {
+  test('T5-GAP8-01 & T5-GAP9-01: assistant-growth-driver rejects whitespace scope/budgetId & dsh-ray runUpgrade rejects symlink dshHome', async () => {
     const ws = await workspaces.create('t5-gap89-')
     const gdMod = await loadAssistantGrowthDriver()
-    const upgMod = await loadDshRsiUpgrade()
+    const upgMod = await loadDshRayUpgrade()
 
     expect(() => gdMod.Config({
       scope: { workspace: '   ', preset: 'p', principalId: 'u', ownerRouteId: 'r' },

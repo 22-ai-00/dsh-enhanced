@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import type { ForegroundToolCallAttestation, OwnerForegroundToolInput } from '@dsh-enhanced/assistant-delivery'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { ForegroundToolCallAttestation, OwnerForegroundToolInput } from '@dsh-ray/assistant-delivery'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { GoalScope } from './types.js'
 
 /** Frozen identity of the authenticated owner request that authorized one native goal. */

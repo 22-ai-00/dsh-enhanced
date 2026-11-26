@@ -1,4 +1,4 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { describe, expect, it } from 'vitest'
 import { parseStrategyBenchmarkConfig, type StrategyBenchmarkConfig } from '../../src/benchmark/strategy-config.ts'
 import { strategyDevelopmentCases, strategyDevelopmentCorpus, strategyDevelopmentDataset, strategyDevelopmentTask } from '../../src/benchmark/strategy-corpus.ts'

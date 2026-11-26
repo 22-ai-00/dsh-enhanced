@@ -1,23 +1,23 @@
-# @dsh-enhanced/personal-wiki
+# @dsh-ray/personal-wiki
 
 面向个人助理的 Markdown 知识库。页面是人可读、可备份的唯一真源；进程内目录、段落检索索引、反链与 lint 报告都可从页面重建。当前 owner 明确要求的 create/update 经独立审查后可即时提交；其他写入仍走持久审批。它保存研究、项目、人物、概念、来源与决策等长资料；每轮都可能有用的短事实和偏好应交给 `personal-memory`。
 
 ## 安装
 
-本插件要求 `@dsh-enhanced/assistant-policy` 先提供 `ctx.assistantPolicy`。生产聊天审批还应组合可选的 `@dsh-enhanced/assistant-delivery`；Wiki 只依赖它的公开类型与 Cordis service，不把 Delivery 打进自己的发布包：
+本插件要求 `@dsh-ray/assistant-policy` 先提供 `ctx.assistantPolicy`。生产聊天审批还应组合可选的 `@dsh-ray/assistant-delivery`；Wiki 只依赖它的公开类型与 Cordis service，不把 Delivery 打进自己的发布包：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-policy
-dsh plugin --profile web add @dsh-enhanced/assistant-delivery
-dsh plugin --profile web add @dsh-enhanced/personal-wiki
+dsh plugin --profile web add @dsh-ray/assistant-policy
+dsh plugin --profile web add @dsh-ray/assistant-delivery
+dsh plugin --profile web add @dsh-ray/personal-wiki
 dsh --profile web --dump-config
 ```
 
 默认页面位于 `$DSH_HOME/personal-wiki/vault/wiki/`，提案状态位于 `$DSH_HOME/personal-wiki/state.sqlite`。默认 policy 没有 allow 规则，因此所有模型操作都会 fail closed。按真实 preset 与绝对 workspace 放行所需服务和工具：
 
 ```yaml
-- id: dsh-enhanced-assistant-policy
-  name: '@dsh-enhanced/assistant-policy'
+- id: dsh-ray-assistant-policy
+  name: '@dsh-ray/assistant-policy'
   config:
     databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
     rules:

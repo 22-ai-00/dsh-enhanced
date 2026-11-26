@@ -143,15 +143,15 @@ describe('web-owner RSI autonomy grants', () => {
     expect(patchStat.mode & 0o777).toBe(0o600)
     expect(savedPatch).not.toMatch(/&a\d+|\*a\d+/u)
 
-    const learningRow = findRow(savedPatch, 'dsh-enhanced-assistant-memory-learning')
+    const learningRow = findRow(savedPatch, 'dsh-ray-assistant-memory-learning')
     expect(learningRow.disabled).toBe(false)
     const validatedLearning = validateLearningConfig(learningRow.config)
-    const verifierCfg = rowConfig(savedPatch, 'dsh-enhanced-assistant-verifier')
+    const verifierCfg = rowConfig(savedPatch, 'dsh-ray-assistant-verifier')
     expect(typeof verifierCfg.databasePath === 'string' && verifierCfg.databasePath.length > 0).toBe(true)
     const validatedReviews = validateMemoryReviewConfig(verifierCfg.memoryReviews)
-    const validatedAdoption = validateMemoryLearningAdoptionGrant(rowConfig(savedPatch, 'dsh-enhanced-personal-assistant').personalMemory.automaticLearning)
-    const validatedDreaming = validateDreamingConfig(rowConfig(savedPatch, 'dsh-enhanced-assistant-dreaming'))
-    const validatedGrowth = validateGrowthConfig(rowConfig(savedPatch, 'dsh-enhanced-assistant-growth-driver'))
+    const validatedAdoption = validateMemoryLearningAdoptionGrant(rowConfig(savedPatch, 'dsh-ray-personal-assistant').personalMemory.automaticLearning)
+    const validatedDreaming = validateDreamingConfig(rowConfig(savedPatch, 'dsh-ray-assistant-dreaming'))
+    const validatedGrowth = validateGrowthConfig(rowConfig(savedPatch, 'dsh-ray-assistant-growth-driver'))
 
     // Four distinct authority identifiers and matching cryptographic digests.
     expect(new Set([
@@ -189,7 +189,7 @@ describe('web-owner RSI autonomy grants', () => {
     })
 
     // Exercise generated policy rules & finite budgets against real AssistantPolicyService.
-    const personalCfg = rowConfig(savedPatch, 'dsh-enhanced-personal-assistant')
+    const personalCfg = rowConfig(savedPatch, 'dsh-ray-personal-assistant')
     expect(personalCfg.assistantAutomations.schedulerEnabled).toBe(true)
     const ctx = new Context()
     const policyService = new AssistantPolicyService(ctx, {
@@ -237,13 +237,13 @@ describe('web-owner RSI autonomy grants', () => {
     const f = await createWebAutonomyFixture()
     const doc = parseDocument(await readFile(f.patchPath, 'utf8'))
     const rows = doc.toJS() as Array<{ id: string; config?: Record<string, any> }>
-    const personal = rows.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    const personal = rows.find(r => r.id === 'dsh-ray-personal-assistant')!
     personal.config!.assistantPolicy = {
       ...personal.config!.assistantPolicy,
       rules: [{ id: 'custom-deny-rm', effect: 'deny', actions: ['execute'], resource: { kind: 'tool', id: 'shell' } }],
       budgets: [{ id: 'custom-tokens', metric: 'tokens', limit: 999, periodMs: 86_400_000, scope: 'workspace' }],
     }
-    const delivery = rows.find(r => r.id === 'dsh-enhanced-assistant-delivery')!
+    const delivery = rows.find(r => r.id === 'dsh-ray-assistant-delivery')!
     delivery.config!.ownerRoutes = [{
       id: 'unrelated-lark-route',
       conversation: { channel: 'lark', account: 'bot', tenant: 't', kind: 'dm', chat: 'oc_1' },
@@ -265,10 +265,10 @@ describe('web-owner RSI autonomy grants', () => {
       { readEffectiveSource: () => f.effective },
     )
     expect(second.grants.patch).toBe(first.grants.patch)
-    expect(rowConfig(first.grants.patch, 'dsh-enhanced-assistant-memory-learning').workItemExperiences).toBe(false)
-    expect(Object.hasOwn(rowConfig(first.grants.patch, 'dsh-enhanced-assistant-verifier').memoryReviews, 'workItemExperiences')).toBe(false)
-    expect(Object.hasOwn(rowConfig(first.grants.patch, 'dsh-enhanced-personal-assistant').personalMemory.automaticLearning, 'workItemExperiences')).toBe(false)
-    expect(rowConfig(first.grants.patch, 'dsh-enhanced-assistant-verifier').requireAcceptance).toBe(true)
+    expect(rowConfig(first.grants.patch, 'dsh-ray-assistant-memory-learning').workItemExperiences).toBe(false)
+    expect(Object.hasOwn(rowConfig(first.grants.patch, 'dsh-ray-assistant-verifier').memoryReviews, 'workItemExperiences')).toBe(false)
+    expect(Object.hasOwn(rowConfig(first.grants.patch, 'dsh-ray-personal-assistant').personalMemory.automaticLearning, 'workItemExperiences')).toBe(false)
+    expect(rowConfig(first.grants.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(true)
 
     // Pause dreaming without mentioning memoryLearning/growth -> preserves both and retains dream.* foreground rules.
     const paused = await applyWebOwnerAutonomySetup(
@@ -283,8 +283,8 @@ describe('web-owner RSI autonomy grants', () => {
       workItemExperiences: false,
     })
     const pausedPatch = await readFile(f.patchPath, 'utf8')
-    expect(rowConfig(pausedPatch, 'dsh-enhanced-assistant-dreaming')).toMatchObject({ enabled: true, retired: true })
-    expect(validateDreamingConfig(rowConfig(pausedPatch, 'dsh-enhanced-assistant-dreaming')).retired).toBe(true)
+    expect(rowConfig(pausedPatch, 'dsh-ray-assistant-dreaming')).toMatchObject({ enabled: true, retired: true })
+    expect(validateDreamingConfig(rowConfig(pausedPatch, 'dsh-ray-assistant-dreaming')).retired).toBe(true)
 
     // Disable memory learning only -> preserves custom rule/budget, unrelated lark route, and dreaming/growth.
     await applyWebOwnerAutonomySetup(
@@ -292,12 +292,12 @@ describe('web-owner RSI autonomy grants', () => {
       { readEffectiveSource: () => f.effective },
     )
     const afterDisableMemory = await readFile(f.patchPath, 'utf8')
-    expect(findRow(afterDisableMemory, 'dsh-enhanced-assistant-memory-learning').disabled).toBe(true)
-    const afterPersonal = rowConfig(afterDisableMemory, 'dsh-enhanced-personal-assistant')
+    expect(findRow(afterDisableMemory, 'dsh-ray-assistant-memory-learning').disabled).toBe(true)
+    const afterPersonal = rowConfig(afterDisableMemory, 'dsh-ray-personal-assistant')
     expect(afterPersonal.assistantPolicy.rules.some((r: { id: string }) => r.id === 'custom-deny-rm')).toBe(true)
     expect(afterPersonal.assistantPolicy.rules.some((r: { id: string }) => r.id.includes('memory'))).toBe(false)
     expect(afterPersonal.assistantPolicy.budgets.map((b: { id: string }) => b.id)).toContain('custom-tokens')
-    expect(rowConfig(afterDisableMemory, 'dsh-enhanced-assistant-delivery').ownerRoutes.map((r: { id: string }) => r.id))
+    expect(rowConfig(afterDisableMemory, 'dsh-ray-assistant-delivery').ownerRoutes.map((r: { id: string }) => r.id))
       .toContain('unrelated-lark-route')
   })
 
@@ -342,17 +342,17 @@ describe('web-owner RSI autonomy grants', () => {
 
     // 4. Disabled traex-acp-provider when selecting traex-agent.
     const disabledDoc = parseDocument(noModel.effective)
-    disabledDoc.add({ id: 'dsh-enhanced-traex-acp-provider', disabled: true, config: {} })
+    disabledDoc.add({ id: 'dsh-ray-traex-acp-provider', disabled: true, config: {} })
     const disabledAcpEffective = disabledDoc.toString()
     expect(() => compileWebOwnerAutonomyGrants(
       { dshHome: noModel.dshHome, profile: 'web', dreaming: 'enabled', modelProvider: 'traex-agent', modelId: 'default' },
       readFileSync(noModel.patchPath, 'utf8'),
       disabledAcpEffective,
-    )).toThrow(/dsh-enhanced-traex-acp-provider to be enabled/u)
+    )).toThrow(/dsh-ray-traex-acp-provider to be enabled/u)
 
     // 5. Rejects pre-existing global ~/.dsh/*.sqlite database path leak.
     const leakedPatch = parseDocument(readFileSync(multi.patchPath, 'utf8'))
-    leakedPatch.add({ id: 'dsh-enhanced-assistant-dreaming', config: { databasePath: join(process.env.HOME ?? '/tmp', '.dsh', 'dreaming.sqlite') } })
+    leakedPatch.add({ id: 'dsh-ray-assistant-dreaming', config: { databasePath: join(process.env.HOME ?? '/tmp', '.dsh', 'dreaming.sqlite') } })
     expect(() => compileWebOwnerAutonomyGrants(
       { dshHome: multi.dshHome, profile: 'web', dreaming: 'enabled' },
       leakedPatch.toString(),
@@ -481,15 +481,15 @@ describe('web-owner RSI autonomy grants', () => {
     })
     const saved = await readFile(patchPath, 'utf8')
     const parsedRows = parseDocument(saved).toJS() as Array<{ id: string }>
-    expect(parsedRows.some(r => r.id === 'dsh-enhanced-assistant-dreaming')).toBe(false)
-    expect(parsedRows.some(r => r.id === 'dsh-enhanced-assistant-growth-driver')).toBe(false)
+    expect(parsedRows.some(r => r.id === 'dsh-ray-assistant-dreaming')).toBe(false)
+    expect(parsedRows.some(r => r.id === 'dsh-ray-assistant-growth-driver')).toBe(false)
   })
 
   test('restates required personal-assistant (personalWiki/personalMemory) and assistant-delivery paths on minimal patch even with memoryLearning disabled', async () => {
     const f = await createWebAutonomyFixture()
     const minimalPatch = [
-      '- id: dsh-enhanced-assistant-web-owner',
-      '  name: "@dsh-enhanced/assistant-web-owner"',
+      '- id: dsh-ray-assistant-web-owner',
+      '  name: "@dsh-ray/assistant-web-owner"',
       '  config:',
       '    principal: { account: web, tenant: local, user: operator }',
       `    workspace: ${f.workspace}`,
@@ -508,7 +508,7 @@ describe('web-owner RSI autonomy grants', () => {
       minimalPatch,
       f.effective,
     )
-    const paCfg = rowConfig(compiled.patch, 'dsh-enhanced-personal-assistant')
+    const paCfg = rowConfig(compiled.patch, 'dsh-ray-personal-assistant')
     expect(paCfg.assistantPolicy?.databasePath).toBeTruthy()
     expect(paCfg.personalMemory?.databasePath).toBeTruthy()
     expect(paCfg.personalWiki?.vaultRoot).toBeTruthy()
@@ -516,7 +516,7 @@ describe('web-owner RSI autonomy grants', () => {
     expect(paCfg.assistantAutomations?.databasePath).toBeTruthy()
     expect(paCfg.assistantAutomations?.runsPath).toBeTruthy()
 
-    const deliveryCfg = rowConfig(compiled.patch, 'dsh-enhanced-assistant-delivery')
+    const deliveryCfg = rowConfig(compiled.patch, 'dsh-ray-assistant-delivery')
     expect(deliveryCfg.databasePath).toBeTruthy()
     expect(deliveryCfg.spoolPath).toBeTruthy()
     expect(Array.isArray(deliveryCfg.ownerRoutes) && deliveryCfg.ownerRoutes.length > 0).toBe(true)
@@ -526,14 +526,14 @@ describe('web-owner RSI autonomy grants', () => {
     const f = await createWebAutonomyFixture()
     const effDoc = parseDocument(f.effective, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] })
     const effRows = effDoc.toJS() as Array<{ id?: string; config?: Record<string, unknown> }>
-    const verifierIdx = effRows.findIndex(r => r.id === 'dsh-enhanced-assistant-verifier')
+    const verifierIdx = effRows.findIndex(r => r.id === 'dsh-ray-assistant-verifier')
     if (verifierIdx >= 0) {
       effDoc.deleteIn([verifierIdx, 'config', 'requireAcceptance'])
     }
     const verifierWithoutFlagEffective = effDoc.toString()
     const basePatch = [
-      '- id: dsh-enhanced-assistant-web-owner',
-      '  name: "@dsh-enhanced/assistant-web-owner"',
+      '- id: dsh-ray-assistant-web-owner',
+      '  name: "@dsh-ray/assistant-web-owner"',
       '  config:',
       '    principal: { account: web, tenant: local, user: operator }',
       `    workspace: ${f.workspace}`,
@@ -545,12 +545,12 @@ describe('web-owner RSI autonomy grants', () => {
       basePatch,
       verifierWithoutFlagEffective,
     )
-    expect(rowConfig(compiledDefault.patch, 'dsh-enhanced-assistant-verifier').requireAcceptance).toBe(true)
+    expect(rowConfig(compiledDefault.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(true)
 
     const optOutPatch = [
       basePatch.trimEnd(),
-      '- id: dsh-enhanced-assistant-verifier',
-      '  name: "@dsh-enhanced/assistant-verifier"',
+      '- id: dsh-ray-assistant-verifier',
+      '  name: "@dsh-ray/assistant-verifier"',
       '  config:',
       '    requireAcceptance: false',
       '',
@@ -560,6 +560,6 @@ describe('web-owner RSI autonomy grants', () => {
       optOutPatch,
       verifierWithoutFlagEffective,
     )
-    expect(rowConfig(compiledOptOut.patch, 'dsh-enhanced-assistant-verifier').requireAcceptance).toBe(false)
+    expect(rowConfig(compiledOptOut.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(false)
   })
 })

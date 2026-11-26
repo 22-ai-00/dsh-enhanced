@@ -1,5 +1,5 @@
-import { RECOVERY_CATALOG_DIGEST, type RecoveryOperatorSnapshot } from '@dsh-enhanced/assistant-recovery'
-import type { AutomationsOperatorSnapshot } from '@dsh-enhanced/assistant-automations'
+import { RECOVERY_CATALOG_DIGEST, type RecoveryOperatorSnapshot } from '@dsh-ray/assistant-recovery'
+import type { AutomationsOperatorSnapshot } from '@dsh-ray/assistant-automations'
 import { describe, expect, test } from 'vitest'
 import {
   captureSupervisedGrowthLifecycleAttestation,
@@ -16,13 +16,13 @@ const databaseDigest = 'd'.repeat(64)
 
 function effective(stage: 'preview' | 'active', nonce = 'activation-one'): string {
   return `
-- id: dsh-enhanced-lark-channel
+- id: dsh-ray-lark-channel
   config:
     enabled: ${stage === 'active'}
-- id: dsh-enhanced-assistant-health
+- id: dsh-ray-assistant-health
   config:
     requiredProviders: ${stage === 'active' ? '[larkChannel]' : '[]'}
-- id: dsh-enhanced-assistant-recovery
+- id: dsh-ray-assistant-recovery
   config:
     databasePath: /state/recovery.sqlite
     maxStepDurationMs: 1000
@@ -81,7 +81,7 @@ function automationSnapshot(input: {
       runningTaskCount: 0,
     }),
     Object.freeze({
-      id: 'recovery:supervised-growth', owner: 'dsh-enhanced-assistant-recovery',
+      id: 'recovery:supervised-growth', owner: 'dsh-ray-assistant-recovery',
       definitionHash: recoveryDefinitionHash, status, createdAt: 1, updatedAt: 2, version: 2,
       runningTaskCount: 0,
     }),
@@ -166,7 +166,7 @@ describe('supervised growth lifecycle attestation', () => {
         status: 'paused', definitionHash: analystDefinitionHash,
       },
       {
-        id: 'recovery:supervised-growth', owner: 'dsh-enhanced-assistant-recovery',
+        id: 'recovery:supervised-growth', owner: 'dsh-ray-assistant-recovery',
         status: 'paused', definitionHash: recoveryDefinitionHash,
       },
     ])
@@ -261,7 +261,7 @@ describe('supervised growth lifecycle attestation', () => {
     ['extra', [
       ...automationSnapshot({ stage: 'active' }).records,
       {
-        id: 'recovery:unexpected', owner: 'dsh-enhanced-assistant-recovery',
+        id: 'recovery:unexpected', owner: 'dsh-ray-assistant-recovery',
         definitionHash: '9'.repeat(64), status: 'active' as const, createdAt: 1, updatedAt: 1,
         version: 1, runningTaskCount: 0,
       },

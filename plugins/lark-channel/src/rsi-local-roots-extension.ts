@@ -19,8 +19,8 @@ export function rsiLocalUpdateBundles(original: readonly string[], extension?: R
 
 /** Matches the learner bundle's published cordis.patch.yml initial row. */
 export const rsiMemoryLearningInitialRow = Object.freeze({
-  id: 'dsh-enhanced-assistant-memory-learning',
-  name: '@dsh-enhanced/assistant-memory-learning',
+  id: 'dsh-ray-assistant-memory-learning',
+  name: '@dsh-ray/assistant-memory-learning',
   disabled: true,
   inject: Object.freeze([
     'assistantDelivery', 'assistantEvaluation', 'assistantAutomations', 'personalMemory', 'assistantVerifier',

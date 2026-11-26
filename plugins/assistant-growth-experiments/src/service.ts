@@ -12,7 +12,7 @@ import {
   validateGrowthRollbackReceipt,
   validateGrowthShadowReceipt,
   validateGrowthWorkflowTraceSourceRegistration,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import { GrowthExperimentsStore, GrowthExperimentsStoreError } from './store.js'
 import type {
   GrowthArtifactIdentity,

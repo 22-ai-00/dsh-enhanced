@@ -2,9 +2,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import { apply, helloMessage, name } from '../src/index.ts'
 
-describe('dsh-enhanced-hello', () => {
+describe('dsh-ray-hello', () => {
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-hello')
+    expect(name).toBe('dsh-ray-hello')
   })
 
   it('logs its activation', () => {

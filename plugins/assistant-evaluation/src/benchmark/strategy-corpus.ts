@@ -1,5 +1,5 @@
 /** Public synthetic development tasks for the native Goal strategy benchmark. */
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { strategyGoalTaskDigests, type StrategyGoalTask } from './strategy-goal-runtime.js'
 import type { BenchmarkCase, BenchmarkPlan } from './types.js'
 

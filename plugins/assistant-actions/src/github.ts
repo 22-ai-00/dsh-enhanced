@@ -191,7 +191,7 @@ async function graphql(payload: string, token: string, signal: AbortSignal, tran
           authorization: `Bearer ${token}`,
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(payload),
-          'user-agent': 'dsh-enhanced-assistant-actions',
+          'user-agent': 'dsh-ray-assistant-actions',
         },
       }, (response) => {
         let size = 0
@@ -260,7 +260,7 @@ async function rest(path: string, method: 'GET' | 'POST', token: string, body: o
       request = transport(new URL(`${API}${path.slice(1)}`), { method, agent: false, headers: {
         accept: 'application/vnd.github+json', authorization: `Bearer ${token}`, 'content-type': 'application/json',
         ...(payload ? { 'content-length': Buffer.byteLength(payload) } : {}),
-        'user-agent': 'dsh-enhanced-assistant-actions', 'x-github-api-version': '2022-11-28',
+        'user-agent': 'dsh-ray-assistant-actions', 'x-github-api-version': '2022-11-28',
       } }, response => {
         let bytes = 0
         const chunks: Buffer[] = []

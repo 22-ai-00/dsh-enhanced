@@ -4,7 +4,7 @@ import { constants } from 'node:fs'
 import { open, lstat } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 
-const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
   const filteredEmitWarning = function emitWarning(warning, ...rest) {

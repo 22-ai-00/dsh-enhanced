@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { NativeMacVerifierRunner, type NativeMacVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
+import { NativeMacVerifierRunner, type NativeMacVerifierRunnerConfig } from '@dsh-ray/assistant-isolation'
 import { behaviorNativeRuntimeDigest, NATIVE_BEHAVIOR_BOUNDARY, LINUX_BEHAVIOR_BOUNDARY, validatePluginBehaviorRunnerConfig,
   type PluginBehaviorRunnerConfig } from './plugin-behavior-config.js'
 export { NATIVE_BEHAVIOR_BOUNDARY, LINUX_BEHAVIOR_BOUNDARY, validatePluginBehaviorRunnerConfig, validatePluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'

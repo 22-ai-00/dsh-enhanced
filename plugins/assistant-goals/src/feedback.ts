@@ -2,7 +2,7 @@ import {
   acceptanceCanonicalJson,
   validateTaskAcceptanceContract,
   validateTaskVerificationReceipt,
-} from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/task-acceptance-contract'
 import type { GoalExecutionRun, GoalRecord } from './types.js'
 
 const MAX_RUNS = 50

@@ -1,8 +1,8 @@
 import { Context } from '@deepseek-ai/cordis'
-import type { DeliveryAdapter, DeliveryAdapterContext } from '@dsh-enhanced/assistant-delivery'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
-import { LarkChannelService } from '@dsh-enhanced/lark-channel'
+import type { DeliveryAdapter, DeliveryAdapterContext } from '@dsh-ray/assistant-delivery'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { CredentialsKeychainService } from '@dsh-ray/credentials-keychain'
+import { LarkChannelService } from '@dsh-ray/lark-channel'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,7 +17,7 @@ describe('Lark and credential composition', () => {
     roots.push(root)
     const ctx = new Context()
     await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [
-      { id: 'lark-credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-lark-channel' },
+      { id: 'lark-credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-lark-channel' },
         actions: ['credential.use'], resource: { kind: 'credential', id: 'lark-app-secret' },
         context: { initiators: ['background'] } },
       { id: 'credential-operator', effect: 'allow', subject: { kind: 'external', id: 'local:owner' },
@@ -27,7 +27,7 @@ describe('Lark and credential composition', () => {
     new CredentialsKeychainService(ctx, {
       databasePath: join(root, 'credentials.sqlite'), handles: [{
         id: 'lark-app-secret', provider: 'environment', environmentName: 'LARK_APP_SECRET',
-        consumers: ['dsh-enhanced-lark-channel'], purposes: ['connect'], maxLeaseMs: 60_000,
+        consumers: ['dsh-ray-lark-channel'], purposes: ['connect'], maxLeaseMs: 60_000,
       }],
     }, { env: { LARK_APP_SECRET: 'composition-secret' } })
     const context: DeliveryAdapterContext = {
@@ -42,7 +42,7 @@ describe('Lark and credential composition', () => {
     })
     let service!: LarkChannelService
     const Plugin = {
-      name: 'dsh-enhanced-lark-channel', inject: ['assistantDelivery'],
+      name: 'dsh-ray-lark-channel', inject: ['assistantDelivery'],
       apply(scoped: Context) {
         service = new LarkChannelService(scoped, {
           enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',

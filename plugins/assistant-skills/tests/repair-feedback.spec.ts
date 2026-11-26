@@ -14,7 +14,7 @@ describe('repair feedback', () => {
     const port = delivery(), first = enqueueRepairFeedback(port, record, outcome), second = enqueueRepairFeedback(port, record, outcome)
     expect(first).toEqual(second)
     expect(first).toMatchObject({ outcome: 'queued', idempotencyKey: 'repair-feedback:repair-1:1:finite-canary' })
-    expect(port.enqueueOwnerNotification).toHaveBeenCalledWith(expect.objectContaining({ sourceId: 'dsh-enhanced-assistant-skills', sessionId: 'current-owner-session', expiresAt: record.feedbackAuthority.expiresAt, idempotencyKey: 'repair-feedback:repair-1:1:finite-canary' }))
+    expect(port.enqueueOwnerNotification).toHaveBeenCalledWith(expect.objectContaining({ sourceId: 'dsh-ray-assistant-skills', sessionId: 'current-owner-session', expiresAt: record.feedbackAuthority.expiresAt, idempotencyKey: 'repair-feedback:repair-1:1:finite-canary' }))
     expect(first.outcome === 'queued' && first.text).not.toMatch(/candidate-secret|deployment-secret|goal-secret|complete|read/u)
   })
 

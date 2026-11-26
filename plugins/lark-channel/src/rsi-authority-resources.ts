@@ -66,7 +66,7 @@ async function inspect(home: string, profile: string, signal: AbortSignal): Prom
   }
   // These are live release resources: validate them, never reset their contents
   // or compare them with the initial empty catalog/registry/state snapshots.
-  const { parseCatalog } = await import('@dsh-enhanced/plugin-control-plane')
+  const { parseCatalog } = await import('@dsh-ray/plugin-control-plane')
   parseCatalog(JSON.parse((await readPrivate(paths.catalogPath, 2_097_152)).toString('utf8')))
   signal.throwIfAborted()
   return resources

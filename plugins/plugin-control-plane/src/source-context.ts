@@ -98,7 +98,7 @@ export async function inspectSourceTargetsContext(input: {
     try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)) }
     catch { throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'plugin target manifest is not strict JSON and UTF-8') }
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
-      || (parsed as Record<string, unknown>).name !== `@dsh-enhanced/${name}`) {
+      || (parsed as Record<string, unknown>).name !== `@dsh-ray/${name}`) {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'plugin target manifest identity is invalid')
     }
     const description = (parsed as Record<string, unknown>).description

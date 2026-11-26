@@ -11,7 +11,7 @@ import { createSourceCreationFixture } from './helpers/source-creation-fixture.t
 
 const sourceRoot = fileURLToPath(new URL('../../..', import.meta.url)).replace(/\/$/u, '')
 const name = 'rsi-native-tools-probe'
-const packageName = `@dsh-enhanced/${name}`
+const packageName = `@dsh-ray/${name}`
 const sdk = '@deepseek-ai/dsh-tools'
 const systemPrompt = '@deepseek-ai/dsh-system-prompt'
 const signal = new AbortController().signal

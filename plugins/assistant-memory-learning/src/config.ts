@@ -1,6 +1,6 @@
 import Schema from '@deepseek-ai/schemastery'
 import { isAbsolute, resolve } from 'node:path'
-import { validateMemoryLearningOwner } from '@dsh-enhanced/assistant-growth-contract'
+import { validateMemoryLearningOwner } from '@dsh-ray/assistant-growth-contract'
 import type { LearningConfig, LearningModel, LearningServiceConfig, ParsedLearningServiceConfig } from './types.js'
 
 export const DEFAULT_LEARNING_OPERATIONAL_CONFIG = Object.freeze({

@@ -89,14 +89,14 @@ describe('model setup', () => {
       '--base-url', 'https://gateway.example/v1', '--display-name', 'Custom Gateway', '--store-key',
     ]))
 
-    const previous = process.env.DSH_ENHANCED_MODEL_API_KEY
-    process.env.DSH_ENHANCED_MODEL_API_KEY = 'plat-secret-value'
+    const previous = process.env.DSH_RAY_MODEL_API_KEY
+    process.env.DSH_RAY_MODEL_API_KEY = 'plat-secret-value'
     let result
     try {
       result = await applyModelSetup(resolved)
     } finally {
-      if (previous === undefined) delete process.env.DSH_ENHANCED_MODEL_API_KEY
-      else process.env.DSH_ENHANCED_MODEL_API_KEY = previous
+      if (previous === undefined) delete process.env.DSH_RAY_MODEL_API_KEY
+      else process.env.DSH_RAY_MODEL_API_KEY = previous
     }
 
     const settings = parse(await readFile(result.settingsPath, 'utf8')) as any
@@ -243,14 +243,14 @@ describe('model setup', () => {
     const home = await temporaryHome()
     const resolved = resolveModelSetup(parseModelSetupArgs(['--dsh-home', home, '--store-key']))
 
-    const previousKey = process.env.DSH_ENHANCED_MODEL_API_KEY
+    const previousKey = process.env.DSH_RAY_MODEL_API_KEY
     const previousRef = process.env.DEEPSEEK_API_KEY
-    delete process.env.DSH_ENHANCED_MODEL_API_KEY
+    delete process.env.DSH_RAY_MODEL_API_KEY
     delete process.env.DEEPSEEK_API_KEY
     try {
       await expect(applyModelSetup(resolved)).rejects.toThrow('no API key found')
     } finally {
-      if (previousKey !== undefined) process.env.DSH_ENHANCED_MODEL_API_KEY = previousKey
+      if (previousKey !== undefined) process.env.DSH_RAY_MODEL_API_KEY = previousKey
       if (previousRef !== undefined) process.env.DEEPSEEK_API_KEY = previousRef
     }
     await expect(readFile(join(home, 'settings.yaml'), 'utf8')).rejects.toThrow()
@@ -280,7 +280,7 @@ describe('model setup', () => {
     const patch = await readFile(result.profilePatchPath!, 'utf8')
     expect(patch).toContain('id: agent-default-model')
     expect(patch).toContain('provider: traex-agent')
-    expect(patch).toContain('id: dsh-enhanced-traex-acp-provider')
+    expect(patch).toContain('id: dsh-ray-traex-acp-provider')
     expect(patch).toContain('enabled: true')
     await expect(readFile(join(home, 'settings.yaml'), 'utf8')).rejects.toThrow()
   })
@@ -290,7 +290,7 @@ describe('model setup', () => {
     const profileDir = join(home, 'profiles', 'web')
     await mkdir(profileDir, { recursive: true })
     await writeFile(join(profileDir, 'cordis.patch.yml'),
-      '# my patch layer\n- id: dsh-enhanced-personal-assistant\n  config:\n    x: 1\n', 'utf8')
+      '# my patch layer\n- id: dsh-ray-personal-assistant\n  config:\n    x: 1\n', 'utf8')
 
     const resolved = resolveModelSetup(parseModelSetupArgs([
       '--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web',
@@ -300,9 +300,9 @@ describe('model setup', () => {
 
     const patch = await readFile(join(profileDir, 'cordis.patch.yml'), 'utf8')
     expect(patch).toContain('# my patch layer')
-    expect(patch).toContain('dsh-enhanced-personal-assistant')
+    expect(patch).toContain('dsh-ray-personal-assistant')
     // The freshly added row is enabled and carries the required !!js cwd.
-    expect(patch).toContain('id: dsh-enhanced-traex-acp-provider')
+    expect(patch).toContain('id: dsh-ray-traex-acp-provider')
     expect(patch).toContain('enabled: true')
     expect(patch).toContain("cwd: !!js dshHomePath('assistant-workspace')")
   })
@@ -312,7 +312,7 @@ describe('model setup', () => {
     const profileDir = join(home, 'profiles', 'web')
     await mkdir(profileDir, { recursive: true })
     await writeFile(join(profileDir, 'cordis.patch.yml'),
-      "- id: dsh-enhanced-traex-acp-provider\n  config:\n    enabled: false\n    cwd: !!js dshHomePath('custom-ws')\n", 'utf8')
+      "- id: dsh-ray-traex-acp-provider\n  config:\n    enabled: false\n    cwd: !!js dshHomePath('custom-ws')\n", 'utf8')
 
     const resolved = resolveModelSetup(parseModelSetupArgs([
       '--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web',
@@ -365,7 +365,7 @@ describe('model setup', () => {
     expect(result.settingsUpdated).toBe(false)
     expect(await readFile(result.settingsPath, 'utf8')).toBe(settingsSource)
     const patch = await readFile(result.profilePatchPath!, 'utf8')
-    expect(patch).toContain('id: dsh-enhanced-traex-acp-provider')
+    expect(patch).toContain('id: dsh-ray-traex-acp-provider')
     expect(patch).not.toContain('id: agent-default-model')
   })
 
@@ -381,7 +381,7 @@ describe('model setup', () => {
     ])))
     expect(result.profileDefaultAction).toBe(layer === 'home' ? 'preserved-home-patch' : 'preserved-profile-patch')
     const patch = await readFile(result.profilePatchPath!, 'utf8')
-    expect(patch).toContain('id: dsh-enhanced-traex-acp-provider')
+    expect(patch).toContain('id: dsh-ray-traex-acp-provider')
     if (layer === 'home') {
       expect(await readFile(selectedPath, 'utf8')).toBe(source)
       expect(patch).not.toContain('id: agent-default-model')
@@ -431,7 +431,7 @@ describe('model setup', () => {
     expect(printed).not.toContain('Updated settings')
     expect(await readFile(settingsPath, 'utf8')).toBe('[invalid\n')
     const patch = await readFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
-    expect(patch).toContain('id: dsh-enhanced-traex-acp-provider')
+    expect(patch).toContain('id: dsh-ray-traex-acp-provider')
     expect(patch).not.toContain('id: agent-default-model')
   })
 
@@ -439,7 +439,7 @@ describe('model setup', () => {
     const home = await temporaryHome()
     const patchPath = join(home, 'profiles', 'web', 'cordis.patch.yml')
     await mkdir(join(home, 'profiles', 'web'), { recursive: true })
-    await writeFile(patchPath, "- id: dsh-enhanced-traex-acp-provider\n  config:\n    enabled: false\n    cwd: !!js dshHomePath('custom-ws')\n", 'utf8')
+    await writeFile(patchPath, "- id: dsh-ray-traex-acp-provider\n  config:\n    enabled: false\n    cwd: !!js dshHomePath('custom-ws')\n", 'utf8')
     const first = await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
       '--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web', '--enable-only', '--agent-command', '/first/traex',
     ])))
@@ -459,7 +459,7 @@ describe('model setup', () => {
     const home = await temporaryHome()
     const profileDir = join(home, 'profiles', 'web')
     await mkdir(profileDir, { recursive: true })
-    const homePatch = "- id: dsh-enhanced-traex-acp-provider\n  config:\n    command: /operator/traex\n    cwd: !!js dshHomePath('operator-ws')\n    timeoutMs: 9000\n"
+    const homePatch = "- id: dsh-ray-traex-acp-provider\n  config:\n    command: /operator/traex\n    cwd: !!js dshHomePath('operator-ws')\n    timeoutMs: 9000\n"
     await writeFile(join(home, 'cordis.patch.yml'), homePatch, 'utf8')
     await writeFile(join(profileDir, 'cordis.patch.yml'), '# profile has no TraeX override\n', 'utf8')
     const result = await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
@@ -480,7 +480,7 @@ describe('model setup', () => {
     const profileDir = join(home, 'profiles', 'web')
     await mkdir(profileDir, { recursive: true })
     const profilePath = join(profileDir, 'cordis.patch.yml')
-    await writeFile(profilePath, "- insert:\n    - id: dsh-enhanced-traex-acp-provider\n      name: '@dsh-enhanced/traex-acp-provider'\n      disabled: true\n      config:\n        command: /profile/traex\n        cwd: !!js dshHomePath('profile-ws')\n        logDiagnostics: true\n", 'utf8')
+    await writeFile(profilePath, "- insert:\n    - id: dsh-ray-traex-acp-provider\n      name: '@dsh-ray/traex-acp-provider'\n      disabled: true\n      config:\n        command: /profile/traex\n        cwd: !!js dshHomePath('profile-ws')\n        logDiagnostics: true\n", 'utf8')
     const result = await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
       '--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web', '--enable-only', '--agent-command', '/detected/traex',
     ])))
@@ -493,12 +493,12 @@ describe('model setup', () => {
     expect(patch).toContain('disabled: false')
     expect(patch).not.toContain('disabled: true')
     expect(patch).not.toContain('/detected/traex')
-    expect((patch.match(/id: dsh-enhanced-traex-acp-provider/gu) ?? [])).toHaveLength(1)
+    expect((patch.match(/id: dsh-ray-traex-acp-provider/gu) ?? [])).toHaveLength(1)
   })
 
   test('a home-disabled route gets a profile row that opens both enable gates', async () => {
     const home = await temporaryHome()
-    const homePatch = "- id: dsh-enhanced-traex-acp-provider\n  disabled: true\n  config:\n    command: /operator/traex\n    cwd: !!js dshHomePath('operator-ws')\n"
+    const homePatch = "- id: dsh-ray-traex-acp-provider\n  disabled: true\n  config:\n    command: /operator/traex\n    cwd: !!js dshHomePath('operator-ws')\n"
     await writeFile(join(home, 'cordis.patch.yml'), homePatch, 'utf8')
     const result = await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
       '--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web', '--enable-only', '--agent-command', '/detected/traex',
@@ -516,7 +516,7 @@ describe('model setup', () => {
   test('a later home config replaces earlier fields before profile enablement', async () => {
     const home = await temporaryHome()
     await writeFile(join(home, 'cordis.patch.yml'),
-      "- id: dsh-enhanced-traex-acp-provider\n  config:\n    command: /old/traex\n    cwd: !!js dshHomePath('old-ws')\n- id: dsh-enhanced-traex-acp-provider\n  config:\n    timeoutMs: 9000\n", 'utf8')
+      "- id: dsh-ray-traex-acp-provider\n  config:\n    command: /old/traex\n    cwd: !!js dshHomePath('old-ws')\n- id: dsh-ray-traex-acp-provider\n  config:\n    timeoutMs: 9000\n", 'utf8')
     const result = await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
       '--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web', '--enable-only', '--agent-command', '/detected/traex',
     ])))
@@ -573,7 +573,7 @@ describe('model setup', () => {
   test('enables agy-agent without overwriting traex enabled/command and preserves agy keys when updating traex', async () => {
     const home = await temporaryHome()
     await writeFile(join(home, 'cordis.patch.yml'), [
-      '- id: dsh-enhanced-traex-acp-provider',
+      '- id: dsh-ray-traex-acp-provider',
       '  disabled: true',
       '  config:',
       '    enabled: true',
@@ -594,8 +594,8 @@ describe('model setup', () => {
 
     const patchAfterAgy = await readFile(agyResult.profilePatchPath!, 'utf8')
     const rowsAfterAgy = parse(patchAfterAgy, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
-    const configAfterAgy = rowsAfterAgy.find(r => r.id === 'dsh-enhanced-traex-acp-provider')?.config
-    expect(rowsAfterAgy.find(r => r.id === 'dsh-enhanced-traex-acp-provider')?.disabled).toBe(false)
+    const configAfterAgy = rowsAfterAgy.find(r => r.id === 'dsh-ray-traex-acp-provider')?.config
+    expect(rowsAfterAgy.find(r => r.id === 'dsh-ray-traex-acp-provider')?.disabled).toBe(false)
     expect(configAfterAgy).toMatchObject({
       enabled: true,
       command: '/opt/traex/bin/traex',
@@ -610,7 +610,7 @@ describe('model setup', () => {
     ])))
     expect(traexPreserved.agentCommandAction).toBe('preserved')
     const rowsAfterTraex = parse(await readFile(traexPreserved.profilePatchPath!, 'utf8'), { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }) as Array<{ id: string; config?: Record<string, unknown> }>
-    expect(rowsAfterTraex.find(r => r.id === 'dsh-enhanced-traex-acp-provider')?.config).toMatchObject({
+    expect(rowsAfterTraex.find(r => r.id === 'dsh-ray-traex-acp-provider')?.config).toMatchObject({
       enabled: true,
       command: '/opt/traex/bin/traex',
       agyEnabled: true,
@@ -627,7 +627,7 @@ describe('model setup', () => {
     ])))
     expect(traexFresh.agentCommandAction).toBe('set')
     const freshRows = parse(await readFile(traexFresh.profilePatchPath!, 'utf8'), { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }) as Array<{ id: string; config?: Record<string, unknown> }>
-    expect(freshRows.find(r => r.id === 'dsh-enhanced-traex-acp-provider')?.config).toMatchObject({
+    expect(freshRows.find(r => r.id === 'dsh-ray-traex-acp-provider')?.config).toMatchObject({
       enabled: true,
       command: '/usr/local/bin/traex',
       agyEnabled: true,
@@ -642,7 +642,7 @@ describe('model setup', () => {
     expect(defaultAbsent.agentCommandAction).toBe('preserved')
   })
 
-  test('resolves bound host executable from .dsh-rsi-host.json when PATH lacks dsh and rejects unsafe binding files', async () => {
+  test('resolves bound host executable from .dsh-ray-host.json when PATH lacks dsh and rejects unsafe binding files', async () => {
     const home = await realpath(await temporaryHome())
     const cacheRoot = await realpath(await temporaryHome())
     const hostRoot = join(cacheRoot, '0.2.2-rc.5', 'node_modules', '@deepseek-ai', 'dsh')
@@ -656,7 +656,7 @@ describe('model setup', () => {
     await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.5' }), 'utf8')
     await symlink('../@deepseek-ai/dsh/bin/dsh.js', join(binDir, 'dsh'))
 
-    const bindingPath = join(home, '.dsh-rsi-host.json')
+    const bindingPath = join(home, '.dsh-ray-host.json')
     await writeFile(bindingPath, JSON.stringify({
       schemaVersion: 1,
       cacheRoot,

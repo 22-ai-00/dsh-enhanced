@@ -5,7 +5,7 @@ import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename
 import { request } from 'node:https'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual, TextDecoder } from 'node:util'
-import { hashNativeMacRuntimeTree, verifyNativeMacRuntime, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import { hashNativeMacRuntimeTree, verifyNativeMacRuntime, type NativeMacRuntime } from '@dsh-ray/assistant-isolation'
 import { parse as parseYaml } from 'yaml'
 import { readRsiSourceWorkspace, type RsiSourceWorkspace } from './rsi-source.js'
 
@@ -249,7 +249,7 @@ export function validateFrozenNativeManifests(source: FrozenNativeManifestSource
   let manifest: { name?: string; version?: string; packageManager?: string }
   try { manifest = JSON.parse(decode(sorted.get('package.json')!)) }
   catch { return fail('frozen root manifest is invalid') }
-  if (manifest?.name !== 'dsh-enhanced' || manifest.version !== source.version
+  if (manifest?.name !== 'dsh-ray' || manifest.version !== source.version
     || manifest.packageManager !== `pnpm@${PNPM_VERSION}`) fail('frozen root manifest identity differs')
   packageConfiguration(manifest)
   const workspaces = new Set([...sorted.keys()].filter(name => MANIFEST.test(name)).map(dirname))

@@ -5,11 +5,11 @@ import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { executeNestedTool } from './tool-batch.js'
 import type { SkillProviderControl } from '@deepseek-ai/dsh-skill'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import type { AssistantGoalsService, GoalScope, HostFailureTriggerEvidence, OwnerAuthorizedRepairInput, OwnerAuthorizedRepairResumeInput } from '@dsh-enhanced/assistant-goals'
-import type { AssistantEvaluationService, EvaluationCanonicalLearningEvidenceTuple, EvaluationHostScope, TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import type { AssistantGoalsService, GoalScope, HostFailureTriggerEvidence, OwnerAuthorizedRepairInput, OwnerAuthorizedRepairResumeInput } from '@dsh-ray/assistant-goals'
+import type { AssistantEvaluationService, EvaluationCanonicalLearningEvidenceTuple, EvaluationHostScope, TrustedTaskLearningProjectionReceipt } from '@dsh-ray/assistant-evaluation'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import Schema from '@deepseek-ai/schemastery'
 import { execFile } from 'node:child_process'
 import { lstat, realpath } from 'node:fs/promises'
@@ -352,7 +352,7 @@ function buildOptionalDefinitionOptions(args: {
 /** Fixed tool compositions run in the original native Goal; no new AgentLoop or scheduler. */
 export class AssistantSkillsService extends Service {
   static Config = Config
-  static { Object.defineProperty(this, 'name', { value: 'dsh-enhanced-assistant-skills' }) }
+  static { Object.defineProperty(this, 'name', { value: 'dsh-ray-assistant-skills' }) }
   static readonly #benchmarkCapabilities = new WeakMap<BenchmarkArmCapability, { recipient: object; scope: GoalScope; binding: SkillDelegatedArmBinding; snapshot: BenchmarkArmSnapshot; controller: AbortController; signal: AbortSignal; assertCurrent(): void; refresh(signal: AbortSignal): Promise<void>; consumed: boolean }>()
   static readonly #benchmarkRecipients = new WeakMap<object, AssistantSkillsService>()
   readonly #benchmarkIdentity = Object.freeze({})
@@ -788,7 +788,7 @@ export class AssistantSkillsService extends Service {
     try { await operation; return this.#comparisonStatus(scope, claim.comparison.id)! } finally { this.#comparing.delete(operation) }
   }
   #promotePolicy(scope: GoalScope) {
-    return { subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
+    return { subject: { kind: 'background' as const, id: 'dsh-ray-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
       action: 'promote', resource, context: { initiator: 'background' as const } }
   }
   #deploymentCurrent(deployment: SkillDeployment): void {
@@ -1424,7 +1424,7 @@ export class AssistantSkillsService extends Service {
     this.#watchRoute(scope, current.authorization.ownerRouteId, current.routeReceipt)
     const policy = this.ctx.get('assistantPolicy', false)
     if (!policy || ['draft', 'compare', 'canary', 'promote', 'watch', 'rollback'].some(action => policy.evaluate({
-      subject: { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
+      subject: { kind: 'background', id: 'dsh-ray-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
       action, resource, context: { initiator: 'background' },
     }).effect !== 'allow')) throw new Error('assistant-skills: repair background policy denied')
     for (let iteration = 1; iteration <= current.authorization.maxIterations; iteration++) this.#repairProfileAt(current, iteration)
@@ -1494,7 +1494,7 @@ export class AssistantSkillsService extends Service {
       const delivery = this.ctx.get('assistantDelivery', false)
       const resolved = delivery?.resolveOwnerRoute(input.ownerRouteId)
       if (!resolved || resolved.binding.sessionId !== String(agent!.session.id)) throw new Error('assistant-skills: repair feedback requires the current owner route Session')
-      const permission = this.ctx.get('assistantPolicy', false)?.evaluate({ subject: { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
+      const permission = this.ctx.get('assistantPolicy', false)?.evaluate({ subject: { kind: 'background', id: 'dsh-ray-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
         action: 'send', resource: { kind: 'message', id: resolved.binding.id }, context: { initiator: 'background' } })
       if (permission?.effect !== 'allow') throw new Error('assistant-skills: repair feedback policy denied')
       feedbackAuthority = { sessionId: resolved.binding.sessionId, expiresAt: input.expiresAt, routeReceipt: route }
@@ -1707,7 +1707,7 @@ export class AssistantSkillsService extends Service {
     })
   }
   #watchPolicy(scope: GoalScope, action: 'watch' | 'rollback') {
-    return { subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
+    return { subject: { kind: 'background' as const, id: 'dsh-ray-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
       action, resource, context: { initiator: 'background' as const } }
   }
   #watchRoute(scope: GoalScope, ownerRouteId: string, expected?: unknown) {
@@ -1750,7 +1750,7 @@ export class AssistantSkillsService extends Service {
     this.#watchRoute(scope, input.ownerRouteId, route)
     const saved = this.#store.createCapture(scope, { ...input, sessionId, nativeGoalId: active.nativeGoalId }, route, digest); this.#queueReconcile(); return publicCapture(saved)
   }
-  #capturePolicy(scope: GoalScope) { return { subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId }, action: 'capture', resource, context: { initiator: 'background' as const } } }
+  #capturePolicy(scope: GoalScope) { return { subject: { kind: 'background' as const, id: 'dsh-ray-assistant-skills', workspace: scope.workspace, principal: scope.principalId }, action: 'capture', resource, context: { initiator: 'background' as const } } }
   #captureAuthorized(capture: SkillCapture): void {
     const scope = capture.scope as GoalScope; this.#watchRoute(scope, capture.ownerRouteId, capture.routeReceipt)
     const policy = this.ctx.get('assistantPolicy', false)
@@ -1814,7 +1814,7 @@ export class AssistantSkillsService extends Service {
           const currentWatch = this.#store.listWatches(scope).find(value => value.id === watch.id)
           if (!currentWatch || currentWatch.state !== 'watching') break
           const prior = currentDeployment && currentWatch.canonicalRevisions?.find(value => value.runId === run.id)
-          const goals = this.#goals() as AssistantGoalsService & { inspectOwnerGoalRunProof?: (input: { ownerRouteId: string; principalId: string; workspace: string; preset: string; sessionId: string; goalId: string; runId: string }, signal?: AbortSignal) => Promise<import('@dsh-enhanced/assistant-goals').OwnerGoalRunProof> }
+          const goals = this.#goals() as AssistantGoalsService & { inspectOwnerGoalRunProof?: (input: { ownerRouteId: string; principalId: string; workspace: string; preset: string; sessionId: string; goalId: string; runId: string }, signal?: AbortSignal) => Promise<import('@dsh-ray/assistant-goals').OwnerGoalRunProof> }
           if (!currentDeployment) {
             if (typeof goals.inspectOwnerGoalRunProof !== 'function') { this.#store.stopWatch(scope, watch.id, 'revoked'); break }
             const proof = await goals.inspectOwnerGoalRunProof({ ownerRouteId: watch.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: run.sessionId, goalId: run.goalId, runId: run.goalExecutionRunId! }, this.#lifecycle.signal)

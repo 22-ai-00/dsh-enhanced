@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,9 +13,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 }
 const bundle = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
 
-describe('dsh-enhanced-assistant-automations', () => {
+describe('dsh-ray-assistant-automations', () => {
   test('exports the public service/types but not mutable store or runner internals', () => {
-    expect(entrypoint.name).toBe('dsh-enhanced-assistant-automations')
+    expect(entrypoint.name).toBe('dsh-ray-assistant-automations')
     expect(entrypoint.version).toBe(manifest.version)
     expect(entrypoint.AssistantAutomationsService).toBeTypeOf('function')
     expect((entrypoint as Record<string, unknown>)['AutomationStore']).toBeUndefined()
@@ -30,7 +30,7 @@ describe('dsh-enhanced-assistant-automations', () => {
     expect(bundle).toContain('schedulerEnabled: false')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
     expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.2.2-rc.5 <0.3.0')
-    expect(manifest.peerDependencies['@dsh-enhanced/assistant-policy']).toBe('>=0.1.0 <0.2.0')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-policy']).toBe('>=0.1.0 <0.2.0')
   })
 
   test('loads through apply when assistant-policy is already composed', async () => {

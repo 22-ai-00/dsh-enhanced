@@ -32,7 +32,7 @@ describe('private authority identities and local release storage', () => {
       keys.set(role, { bytes, ino: entry.ino })
     }
     for (const path of [first.root, first.stateRoot, first.configRoot, first.registry.root]) expect((await lstat(path)).mode & 0o777).toBe(0o700)
-    const catalog = { schemaVersion: 1, entries: [{ id: 'fixture', package: '@dsh-enhanced/fixture', version: '1.2.3',
+    const catalog = { schemaVersion: 1, entries: [{ id: 'fixture', package: '@dsh-ray/fixture', version: '1.2.3',
       integrity: 'sha512-Zml4dHVyZQ==', capabilities: ['fixture'], authorities: ['owner'], requires: [], dshBaseline: '0.1.5-rc.3' }] }
     await writeFile(first.catalog.path, JSON.stringify(catalog), { mode: 0o600 })
     await writeFile(join(first.registry.root, 'published.tgz'), 'published artifact', { mode: 0o600 })

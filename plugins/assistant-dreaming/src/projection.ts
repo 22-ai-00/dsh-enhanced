@@ -1,10 +1,10 @@
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
-import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
-import type { GoalScope } from '@dsh-enhanced/assistant-goals'
-import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
-import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
-import type { PersonalMemoryService } from '@dsh-enhanced/personal-memory'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import type { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
+import type { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
+import type { GoalScope } from '@dsh-ray/assistant-goals'
+import type { AssistantGoalsService } from '@dsh-ray/assistant-goals'
+import type { AssistantSkillsService } from '@dsh-ray/assistant-skills'
+import type { PersonalMemoryService } from '@dsh-ray/personal-memory'
 import type { DreamingScopeConfig } from './config.js'
 
 /**

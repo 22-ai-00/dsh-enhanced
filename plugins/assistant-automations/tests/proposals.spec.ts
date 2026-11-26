@@ -8,7 +8,7 @@ import {
   type ApprovalDispatchRoute,
   type ApprovalDispatchRouteV2,
   type ApprovalProposalSnapshot,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   type AutomationApprovalPolicy,
@@ -52,7 +52,7 @@ async function harness(now: () => number = () => nowValue) {
 
 const dispatch: ApprovalDispatchRouteV2 = {
   routeVersion: 2,
-  sourceId: 'dsh-enhanced-assistant-automations',
+  sourceId: 'dsh-ray-assistant-automations',
   bindingId: 'binding-owner',
   bindingVersion: 7,
   bindingGeneration: 3,

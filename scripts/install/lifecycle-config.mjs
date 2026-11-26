@@ -7,20 +7,20 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 
 const storageFields = new Set(['databasePath', 'statePath', 'stateRoot', 'vaultRoot', 'spoolPath', 'runsPath', 'catalogPath', 'trustPath', 'scratchPath'])
-const trustedBundleName = /^@(?:deepseek-ai|dsh-enhanced)\/[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/u
+const trustedBundleName = /^@(?:deepseek-ai|dsh-ray)\/[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/u
 const lifecycleMarkers = new Map([
-  ['dsh-enhanced-assistant-web-owner', 'web'],
-  ['@dsh-enhanced/assistant-web-owner', 'web'],
-  ['dsh-enhanced-assistant-isolation', 'isolation'],
-  ['@dsh-enhanced/assistant-isolation', 'isolation'],
-  ['dsh-enhanced-lark-channel', 'lark'],
-  ['@dsh-enhanced/lark-channel', 'lark'],
-  ['dsh-enhanced-assistant-recovery', 'supervised'],
-  ['@dsh-enhanced/assistant-recovery', 'supervised'],
-  ['dsh-enhanced-assistant-automations', 'supervised'],
-  ['@dsh-enhanced/assistant-automations', 'supervised'],
-  ['dsh-enhanced-assistant-evolution', 'supervised'],
-  ['@dsh-enhanced/assistant-evolution', 'supervised'],
+  ['dsh-ray-assistant-web-owner', 'web'],
+  ['@dsh-ray/assistant-web-owner', 'web'],
+  ['dsh-ray-assistant-isolation', 'isolation'],
+  ['@dsh-ray/assistant-isolation', 'isolation'],
+  ['dsh-ray-lark-channel', 'lark'],
+  ['@dsh-ray/lark-channel', 'lark'],
+  ['dsh-ray-assistant-recovery', 'supervised'],
+  ['@dsh-ray/assistant-recovery', 'supervised'],
+  ['dsh-ray-assistant-automations', 'supervised'],
+  ['@dsh-ray/assistant-automations', 'supervised'],
+  ['dsh-ray-assistant-evolution', 'supervised'],
+  ['@dsh-ray/assistant-evolution', 'supervised'],
 ])
 
 const prereleaseIdentifiers = value => {
@@ -165,7 +165,7 @@ async function repositoryParser() {
   const root = dirname(dirname(dirname(helper)))
   if (helper !== join(root, 'scripts', 'install', 'lifecycle-config.mjs')) throw new Error('helper is not in its repository')
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
-  if (manifest.name !== 'dsh-enhanced') throw new Error('helper repository identity differs')
+  if (manifest.name !== 'dsh-ray') throw new Error('helper repository identity differs')
   return declaredParser(join(root, 'package.json'), join(root, 'node_modules'), manifest.devDependencies?.yaml ?? manifest.dependencies?.yaml)
 }
 
@@ -432,7 +432,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
 }
 
 const exactSemver = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u
-const enhancedPackage = /^@dsh-enhanced\/[a-z0-9][a-z0-9._-]*$/u
+const enhancedPackage = /^@dsh-ray\/[a-z0-9][a-z0-9._-]*$/u
 
 function metadataError(message) {
   throw new Error(`lifecycle npm metadata rejects ${message}`)
@@ -448,11 +448,11 @@ function sameJson(left, right) {
 }
 
 function exactPackageVersion(value, field) {
-  if (typeof value !== 'string') metadataError(`${field} must be an exact @dsh-enhanced package version`)
+  if (typeof value !== 'string') metadataError(`${field} must be an exact @dsh-ray package version`)
   const split = value.indexOf('@', 1)
-  if (split === -1) metadataError(`${field} must be an exact @dsh-enhanced package version`)
+  if (split === -1) metadataError(`${field} must be an exact @dsh-ray package version`)
   const name = value.slice(0, split), version = value.slice(split + 1)
-  if (!enhancedPackage.test(name) || !exactSemver.test(version)) metadataError(`${field} must be an exact @dsh-enhanced package version`)
+  if (!enhancedPackage.test(name) || !exactSemver.test(version)) metadataError(`${field} must be an exact @dsh-ray package version`)
   return { name, version }
 }
 
@@ -507,9 +507,9 @@ function containsAlias(yaml, node) {
 
 const rsiProfilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const rsiCoordinatorBundles = new Map([
-  ['dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy'],
-  ['dsh-enhanced-assistant-automations', '@dsh-enhanced/assistant-automations'],
-  ['dsh-enhanced-plugin-control-plane', '@dsh-enhanced/plugin-control-plane'],
+  ['dsh-ray-assistant-policy', '@dsh-ray/assistant-policy'],
+  ['dsh-ray-assistant-automations', '@dsh-ray/assistant-automations'],
+  ['dsh-ray-plugin-control-plane', '@dsh-ray/plugin-control-plane'],
 ])
 
 function rsiPairError(message) {
@@ -636,13 +636,13 @@ export async function validateRsiCoordinatorPair(targetSource, coordinatorSource
   for (const id of rsiCoordinatorBundles.keys()) {
     if (!coordinator.has(id)) rsiPairError(`coordinator lacks required row ${id}`)
   }
-  const targetControlPlane = target.get('dsh-enhanced-plugin-control-plane')
-  if (targetControlPlane?.name !== '@dsh-enhanced/plugin-control-plane'
+  const targetControlPlane = target.get('dsh-ray-plugin-control-plane')
+  if (targetControlPlane?.name !== '@dsh-ray/plugin-control-plane'
     || targetControlPlane.disabled !== undefined && targetControlPlane.disabled !== false) {
     rsiPairError('target control plane is missing, renamed or disabled')
   }
-  const targetCp = rsiRecord(target.get('dsh-enhanced-plugin-control-plane')?.config, 'target control plane')
-  const coordinatorCp = rsiRecord(coordinator.get('dsh-enhanced-plugin-control-plane')?.config, 'coordinator control plane')
+  const targetCp = rsiRecord(target.get('dsh-ray-plugin-control-plane')?.config, 'target control plane')
+  const coordinatorCp = rsiRecord(coordinator.get('dsh-ray-plugin-control-plane')?.config, 'coordinator control plane')
   const adoptions = rsiRecord(targetCp.sourceAdoptions, 'target sourceAdoptions')
   const jobs = rsiRecord(targetCp.sourceJobs, 'target sourceJobs')
   const adoption = rsiRecord(coordinatorCp.adoptionCoordinator, 'coordinator adoptionCoordinator')
@@ -657,8 +657,8 @@ export async function validateRsiCoordinatorPair(targetSource, coordinatorSource
     || coordinatorCp.catalogPath !== targetCp.catalogPath || coordinatorCp.trustPath !== targetCp.trustPath) rsiPairError('coordinator catalog or trust path differs from target')
   const root = join(dshHome, 'rsi-coordinators', coordinatorProfile)
   if (coordinatorCp.statePath !== root) rsiPairError('coordinator statePath differs from dedicated root')
-  const policy = rsiRecord(coordinator.get('dsh-enhanced-assistant-policy')?.config, 'coordinator Policy config')
-  const automations = rsiRecord(coordinator.get('dsh-enhanced-assistant-automations')?.config, 'coordinator Automations config')
+  const policy = rsiRecord(coordinator.get('dsh-ray-assistant-policy')?.config, 'coordinator Policy config')
+  const automations = rsiRecord(coordinator.get('dsh-ray-assistant-automations')?.config, 'coordinator Automations config')
   if (policy.databasePath !== join(root, 'policy.sqlite') || automations.databasePath !== join(root, 'automations.sqlite')
     || automations.runsPath !== join(root, 'runs')) rsiPairError('coordinator storage differs from dedicated root')
   if (automations.schedulerEnabled !== true || automations.allowUnbudgetedExecution === true) rsiPairError('coordinator scheduler or budget admission is unsafe')
@@ -675,8 +675,8 @@ export async function validateRsiCoordinatorPair(targetSource, coordinatorSource
     || !Number.isSafeInteger(matchingBudgets[0].periodMs) || matchingBudgets[0].periodMs < 1_000) {
     rsiPairError('coordinator Policy lacks a unique finite automation budget')
   }
-  const preview = yaml.parseDocument('- id: dsh-enhanced-assistant-automations\n')
-  const previewConfig = coordinator.get('dsh-enhanced-assistant-automations').configNode.clone()
+  const preview = yaml.parseDocument('- id: dsh-ray-assistant-automations\n')
+  const previewConfig = coordinator.get('dsh-ray-assistant-automations').configNode.clone()
   previewConfig.set('schedulerEnabled', false)
   preview.contents.items[0].set('config', previewConfig)
   return { scope, coordinatorId: adoption.coordinatorId, previewPatch: preview.toString({ lineWidth: 0 }) }

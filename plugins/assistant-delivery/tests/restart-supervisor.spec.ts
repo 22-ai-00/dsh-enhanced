@@ -328,7 +328,7 @@ describe('fixed-unit restart supervisor', () => {
       await writeFile(hostReceiptPath, hostReceipt)
       const hostBinding = JSON.stringify({ schemaVersion: 1, cacheRoot: join(external, 'hosts'),
         version: '0.2.1-rc.2', receiptDigest: createHash('sha256').update(hostReceipt).digest('hex') })
-      await writeFile(join(f.root, '.dsh-rsi-host.json'), hostBinding)
+      await writeFile(join(f.root, '.dsh-ray-host.json'), hostBinding)
       const policyDb = new DatabaseSync(policyDatabasePath)
       policyDb.exec('CREATE TABLE emergency_state(singleton INTEGER PRIMARY KEY,enabled INTEGER NOT NULL)')
       policyDb.prepare('INSERT INTO emergency_state(singleton,enabled) VALUES(1,0)').run()
@@ -351,11 +351,11 @@ describe('fixed-unit restart supervisor', () => {
       const hostAlias = join(external, 'hosts-alias')
       await symlink(join(external, 'hosts'), hostAlias)
       const aliasedBinding = JSON.stringify({ ...JSON.parse(hostBinding), cacheRoot: hostAlias })
-      await writeFile(join(f.root, '.dsh-rsi-host.json'), aliasedBinding)
+      await writeFile(join(f.root, '.dsh-ray-host.json'), aliasedBinding)
       expect(await inspectRestartPolicyAndCode({ ...config,
         hostBindingDigest: createHash('sha256').update(aliasedBinding).digest('hex'),
         hostReceiptPath: join(hostAlias, '0.2.1-rc.2', 'receipt.json') }, task)).toBe(false)
-      await writeFile(join(f.root, '.dsh-rsi-host.json'), hostBinding)
+      await writeFile(join(f.root, '.dsh-ray-host.json'), hostBinding)
       expect(await inspectRestartPolicyAndCode(config,
         { ...task, binding: { ...task.binding, id: 'new-binding-after-new' } })).toBe(true)
       expect(await inspectRestartPolicyAndCode({ ...config, policyRules: [] }, task)).toBe(false)

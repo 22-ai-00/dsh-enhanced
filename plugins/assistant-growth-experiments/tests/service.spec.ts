@@ -7,7 +7,7 @@ import {
   AssistantGrowthExperimentsService,
   growthPortReceiptDigest,
 } from '../src/service.ts'
-import { workflowTraceRevisionDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { workflowTraceRevisionDigest } from '@dsh-ray/assistant-growth-contract'
 import type {
   GrowthAutomationArtifactRequest,
   GrowthAutomationPort,

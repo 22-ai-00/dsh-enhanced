@@ -19,14 +19,14 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies, provideWorkingDirectoryFixture } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
-import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { AssistantSkillsService } from '@dsh-ray/assistant-skills'
+import { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import { AssistantEvaluationService, EvaluationStore } from '@dsh-ray/assistant-evaluation'
 import { SourceGrowthRunUnavailableError, sourceGrowthRunDigest, validateSourceGrowthRunBinding, type SourceGrowthRunProducer,
-  type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
-import { OwnerVerifiedWorkflowSourceError, type GoalRecord, type GoalScope, type VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
+  type SourceGrowthRunRequest } from '@dsh-ray/assistant-growth-contract'
+import { OwnerVerifiedWorkflowSourceError, type GoalRecord, type GoalScope, type VerifiedWorkflowSource } from '@dsh-ray/assistant-goals'
 import plugin, { apply, AssistantGrowthDriverService, Config, name, normalizeConfig, version } from '../src/index.ts'
 import type { OwnerRouteReceipt } from '../src/deposit.ts'
 import { ptcTrajectory, runGrowthAgent, SOURCE_REVISION_PROMPT, SOURCE_SECURE_CODING_GUIDANCE, splitGrowthToolSurface } from '../src/growth-agent.ts'
@@ -457,7 +457,7 @@ async function runWake(service: AssistantGrowthDriverService): Promise<void> {
   try { await service.wake() } catch { /* health() is the source of truth */ }
 }
 
-describe('dsh-enhanced-assistant-growth-driver', () => {
+describe('dsh-ray-assistant-growth-driver', () => {
   it.each([false, true])('automatically reviews task feedback through native scheduling and the source model; owner prose=%s', async ownerProse => {
     const adapter = new ScriptedAdapter([])
     const h = await mount({ adapter, provider: 'conversation-provider' })
@@ -578,7 +578,7 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
   })
 
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-assistant-growth-driver')
+    expect(name).toBe('dsh-ray-assistant-growth-driver')
     expect(version).toBe(manifest.version)
   })
 

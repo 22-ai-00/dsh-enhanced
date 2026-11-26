@@ -4,15 +4,15 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import type { TaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
 import { AssistantVerifierService } from '../src/service.ts'
 import { createVerifierAuthorities, type NativeIsolatedRunnerAuthorityInput } from '../src/drivers.ts'
 import type { AcceptanceHandle, AcceptanceTask, AcceptedExecution, TaskAcceptanceProducer, TaskAcceptanceRegistration } from '../src/host.ts'
 
 // Records service dispatch only. This seam is not Linux execution evidence.
 const runnerCalls = vi.hoisted(() => ({ created: [] as Record<string, unknown>[], runs: 0, closed: 0, onRun: undefined as (() => void) | undefined }))
-vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
-  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+vi.mock('@dsh-ray/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-ray/assistant-isolation')>()
   return { ...actual, IsolatedVerifierRunner: class {
     constructor(input: Record<string, unknown>) { runnerCalls.created.push(input) }
     async run() { runnerCalls.runs++; runnerCalls.onRun?.(); return { jobId: 'private-verification', status: 'succeeded', quiescent: true,

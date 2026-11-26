@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { PluginControlPlaneService, normalizeControlPlaneConfig, type Config } from './service.js'
 import { version } from './version.js'
 
-export const name = 'dsh-enhanced-plugin-control-plane'
+export const name = 'dsh-ray-plugin-control-plane'
 export { PluginControlPlaneService, normalizeControlPlaneConfig, version }
 export { Config } from './service.js'
 export type { NormalizedControlPlaneConfig } from './service.js'

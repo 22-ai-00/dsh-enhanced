@@ -6,7 +6,7 @@ import { realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import type { TaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
 import { createVerifierAuthorities, verifyAcceptanceCriteria, type VerifierAuthority } from '../src/drivers.ts'
 
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')

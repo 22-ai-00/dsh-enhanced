@@ -10,9 +10,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 }
 const now = () => Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.checkedAt) + 1000
 
-describe('dsh-enhanced-assistant-deepseek-budget', () => {
+describe('dsh-ray-assistant-deepseek-budget', () => {
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-assistant-deepseek-budget')
+    expect(name).toBe('dsh-ray-assistant-deepseek-budget')
     expect(version).toBe(manifest.version)
   })
 

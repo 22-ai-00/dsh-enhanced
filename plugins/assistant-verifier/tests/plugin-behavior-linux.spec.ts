@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
-import type { IsolationResult } from '@dsh-enhanced/assistant-isolation'
+import type { IsolationResult } from '@dsh-ray/assistant-isolation'
 import { beforeEach, expect, it, vi } from 'vitest'
 
 const seam = vi.hoisted(() => ({ run: vi.fn(), close: vi.fn(), verify: vi.fn(), configs: [] as unknown[] }))
-vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => ({
-  ...await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>(),
+vi.mock('@dsh-ray/assistant-isolation', async importOriginal => ({
+  ...await importOriginal<typeof import('@dsh-ray/assistant-isolation')>(),
   LinuxVerifierRunner: class {
     constructor(config: unknown) { seam.configs.push(config) }
     run(...args: unknown[]) { return seam.run(...args) }

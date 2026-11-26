@@ -1,5 +1,5 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import type { DeliveryPreferencePrincipalAttestation } from './types.js'
 
 /** Exact durable locator for owner feedback about one terminal whole-goal assessment. */

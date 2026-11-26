@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { applyEntryPatches, entryListSchema } from '@deepseek-ai/cordis-plugin-include'
-import type { ActiveLarkOwnerBindingsSnapshot } from '@dsh-enhanced/assistant-delivery'
+import type { ActiveLarkOwnerBindingsSnapshot } from '@dsh-ray/assistant-delivery'
 import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, readRsiInstalledBase, rsiSetupPorts, runRsiSetup, waitForOwnerDmBinding, type RsiSetupPorts } from '../src/rsi-setup.js'
 
 const roots: string[] = []
@@ -17,7 +17,7 @@ afterEach(async () => {
 async function fixture() {
   // macOS 上 os.tmpdir() 经 /var → /private/var 符号链接，须先规范化到 canonical 路径，
   // 否则 safeDirectory 的 realpath 检查会拒绝测试夹具本身（生产 DSH home 无此问题）。
-  const home = await mkdtemp(join(await realpath(tmpdir()), 'dsh-rsi-setup-')); roots.push(home)
+  const home = await mkdtemp(join(await realpath(tmpdir()), 'dsh-ray-setup-')); roots.push(home)
   const pair = ['target', 'coordinator']
   for (const name of pair) {
     await mkdir(join(home, 'profiles', name), { recursive: true, mode: 0o700 })
@@ -47,7 +47,7 @@ async function fixture() {
 
 async function installedBaseFixture() {
   const setup = await fixture()
-  const host = await mkdtemp(join(await realpath(tmpdir()), 'dsh-rsi-host-')); roots.push(host)
+  const host = await mkdtemp(join(await realpath(tmpdir()), 'dsh-ray-host-')); roots.push(host)
   const bin = join(host, 'bin'), dsh = join(host, 'node_modules', '@deepseek-ai', 'dsh')
   const base = join(host, 'node_modules', '@deepseek-ai', 'dsh-base')
   await mkdir(bin, { recursive: true })

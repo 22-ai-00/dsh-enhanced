@@ -22,11 +22,11 @@ const notice = z.object({
 
 /** Strict Host and client descriptor for owner-scoped accepted reminders. */
 export const TYPERT = {
-  package: '@dsh-enhanced/assistant-web-owner',
+  package: '@dsh-ray/assistant-web-owner',
   face: 'host',
   schemas: [],
   invocations: [{
-    id: '@dsh-enhanced/assistant-web-owner#deliveryNotices/list',
+    id: '@dsh-ray/assistant-web-owner#deliveryNotices/list',
     service: 'deliveryNotices',
     namespace: 'deliveryNotices',
     method: 'list',
@@ -37,12 +37,12 @@ export const TYPERT = {
     }],
     result: {
       mode: 'strict',
-      typeSymbol: '@dsh-enhanced/assistant-web-owner#DeliveryNotice[]',
+      typeSymbol: '@dsh-ray/assistant-web-owner#DeliveryNotice[]',
       create: () => z.array(notice).readonly(),
     },
     sourceLocation: { file: 'plugins/assistant-web-owner/src/typert.ts', line: 15, column: 3 },
   }, {
-    id: '@dsh-enhanced/assistant-web-owner#deliveryNotices/ack',
+    id: '@dsh-ray/assistant-web-owner#deliveryNotices/ack',
     service: 'deliveryNotices',
     namespace: 'deliveryNotices',
     method: 'ack',
@@ -52,14 +52,14 @@ export const TYPERT = {
       codec: { mode: 'strict', typeSymbol: '@deepseek-ai/dsh-session/types#SessionId', create: () => sessionId },
     }, {
       name: 'ids', wire: 'ids', source: 'json',
-      codec: { mode: 'strict', typeSymbol: '@dsh-enhanced/assistant-web-owner#NoticeIds', create: () => noticeIds },
+      codec: { mode: 'strict', typeSymbol: '@dsh-ray/assistant-web-owner#NoticeIds', create: () => noticeIds },
     }, {
       name: 'status', wire: 'status', source: 'json',
-      codec: { mode: 'strict', typeSymbol: '@dsh-enhanced/assistant-web-owner#NoticeAckStatus', create: () => noticeAckStatus },
+      codec: { mode: 'strict', typeSymbol: '@dsh-ray/assistant-web-owner#NoticeAckStatus', create: () => noticeAckStatus },
     }],
     result: {
       mode: 'strict',
-      typeSymbol: '@dsh-enhanced/assistant-web-owner#NoticeAckResult',
+      typeSymbol: '@dsh-ray/assistant-web-owner#NoticeAckResult',
       create: () => noticeAckResult,
     },
     sourceLocation: { file: 'plugins/assistant-web-owner/src/typert.ts', line: 40, column: 3 },

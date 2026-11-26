@@ -4,7 +4,7 @@ import {
   canonicalGrowthJson,
   growthObjectDigest,
   isGrowthRecord,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import type { NormalizedAssociationConfig } from './config.js'
 import { runHotPathQuery } from './hot-path.js'
 import type { AssociationMemoryIndex } from './index-memory.js'

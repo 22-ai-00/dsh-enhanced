@@ -10,7 +10,7 @@ import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 
 type ToolJsonValue = null | boolean | number | string | ToolJsonValue[] | { [key: string]: ToolJsonValue }
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import {
   familiesScenario,
   type FamiliesCodeVector,

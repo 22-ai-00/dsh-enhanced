@@ -11,7 +11,7 @@ import LlmRuntime, {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from './deep-freeze.ts'
-import { createAgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
+import { createAgentLoopRequestAttestor } from '@dsh-ray/llm-route-capabilities'
 import { realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'

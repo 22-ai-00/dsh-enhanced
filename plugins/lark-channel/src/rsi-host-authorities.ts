@@ -4,7 +4,7 @@ import { readFile, realpath, lstat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { inspectTrustedExecutable, resolveTrustKey, validateSystemdHostAuthorityConfig,
-  type PluginControlTrustConfig, type SourceAdoptionAuthorityConfig, type SystemdHostAuthorityConfig } from '@dsh-enhanced/plugin-control-plane'
+  type PluginControlTrustConfig, type SourceAdoptionAuthorityConfig, type SystemdHostAuthorityConfig } from '@dsh-ray/plugin-control-plane'
 
 type Pin = { path: string; sha256: string }
 type Wrapper = { schemaVersion: 4; template: SystemdHostAuthorityConfig['template']; resolver: {

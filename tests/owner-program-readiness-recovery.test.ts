@@ -39,12 +39,12 @@ function fixture() {
     hostPlanDigest: hash(JSON.stringify(plan)), installer: oldInstaller,
     original: { resources: { root: join(homePath, 'rsi-authorities', profile), installationId: 'installation',
       identities: { host } }, manifest: { sourceReviews: { owner: { id: 'original-owner' } } } } }
-  const proof = { protocol: 'dsh-enhanced/host-owner-program-update/v1', installer: oldInstaller,
+  const proof = { protocol: 'dsh-ray/host-owner-program-update/v1', installer: oldInstaller,
     ownerUpdate, ownerUpdateNext: { transactionId, overlay, manifestDigest: 'b'.repeat(64),
       overlayDigest: 'c'.repeat(64) }, candidate: { sourceCommit: 'd'.repeat(40) } }
   const manifest = { version: 4, operation: 'host-update', state: 'swapped', homePath,
     canonicalHome: homePath, profile, id: transactionId,
-    transactionPath: `${homePath}.dsh-enhanced-transaction`, bindingDigest: 'e'.repeat(64),
+    transactionPath: `${homePath}.dsh-ray-transaction`, bindingDigest: 'e'.repeat(64),
     originalIdentity: { ...identity, ino: '1' }, stagedIdentity: identity,
     services: [profile, coordinator].map(name => ({ profile: name,
       unit: `dsh-profile-${name}.service`, wasActive: true })),
@@ -60,7 +60,7 @@ function fixture() {
 async function diskFixture() {
   const directory = await realpath(await mkdtemp(join(await realpath(tmpdir()), 'readiness-recovery-')))
   temporaryRoots.push(directory)
-  const home = join(directory, 'home'), backup = join(`${home}.dsh-enhanced-transaction`, 'original-home')
+  const home = join(directory, 'home'), backup = join(`${home}.dsh-ray-transaction`, 'original-home')
   const config = join(home, 'rsi-authorities', profile)
   const identities = join(config, 'identities')
   await mkdir(backup, { recursive: true, mode: 0o700 })
@@ -80,7 +80,7 @@ async function diskFixture() {
     receiptDigest: hash(JSON.stringify(receiptBody)) }), { mode: 0o600 })
   manifest.homePath = home
   manifest.canonicalHome = home
-  manifest.transactionPath = `${home}.dsh-enhanced-transaction`
+  manifest.transactionPath = `${home}.dsh-ray-transaction`
   manifest.originalIdentity = { ...manifest.originalIdentity, ...statIdentity(await lstat(backup)) }
   manifest.stagedIdentity = statIdentity(await lstat(home))
   manifest.hostMigration.localSource.ownerUpdate.homePath = home

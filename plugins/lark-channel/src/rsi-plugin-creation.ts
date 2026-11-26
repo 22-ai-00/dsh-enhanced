@@ -3,10 +3,10 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { validateCreationAcceptanceAuthorityRef, type CreationAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
-import type { CreationReviewConfig } from '@dsh-enhanced/assistant-verifier'
-import type { LinuxRunnerStateSeal } from '@dsh-enhanced/assistant-isolation'
-import type { Config as ControlPlaneConfig, CreationCapabilityConfig, CreationCapabilityOwner } from '@dsh-enhanced/plugin-control-plane'
+import { validateCreationAcceptanceAuthorityRef, type CreationAcceptanceAuthorityRef } from '@dsh-ray/assistant-growth-contract'
+import type { CreationReviewConfig } from '@dsh-ray/assistant-verifier'
+import type { LinuxRunnerStateSeal } from '@dsh-ray/assistant-isolation'
+import type { Config as ControlPlaneConfig, CreationCapabilityConfig, CreationCapabilityOwner } from '@dsh-ray/plugin-control-plane'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
 import type { NativeRsiCreationBuildEnvironment } from './rsi-native-runtime-bootstrap.js'
@@ -44,11 +44,11 @@ function installedPeer<T>(name: string): T {
 
 /** Optional peers are loaded only for an opted-in creation setup. */
 export function getRsiPluginCreationValidators(): {
-  compileCreationReviewConfig: typeof import('@dsh-enhanced/assistant-verifier').compileCreationReviewConfig
-  validateCreationCapabilityConfig: typeof import('@dsh-enhanced/plugin-control-plane').validateCreationCapabilityConfig
+  compileCreationReviewConfig: typeof import('@dsh-ray/assistant-verifier').compileCreationReviewConfig
+  validateCreationCapabilityConfig: typeof import('@dsh-ray/plugin-control-plane').validateCreationCapabilityConfig
 } {
-  const verifier = installedPeer<typeof import('@dsh-enhanced/assistant-verifier')>('@dsh-enhanced/assistant-verifier')
-  const controlPlane = installedPeer<typeof import('@dsh-enhanced/plugin-control-plane')>('@dsh-enhanced/plugin-control-plane')
+  const verifier = installedPeer<typeof import('@dsh-ray/assistant-verifier')>('@dsh-ray/assistant-verifier')
+  const controlPlane = installedPeer<typeof import('@dsh-ray/plugin-control-plane')>('@dsh-ray/plugin-control-plane')
   if (typeof verifier.compileCreationReviewConfig !== 'function'
     || typeof controlPlane.validateCreationCapabilityConfig !== 'function') {
     fail('installed creation validators are unavailable; update the verifier and control-plane peers')
@@ -237,8 +237,8 @@ export function creationAdoptionAuthorityDigest(input: {
   const { resources, capabilities } = input
   if (resources?.schemaVersion !== 1 || !capabilities || typeof capabilities !== 'object'
     || typeof capabilities.keyPath !== 'string') fail('invalid adoption authority input')
-  const controlPlane: typeof import('@dsh-enhanced/plugin-control-plane') =
-    installedPeer('@dsh-enhanced/plugin-control-plane')
+  const controlPlane: typeof import('@dsh-ray/plugin-control-plane') =
+    installedPeer('@dsh-ray/plugin-control-plane')
   if (typeof controlPlane.creationCapabilityAuthorityDigest !== 'function') {
     fail('installed control-plane cannot derive the adoption authority digest')
   }

@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto'
 import { types as utilTypes } from 'node:util'
 import { isAbsolute, resolve } from 'node:path'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { validateWorkItemGrowthAuthorityPins, validateWorkItemRevisionAuthorityPins,
   type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins,
-  type WorkItemSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import type { OwnerForegroundLearningTask, OwnerWorkItemEngineeringContextSource } from '@dsh-enhanced/assistant-delivery'
+  type WorkItemSourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
+import type { OwnerForegroundLearningTask, OwnerWorkItemEngineeringContextSource } from '@dsh-ray/assistant-delivery'
 
 export type UsageStableOwner = Pick<OwnerForegroundLearningTask['owner'], 'authorityId' | 'authorityHash' | 'principalId' | 'principalRecordId' | 'principalVersion' | 'workspace' | 'agentPreset'>
 export const workItemStableOwner = (owner: UsageStableOwner): UsageStableOwner => ({ authorityId: owner.authorityId, authorityHash: owner.authorityHash, principalId: owner.principalId, principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion, workspace: owner.workspace, agentPreset: owner.agentPreset })

@@ -1,4 +1,4 @@
-# @dsh-enhanced/credentials-keychain
+# @dsh-ray/credentials-keychain
 
 给可信 DSH 插件使用的凭据 handle 服务。配置只保存 locator 与 allowlist，值留在 macOS Keychain、Linux Secret Service、无桌面 Linux 的 owner-protected 文件、当前 Windows 用户的 DPAPI 加密文件或一个明确命名的进程环境变量中；每次使用都经过 `assistant-policy`、有界 lease 和不含 secret 的 SQLite 审计账本。
 
@@ -6,10 +6,10 @@
 
 ## 安装
 
-先安装 `@dsh-enhanced/assistant-policy`，再安装：
+先安装 `@dsh-ray/assistant-policy`，再安装：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/credentials-keychain
+dsh plugin --profile web add @dsh-ray/credentials-keychain
 dsh --profile web --dump-config
 ```
 
@@ -21,7 +21,7 @@ handles:
     provider: macos-keychain
     service: dsh/lark
     account: personal
-    consumers: [dsh-enhanced-lark-channel]
+    consumers: [dsh-ray-lark-channel]
     purposes: [connect]
     maxLeaseMs: 86400000
 ```
@@ -31,7 +31,7 @@ handles:
 ```yaml
 - id: lark-credential
   effect: allow
-  subject: { kind: background, id: dsh-enhanced-lark-channel }
+  subject: { kind: background, id: dsh-ray-lark-channel }
   actions: [credential.use]
   resource: { kind: credential, id: lark-app-secret }
   context: { initiators: [background] }
@@ -69,7 +69,7 @@ handles:
 - id: lark-app-secret
   provider: linux-protected-file
   path: /home/me/.dsh/credentials-keychain/lark-web-primary-0123456789abcdef0123456789abcdef.secret
-  consumers: [dsh-enhanced-lark-channel]
+  consumers: [dsh-ray-lark-channel]
   purposes: [connect]
   maxLeaseMs: 86400000
 ```
@@ -90,7 +90,7 @@ handles:
 - id: lark-app-secret
   provider: environment
   environmentName: LARK_APP_SECRET
-  consumers: [dsh-enhanced-lark-channel]
+  consumers: [dsh-ray-lark-channel]
   purposes: [connect]
   maxLeaseMs: 86400000
 ```
@@ -103,7 +103,7 @@ handles:
 - id: lark-app-secret
   provider: windows-dpapi
   path: 'C:\Users\me\.dsh\credentials-keychain\lark-web-primary.clixml'
-  consumers: [dsh-enhanced-lark-channel]
+  consumers: [dsh-ray-lark-channel]
   purposes: [connect]
   maxLeaseMs: 86400000
 ```
@@ -135,5 +135,5 @@ Cordis fiber identity 与 callback 是同进程合作式边界，不能阻止恶
 ## 兼容性
 
 - `@deepseek-ai/cordis ^4.1.0`
-- `@dsh-enhanced/assistant-policy`（同批发布版本）
+- `@dsh-ray/assistant-policy`（同批发布版本）
 - Node.js：依赖内置 `node:sqlite`，具体 `engines.node` 与运行时基线参见仓库[兼容性基线](../../docs/compatibility.md)。

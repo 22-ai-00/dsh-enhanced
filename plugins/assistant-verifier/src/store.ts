@@ -3,8 +3,8 @@ import { dirname, isAbsolute, normalize } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import {
   acceptanceCanonicalJson, validateTaskAcceptanceContract, validateTaskVerificationReceipt,
-} from '@dsh-enhanced/task-acceptance-contract'
-import type { AcceptanceTaskIdentity, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/task-acceptance-contract'
+import type { AcceptanceTaskIdentity, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-ray/task-acceptance-contract'
 
 export class AcceptanceStoreError extends Error {
   constructor(readonly code: 'invalid-input' | 'conflict' | 'corrupt', message: string) { super(message); this.name = 'AcceptanceStoreError' }

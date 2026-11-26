@@ -6,7 +6,7 @@
 
 | 包 | 用途 |
 | --- | --- |
-| [`@dsh-enhanced/assistant-growth-contract`](assistant-growth-contract) | 为 Delivery、自动化与受监督 growth 实验提供可验证、内容最小化的 workflow/实验契约；不激活 Cordis 插件，也不保存或传递原始 owner 内容。 |
-| [`@dsh-enhanced/dsh-rsi-cli`](dsh-rsi-cli) | 全局 `dsh-rsi` 命令：安装、打开控制台（`open`）、版本与只读自迭代演进统计（`version` / `--version` / `-V`，支持 `--json` / `--short`）、状态与只读诊断（`status`/`doctor`）、成长计分卡（`growth-report`）、自迭代开关（`enable`/`disable`）、日志与 Web URL、就地升级（`upgrade`/`update`）、运维结算（`maintenance`）和卸载（`purge`）；管理 macOS/Linux 的 Home、profile 与服务，不声明 `dsh.bundle`，也不向 profile 注入 patch 层。 |
-| [`@dsh-enhanced/llm-route-capabilities`](llm-route-capabilities) | 在精确的 DSH `LlmRuntime` 上发布和查询 provider/model 的 tool-call 协议投影方式；不决定 Agent 工具权限，仅用显式 `none` 表达 adapter 未实现统一协议，也不会激活 Cordis 插件。 |
-| [`@dsh-enhanced/task-acceptance-contract`](task-acceptance-contract) | 为任务验收合同与独立验证回执提供严格、不可变的 wire 契约；只做 JSON 校验、路径规范化与规范 SHA-256 摘要，不激活服务、工具、网络、文件或子进程。 |
+| [`@dsh-ray/assistant-growth-contract`](assistant-growth-contract) | 为 Delivery、自动化与受监督 growth 实验提供可验证、内容最小化的 workflow/实验契约；不激活 Cordis 插件，也不保存或传递原始 owner 内容。 |
+| [`dsh-ray`](dsh-ray) | 全局 `dsh-ray` 命令：安装、打开控制台（`open`）、版本与只读自迭代演进统计（`version` / `--version` / `-V`，支持 `--json` / `--short`）、状态与只读诊断（`status`/`doctor`）、成长计分卡（`growth-report`）、自迭代开关（`enable`/`disable`）、日志与 Web URL、就地升级（`upgrade`/`update`）、运维结算（`maintenance`）和卸载（`purge`）；管理 macOS/Linux 的 Home、profile 与服务，不声明 `dsh.bundle`，也不向 profile 注入 patch 层。 |
+| [`@dsh-ray/llm-route-capabilities`](llm-route-capabilities) | 在精确的 DSH `LlmRuntime` 上发布和查询 provider/model 的 tool-call 协议投影方式；不决定 Agent 工具权限，仅用显式 `none` 表达 adapter 未实现统一协议，也不会激活 Cordis 插件。 |
+| [`@dsh-ray/task-acceptance-contract`](task-acceptance-contract) | 为任务验收合同与独立验证回执提供严格、不可变的 wire 契约；只做 JSON 校验、路径规范化与规范 SHA-256 摘要，不激活服务、工具、网络、文件或子进程。 |

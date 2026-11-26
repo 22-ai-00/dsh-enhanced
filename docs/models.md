@@ -7,8 +7,8 @@
 默认安装或轻量 `core` / `web` 安装完成后，可直接打开本地 Web 并前往左侧栏 **Settings → Models**（或在 **Settings → 文鳐助手** 中查看本机 ACP Agent）：
 
 ```sh
-dsh-rsi open --profile web          # 自动接通受管服务或前台启动并打开浏览器
-dsh-rsi web-url --profile web       # 仅查看已运行受管服务的 Web 地址
+dsh-ray open --profile web          # 自动接通受管服务或前台启动并打开浏览器
+dsh-ray web-url --profile web       # 仅查看已运行受管服务的 Web 地址
 ```
 
 `web` 是默认配置名称；使用其他 profile 时替换命令中的名称。各场景参数详见[安装指南](../scripts/install/README.md#场景与参数入口)。
@@ -61,13 +61,13 @@ dsh-model-setup --profile web --provider traex-agent --enable-in-profile web --d
 dsh-model-setup --profile web --provider agy-agent   --enable-in-profile web --default-if-absent
 ```
 
-模型目录来自当前本机 CLI 账号，首次打开可能需要短暂等待。只出现 `default` 或发现失败时，先用 `dsh-rsi doctor --profile web` 检查登录与 CLI 可执行文件状态，详见[ACP Provider 帮助](../plugins/traex-acp-provider/README.md)。
+模型目录来自当前本机 CLI 账号，首次打开可能需要短暂等待。只出现 `default` 或发现失败时，先用 `dsh-ray doctor --profile web` 检查登录与 CLI 可执行文件状态，详见[ACP Provider 帮助](../plugins/traex-acp-provider/README.md)。
 
 ## 常见问题
 
 | 现象 | 先检查什么 |
 | --- | --- |
-| 没有模型列表 | 服务可能不支持列表查询；手填服务给出的准确模型 ID。TraeX / Antigravity 则先运行 `traex login status` 或 `agy models`（或 `dsh-rsi doctor`）确认登录。 |
+| 没有模型列表 | 服务可能不支持列表查询；手填服务给出的准确模型 ID。TraeX / Antigravity 则先运行 `traex login status` 或 `agy models`（或 `dsh-ray doctor`）确认登录。 |
 | 401 / 403 或密钥缺失 | API Key、模型访问权限，以及当前机器是否能访问该服务。 |
 | 404 或协议错误 | API 地址是否误填了完整请求路径，协议是否与服务一致。 |
 | 页面只读或无法保存 | 用本机 `localhost` / `127.0.0.1` 的授权地址访问；当前 Host 不允许从非本机页面持久化设置。 |
@@ -86,4 +86,4 @@ compat:
   maxTokensField: max_tokens
 ```
 
-这是提供商内部的字段片段，不是完整配置文件。请求头值是固定字符串，不会自动替换为每次会话的 ID；API Key 继续由 Web 凭据输入框管理。修改后回到模型选择器验证，错误日志可用 `dsh-rsi logs --profile web --errors-only` 查看。
+这是提供商内部的字段片段，不是完整配置文件。请求头值是固定字符串，不会自动替换为每次会话的 ID；API Key 继续由 Web 凭据输入框管理。修改后回到模型选择器验证，错误日志可用 `dsh-ray logs --profile web --errors-only` 查看。

@@ -24,7 +24,7 @@ bash scripts/install/install-local.sh
 
 公开 npm 安装会在调用 `dsh plugin add` 前，由 DSH 初始化目标 profile 的 workspace，并在该 profile 的 `pnpm-workspace.yaml` 中写入经评审的有界决策表：`allowBuilds.koffi: true`、`allowBuilds.protobufjs: false`。
 
-- `koffi` 是预编译原生 FFI 绑定：assistant-skills 等批次经 `@deepseek-ai/dsh-fs-local`、`@deepseek-ai/dsh-session-persistence-jsonl` 引入 3.1.1，`@dsh-enhanced/assistant-actions` 直接依赖 3.2.1；最小的 health/personal-assistant 闭包不含它，但 skills/supervised 批次必含，并非仅 `autonomy` 场景需要。`assistant-actions` 的 Linux broker 通过它调用 libc `getsockopt` 做 SO_PEERCRED 对端鉴权（`broker-peer-linux`）；fs/persistence 包仅在 Windows 惰性加载它做文件 ACL。设为 `true` 与源码根 `pnpm-workspace.yaml` 及本地 cohort 收据冻结值一致；其安装脚本（cnoke `--prebuild`）在平台预编译绑定已随 optionalDependencies 安装时只做一次 `require` 自检即返回，不编译、不联网，预编译缺失时才回退源码构建作为兜底。
+- `koffi` 是预编译原生 FFI 绑定：assistant-skills 等批次经 `@deepseek-ai/dsh-fs-local`、`@deepseek-ai/dsh-session-persistence-jsonl` 引入 3.1.1，`@dsh-ray/assistant-actions` 直接依赖 3.2.1；最小的 health/personal-assistant 闭包不含它，但 skills/supervised 批次必含，并非仅 `autonomy` 场景需要。`assistant-actions` 的 Linux broker 通过它调用 libc `getsockopt` 做 SO_PEERCRED 对端鉴权（`broker-peer-linux`）；fs/persistence 包仅在 Windows 惰性加载它做文件 ACL。设为 `true` 与源码根 `pnpm-workspace.yaml` 及本地 cohort 收据冻结值一致；其安装脚本（cnoke `--prebuild`）在平台预编译绑定已随 optionalDependencies 安装时只做一次 `require` 自检即返回，不编译、不联网，预编译缺失时才回退源码构建作为兜底。
 - `protobufjs` 的 postinstall 只输出依赖版本建议，已发布的 SDK 使用预构建文件，设为 `false`。
 
 重试时安装器把 pnpm 留下的 `set this to true or false` 未决占位收敛为表内决策；已是相同布尔的键保持原样。owner 显式写入的 `koffi: false` 会被尊重并继续安装，但安装器会警告其后果：预编译绑定缺失时运行期失败，且该 profile 日后原地转换为本地 supervised-growth cohort 时会因构建策略与收据冻结值冲突被拒绝，需手工改回 `true`。`protobufjs: true`、任何非布尔标量、非标量值都会使安装停止，不会覆盖 owner 决策。决策表之外若还残留未决占位，安装器同样停止并列出包名，要求 owner 在 `pnpm-workspace.yaml` 手工写明布尔后重跑，不会替未评审的依赖做决定。
@@ -45,7 +45,7 @@ pnpm 在执行构建脚本前已把依赖写入 `package.json`；若 add 中途�
 
 ## 安装入口
 
-安装器先确保 Node.js、pnpm 和兼容的 DSH：默认解析官方 `@deepseek-ai/dsh` 的 `latest`（不追踪 `next` 或 beta），校验当前源码允许的已验证范围 `>=0.2.2-rc.5 <0.3.0`，对全新空 Home 将精确 Host（`0.2.2-rc.5`，可用显式 `--dsh-version` 指定允许的精确版本）安装到独立目录并在 `$DSH_HOME/.dsh-rsi-host.json` 中持久绑定；重试、插件升级及生成的服务复用该入口，不修改全局 DSH，未知新版或解析失败会拒绝。`--dry-run` 离线展示计划，已有未绑定 Home 保留原 Host。当前发布包与 Host 固定值以[发布账本](../../release-manifest.json)为准；旧 `0.1`（`0.1.5+` 收据）Home 到 `0.2` 以及 macOS 受管 Host 更新已通过 `dsh-rsi upgrade` / `dsh-rsi update --all` 事务路径开放（带配置、依赖与 SQLite 账本备份/doctor 校验/失败自动回滚）；已有非空 creation/revision 账本需显式传入 `--allow-non-empty-history-migration` 才能在备份保护下原地保留行迁移；远端引导器的固定 tag 和资产摘要由 `release:prepare` 更新。普通 Linux npm cohort 的受管 Host 更新与下述冻结 owner 程序升级有不同适用条件；真实跨版本验收状态见 [RSI 状态](../../docs/rsi-status.md)，缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#升级与重装)。
+安装器先确保 Node.js、pnpm 和兼容的 DSH：默认解析官方 `@deepseek-ai/dsh` 的 `latest`（不追踪 `next` 或 beta），校验当前源码允许的已验证范围 `>=0.2.2-rc.5 <0.3.0`，对全新空 Home 将精确 Host（`0.2.2-rc.5`，可用显式 `--dsh-version` 指定允许的精确版本）安装到独立目录并在 `$DSH_HOME/.dsh-ray-host.json` 中持久绑定；重试、插件升级及生成的服务复用该入口，不修改全局 DSH，未知新版或解析失败会拒绝。`--dry-run` 离线展示计划，已有未绑定 Home 保留原 Host。当前发布包与 Host 固定值以[发布账本](../../release-manifest.json)为准；旧 `0.1`（`0.1.5+` 收据）Home 到 `0.2` 以及 macOS 受管 Host 更新已通过 `dsh-ray upgrade` / `dsh-ray update --all` 事务路径开放（带配置、依赖与 SQLite 账本备份/doctor 校验/失败自动回滚）；已有非空 creation/revision 账本需显式传入 `--allow-non-empty-history-migration` 才能在备份保护下原地保留行迁移；远端引导器的固定 tag 和资产摘要由 `release:prepare` 更新。普通 Linux npm cohort 的受管 Host 更新与下述冻结 owner 程序升级有不同适用条件；真实跨版本验收状态见 [RSI 状态](../../docs/rsi-status.md)，缓存与重装说明见 [CLI 指南](../../packages/dsh-ray/README.md#升级与重装)。
 
 macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；若 `ai.deepseek.dsh.profile.<profile>` 未注册，会自动调用当前 profile 的服务注册入口并再次确认，再执行健康检查，无需手动运行 `launchctl bootstrap`。修复复用服务注册入口，不启动新的飞书 onboarding；已有中断的 setup 事务仍由原入口恢复。`--no-service`、`--lark skip` 以及不管理常驻服务的场景保持跳过；独立 `doctor.sh` 仍只检查。注册失败会保留具体错误并停止安装。
 
@@ -53,7 +53,7 @@ macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；
 
 macOS purge 从枚举 profile 到停服、备份和删除结束持续持有 Home 生命周期锁，并在停服前获取全部目标服务锁，阻止同 Home 的安装或同目标的启动与清理并发。`/tmp` 中的 Home 和服务锁文件保留稳定 inode；进程退出即释放内核锁，保留文件不表示仍被占用。同 profile 的手动 Host 若无法证明所属 Home，清理会中止，`--yes` 不会自动终止它。
 
-三档基础场景能力逐级叠加：`core ⊂ lark ⊂ supervised`（另提供面向本机 Web 的 `web` 与 Linux 隔离 `autonomy`）。`dsh-rsi install/reinstall` 未指定 `--scenario` 或 `--mode` 时默认进入 `supervised`：Linux/macOS 默认配置飞书常驻、`owner-console`（「文鳐」控制台与原生设置 UI）、`assistant-proactive`、`assistant-growth-driver`、`assistant-work-items`、`assistant-memory-learning`、新工具独立验收和有限采用，Linux 另配置独立采用协调器，不因 `--yes` 或非交互而降为 `core`。全新 Home 的 `supervised` 需要交互式飞书 onboarding；未配对时 `--yes` 或管道执行会在安装前停止。显式 `--scenario core` / `web` 或 `--lark skip` / `--no-service` 保留有限场景。macOS 使用原生 launchd Host，支持记忆学习、新工具独立验证与动态采用；源码替换发布轨仍限 Linux。
+三档基础场景能力逐级叠加：`core ⊂ lark ⊂ supervised`（另提供面向本机 Web 的 `web` 与 Linux 隔离 `autonomy`）。`dsh-ray install/reinstall` 未指定 `--scenario` 或 `--mode` 时默认进入 `supervised`：Linux/macOS 默认配置飞书常驻、`owner-console`（「文鳐」控制台与原生设置 UI）、`assistant-proactive`、`assistant-growth-driver`、`assistant-work-items`、`assistant-memory-learning`、新工具独立验收和有限采用，Linux 另配置独立采用协调器，不因 `--yes` 或非交互而降为 `core`。全新 Home 的 `supervised` 需要交互式飞书 onboarding；未配对时 `--yes` 或管道执行会在安装前停止。显式 `--scenario core` / `web` 或 `--lark skip` / `--no-service` 保留有限场景。macOS 使用原生 launchd Host，支持记忆学习、新工具独立验证与动态采用；源码替换发布轨仍限 Linux。
 
 全新 managed supervised 安装的顶层集合还包含 observe-only 的 `assistant-work-items`：owner 学习配置生成后自动幂等应用一次 `recommended` 装配，使 WorkItems 以 `enabled: true`、`mode: observe`、`intakeLedger.enabled: true` 生成 profile 配置行，并打开交付/评测/事件轮询等既有有限开关。装配不打开 admit/auto/worker，不改 Policy、凭据、ownerRoutes 或密封状态；模型路由与规则、签名 `workItemAuthorities` pin、修订采用密钥不由装配生成，缺前置时以 skipped 原因列出。显式 `--plugin-preset skip`、引导中选择否或已有 profile 的显式插件配置优先。逐环节只读就绪快照见 `dsh-autonomy-doctor --readiness`（匹配版本的 `assistant-web-owner`，需从自带该入口的 Home 运行并指向目标 `--dsh-home`/`--profile`）：输出确定性文本加一行 JSON，缺项标 not-ready 并给原因，必需环节未就绪时退出码 1；它只读组合配置，不验证运行时注册、模型或外部送达。
 
@@ -83,9 +83,9 @@ macOS purge 从枚举 profile 到停服、备份和删除结束持续持有 Home
   --confirm-dsh-home-stopped --yes
 ```
 
-两种操作都要求整个 `DSH_HOME` 在复制和切换时保持静止，且都会拒绝活动的第三方顶层 bundle，因为安装器无法穷举其私有状态路径；未作为 bundle 激活的普通第三方依赖会原样保留。`web` / `autonomy` 由操作者预先停止所有相关进程；Linux `lark` 和 `supervised` upgrade/uninstall 则由安装器在锁内停止并屏蔽已证明归属的 systemd units，操作者只需预先停止其它外部或手工进程。安装器持有 home 外的独占锁，在无网络隔离环境中对私有副本更新 package/lockfile、组合配置和实际激活；只有副本通过才提交。成功升级只更新当前已安装的 `@dsh-enhanced/*` 顶层依赖，不新增场景能力，并保留自定义 patch、凭据、Session、Goal 与其它任务状态。卸载的语义是停用并归档目标 profile 的受管能力：它把完整旧 profile 归档到 `$DSH_HOME/uninstalled-profiles/`，创建干净的同名 DSH 基础 profile；事务不会主动清除该 live profile 之外的凭据 locator、owner binding、Session、Goal 或数据库记录，也不承诺这些状态已被撤销、永久退休或逐字节验证。原 active units 在 clean profile 通过 fresh readiness 后恢复，原 inactive units 保持停止。归档配置不会继续激活；后续显式重装或共享同一状态库的其它 profile 仍可能再次解释这些保留状态。归档 profile 绑定完整树摘要；source proof 只覆盖协议明确列出的 Delivery、Recovery、Automations、owner 与非受管 Automation 摘要。再次卸载已无受管依赖的基础 profile 是幂等 no-op。
+两种操作都要求整个 `DSH_HOME` 在复制和切换时保持静止，且都会拒绝活动的第三方顶层 bundle，因为安装器无法穷举其私有状态路径；未作为 bundle 激活的普通第三方依赖会原样保留。`web` / `autonomy` 由操作者预先停止所有相关进程；Linux `lark` 和 `supervised` upgrade/uninstall 则由安装器在锁内停止并屏蔽已证明归属的 systemd units，操作者只需预先停止其它外部或手工进程。安装器持有 home 外的独占锁，在无网络隔离环境中对私有副本更新 package/lockfile、组合配置和实际激活；只有副本通过才提交。成功升级只更新当前已安装的 `@dsh-ray/*` 顶层依赖，不新增场景能力，并保留自定义 patch、凭据、Session、Goal 与其它任务状态。卸载的语义是停用并归档目标 profile 的受管能力：它把完整旧 profile 归档到 `$DSH_HOME/uninstalled-profiles/`，创建干净的同名 DSH 基础 profile；事务不会主动清除该 live profile 之外的凭据 locator、owner binding、Session、Goal 或数据库记录，也不承诺这些状态已被撤销、永久退休或逐字节验证。原 active units 在 clean profile 通过 fresh readiness 后恢复，原 inactive units 保持停止。归档配置不会继续激活；后续显式重装或共享同一状态库的其它 profile 仍可能再次解释这些保留状态。归档 profile 绑定完整树摘要；source proof 只覆盖协议明确列出的 Delivery、Recovery、Automations、owner 与非受管 Automation 摘要。再次卸载已无受管依赖的基础 profile 是幂等 no-op。
 
-Linux 的强隔离生命周期事务要求 Node.js、`flock`、Perl、`/usr/bin/python3` 和 bubblewrap。本地 upgrade 会先对当前 checkout 执行 `pnpm install --offline --frozen-lockfile` 和构建，任一步失败都在事务开始前终止。macOS 的 Lark/supervised upgrade 仅在整个 DSH_HOME 已静止时开放：安装器在任何 package、registry、store 或工作目录变更前检查 canonical Home 的所有 profile、launchd 与 Host 进程，并在修改 profile 前复检；状态未知时拒绝。Home 中已有冻结的原生 owner/source/cohort 资源时，普通升级直接拒绝；非空 creation/revision 账本历史在 `dsh-rsi upgrade` 中通过 `--allow-non-empty-history-migration` 与完整备份/回滚受控放行。未冻结且已停止的 Home 会完整备份 profile 与账本，精确更新既有受管 bundle，执行组合配置与健康校验；失败自动恢复原 profile 与账本并保留失败现场。macOS 只有两次静止检查，没有覆盖整个升级过程的 Home 独占锁；操作者必须在升级全程保持同一 Home 的 Host 停止。该路径不重跑 onboarding、不创建或启动 LaunchAgent。macOS 受管 Host 跨版本更新与 `0.1 → 0.2` 迁移均由 `dsh-rsi upgrade` / `dsh-rsi update --all` 的事务路径执行（直接底层 bash/lifecycle `host-update` 仍保持显式拒绝守卫）。`dsh-rsi update --all` 在 macOS 不会代替操作者确认停服，必须显式传入 `--confirm-dsh-home-stopped`；预检失败时也不会先自更新 CLI。
+Linux 的强隔离生命周期事务要求 Node.js、`flock`、Perl、`/usr/bin/python3` 和 bubblewrap。本地 upgrade 会先对当前 checkout 执行 `pnpm install --offline --frozen-lockfile` 和构建，任一步失败都在事务开始前终止。macOS 的 Lark/supervised upgrade 仅在整个 DSH_HOME 已静止时开放：安装器在任何 package、registry、store 或工作目录变更前检查 canonical Home 的所有 profile、launchd 与 Host 进程，并在修改 profile 前复检；状态未知时拒绝。Home 中已有冻结的原生 owner/source/cohort 资源时，普通升级直接拒绝；非空 creation/revision 账本历史在 `dsh-ray upgrade` 中通过 `--allow-non-empty-history-migration` 与完整备份/回滚受控放行。未冻结且已停止的 Home 会完整备份 profile 与账本，精确更新既有受管 bundle，执行组合配置与健康校验；失败自动恢复原 profile 与账本并保留失败现场。macOS 只有两次静止检查，没有覆盖整个升级过程的 Home 独占锁；操作者必须在升级全程保持同一 Home 的 Host 停止。该路径不重跑 onboarding、不创建或启动 LaunchAgent。macOS 受管 Host 跨版本更新与 `0.1 → 0.2` 迁移均由 `dsh-ray upgrade` / `dsh-ray update --all` 的事务路径执行（直接底层 bash/lifecycle `host-update` 仍保持显式拒绝守卫）。`dsh-ray update --all` 在 macOS 不会代替操作者确认停服，必须显式传入 `--confirm-dsh-home-stopped`；预检失败时也不会先自更新 CLI。
 
 npm upgrade 则在同一生命周期锁内把发布 selector 解析为精确 cohort，在 `DSH_HOME` 外的私有目录准备最终 package manifest、workspace 配置和 lockfile；以固定的公开 registry 和 pnpm 策略完成供应链校验、完整预取，随后才创建 transaction。bwrap 内按同一份元数据执行 frozen/offline install，缓存与 store 只读，禁止 install scripts、pnpmfile hooks 和 `trustLockfile` 跳过验证。
 
@@ -93,7 +93,7 @@ npm upgrade 则在同一生命周期锁内把发布 selector 解析为精确 coh
 
 uninstall 不访问 npm registry 或 pnpm store。`web` / `autonomy` 仍使用操作者预先停止整个 home 的离线事务；Linux `lark` 和 `supervised` upgrade/uninstall 会在锁内枚举同一 canonical `DSH_HOME` 的 installer-managed systemd user units，以绑定 inode 的高优先级 `user.control` mask 屏蔽后全部停止，在每次 rename 前后复核进程静止，并只恢复原 active units；启动由独立 crash guardian 执行，fresh InvocationID 的 journal ready marker 与稳定窗口通过后才删除旧备份。明确属于其它绝对 HOME 的 custom/legacy unit 不会被修改，但它的 ownership 摘要会写入事务并持续复核；归属缺失、相对、冲突、漂移为当前 HOME 或嵌套于当前 HOME 都会 fail closed。此前卸载留下的同 HOME clean profile 只有在四文件和目录闭集精确匹配 installer baseline 时才允许共存，其摘要同样绑定到事务并在恢复、启动、验收与清理前复核。此能力要求 `DSH_HOME` 与用户 systemd 配置位于同一文件系统，以便用 Linux `renameat2(RENAME_NOREPLACE)` 原子移动受管 mask 和 enablement link。此 Linux service-aware 能力不适用于外部 supervisor 或 Windows；macOS 仅支持调用方已停止整个 Home 的 upgrade，不支持 service-aware uninstall。`supervised` upgrade/uninstall 还要求 source 已安装支持只读 operator/attestation seam 的 cohort；安装器绝不回退到会迁移数据库的 Store 读取。停服后会绑定 Recovery、Automations 与 Delivery owner 快照；copied state 只按内容和语义摘要比较，允许 inode 改变。升级后的私有副本用 fresh UUID 和新包 catalog 生成 preview；preview Host 在无网络 bwrap 中运行，并只在该进程的临时 overlay 里禁用 Lark、从 Health required providers 移除 `larkChannel`。这个唯一 external-provider exemption 会绑定进事务且不会进入 active 配置。swap 后真实 upgraded service 必须同时通过 fresh InvocationID/journal、真实 Lark required-health、generation 严格前进的 exact active attestation 与稳定窗口。`supervised` uninstall 则在停服后绑定只读 source proof，将旧 profile 归档并换成 installer-clean Web profile；clean target 只按通用 fresh InvocationID/journal readiness 与稳定窗口验收，不要求已被停用的 Lark/Health/supervised active attestation。失败会保持服务收容并保留 current/original homes 和 manifest，不自动回滚。
 
-Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中成对升级插件：目标及协调器必须处于活动状态，安装收据和现有版本一致，共享 catalog/trust、owner 与 handoff 通过核对。协调器只包含原生基础配置及 Policy、Automations、Control Plane 三个增强包，三包随目标同批更新。npm 路径先分别准备并完整预取两个 profile 的锁文件；切换前更新副本收据并实际激活两个 profile。协调器预览只在进程 overlay 中关闭 scheduler，真实启动须生成本次启动后的 owner-bound Automation 登记。原始/候选的有效配置、收据和包版本在恢复、接受及清理前重新核对。停服前还要求旧协调器本次 InvocationID 已有就绪信号；缺少信号时原服务继续运行。切换前失败可恢复原活动服务；切换后失败保持双服务停止、保留新旧 Home 与事务供对账，不自动覆盖可能已迁移的状态。固定本地源码或存在 `rsi-local-cohorts` 的安装在 registry 查询、停服和包修改前拒绝普通 npm 升级，包括尚未生成协调器收据的冻结安装。开发版 `dsh-rsi-setup --prepare-local-update` 可在 Home 外准备保留既有修复的合并源码与隔离构建制品；尚无 RSI owner/coordinator 的安装可使用下述 checkout 内显式维护入口。已授权双 Host 的通用源码升级仍未开放；下文仅开放符合严格条件的程序升级，已 applied、未首次采用的失败首启另有有界 `host-owner-repair` 入口。详见 [RSI 配置](../../plugins/lark-channel/docs/rsi-setup.md)；成对卸载仍未支持。跨版本 Host 更新作为插件升级之后的独立阶段，见下文。
+Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中成对升级插件：目标及协调器必须处于活动状态，安装收据和现有版本一致，共享 catalog/trust、owner 与 handoff 通过核对。协调器只包含原生基础配置及 Policy、Automations、Control Plane 三个增强包，三包随目标同批更新。npm 路径先分别准备并完整预取两个 profile 的锁文件；切换前更新副本收据并实际激活两个 profile。协调器预览只在进程 overlay 中关闭 scheduler，真实启动须生成本次启动后的 owner-bound Automation 登记。原始/候选的有效配置、收据和包版本在恢复、接受及清理前重新核对。停服前还要求旧协调器本次 InvocationID 已有就绪信号；缺少信号时原服务继续运行。切换前失败可恢复原活动服务；切换后失败保持双服务停止、保留新旧 Home 与事务供对账，不自动覆盖可能已迁移的状态。固定本地源码或存在 `rsi-local-cohorts` 的安装在 registry 查询、停服和包修改前拒绝普通 npm 升级，包括尚未生成协调器收据的冻结安装。开发版 `dsh-ray-setup --prepare-local-update` 可在 Home 外准备保留既有修复的合并源码与隔离构建制品；尚无 RSI owner/coordinator 的安装可使用下述 checkout 内显式维护入口。已授权双 Host 的通用源码升级仍未开放；下文仅开放符合严格条件的程序升级，已 applied、未首次采用的失败首启另有有界 `host-owner-repair` 入口。详见 [RSI 配置](../../plugins/lark-channel/docs/rsi-setup.md)；成对卸载仍未支持。跨版本 Host 更新作为插件升级之后的独立阶段，见下文。
 
 
 成对升级还在第一个候选 Host 启动前处理已撤权 owner 的旧扫描：以原 manifest/签名 overlay 的冻结身份为准，核验 Delivery 撤权状态后，在副本中通过正式 Policy/Automations 入口永久退休精确匹配的 usage、memory、task-observation 和 live-qualification 定义。原配置、原数据库证明和固定操作标识先落盘，历史、unknown 与原预算账户保留；读取和维护都在有期限的隔离子进程内。身份仍有效时仅校验，不退休扫描。原 source 证明不会被改写，只有完整退休证明可解释这几行的预期变化，其余非受管状态仍严格核对。
@@ -102,10 +102,10 @@ Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中�
 
 ## 查找私有 Host 入口
 
-`dsh-rsi status` 中的 Host 版本来自全局 PATH。旧 Home 或自定义缓存应读取 Home 自身的绑定；下面只输出入口路径，不输出凭据：
+`dsh-ray status` 中的 Host 版本来自全局 PATH。旧 Home 或自定义缓存应读取 Home 自身的绑定；下面只输出入口路径，不输出凭据：
 
 ```sh
-node -e 'const fs=require("node:fs"),p=require("node:path"),os=require("node:os");const h=process.env.DSH_HOME||p.join(os.homedir(),".dsh");const {cacheRoot,version}=JSON.parse(fs.readFileSync(p.join(h,".dsh-rsi-host.json"),"utf8"));console.log(p.join(cacheRoot,version,"node_modules",".bin","dsh"))'
+node -e 'const fs=require("node:fs"),p=require("node:path"),os=require("node:os");const h=process.env.DSH_HOME||p.join(os.homedir(),".dsh");const {cacheRoot,version}=JSON.parse(fs.readFileSync(p.join(h,".dsh-ray-host.json"),"utf8"));console.log(p.join(cacheRoot,version,"node_modules",".bin","dsh"))'
 ```
 
 用输出的完整路径代替 `dsh`，再加 `--profile web` 启动。若使用自定义 `DSH_HOME`，两次命令应保留相同设置。没有绑定文件的旧 Home 不适用此方法，先按原安装方式核对 Host。
@@ -117,11 +117,11 @@ Host 和本地程序升级会在停服前从 Home 父目录解析持久 pnpm sto
 对**原安装为 Docker 后端**且满足本节条件的 Linux owner/cohort Home，可运行：
 
 ```sh
-dsh-rsi update --all --dry-run --yes
-dsh-rsi update --all --yes
+dsh-ray update --all --dry-run --yes
+dsh-ray update --all --yes
 ```
 
-若本机旧版 CLI 尚无法识别冻结 owner 升级，先单独运行 `dsh-rsi update` 自举后再执行 `--all`。CLI 会识别 Home 中唯一的冻结 target/coordinator 与原 `sourceRepository`；只接受绑定仓库的官方 GitHub origin、干净的 `dev` / `main` 分支（detached HEAD 须位于本机记录的 `origin/dev` 或 `origin/main` 历史上，更新后仍保持 detached；两者都包含时优先 `dev`，缺少跟踪引用或浅历史无法判定则拒绝），并执行 `git fetch`、仅快进合并、锁文件安装、离线构建和打包。候选目前要求私有 Host 从受支持的 `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` / `0.2.2-rc.3` / `0.2.2-rc.5` 升级至 `0.2.2-rc.5`，同时更新冻结插件。要求原 owner 授权有效、target 与 coordinator 受管服务均活动、没有已采用的源码或未结 activation；额外参数会被拒绝。事务自动停启这对服务，保留原 owner 绑定、模型配置、权限、凭据引用、授权原期限与累计已用额度、Session、Goal 和历史，不重做 onboarding、不重置额度或续期；已过期授权会被预检拒绝。
+若本机旧版 CLI 尚无法识别冻结 owner 升级，先单独运行 `dsh-ray update` 自举后再执行 `--all`。CLI 会识别 Home 中唯一的冻结 target/coordinator 与原 `sourceRepository`；只接受绑定仓库的官方 GitHub origin、干净的 `dev` / `main` 分支（detached HEAD 须位于本机记录的 `origin/dev` 或 `origin/main` 历史上，更新后仍保持 detached；两者都包含时优先 `dev`，缺少跟踪引用或浅历史无法判定则拒绝），并执行 `git fetch`、仅快进合并、锁文件安装、离线构建和打包。候选目前要求私有 Host 从受支持的 `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` / `0.2.2-rc.3` / `0.2.2-rc.5` 升级至 `0.2.2-rc.5`，同时更新冻结插件。要求原 owner 授权有效、target 与 coordinator 受管服务均活动、没有已采用的源码或未结 activation；额外参数会被拒绝。事务自动停启这对服务，保留原 owner 绑定、模型配置、权限、凭据引用、授权原期限与累计已用额度、Session、Goal 和历史，不重做 onboarding、不重置额度或续期；已过期授权会被预检拒绝。
 
 本节 owner 程序升级在读取原构建时明确拒绝 native→native；原安装已是 `linux-native` 时不能沿此入口更新。Docker→native 按创建历史分两条路径，停服前和 stage 物化前分别复核，移交保留原 key、额度、期限和不可变证明：
 
@@ -143,9 +143,9 @@ dsh-rsi update --all --yes
 
 ### 旧 Home 的联合 Host / 源码迁移
 
-> **历史迁移路径（DSH `0.1.x → 0.2.0-rc.2` / 遗留预备 Home）：** 以下章节仅面向遗留 DSH `0.1` 或 Docker 时代旧 Home 的一次性迁移与恢复；新装与当前 `0.2.2-rc.5` 日常维护请优先使用前文的 `dsh-rsi` 常规入口。
+> **历史迁移路径（DSH `0.1.x → 0.2.0-rc.2` / 遗留预备 Home）：** 以下章节仅面向遗留 DSH `0.1` 或 Docker 时代旧 Home 的一次性迁移与恢复；新装与当前 `0.2.2-rc.5` 日常维护请优先使用前文的 `dsh-ray` 常规入口。
 
-开发 checkout 提供显式 `host-local-update`，适用于尚无 owner 授权、具有精确匹配的惰性预备协调器及单个活动目标服务的 Linux Home。原 Host 必须有可验证的私有缓存收据；支持未绑定 Home 的 `0.1.x → 0.2.0-rc.2`，以及已绑定 `0.2.0-rc.2` 的同 Host 源码更新。它不是普通 `dsh-rsi update` 的自动路径，也不自动开启学习。其他状态仍拒绝，不能删除协调器标记或伪造 Host 绑定来满足前提。
+开发 checkout 提供显式 `host-local-update`，适用于尚无 owner 授权、具有精确匹配的惰性预备协调器及单个活动目标服务的 Linux Home。原 Host 必须有可验证的私有缓存收据；支持未绑定 Home 的 `0.1.x → 0.2.0-rc.2`，以及已绑定 `0.2.0-rc.2` 的同 Host 源码更新。它不是普通 `dsh-ray update` 的自动路径，也不自动开启学习。其他状态仍拒绝，不能删除协调器标记或伪造 Host 绑定来满足前提。
 
 先准备 schema 1 冻结源码候选，再用 CLI 包的 `prepareUnboundHostUpdatePlan` 显式提供旧 Host 的 `cacheRoot`、`version`、`dshPath`，将返回计划保存为 Home 外当前用户独占的 `0600` 文件。准备过程核对完整旧 / 新 Host 收据，不修改 Home。使用已经审核、构建且在事务期间保持不变的 checkout 执行：
 
@@ -161,7 +161,7 @@ node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
 
 事务检查整个 Home 的所有 profile，包括未运行的 ACP、Web 和预备协调器。缺少的增强包从同一冻结候选提交隔离构建；辅助目录在恢复结束前必须保留。同一收据只在全部输入和字节仍一致时复用。停服前的副本仅供依赖解析和预取，绝不作为运行状态切换；屏蔽、停止并核对整个 Home 静止后重新复制，在无网络隔离中物化所有锁定依赖。原 patch、身份、密钥和授权树保持不变，源码维护记录仍为 pre-owner，不授予 owner 权限。候选 authority runtime、包文件、锁图及空 profile 残留在切换前、恢复启动前和验收后核对。
 
-沿用 v4 Host 事务的崩溃收容与 `host-recover`：候选尚未运行时可恢复原 Home 和 unit；候选已运行后保留候选绑定并继续验收，不自动覆盖可能已变更的业务状态。真实目标服务还必须通过新 InvocationID、飞书就绪和稳定窗口。迁移成功后才单独执行 `dsh-rsi-setup --install-owner --ack-existing-automations`，使用既有配对和模型生成有限学习配置；迁移通过不代表学习就绪或普通任务闭环通过。
+沿用 v4 Host 事务的崩溃收容与 `host-recover`：候选尚未运行时可恢复原 Home 和 unit；候选已运行后保留候选绑定并继续验收，不自动覆盖可能已变更的业务状态。真实目标服务还必须通过新 InvocationID、飞书就绪和稳定窗口。迁移成功后才单独执行 `dsh-ray-setup --install-owner --ack-existing-automations`，使用既有配对和模型生成有限学习配置；迁移通过不代表学习就绪或普通任务闭环通过。
 
 DSH `0.2` 使用原生 runtime resolution，不再依赖旧的共享 `profiles/node_modules` 或 profile 内 `.dsh-module-fallback`。联合迁移只在暂存副本退役经过库存核对的纯链接缓存；真实文件、自定义包目录、未知链接来源或准备后的漂移都会拒绝。如果缓存还引用旧全局安装，须在上述命令的辅助制品目录后追加原全局 `@deepseek-ai/dsh` 包的 canonical 目录，供显式核验。原 Home 和回滚副本保留原缓存；不会跟随悬空链接删除目标，也不把旧全局 DSH 路径当作候选代码授权。
 
@@ -222,7 +222,7 @@ node /reviewed/new-checkout/scripts/install/lifecycle-profile.mjs \
 
 ### Checkout 内的 pre-owner 冻结源码维护
 
-已安装冻结源码/cohort、尚无 RSI owner、coordinator 或 control ledger 的 Linux systemd Home，可显式调用已经审核并构建的本地 checkout。此入口尚未接入普通 `dsh-rsi update`、远程 helper 下载或发布版本 pins；不要复制单个新版 `lib` 文件到正式 profile。先以 `dsh-rsi-setup --prepare-local-update` 在 Home 外制作候选；候选与执行维护的 reviewed checkout 是两份独立绑定的输入。
+已安装冻结源码/cohort、尚无 RSI owner、coordinator 或 control ledger 的 Linux systemd Home，可显式调用已经审核并构建的本地 checkout。此入口尚未接入普通 `dsh-ray update`、远程 helper 下载或发布版本 pins；不要复制单个新版 `lib` 文件到正式 profile。先以 `dsh-ray-setup --prepare-local-update` 在 Home 外制作候选；候选与执行维护的 reviewed checkout 是两份独立绑定的输入。
 
 维护事务先用 Home 外的私有 profile 和全新缓存，按原有效 pnpm 配置验证、预取并离线复演原依赖图，保留原 registry 包和可选依赖。随后复制预览 Home，复用正式安装的候选 roots、peer overrides 和 workspace 投影；不支持的资源迁移在停服前拒绝。
 
@@ -245,7 +245,7 @@ pre-owner 的 Docker→native 和 native→native 使用独立 v3 维护证明�
 旧冻结安装缺少 `assistant-memory-learning` 时，可用同一 reviewed checkout 的 CLI 显式准备唯一受支持的根包扩展。目标必须已提供 Personal Assistant、Delivery、Evaluation 和 Verifier，且通过实际 pre-owner 权限与签名历史检查；这不是任意增删插件的入口：
 
 ```sh
-node /reviewed/checkout/plugins/lark-channel/bin/dsh-rsi-setup.js \
+node /reviewed/checkout/plugins/lark-channel/bin/dsh-ray-setup.js \
   --prepare-local-update --add-memory-learning --profile assistant \
   --dsh-home /absolute/dsh-home --source-repository /absolute/source-repository
 ```
@@ -276,7 +276,7 @@ DSH `0.2` 的 standalone setup 需要 Host 原生模块解析器；不要用旧 
 ```sh
 export PATH=/absolute/verified-host/node_modules/.bin:$PATH
 source /reviewed/checkout/scripts/install/common.sh
-dsh_enhanced_run_profile_setup 0 /absolute/dsh-home assistant dsh-rsi-setup \
+dsh_ray_run_profile_setup 0 /absolute/dsh-home assistant dsh-ray-setup \
   --install-owner --profile assistant --dsh-home /absolute/dsh-home \
   --source-repository /absolute/source-repository --ack-existing-automations
 ```
@@ -301,20 +301,20 @@ Linux Lark/supervised service-aware upgrade/uninstall 另外要求固定系统�
 
 ## 彻底卸载（purge）
 
-`--operation uninstall` 是**保留数据的归档**（旧 profile 移入 `$DSH_HOME/uninstalled-profiles/`，凭据 / Session / Goal 等状态保留）。需要**彻底删除**整个安装（崩溃救机、报废环境、干净重装）时，使用随插件集合一起安装的全局 `dsh-rsi` 命令：
+`--operation uninstall` 是**保留数据的归档**（旧 profile 移入 `$DSH_HOME/uninstalled-profiles/`，凭据 / Session / Goal 等状态保留）。需要**彻底删除**整个安装（崩溃救机、报废环境、干净重装）时，使用随插件集合一起安装的全局 `dsh-ray` 命令：
 
 ```sh
-dsh-rsi doctor          # 只读诊断：host 版本、服务、凭据条目数、已知崩溃模式
-dsh-rsi purge --dry-run # 查看完整删除计划
-dsh-rsi purge --yes     # 先在 ~ 生成 0600 的 tar.gz 备份，再删除 DSH home 与全部受管痕迹
+dsh-ray doctor          # 只读诊断：host 版本、服务、凭据条目数、已知崩溃模式
+dsh-ray purge --dry-run # 查看完整删除计划
+dsh-ray purge --yes     # 先在 ~ 生成 0600 的 tar.gz 备份，再删除 DSH home 与全部受管痕迹
 ```
 
-purge 覆盖 npm cohort 实体副本与本地 checkout 符号链接两种形态。**全量**（默认）删除整个 `$DSH_HOME`（profiles、logs、uninstalled-profiles、home 内锁文件）以及 home 外生命周期事务目录、失败诊断目录、home 锁；Linux 另清理 `/tmp` rendezvous 锁，macOS 保留共享内核锁文件以维持并发互斥。**单 profile**（`--profile <name>`）只删除 `profiles/<name>`、该 profile 的两份 host 日志与 `.failed-<name>-*` 失败诊断目录，共享的生命周期事务目录与两把锁因可能涉及其它 profile 而刻意保留——注意单 profile 的 tar.gz 备份仍覆盖**整个** `$DSH_HOME`。两种范围都会停用并注销 launchd / systemd --user 受管服务，并按各 profile 的 setup journal 权威反查清理 Keychain / Secret Service 中 service 前缀为 `dsh/` 的凭据。选项：`--no-backup`、`--keep-keychain`、`--remove-host`（同时卸载全局 `@deepseek-ai/dsh`，默认保留；仅限全量）。本地 checkout 源码只删符号链接、**绝不删除 checkout**，报告会列出 checkout 路径。清理前会先停用受管服务。Linux 停服后若还有可证明属于目标 Home 的残留进程，`--yes` 会尝试终止它们；没有 `--yes` 时会拒绝并列出进程。无法证明归属的进程，或旧检查仍发现运行中的 Host，均会阻止删除；`--yes` 不能绕过归属检查。systemd unit 文件内容不匹配受管标记时只报告保留。完整命令参考见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#故障与卸载)。
+purge 覆盖 npm cohort 实体副本与本地 checkout 符号链接两种形态。**全量**（默认）删除整个 `$DSH_HOME`（profiles、logs、uninstalled-profiles、home 内锁文件）以及 home 外生命周期事务目录、失败诊断目录、home 锁；Linux 另清理 `/tmp` rendezvous 锁，macOS 保留共享内核锁文件以维持并发互斥。**单 profile**（`--profile <name>`）只删除 `profiles/<name>`、该 profile 的两份 host 日志与 `.failed-<name>-*` 失败诊断目录，共享的生命周期事务目录与两把锁因可能涉及其它 profile 而刻意保留——注意单 profile 的 tar.gz 备份仍覆盖**整个** `$DSH_HOME`。两种范围都会停用并注销 launchd / systemd --user 受管服务，并按各 profile 的 setup journal 权威反查清理 Keychain / Secret Service 中 service 前缀为 `dsh/` 的凭据。选项：`--no-backup`、`--keep-keychain`、`--remove-host`（同时卸载全局 `@deepseek-ai/dsh`，默认保留；仅限全量）。本地 checkout 源码只删符号链接、**绝不删除 checkout**，报告会列出 checkout 路径。清理前会先停用受管服务。Linux 停服后若还有可证明属于目标 Home 的残留进程，`--yes` 会尝试终止它们；没有 `--yes` 时会拒绝并列出进程。无法证明归属的进程，或旧检查仍发现运行中的 Host，均会阻止删除；`--yes` 不能绕过归属检查。systemd unit 文件内容不匹配受管标记时只报告保留。完整命令参考见 [CLI 指南](../../packages/dsh-ray/README.md#故障与卸载)。
 
-机器上 host 已损坏或全局命令被删时，可执行单文件救机脚本，参数与 `dsh-rsi purge` 一致。Linux 优先委托 `dsh-rsi`，找不到时使用内联精简实现；macOS 必须找到具有 `macos-launchd-ownership-v1` 能力的完整 CLI，旧 CLI 或缺失 CLI 均停止清理并提示升级，不停止服务、不删除数据：
+机器上 host 已损坏或全局命令被删时，可执行单文件救机脚本，参数与 `dsh-ray purge` 一致。Linux 优先委托 `dsh-ray`，找不到时使用内联精简实现；macOS 必须找到具有 `macos-launchd-ownership-v1` 能力的完整 CLI，旧 CLI 或缺失 CLI 均停止清理并提示升级，不停止服务、不删除数据：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/purge.sh \
+curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-ray/main/scripts/install/purge.sh \
   | bash -s -- --yes
 # 或 checkout 内：
 ./scripts/install/purge.sh --dry-run
@@ -322,32 +322,32 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 
 `purge.sh` 是 **mutable-main 运维脚本**：始终取 main 分支最新版本，不做 release pin / SHA-256 校验，也不纳入 `install-npm.sh` 的引导资产清单（引导器不会下载执行它）。它与固定 tag、最多六项按需资产摘要校验的供应链引导路径刻意分离；需要可复现引导校验时仍应使用 `install-npm.sh`。
 
-## 通过 `dsh-rsi` 安装与重装
+## 通过 `dsh-ray` 安装与重装
 
-全局 `dsh-rsi` 也可以直接发起安装（修复损坏安装、救机重装），它是**薄委托**：自身不复制任何安装逻辑，只锁定版本并把参数原样交给对应安装器，stdio 与终端直连。
+全局 `dsh-ray` 也可以直接发起安装（修复损坏安装、救机重装），它是**薄委托**：自身不复制任何安装逻辑，只锁定版本并把参数原样交给对应安装器，stdio 与终端直连。
 
 ```sh
-# npm 形态（默认）：下载与本 dsh-rsi 同版本（vX.Y.Z）的 install-npm.sh 到临时目录执行；
+# npm 形态（默认）：下载与本 dsh-ray 同版本（vX.Y.Z）的 install-npm.sh 到临时目录执行；
 # 引导脚本内部仍按内嵌 SHA-256 自校验 common.sh 等资产
-dsh-rsi install
+dsh-ray install
 
 # 只需轻量 core 时可跳过飞书 onboarding
-dsh-rsi install --scenario core --yes
+dsh-ray install --scenario core --yes
 
 # local 形态：执行 checkout 内 install-local.sh
-dsh-rsi install --local ~/work/github/dsh-enhanced --scenario web
+dsh-ray install --local ~/work/github/dsh-ray --scenario web
 
 # 安装器支持的全部参数（--scenario/--workspace/--model-route/--lark …）原样透传
-dsh-rsi install --help
+dsh-ray install --help
 
 # 干净重装：先按 purge 安全门控备份+彻底删除，再交互式完成 onboarding
-dsh-rsi reinstall
-dsh-rsi reinstall --local ~/work/github/dsh-enhanced
+dsh-ray reinstall
+dsh-ray reinstall --local ~/work/github/dsh-ray
 # 非交互重装可显式选择轻量 core
-dsh-rsi reinstall --profile web --scenario core --yes
+dsh-ray reinstall --profile web --scenario core --yes
 ```
 
-`--dsh-home` 由 dsh-rsi 经 `DSH_HOME` 环境变量传给安装器（安装器不识别该 flag）；`reinstall` 的 purge 阶段支持 `--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`，未加 `--yes` 仍需输入 `purge` 确认。安装器退出码原样透传。
+`--dsh-home` 由 dsh-ray 经 `DSH_HOME` 环境变量传给安装器（安装器不识别该 flag）；`reinstall` 的 purge 阶段支持 `--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`，未加 `--yes` 仍需输入 `purge` 确认。安装器退出码原样透传。
 
 交互运行不传参数会选择场景；自动化可显式指定：
 
@@ -365,40 +365,40 @@ dsh-rsi reinstall --profile web --scenario core --yes
 ./scripts/install/install-local.sh --scenario supervised --lark configure
 ```
 
-原生 `web` 模板的新 profile 会预检 Web 端口；原生自定义 profile 只加载 `dsh-base`，不会因为另一个 profile 占用 3080 而被阻止安装。`DSH_ENHANCED_WEB_PORT` 只指定诊断端口，不会改写 DSH 的实际监听配置。
+原生 `web` 模板的新 profile 会预检 Web 端口；原生自定义 profile 只加载 `dsh-base`，不会因为另一个 profile 占用 3080 而被阻止安装。`DSH_RAY_WEB_PORT` 只指定诊断端口，不会改写 DSH 的实际监听配置。
 
 安装器不会把 `dsh --dump-config` 当作“可用”的证明：对于尚未配置 Lark 的 profile，它会在安装 bundle 后、飞书 OAuth 前，短暂启动一次 Host，等待原生 Loader 完成审计后的就绪信号；Web 使用 OS 分配的 loopback 端口，自定义 profile 通过临时 `appReady` 监听接收信号。已启用 Lark 的旧 profile 则不会启动第二个 Host 去并发访问同一份状态；若由安装器管理服务，最终会以真正的常驻进程和稳定性窗口验收。Lark 是否已启用按 DSH 的 home→profile 覆盖层计算，profile 的 `disabled`、`enabled` 或 App ID 覆盖会优先于 home 层，避免把已禁用的 bot 误判为可保留。临时 probe 中的 Lark Channel 会被 process-only overlay 禁用，不会建立第二条 WebSocket，也不会改写 profile。任何 Cordis service 依赖未满足都会明确失败。对于历史 profile 中已存在 `assistant-evolution` 而缺少其 `assistant-evaluation` provider 的情况，安装器会只补齐 Evaluation bundle；不会删除或默默启用其它旧插件。
 
-新 Control Plane 会在原生 Host 完成启动审计后向 stderr 打印 `dsh-enhanced host ready: v1`。安装探针及单目标 Lark/supervised 生命周期事务可用此信号验收无 Web Host；旧 Web URL 信号继续支持。systemd 验收仍绑定新 InvocationID，并执行原有 Lark、稳定性与持久状态检查。旧无 Web cohort 未必具备通知，缺少当前就绪记录时会在停服前拒绝升级。已登记的双 Host 插件升级与独立 Host 更新事务见本页前文。
+新 Control Plane 会在原生 Host 完成启动审计后向 stderr 打印 `dsh-ray host ready: v1`。安装探针及单目标 Lark/supervised 生命周期事务可用此信号验收无 Web Host；旧 Web URL 信号继续支持。systemd 验收仍绑定新 InvocationID，并执行原有 Lark、稳定性与持久状态检查。旧无 Web cohort 未必具备通知，缺少当前就绪记录时会在停服前拒绝升级。已登记的双 Host 插件升级与独立 Host 更新事务见本页前文。
 
 飞书向导支持纯 SSH/无桌面 Linux：默认先探测 Secret Service，不可用时会在 OAuth 前自动验证并改用当前用户 `0700` 目录下的版本化 `0600` protected-file，不要求安装 GNOME Keyring。该文件没有额外静态加密，同 UID、root 与可读备份仍能读取；需要强制系统钥匙环时，参阅[飞书凭据后端](../../plugins/lark-channel/docs/setup.md#linux-凭据后端)中的独立向导参数及运行前提。
 
-配置飞书时还会自动安装或复用官方 `lark-cli`，使用同一应用完成 owner 的业务域授权，并生成原生 DSH 业务技能；后续有效授权可复用。已有 channel 选择 keep/skip 时不重新发起授权，需要新增业务接入时运行 `--lark configure`。暂缓业务授权的续跑方式见[飞书指南](../../plugins/lark-channel/docs/setup.md#业务权限可以单独处理)。`--no-business-tools` 只属于依赖环境已就绪的独立 `dsh-lark-setup`，不能传给 `dsh-rsi install`；范围、凭据存储和失败恢复见[业务工具参考](../../plugins/lark-channel/docs/setup.md#自动业务工具接入)。
+配置飞书时还会自动安装或复用官方 `lark-cli`，使用同一应用完成 owner 的业务域授权，并生成原生 DSH 业务技能；后续有效授权可复用。已有 channel 选择 keep/skip 时不重新发起授权，需要新增业务接入时运行 `--lark configure`。暂缓业务授权的续跑方式见[飞书指南](../../plugins/lark-channel/docs/setup.md#业务权限可以单独处理)。`--no-business-tools` 只属于依赖环境已就绪的独立 `dsh-lark-setup`，不能传给 `dsh-ray install`；范围、凭据存储和失败恢复见[业务工具参考](../../plugins/lark-channel/docs/setup.md#自动业务工具接入)。
 
 管理内建服务时，安装器会在 OAuth 前检查 systemd user manager 和 lingering。当前用户有权时会自动启用 lingering；需要管理员权限时，交互向导会先展示唯一的固定提权命令，并询问是否现在通过 `sudo` 执行，密码由 `sudo` 直接读取，不进入安装器、参数或日志。拒绝、失败或非交互运行都会在云端授权前停止并给出同一条可复制命令。Linux 安装完成后还会观察 user unit 的 `ActiveState`、`ExecMainStatus` 和 `NRestarts` 一个短窗口；发现快速崩溃/重启循环会打印最近 journal 并停止该 unit，避免 systemd 无限重启掩盖原始错误。容器、未启用 systemd 的 WSL 或其他没有 systemd user manager/logind 的系统应使用 `--no-service`，并由 Docker、s6、runit 等外部 supervisor 保持 `dsh --profile <name> --no-open` 常驻；此时安装器不会宣称或验证内建服务的注销后存活能力。
 Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 root-owned `01777` `/tmp`；setup 会在任何 profile、凭据、数据库或 service mutation 前持有与 upgrade/uninstall 相同的 canonical `DSH_HOME` rendezvous lock，避免 onboarding/reconfigure 与 service-aware lifecycle 并发。
 
 普通 `lark` 场景已经安装 Preference Learning：经 owner onboarding 的完成对话只产生无正文的有界行为证据，并可在固定 T1 目录、阈值和回滚门内自动应用偏好；它不要求 Health、Heartbeat 或 Recovery，也不会新增通用 Agent 工具授权。用户面参数 `--agent-tools disable` 只移除向导托管的规则，不覆盖用户自定义规则或显式的全局 Policy 默认值（安装器内部再映射为 `dsh-lark-setup` 的 `--disable-agent-tools`，不能直接把后者传给安装脚本）。
 
-`supervised` 在此基础上额外安装 Evaluation、Evolution、Growth Experiments、Heartbeat、Goals、Skills、Verifier、Growth Driver、Memory Learning、WorkItems、Proactive、Owner Console、Recovery 与 Health；Goals 必须与 Recovery 同场景安装，因为 Recovery 的运行时 Cordis 注入要求 `assistantGoals`。Memory 已由 Personal Assistant 内嵌提供，Memory Learning 安装后默认禁用，直到 owner 配置组合三份有限授权和调度预算。普通使用自迭代由下述 `dsh-rsi-setup --install-owner` 成对配置，不要求先激活固定 Recovery runbook，也不因该 runbook 的全局健康门阻止 owner 配置。固定 `supervised-growth/v2` runbook 与 adoption analyst 仍可通过[独立激活器](../../plugins/lark-channel/docs/supervised-growth.md)显式启用，保留原有严格健康检查。新安装发现本机 `traex`/`trae-cli` 或 `agy` 可执行文件时，会把 `traex-acp-provider` 纳入同一安装集并启用对应 route，升级不会自动追加。
+`supervised` 在此基础上额外安装 Evaluation、Evolution、Growth Experiments、Heartbeat、Goals、Skills、Verifier、Growth Driver、Memory Learning、WorkItems、Proactive、Owner Console、Recovery 与 Health；Goals 必须与 Recovery 同场景安装，因为 Recovery 的运行时 Cordis 注入要求 `assistantGoals`。Memory 已由 Personal Assistant 内嵌提供，Memory Learning 安装后默认禁用，直到 owner 配置组合三份有限授权和调度预算。普通使用自迭代由下述 `dsh-ray-setup --install-owner` 成对配置，不要求先激活固定 Recovery runbook，也不因该 runbook 的全局健康门阻止 owner 配置。固定 `supervised-growth/v2` runbook 与 adoption analyst 仍可通过[独立激活器](../../plugins/lark-channel/docs/supervised-growth.md)显式启用，保留原有严格健康检查。新安装发现本机 `traex`/`trae-cli` 或 `agy` 可执行文件时，会把 `traex-acp-provider` 纳入同一安装集并启用对应 route，升级不会自动追加。
 
-新安装 `supervised` 时还会自动调用 `dsh-rsi-setup --prepare-build --optional-build`，在 `$DSH_HOME/rsi-sources/<profile>` 创建私有源码工作树和本地 bare 发布仓库。npm 来源固定为本次安装版本的官方 Git tag，本地来源只取已提交 HEAD；重装保留已推进的修复基准。需要 Git，npm 来源还需要 GitHub 连接；准备失败会停止安装并显示原因，`--dry-run` 只展示命令。
+新安装 `supervised` 时还会自动调用 `dsh-ray-setup --prepare-build --optional-build`，在 `$DSH_HOME/rsi-sources/<profile>` 创建私有源码工作树和本地 bare 发布仓库。npm 来源固定为本次安装版本的官方 Git tag，本地来源只取已提交 HEAD；重装保留已推进的修复基准。需要 Git，npm 来源还需要 GitHub 连接；准备失败会停止安装并显示原因，`--dry-run` 只展示命令。
 
 Linux 默认从固定官方归档和冻结 manifests/lockfile 准备 schema 3 原生工具链、离线依赖及发布资源，无需 Docker CLI、daemon、socket 或镜像。工具链准备检查 user/mount/pid namespace、bubblewrap 和有界 tmpfs；owner 安装及实际运行另外要求委派给当前非 root 用户的四个 cgroup v1 控制器或统一 cgroup v2 子树（`/sys/fs/cgroup/dsh-native/uid-<uid>` 或 `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`）。完整仓库执行还需受信任的 subordinate UID/GID 映射与 `newuidmap`/`newgidmap`，creation 构建需系统编译器。安装器不会自动提权或补建 cgroup 委派，不满足前提时报未就绪。Linux x64/cgroup v1 已有实机证据，cgroup v2 实机冷安装→学习验证与 arm64 尚未实机验收。
 
-Linux 同时准备私有授权工具、签名身份、registry/catalog 和状态目录。重复执行核对原收据、来源及 runtime 身份，保留授权与发布进展；旧 Docker 部署须走独立迁移，不能靠重装或覆盖 runtime 描述符切换。底层 `dsh-rsi-setup --prepare-build --docker-path <absolute>` 保留旧镜像准备入口，不代表新 owner 安装会自动接纳旧 backend。
+Linux 同时准备私有授权工具、签名身份、registry/catalog 和状态目录。重复执行核对原收据、来源及 runtime 身份，保留授权与发布进展；旧 Docker 部署须走独立迁移，不能靠重装或覆盖 runtime 描述符切换。底层 `dsh-ray-setup --prepare-build --docker-path <absolute>` 保留旧镜像准备入口，不代表新 owner 安装会自动接纳旧 backend。
 
 macOS 的 supervised 使用原生 launchd Host、私有固定 Node 与系统沙箱，无需 Docker。安装时从官方归档及冻结 lockfile 准备运行依赖，重试核对摘要；候选在禁止联网、禁止子进程、只读工作区中接受固定 TypeScript 编译和独立留出行为检查。原生授权限制次数、累计时长和输出，不提供容器的内存、CPU、磁盘硬配额。Apple Silicon 已有实机证据，Intel Mac 仍需独立实机验证。安装失败恢复本次尝试前的配置与服务，重复执行不续期、不重置额度。具体边界见[原生 macOS 学习](../../plugins/lark-channel/docs/rsi-setup.md#原生-macos-学习)。
 
-在最终模型、TraeX、飞书配置和 doctor 后，Linux/macOS `supervised` 安装调用当前 profile 内的 `dsh-rsi-setup --install-owner`，自动读取当前 owner 并生成有限授权；Linux 补装独立协调器并成对启动两个 systemd Host，macOS 启动单个原生 launchd Host。本地安装会传入源码仓库路径。构建前置条件不足，或旧的本地目录链接使必需包实体位于 profile 外时，此阶段返回 `not-ready` 和退出码 3，安装命令不打印“安装流程完成”，已准备的普通 Agent 与资源可用于重试。其他配置或服务就绪失败也非零退出。重试保留原授权期限和额度；`--local` 的 supervised 新安装会从冻结的已提交 HEAD 构建独立 tarball，并将选定插件及其运行依赖安装到目标 profile 内；协调器复用同一批包，安装后校验制品摘要和实际文件。重试保持原提交和包选择，未提交修改不会进入 Agent。包安装失败时保留固定制品和配置，Host 保持停机，供修复后重试。owner route 缺失时在同一配置事务内创建，既有精确路由沿用。打开原先关闭的 scheduler，或迁入另一 Automation 数据库前，会检查原库与目标库；存在 active 或 paused 定义须显式传入 `--ack-existing-automations`，停机后库存变化仍会拒绝。稳定启动验收不等于真实普通任务自迭代闭环，详见[RSI 配置指南](../../plugins/lark-channel/docs/rsi-setup.md)。
+在最终模型、TraeX、飞书配置和 doctor 后，Linux/macOS `supervised` 安装调用当前 profile 内的 `dsh-ray-setup --install-owner`，自动读取当前 owner 并生成有限授权；Linux 补装独立协调器并成对启动两个 systemd Host，macOS 启动单个原生 launchd Host。本地安装会传入源码仓库路径。构建前置条件不足，或旧的本地目录链接使必需包实体位于 profile 外时，此阶段返回 `not-ready` 和退出码 3，安装命令不打印“安装流程完成”，已准备的普通 Agent 与资源可用于重试。其他配置或服务就绪失败也非零退出。重试保留原授权期限和额度；`--local` 的 supervised 新安装会从冻结的已提交 HEAD 构建独立 tarball，并将选定插件及其运行依赖安装到目标 profile 内；协调器复用同一批包，安装后校验制品摘要和实际文件。重试保持原提交和包选择，未提交修改不会进入 Agent。包安装失败时保留固定制品和配置，Host 保持停机，供修复后重试。owner route 缺失时在同一配置事务内创建，既有精确路由沿用。打开原先关闭的 scheduler，或迁入另一 Automation 数据库前，会检查原库与目标库；存在 active 或 paused 定义须显式传入 `--ack-existing-automations`，停机后库存变化仍会拒绝。稳定启动验收不等于真实普通任务自迭代闭环，详见[RSI 配置指南](../../plugins/lark-channel/docs/rsi-setup.md)。
 
 - `--with <addon>`（可重复）：为其他场景追加 `coding|traex|console|health|heartbeat|events|bridge|proactive|dreaming`。
-- `--proactive <auto|on|off>`、`--dreaming <auto|on|off>`、`--growth <auto|on|off>`（默认 `auto`）：在引导自定义下询问白话开关并持久写入 `$DSH_HOME/.dsh-enhanced/install-intent.json`；`assistant-dreaming` 始终以 `enabled: false` fail-closed 休眠安装，仅当明确配置 `scope.{workspace,preset,principalId,ownerRouteId}`、`$DSH_HOME` `databasePath`、`provider`/`model` 与 `budgetId`/`budgetAmount` 后才会激活。
+- `--proactive <auto|on|off>`、`--dreaming <auto|on|off>`、`--growth <auto|on|off>`（默认 `auto`）：在引导自定义下询问白话开关并持久写入 `$DSH_HOME/.dsh-ray/install-intent.json`；`assistant-dreaming` 始终以 `enabled: false` fail-closed 休眠安装，仅当明确配置 `scope.{workspace,preset,principalId,ownerRouteId}`、`$DSH_HOME` `databasePath`、`provider`/`model` 与 `budgetId`/`budgetAmount` 后才会激活。
 - `--scenario full` 只用于迁移旧的全量默认集合，新安装不应使用；`--mode supervised-growth` 保持兼容，等价于 `supervised` 场景。
 
 ## 实验性 Web 与 autonomy
 
-`web` 是本机桌面/Web 入口：它安装 core、Delivery、Goals、Web owner 与 `owner-console`（「文鳐」控制台与原生左栏设置 UI），并在第一次配置组合/activation probe 前运行 profile 内的 `dsh-web-owner-setup`，使用 `web/account=<profile>/tenant=local/user=operator` 的固定本机 owner。安装器通过已验证的 Host 解析配置工具的依赖；当前 DSH 0.2 使用原生运行时解析，不创建旧版共享 peer 目录。它不接入 Lark、不启动常驻服务（可直接用 `dsh-rsi open --profile web` 拉起并打开），也不提高原生权限默认值。该入口尚不代表完整自治或真实模型验收；仍应按部署的模型、权限和工作区边界单独验证。Web owner 复用有效的 Delivery databasePath（默认是 `$DSH_HOME/assistant-delivery/state.sqlite`），不会替换或复活已有 owner；若另一 profile 的 Lark 也共享该数据库，setup 会拒绝，需使用独立的 `DSH_HOME`。为避免同一 profile 的 owner 语义混杂，已有启用 Lark channel、`--lark configure|keep`，或 `--agent-tools` 非 `preserve` 时会被拒绝。
+`web` 是本机桌面/Web 入口：它安装 core、Delivery、Goals、Web owner 与 `owner-console`（「文鳐」控制台与原生左栏设置 UI），并在第一次配置组合/activation probe 前运行 profile 内的 `dsh-web-owner-setup`，使用 `web/account=<profile>/tenant=local/user=operator` 的固定本机 owner。安装器通过已验证的 Host 解析配置工具的依赖；当前 DSH 0.2 使用原生运行时解析，不创建旧版共享 peer 目录。它不接入 Lark、不启动常驻服务（可直接用 `dsh-ray open --profile web` 拉起并打开），也不提高原生权限默认值。该入口尚不代表完整自治或真实模型验收；仍应按部署的模型、权限和工作区边界单独验证。Web owner 复用有效的 Delivery databasePath（默认是 `$DSH_HOME/assistant-delivery/state.sqlite`），不会替换或复活已有 owner；若另一 profile 的 Lark 也共享该数据库，setup 会拒绝，需使用独立的 `DSH_HOME`。为避免同一 profile 的 owner 语义混杂，已有启用 Lark channel、`--lark configure|keep`，或 `--agent-tools` 非 `preserve` 时会被拒绝。
 
 `autonomy` 是显式选择的实验性离线执行入口，安装 Web 场景以及 Isolation、Actions、Keychain、Evaluation、Verifier、`assistant-deepseek-budget`、Event Triggers、Proactive 和 Skills。后面三者没有匹配授权时保持静默：不会自动创建任务、续期或发起网络请求。基本 RSI 首版包含有限 repair admission 与同一任务族的两轮改进验收；完整自治规划仍在推进，使用边界见[验收合同](../../docs/rsi-acceptance.md)与[当前状态](../../docs/rsi-status.md)。
 
@@ -447,7 +447,7 @@ v1 任务只能选 `deepseek-v4-flash` 或 `deepseek-v4-pro`，并需为每次�
 
 ## 配置默认模型
 
-DSH 需要一个能解析的默认模型才能真正对话。新安装时若 `PATH` 上有真正可执行的 `traex`/`trae-cli` 或 Antigravity `agy`，安装器会在写入前把 `@dsh-enhanced/traex-acp-provider` 加入同一 cohort 预检、安装并启用当前 profile 中对应发现的 route（`traex-agent` / `agy-agent`），不弹模型菜单。它只在对应 CLI 无交互登录检查通过（`traex login status` / `agy models`）、且 settings/home/profile 都没有显式默认模型时，为当前 profile 选中对应默认模型；已有命令、工作目录与明确默认模型均保留。未登录时 route 仍可启用，但不声称可对话，只提示交互登录（TraeX 用 `traex login`，Antigravity 用 `agy` 或 `agy acp --login`）；`--model skip` 仍启用发现的 route，但不设置默认模型。未发现可用本机 agent 时沿用模型配置引导；仅在未检测到可用本机 agent 且未显式指定 provider 时，`--yes` 和非交互运行不主动写入新 route。升级不自动追加 ACP provider 或改模型 route。
+DSH 需要一个能解析的默认模型才能真正对话。新安装时若 `PATH` 上有真正可执行的 `traex`/`trae-cli` 或 Antigravity `agy`，安装器会在写入前把 `@dsh-ray/traex-acp-provider` 加入同一 cohort 预检、安装并启用当前 profile 中对应发现的 route（`traex-agent` / `agy-agent`），不弹模型菜单。它只在对应 CLI 无交互登录检查通过（`traex login status` / `agy models`）、且 settings/home/profile 都没有显式默认模型时，为当前 profile 选中对应默认模型；已有命令、工作目录与明确默认模型均保留。未登录时 route 仍可启用，但不声称可对话，只提示交互登录（TraeX 用 `traex login`，Antigravity 用 `agy` 或 `agy acp --login`）；`--model skip` 仍启用发现的 route，但不设置默认模型。未发现可用本机 agent 时沿用模型配置引导；仅在未检测到可用本机 agent 且未显式指定 provider 时，`--yes` 和非交互运行不主动写入新 route。升级不自动追加 ACP provider 或改模型 route。
 
 引导支持多种目标，都由 `dsh-model-setup --profile <目标 profile>` 写入目标 profile 的 `cordis.patch.yml`：`agent-default-model` 选择模型，自定义网关另写 `llm-pi-ai.providers.<route>`。各 profile 的选择彼此隔离：
 
@@ -475,12 +475,12 @@ DSH 需要一个能解析的默认模型才能真正对话。新安装时若 `PA
 显式 `--model-provider traex-agent|agy-agent` 和自动发现路径都只写当前 profile 的默认行，不改全局 settings。
 
 - 不需要 API Key，也不接受 `--model-base-url/--model-api/--model-display-name`。
-- 安装器会自动把 `@dsh-enhanced/traex-acp-provider` 加入安装集，把目标 profile 的 `agent-default-model` 指向对应 provider，并在同一 patch 层开启对应键（`traex-agent` 写 `config.enabled: true` / `command`，`agy-agent` 写 `config.agyEnabled: true` / `agyCommand`，互不覆盖，同时保留其它行、注释、`!!js` 表达式与已有 `cwd`）。
+- 安装器会自动把 `@dsh-ray/traex-acp-provider` 加入安装集，把目标 profile 的 `agent-default-model` 指向对应 provider，并在同一 patch 层开启对应键（`traex-agent` 写 `config.enabled: true` / `command`，`agy-agent` 写 `config.agyEnabled: true` / `agyCommand`，互不覆盖，同时保留其它行、注释、`!!js` 表达式与已有 `cwd`）。
 - 当本轮将默认模型设为 `traex-agent` / `agy-agent` 且 `--model-route` 保持 `auto` 时，安装器先做不消耗额度的无交互检查（`traex login status` 或 `agy models`），再写入目标 profile 默认模型并检查适配器；未安装、未登录或未注册适配器都会失败并恢复配置快照。显式 `--model-route skip` 可跳过该检查。
 
 `traex-agent` 与 `agy-agent` 的适配器按 profile 注册（仅在启用了 `traex-acp-provider` bundle 的 profile 里存在）。安装器只通过 `--dump-config` 与无交互 CLI 状态做结构化验证，不消耗模型额度；每次真实调用会启动子进程（`traex acp serve` 或 `agy acp --sandbox --include-default-customizations=false --disable-telemetry --stdio`）并消耗本机账号额度，沙盒与 `agyMode: 'plan'` 信任边界见 [`traex-acp-provider` 文档](../../plugins/traex-acp-provider/README.md)与[模型指南](../../docs/models.md)。
 
-API Key 推荐在 [Web 模型设置](../../docs/models.md)中保存，使用当前 Host 的凭据格式；不要手工编辑 `.credentials.yaml` 或把密钥写入命令。安装器支持从 `DSH_ENHANCED_MODEL_API_KEY` 或提供商对应变量读取密钥，终端无环境变量时也会询问隐藏输入；这些部署入口用于配置默认值。只添加一个可选模型时使用 Web，无需重跑安装器。TraeX / `agy` 不需要 API Key。
+API Key 推荐在 [Web 模型设置](../../docs/models.md)中保存，使用当前 Host 的凭据格式；不要手工编辑 `.credentials.yaml` 或把密钥写入命令。安装器支持从 `DSH_RAY_MODEL_API_KEY` 或提供商对应变量读取密钥，终端无环境变量时也会询问隐藏输入；这些部署入口用于配置默认值。只添加一个可选模型时使用 Web，无需重跑安装器。TraeX / `agy` 不需要 API Key。
 
 独立 `dsh-model-setup` 入口要求正确的 Host 依赖解析与 PATH；私有 Host 安装请优先通过安装器调用。源码开发环境可用 `dsh-model-setup --help` 查看所有选项。
 
@@ -494,7 +494,7 @@ API Key 推荐在 [Web 模型设置](../../docs/models.md)中保存，使用当�
 
 验证方式取决于目标 profile 的有效默认 provider：普通 API-key/网关 route 先从目标 profile 的 `--dump-config` 读取 provider/model，再用临时只含该选择的 headless overlay 发送一次固定最小请求；待导入的全局 `settings.yaml` 存在时拒绝真实验证，以免消费其它 profile 的遗留配置。agent route（`traex-agent` / `agy-agent`）不发收费模型请求，改为校验目标 profile 已注册 `traex-acp-provider` 适配器并检查 `traex login status` / `agy models`。
 
-新建原生 `web` 模板时会预检 Web 端口（默认 `127.0.0.1:3080`，可用 `DSH_ENHANCED_WEB_PORT` 覆盖）。自定义 profile 不要求 Web 端口；安装器在飞书配置前通过原生 Host 就绪信号验证插件真实激活，而非只验证 YAML 可组合；已管理的 Lark profile 则以实际常驻服务验收。独立诊断：
+新建原生 `web` 模板时会预检 Web 端口（默认 `127.0.0.1:3080`，可用 `DSH_RAY_WEB_PORT` 覆盖）。自定义 profile 不要求 Web 端口；安装器在飞书配置前通过原生 Host 就绪信号验证插件真实激活，而非只验证 YAML 可组合；已管理的 Lark profile 则以实际常驻服务验收。独立诊断：
 
 ```sh
 ./scripts/install/doctor.sh --profile web
@@ -506,23 +506,23 @@ API Key 推荐在 [Web 模型设置](../../docs/models.md)中保存，使用当�
 ./scripts/install/doctor.sh --preflight --port 3080
 ```
 
-`doctor.sh` 参数：`--preflight` 切换为安装前预检（只查 Web 端口，默认 postflight 会组合 profile 并对未启用 Lark 的 profile 做一次前台激活，并追加 `dsh_enhanced_doctor_live_summary` 实时诊断摘要）；`--json` 直接调用已绑定 `.dsh-rsi-host.json` 的 `dsh-rsi doctor --profile <name> --json` 输出无密钥结构化报告（不能与 `--preflight` 或 `--require-isolation` 同用）；`--port <1..65535>` 指定预检端口（默认取 `DSH_ENHANCED_WEB_PORT`，再缺省 `3080`）；`--require-service` 验证受管常驻服务与 Linux 注销后存活；`--require-isolation` 检查有限隔离授权、配对 owner 与对应 backend 的临时隔离探测（不另起 Host、不续授权）。`--require-isolation` 不得与 `--preflight` 或 `--require-service` 同用，违反时以退出码 2 拒绝。
+`doctor.sh` 参数：`--preflight` 切换为安装前预检（只查 Web 端口，默认 postflight 会组合 profile 并对未启用 Lark 的 profile 做一次前台激活，并追加 `dsh_ray_doctor_live_summary` 实时诊断摘要）；`--json` 直接调用已绑定 `.dsh-ray-host.json` 的 `dsh-ray doctor --profile <name> --json` 输出无密钥结构化报告（不能与 `--preflight` 或 `--require-isolation` 同用）；`--port <1..65535>` 指定预检端口（默认取 `DSH_RAY_WEB_PORT`，再缺省 `3080`）；`--require-service` 验证受管常驻服务与 Linux 注销后存活；`--require-isolation` 检查有限隔离授权、配对 owner 与对应 backend 的临时隔离探测（不另起 Host、不续授权）。`--require-isolation` 不得与 `--preflight` 或 `--require-service` 同用，违反时以退出码 2 拒绝。
 
 `--require-service` 在 Linux 同时验证 systemd user unit、稳定性窗口和 lingering；若检测到循环崩溃会停止该 unit 并输出 journal，若未启用 lingering，注销会停止 user service，按 doctor 提示运行 `sudo loginctl enable-linger "$(id -u)"`。未带 `--require-service` 的 doctor 会避免对已启用 Lark 的 profile 启动第二个 Host；macOS LaunchAgent 与 Windows 当前用户计划任务只能在用户登录会话中运行；Windows 的任务会在失败后重启，但不宣称注销后继续运行。
 
-远程 npm 安装器（`install-npm.sh`）是薄引导器。将它下载到新建的私有目录再执行：若同目录存在可读的 `common.sh`，脚本会直接 source sibling，仅可信 checkout 适合该模式。没有 sibling 时，引导器从固定 `vX.Y.Z` 发布标签下载并校验 `common.sh`；最终 `--operation` 为 `upgrade` 或 `uninstall` 时，再下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`；存在 `DSH_ENHANCED_HOST_UPDATE_PLAN` 或 `DSH_ENHANCED_HOST_RECOVERY_ONLY=1` 时，再下载 `host-lifecycle.mjs`、`host-profile-update.mjs` 和 `host-rsi-update.mjs`。所需资产先写入私有临时目录的 `.download` 文件，逐项通过内嵌 SHA-256 校验后才封存，并在 source `common.sh` 前核验文件身份。缺失、无效或占位的必需摘要会拒绝对应操作。
+远程 npm 安装器（`install-npm.sh`）是薄引导器。将它下载到新建的私有目录再执行：若同目录存在可读的 `common.sh`，脚本会直接 source sibling，仅可信 checkout 适合该模式。没有 sibling 时，引导器从固定 `vX.Y.Z` 发布标签下载并校验 `common.sh`；最终 `--operation` 为 `upgrade` 或 `uninstall` 时，再下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`；存在 `DSH_RAY_HOST_UPDATE_PLAN` 或 `DSH_RAY_HOST_RECOVERY_ONLY=1` 时，再下载 `host-lifecycle.mjs`、`host-profile-update.mjs` 和 `host-rsi-update.mjs`。所需资产先写入私有临时目录的 `.download` 文件，逐项通过内嵌 SHA-256 校验后才封存，并在 source `common.sh` 前核验文件身份。缺失、无效或占位的必需摘要会拒绝对应操作。
 
-远程 bootstrap 要求 `TMPDIR` 是绝对路径；逻辑路径上的每个符号链接组件都必须由 root 拥有并解析到目录，因此接受 macOS `/var` → `/private/var`（每用户 `TMPDIR` 所在）与 `/tmp` → `/private/tmp` 这类操作系统别名，任何非 root 拥有的符号链接组件都会在下载前被拒绝。完全解析到 canonical 路径后，最终目录必须由当前用户拥有，其非系统临时目录祖先不能由非 root/当前用户拥有或向 group/other 开放写权限；系统 `/tmp` 必须解析到 root-owned `01777` 目录。六项资产摘要可分别由 `DSH_ENHANCED_INSTALL_COMMON_SHA256`、`DSH_ENHANCED_INSTALL_LIFECYCLE_CONFIG_SHA256`、`DSH_ENHANCED_INSTALL_LIFECYCLE_PROFILE_SHA256`、`DSH_ENHANCED_INSTALL_HOST_LIFECYCLE_SHA256`、`DSH_ENHANCED_INSTALL_HOST_PROFILE_UPDATE_SHA256` 和 `DSH_ENHANCED_INSTALL_HOST_RSI_UPDATE_SHA256` 覆盖；`DSH_ENHANCED_INSTALL_REF` 可覆盖固定发布 tag。已请求资产的摘要必须是精确的 64 位小写十六进制值。远程模式的安装逻辑和生命周期执行器不从 mutable `main` 执行；可信 checkout 的 sibling 模式直接使用本地 helper。
+远程 bootstrap 要求 `TMPDIR` 是绝对路径；逻辑路径上的每个符号链接组件都必须由 root 拥有并解析到目录，因此接受 macOS `/var` → `/private/var`（每用户 `TMPDIR` 所在）与 `/tmp` → `/private/tmp` 这类操作系统别名，任何非 root 拥有的符号链接组件都会在下载前被拒绝。完全解析到 canonical 路径后，最终目录必须由当前用户拥有，其非系统临时目录祖先不能由非 root/当前用户拥有或向 group/other 开放写权限；系统 `/tmp` 必须解析到 root-owned `01777` 目录。六项资产摘要可分别由 `DSH_RAY_INSTALL_COMMON_SHA256`、`DSH_RAY_INSTALL_LIFECYCLE_CONFIG_SHA256`、`DSH_RAY_INSTALL_LIFECYCLE_PROFILE_SHA256`、`DSH_RAY_INSTALL_HOST_LIFECYCLE_SHA256`、`DSH_RAY_INSTALL_HOST_PROFILE_UPDATE_SHA256` 和 `DSH_RAY_INSTALL_HOST_RSI_UPDATE_SHA256` 覆盖；`DSH_RAY_INSTALL_REF` 可覆盖固定发布 tag。已请求资产的摘要必须是精确的 64 位小写十六进制值。远程模式的安装逻辑和生命周期执行器不从 mutable `main` 执行；可信 checkout 的 sibling 模式直接使用本地 helper。
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash -s -- --scenario core
+curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-ray/main/scripts/install/install-npm.sh | bash -s -- --scenario core
 ```
 
 管道示例只安装轻量 `core`。首次完整 `supervised` 需要终端交互；不使用 npm CLI 时先下载脚本再执行：
 
 ```sh
 installer_directory="$(mktemp -d)"
-curl -fsSLo "$installer_directory/install-npm.sh" https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh &&
+curl -fsSLo "$installer_directory/install-npm.sh" https://raw.githubusercontent.com/22-ai-00/dsh-ray/main/scripts/install/install-npm.sh &&
   bash "$installer_directory/install-npm.sh" --scenario supervised
 install_status=$?
 rm -rf -- "$installer_directory"
@@ -531,7 +531,7 @@ test "$install_status" -eq 0
 
 默认仍推荐[简明安装指南](README.md)中的 npm CLI 入口。
 
-安装器默认先把 `@dsh-enhanced/personal-assistant@latest` 解析为一次安装的精确版本，再用该精确版本预检并安装每个选中的 `@dsh-enhanced/*` bundle；registry 查询固定使用 npm 的 global location，避免当前 checkout 中 pnpm 专用 `.npmrc` 键被 npm 误报为 unknown project config。profile add 仅把 pnpm 日志级别降到 error：安装器自己的 cohort/阶段输出保留，Host 已提供的 optional peer 与已明确忽略的 build-script 重复提示不再刷屏，真实 package-manager 错误仍原样显示并以非零退出。因此仍会获得最新的完整发布，不会因各包独立解析 `latest` 而混装。预检发现任一 bundle 尚未发布该版本时，会在修改 profile 前失败。显式传入 `--plugin-version` 或 `DSH_ENHANCED_VERSION` 可使用精确 SemVer 或 npm dist-tag；tag 同样先由 anchor 解析为精确版本。版本 range 会被拒绝，因为它不能表达一个可验证的单一 cohort。`--dry-run` 不访问 npm registry，会显示待执行的 anchor 解析与预检；要确认实际发布状态请去掉 `--dry-run`。`supervised` 场景要求完整的 bundle 集合，安装后由 owner RSI 入口成对配置目标与协调器。
+安装器默认先把 `@dsh-ray/personal-assistant@latest` 解析为一次安装的精确版本，再用该精确版本预检并安装每个选中的 `@dsh-ray/*` bundle；registry 查询固定使用 npm 的 global location，避免当前 checkout 中 pnpm 专用 `.npmrc` 键被 npm 误报为 unknown project config。profile add 仅把 pnpm 日志级别降到 error：安装器自己的 cohort/阶段输出保留，Host 已提供的 optional peer 与已明确忽略的 build-script 重复提示不再刷屏，真实 package-manager 错误仍原样显示并以非零退出。因此仍会获得最新的完整发布，不会因各包独立解析 `latest` 而混装。预检发现任一 bundle 尚未发布该版本时，会在修改 profile 前失败。显式传入 `--plugin-version` 或 `DSH_RAY_VERSION` 可使用精确 SemVer 或 npm dist-tag；tag 同样先由 anchor 解析为精确版本。版本 range 会被拒绝，因为它不能表达一个可验证的单一 cohort。`--dry-run` 不访问 npm registry，会显示待执行的 anchor 解析与预检；要确认实际发布状态请去掉 `--dry-run`。`supervised` 场景要求完整的 bundle 集合，安装后由 owner RSI 入口成对配置目标与协调器。
 
 本地源码改动后仅重建并重启已有常驻服务：
 

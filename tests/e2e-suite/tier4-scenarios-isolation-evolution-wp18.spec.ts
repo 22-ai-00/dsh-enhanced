@@ -478,7 +478,7 @@ describe('Tier 4 Real-World Scenarios — S4–S7: S4 Isolation, WP16 Reload & R
       {
         path: 'package.json',
         content: JSON.stringify({
-          name: '@dsh-enhanced/evolved-greeter',
+          name: '@dsh-ray/evolved-greeter',
           version: '0.2.0',
           main: './lib/index.js',
           dsh: { pluginKind: 'service', bundle: { patch: './cordis.patch.yml' } },
@@ -486,15 +486,15 @@ describe('Tier 4 Real-World Scenarios — S4–S7: S4 Isolation, WP16 Reload & R
       },
       {
         path: 'cordis.patch.yml',
-        content: '- insert:\n  - id: dsh-enhanced-evolved-greeter\n    name: "@dsh-enhanced/evolved-greeter"\n    config: {}\n',
+        content: '- insert:\n  - id: dsh-ray-evolved-greeter\n    name: "@dsh-ray/evolved-greeter"\n    config: {}\n',
       },
     ]
     expect(() => validateFiles(v2SourceFiles)).not.toThrow()
     expect(extractKind(v2SourceFiles)).toBe('service')
 
     const v2Tgz = packPluginEntries({
-      'package/package.json': JSON.stringify({ name: '@dsh-enhanced/evolved-greeter', version: '0.2.0', type: 'module', main: './lib/index.js' }),
-      'package/cordis.patch.yml': '- insert:\n  - id: evolved-greeter\n    name: "@dsh-enhanced/evolved-greeter"\n',
+      'package/package.json': JSON.stringify({ name: '@dsh-ray/evolved-greeter', version: '0.2.0', type: 'module', main: './lib/index.js' }),
+      'package/cordis.patch.yml': '- insert:\n  - id: evolved-greeter\n    name: "@dsh-ray/evolved-greeter"\n',
       'package/lib/index.js': `
         import { Service } from '@deepseek-ai/cordis'
         class GreeterService extends Service {
@@ -540,7 +540,7 @@ describe('Tier 4 Real-World Scenarios — S4–S7: S4 Isolation, WP16 Reload & R
 
     try {
       await writeBundlePackage(siblingDir, {
-        name: '@dsh-enhanced/sibling-stable',
+        name: '@dsh-ray/sibling-stable',
         version: '0.1.0',
         body: `
 export const name = 'sibling-stable'
@@ -551,7 +551,7 @@ export function apply(ctx) {
 `,
       })
       await writeBundlePackage(v1Dir, {
-        name: '@dsh-enhanced/evolved-greeter',
+        name: '@dsh-ray/evolved-greeter',
         version: '0.1.0',
         body: `
 export const name = 'evolved-greeter'
@@ -561,7 +561,7 @@ export function apply(ctx) {
 `,
       })
       await writeBundlePackage(v2Dir, {
-        name: '@dsh-enhanced/evolved-greeter',
+        name: '@dsh-ray/evolved-greeter',
         version: '0.2.0',
         body: `
 export const name = 'evolved-greeter'
@@ -725,7 +725,7 @@ export function apply(ctx) {
                   running: { artifactDigest: v1Digest, patchDigest: v2PatchDigest },
                   mode: 'artifact-replace',
                   target: {
-                    package: '@dsh-enhanced/evolved-greeter',
+                    package: '@dsh-ray/evolved-greeter',
                     version: '0.2.0',
                     artifactDigest: v2Digest,
                     patchDigest: v2PatchDigest,
@@ -774,8 +774,8 @@ export function apply(ctx) {
     const pcpMod = await loadPluginControlPlane()
     const coord = await loadAdoptionCoordinator()
 
-    expect(delivery.IN_PROCESS_RELOAD_DENYLIST).toContain('@dsh-enhanced/plugin-control-plane')
-    expect(delivery.IN_PROCESS_RELOAD_DENYLIST).toContain('@dsh-enhanced/assistant-delivery')
+    expect(delivery.IN_PROCESS_RELOAD_DENYLIST).toContain('@dsh-ray/plugin-control-plane')
+    expect(delivery.IN_PROCESS_RELOAD_DENYLIST).toContain('@dsh-ray/assistant-delivery')
 
     const evoDefaults = AssistantEvolutionService.Config({ databasePath: ws.sqlitePath('evo') })
     const verifierDefaults = verifierMod.Config({ databasePath: ws.sqlitePath('ver') })
@@ -790,17 +790,17 @@ export function apply(ctx) {
     await mkdir(profileDir, { recursive: true, mode: 0o700 })
 
     await writeBundlePackage(siblingDir, {
-      name: '@dsh-enhanced/sibling-s6',
+      name: '@dsh-ray/sibling-s6',
       version: '0.1.0',
       body: "export const name = 'sibling-s6'\nexport function apply(ctx) { ctx.provide('siblingS6', () => 'intact') }\n",
     })
     await writeBundlePackage(v1Dir, {
-      name: '@dsh-enhanced/cand-svc',
+      name: '@dsh-ray/cand-svc',
       version: '0.1.0',
       body: "export const name = 'cand-svc'\nexport function apply(ctx) { ctx.provide('candService', () => 'v1-healthy') }\n",
     })
     await writeBundlePackage(v2CrashDir, {
-      name: '@dsh-enhanced/cand-svc',
+      name: '@dsh-ray/cand-svc',
       version: '0.1.84',
       body: "export const name = 'cand-svc'\nexport function apply() { throw new Error('evolved-plugin-crash') }\n",
     })
@@ -968,7 +968,7 @@ export function apply(ctx) {
                 running: { artifactDigest: v1Digest, patchDigest: badPatchDigest },
                 mode: 'artifact-replace',
                 target: {
-                  package: '@dsh-enhanced/cand-svc',
+                  package: '@dsh-ray/cand-svc',
                   version: '0.1.84',
                   artifactDigest: badDigest,
                   patchDigest: badPatchDigest,
@@ -1038,7 +1038,7 @@ export function apply(ctx) {
         inProcessGeneration: 1,
         running: { artifactDigest: badDigest, patchDigest: badPatchDigest },
         target: {
-          package: '@dsh-enhanced/cand-svc',
+          package: '@dsh-ray/cand-svc',
           version: '0.1.84',
           artifactDigest: badDigest,
           patchDigest: badPatchDigest,
@@ -1167,7 +1167,7 @@ export function apply(ctx) {
     // 3. Provision WP18 repo-verified-delivery-fixture + AssistantActionsService commit -> PR -> inspect + observer gating
     const patchPath = join(ws.dshHome, 'profiles', 'web', 'cordis.patch.yml')
     await mkdir(dirname(patchPath), { recursive: true, mode: 0o700 })
-    await writeFile(patchPath, `- id: dsh-enhanced-assistant-isolation\n  name: "@dsh-enhanced/assistant-isolation"\n  config:\n    grants:\n      - id: repo\n        expiresAt: ${Date.now() + 600_000}\n`, { mode: 0o600 })
+    await writeFile(patchPath, `- id: dsh-ray-assistant-isolation\n  name: "@dsh-ray/assistant-isolation"\n  config:\n    grants:\n      - id: repo\n        expiresAt: ${Date.now() + 600_000}\n`, { mode: 0o600 })
 
     const prevEventSource = process.env.DSH_REPO_EVENT_SOURCE
     const prevLog = process.env.DSH_REPO_DELIVERY_FIXTURE_LOG
@@ -1228,7 +1228,7 @@ export function apply(ctx) {
         credential: {
           id: 'live-gh-handle',
           provider: 'linux-protected-file',
-          consumers: ['dsh-enhanced-assistant-actions', 'dsh-enhanced-event-triggers'],
+          consumers: ['dsh-ray-assistant-actions', 'dsh-ray-event-triggers'],
           purposes: ['github.commit', 'github.observe'],
           maxLeaseMs: 60_000,
           reference: { path: secretFile },

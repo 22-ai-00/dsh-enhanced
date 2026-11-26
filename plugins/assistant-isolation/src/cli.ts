@@ -11,7 +11,7 @@ import { defaultStoragePolicy, validateStoragePolicy } from './storage-policy.js
 import { maintainIsolationStorage, type IsolationStorageMaintenance } from './storage.js'
 
 function installSqliteWarningFilter(): void {
-  const sqliteWarningFiltered = Symbol.for('dsh-enhanced.sqlite-warning-filtered')
+  const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
   if (Reflect.get(process.emitWarning, sqliteWarningFiltered)) return
   const originalEmitWarning = process.emitWarning
   const filteredEmitWarning = function emitWarning(this: unknown, warning: string | Error, ...rest: unknown[]): void {

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { createPublicKey } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
-import type { GoalScope } from '@dsh-enhanced/assistant-goals'
+import type { GoalScope } from '@dsh-ray/assistant-goals'
 import { holdoutPathsOverlap, validateCanaryAdmission, validateHoldoutExecution, type CanaryAdmission, type HoldoutExecutionConfig, type HoldoutQualificationInput } from './holdout-qualification.js'
 import { validateCanaryAdmissionTemplate, type CanaryAdmissionTemplate } from './repair-admission.js'
 

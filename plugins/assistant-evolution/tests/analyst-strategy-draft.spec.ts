@@ -10,8 +10,8 @@ import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-ses
 import {
   acceptanceDigest,
   goalDefinitionSituation,
-} from '@dsh-enhanced/task-acceptance-contract'
-import { AssistantPolicyService, setApprovalReviewer } from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/task-acceptance-contract'
+import { AssistantPolicyService, setApprovalReviewer } from '@dsh-ray/assistant-policy'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
   AssistantEvolutionService,
@@ -154,7 +154,7 @@ async function fixture(options: { provideGoals: boolean }): Promise<Target> {
   ctx.provide('assistantDelivery', {
     prepareAgentApproval: () => Object.freeze({
       routeVersion: 2,
-      sourceId: 'dsh-enhanced-assistant-evolution',
+      sourceId: 'dsh-ray-assistant-evolution',
       bindingId: 'analyst-owner-route',
       bindingVersion: 3,
       bindingGeneration: 2,

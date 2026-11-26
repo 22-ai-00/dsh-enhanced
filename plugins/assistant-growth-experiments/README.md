@@ -1,7 +1,7 @@
-# @dsh-enhanced/assistant-growth-experiments
+# @dsh-ray/assistant-growth-experiments
 
 > **显式启用的受监督能力，非默认能力。** 默认个人助理安装不会加载本包。启用时它只组合
-> `@dsh-enhanced/assistant-growth-contract`、Delivery 和 Automations 的当前 Host 协议；没有这些
+> `@dsh-ray/assistant-growth-contract`、Delivery 和 Automations 的当前 Host 协议；没有这些
 > 精确边界会拒绝启动，绝不降级为接受任意 trace 或模型自报。
 
 这是基于可信、版本化工作流证据的持久成长实验控制器：只接受 Delivery 的结构化 trace
@@ -14,15 +14,15 @@ projection，不让原始工具参数离开其 Host 边界；候选经 owner 审
 ## 开发者显式安装
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-growth-experiments
+dsh plugin --profile web add @dsh-ray/assistant-growth-experiments
 dsh --profile web --dump-config
 ```
 
 ## 配置
 
 ```yaml
-- id: dsh-enhanced-assistant-growth-experiments
-  name: '@dsh-enhanced/assistant-growth-experiments'
+- id: dsh-ray-assistant-growth-experiments
+  name: '@dsh-ray/assistant-growth-experiments'
   inject:
     - assistantAutomations
     - assistantDelivery

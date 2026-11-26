@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { assertLocalSourceInstaller } from './local-source-maintenance.mjs'
 
-const protocol = 'dsh-enhanced/host-owner-source-repair/v1'
+const protocol = 'dsh-ray/host-owner-source-repair/v1'
 const hash = value => createHash('sha256').update(value).digest('hex')
 const json = value => `${JSON.stringify(value, null, 2)}\n`
 const same = isDeepStrictEqual
@@ -76,7 +76,7 @@ async function load(installer) {
   const api = Object.assign({}, ...await Promise.all(names.map(name => import(pathToFileURL(join(root, `${name}.js`)).href))))
   const require = createRequire(join(installer.root, 'package.json'))
   const larkRequire = createRequire(join(installer.root, 'plugins', 'lark-channel', 'package.json'))
-  const controlPath = await realpath(larkRequire.resolve('@dsh-enhanced/plugin-control-plane'))
+  const controlPath = await realpath(larkRequire.resolve('@dsh-ray/plugin-control-plane'))
   if (!inside(installer.root, controlPath)) fail('Control Plane implementation escapes installer')
   if (!inside(installer.root, await realpath(require.resolve('yaml/package.json')))) {
     fail('YAML parser escapes reviewed installer')
@@ -260,7 +260,7 @@ async function originalCompiledPlan(api, { homePath, profile, coordinatorProfile
   const profilePath = join(homePath, 'profiles', profile)
   await api.verifyRsiLocalInstalledPackagesFresh({ cohort, profilePath, bundles: ['lark-channel'] })
   const profileRequire = createRequire(join(profilePath, 'package.json'))
-  const packageManifestPath = await realpath(profileRequire.resolve('@dsh-enhanced/lark-channel/package.json'))
+  const packageManifestPath = await realpath(profileRequire.resolve('@dsh-ray/lark-channel/package.json'))
   const packageRoot = dirname(packageManifestPath)
   if (!inside(profilePath, packageRoot)) fail('original profile compiler escapes verified cohort')
   const compilerPath = join(packageRoot, 'lib', 'rsi-profile.js')
@@ -270,7 +270,7 @@ async function originalCompiledPlan(api, { homePath, profile, coordinatorProfile
   if (loaded.skippedBundles.length) fail('original compiler profile has unresolved bundles')
   const resolution = await host.boot.createRuntimeResolution({ installAnchor: host.manifestPath,
     profile: loaded, home: homePath })
-  const larkName = '@dsh-enhanced/lark-channel'
+  const larkName = '@dsh-ray/lark-channel'
   const direct = resolution.localPackageNames.includes(larkName)
   const installedLark = resolution.entries.find(item => item.name === larkName && item.scope === 'profile')
   const larkLayer = loaded.layers.find(item => item.packageName === larkName)
@@ -305,8 +305,8 @@ async function originalCompiledPlan(api, { homePath, profile, coordinatorProfile
     const creationBuild = await api.readRsiCreationBuildEnvironment({ dshHome: homePath,
       profile, source: source.workspace, build })
     const hostAuthority = parsed(files[join(resources.configRoot, 'host-authority.json')], 'original Host grant')
-    const observerIds = new Set(['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-verifier',
-      'dsh-enhanced-personal-assistant', 'dsh-enhanced-assistant-memory-learning'])
+    const observerIds = new Set(['dsh-ray-assistant-growth-driver', 'dsh-ray-assistant-verifier',
+      'dsh-ray-personal-assistant', 'dsh-ray-assistant-memory-learning'])
     const originalRows = yamlRows(api, originalEffective.targetEffective, 'pre-owner target effective').contents.items
     const observerTargets = manifest.controlPlane.runtimeObserver.targets.filter(item => !observerIds.has(item.entryId))
       .map(item => {
@@ -365,8 +365,8 @@ export async function assertIssuerStateAbsent({ resources, files, homePath, phys
 }
 
 function manifestInputs(original, targetEffective, creationBuild, source, runtime, sourceBuild) {
-  const immutable = new Set(['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-verifier',
-    'dsh-enhanced-personal-assistant', 'dsh-enhanced-assistant-memory-learning'])
+  const immutable = new Set(['dsh-ray-assistant-growth-driver', 'dsh-ray-assistant-verifier',
+    'dsh-ray-personal-assistant', 'dsh-ray-assistant-memory-learning'])
   return { dshHome: original.resources.root.slice(0, -`/rsi-authorities/${original.manifest.targetProfile}`.length),
     targetProfile: original.manifest.targetProfile, coordinatorProfile: original.manifest.coordinatorProfile,
     targetEffective, owner: original.owner, resources: original.resources, runtime, source,
@@ -515,9 +515,9 @@ function assertNonOwnerRows(api, originalEffective, stagedEffective) {
     }
   }
   if (!same([...first.keys()], [...second.keys()])) fail('target effective row inventory changed')
-  const ownerRows = new Set(['dsh-enhanced-personal-assistant', 'dsh-enhanced-assistant-delivery',
-    'dsh-enhanced-assistant-verifier', 'dsh-enhanced-assistant-growth-driver',
-    'dsh-enhanced-assistant-memory-learning', 'dsh-enhanced-plugin-control-plane'])
+  const ownerRows = new Set(['dsh-ray-personal-assistant', 'dsh-ray-assistant-delivery',
+    'dsh-ray-assistant-verifier', 'dsh-ray-assistant-growth-driver',
+    'dsh-ray-assistant-memory-learning', 'dsh-ray-plugin-control-plane'])
   for (const [id, row] of first) {
     if (ownerRows.has(id)) continue
     if (!same(yamlValue(api, row, original), yamlValue(api, second.get(id), staged))) {
@@ -790,7 +790,7 @@ export async function captureOwnerSourceRepair({ homePath, profile, installer, p
   const owner = ownerSnapshot.bindings[0]
   const effectiveRows = yamlRows(api, composed.targetEffective, 'owner effective').contents.items
   const delivery = effectiveRows.filter(item => api.yaml.isMap(item)
-    && item.get('id') === 'dsh-enhanced-assistant-delivery')
+    && item.get('id') === 'dsh-ray-assistant-delivery')
   if (delivery.length !== 1 || !api.yaml.isMap(delivery[0].get('config', true))) {
     fail('owner Delivery row differs')
   }

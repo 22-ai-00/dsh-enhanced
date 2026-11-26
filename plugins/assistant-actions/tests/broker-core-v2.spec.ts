@@ -24,7 +24,7 @@ import {
   type ActionBrokerRequestIntent,
   type ActionBrokerServerResponse,
 } from '../src/broker-protocol.ts'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
 import { startGitHubBrokerServer, type BrokerPeerCredentialInspector, type GitHubBrokerServer } from '../src/broker-server.ts'
 import { AssistantActionsService } from '../src/service.ts'
 

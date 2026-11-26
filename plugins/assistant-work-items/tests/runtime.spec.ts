@@ -3,7 +3,7 @@ import {
   createTaskAcceptanceContract,
   createTaskVerificationReceipt,
   type TaskAcceptanceContract,
-} from '@dsh-enhanced/task-acceptance-contract'
+} from '@dsh-ray/task-acceptance-contract'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { AssistantDeliveryService, type OwnerRouteAuthority } from '@dsh-enhanced/assistant-delivery'
+import { AssistantDeliveryService, type OwnerRouteAuthority } from '@dsh-ray/assistant-delivery'
 import type { DeliveryStore } from '../../assistant-delivery/lib/store.js'
 import { WorkItemAdmission } from '../src/admission.ts'
 import { WorkItemAuthority } from '../src/authority.ts'

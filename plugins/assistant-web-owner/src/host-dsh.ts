@@ -34,8 +34,8 @@ export function findExactRow(
   options: { required: boolean; allowDisabled?: boolean; label?: string },
   fail: Fail,
 ): YAMLMap | undefined {
-  const id = `dsh-enhanced-${slug}`
-  const name = `@dsh-enhanced/${slug}`
+  const id = `dsh-ray-${slug}`
+  const name = `@dsh-ray/${slug}`
   const matches = rows.items.filter(item => isMap(item) && (item.get('id') === id || item.get('name') === name)) as YAMLMap[]
   if (matches.length > 1) fail(`duplicate or shadowed ${id}`)
   const found = matches[0]
@@ -140,22 +140,22 @@ async function validateBoundHostExecutable(executable: string, dshHome: string, 
   fail('bound dsh executable is not owned by an approved Host')
 }
 
-/** Resolve the approved DSH executable bound under `$DSH_HOME/.dsh-rsi-host.json`, failing closed on unsafe metadata. */
+/** Resolve the approved DSH executable bound under `$DSH_HOME/.dsh-ray-host.json`, failing closed on unsafe metadata. */
 export async function resolveBoundHostExecutable(dshHome: string, fail: Fail): Promise<string | undefined> {
-  const bindingPath = join(dshHome, '.dsh-rsi-host.json')
+  const bindingPath = join(dshHome, '.dsh-ray-host.json')
   let handle
   try {
     handle = await open(bindingPath, constants.O_RDONLY | constants.O_NOFOLLOW)
   } catch (error: unknown) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined
-    fail('bound host file .dsh-rsi-host.json is inaccessible or a symlink')
+    fail('bound host file .dsh-ray-host.json is inaccessible or a symlink')
   }
   let raw: string
   try {
     const info = await handle.stat()
     if (!info.isFile() || info.nlink !== 1 || info.size < 1 || info.size > 16_384
       || (info.mode & 0o077) !== 0 || (process.getuid !== undefined && info.uid !== process.getuid())) {
-      fail('bound host file .dsh-rsi-host.json has unsafe permissions or type')
+      fail('bound host file .dsh-ray-host.json has unsafe permissions or type')
     }
     raw = await handle.readFile({ encoding: 'utf8' })
   } finally {
@@ -165,18 +165,18 @@ export async function resolveBoundHostExecutable(dshHome: string, fail: Fail): P
   try {
     parsed = JSON.parse(raw)
   } catch {
-    fail('bound host file .dsh-rsi-host.json is invalid JSON')
+    fail('bound host file .dsh-ray-host.json is invalid JSON')
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)
     || Object.keys(parsed).sort().join(',') !== 'cacheRoot,receiptDigest,schemaVersion,version') {
-    fail('bound host file .dsh-rsi-host.json has an unexpected schema')
+    fail('bound host file .dsh-ray-host.json has an unexpected schema')
   }
   const binding = parsed as { schemaVersion?: unknown; cacheRoot?: unknown; version?: unknown; receiptDigest?: unknown }
   if (binding.schemaVersion !== 1 || typeof binding.cacheRoot !== 'string' || !isAbsolute(binding.cacheRoot)
     || resolve(binding.cacheRoot) !== binding.cacheRoot || typeof binding.version !== 'string'
     || !supportedHostVersions.has(binding.version) || typeof binding.receiptDigest !== 'string'
     || !/^[a-f0-9]{64}$/u.test(binding.receiptDigest)) {
-    fail('bound host file .dsh-rsi-host.json names an unsupported or invalid Host')
+    fail('bound host file .dsh-ray-host.json names an unsupported or invalid Host')
   }
   const candidate = join(binding.cacheRoot, binding.version, 'node_modules', '.bin', 'dsh')
   try {
@@ -188,7 +188,7 @@ export async function resolveBoundHostExecutable(dshHome: string, fail: Fail): P
   return validateBoundHostExecutable(await realpath(candidate), dshHome, fail)
 }
 
-/** Run `dsh --profile <p> --dump-config` from PATH or fall back to verified `$DSH_HOME/.dsh-rsi-host.json`. */
+/** Run `dsh --profile <p> --dump-config` from PATH or fall back to verified `$DSH_HOME/.dsh-ray-host.json`. */
 export async function dumpEffectiveProfile(dshHome: string, profile: string, fail: Fail, failureMessage: string): Promise<string> {
   const execOpts = {
     env: { ...process.env, DSH_HOME: dshHome },

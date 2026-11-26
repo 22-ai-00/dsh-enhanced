@@ -1,29 +1,29 @@
-# @dsh-enhanced/personal-assistant
+# @dsh-ray/personal-assistant
 
 个人助手「文鳐」（Ray，小鳐）四核心的纯 meta-bundle，一次安装以下独立包：
 
-- `@dsh-enhanced/assistant-policy`
-- `@dsh-enhanced/personal-memory`
-- `@dsh-enhanced/personal-wiki`
-- `@dsh-enhanced/assistant-automations`
+- `@dsh-ray/assistant-policy`
+- `@dsh-ray/personal-memory`
+- `@dsh-ray/personal-wiki`
+- `@dsh-ray/assistant-automations`
 
 它不包含消息、飞书、凭据、heartbeat、事件触发或浏览器，也不新增第五个业务 service 或数据库。自己的唯一 Cordis 行只负责按生命周期顺序挂载四个核心 service。
 
 ## 安装
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/personal-assistant
+dsh plugin --profile web add @dsh-ray/personal-assistant
 dsh --profile web --dump-config
 ```
 
-patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-personal-assistant` 业务行；后者再通过 Cordis 子插件生命周期依次启动 Policy、Memory、Wiki 和 Automations。不要在同一 profile 同时启用本 meta-bundle 与四个独立子 bundle，否则会重复提供同名 service。
+patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-ray-personal-assistant` 业务行；后者再通过 Cordis 子插件生命周期依次启动 Policy、Memory、Wiki 和 Automations。不要在同一 profile 同时启用本 meta-bundle 与四个独立子 bundle，否则会重复提供同名 service。
 
 ## 默认安全状态
 
 `auto` 是 Harness 原生组件保留的当前会话档位，本项目不注册它。助手自身自动审批通过已鉴权的 Delivery `/permission auto` 选择，使用 `workspace-write + ask` 与项目专属 reviewer 事件。新会话默认仍为 `danger-full-access`，需要收紧时使用 `--permission workspace-write`；动态原生 Auto 不能配置为默认值。
 
 - 原生 Permission selector 的 `workspace-write` / `danger-full-access` 和官方组件提供的 `auto` 由 Harness 管理。Policy 不动态添加原生 Auto；助手 `/permission auto` 使用独立的项目 reviewer 与工作区沙箱。无用户设置的新安装默认仍为 `danger-full-access`，已有兼容的静态默认与会话记录保留。
-- policy 默认写入一条 `dsh-enhanced-foreground-capability-*`：本机 Web/direct 的 foreground Agent 可访问 profile 已挂载的全部技能、工具与插件动作，后续动态挂载也无需逐项补 allow；它不会安装尚未安装的插件，也不授权 background 或飞书 external 身份。显式 deny、紧急停止、身份/预算检查仍优先。`budgets` 默认留空。
+- policy 默认写入一条 `dsh-ray-foreground-capability-*`：本机 Web/direct 的 foreground Agent 可访问 profile 已挂载的全部技能、工具与插件动作，后续动态挂载也无需逐项补 allow；它不会安装尚未安装的插件，也不授权 background 或飞书 external 身份。显式 deny、紧急停止、身份/预算检查仍优先。`budgets` 默认留空。
 - automations scheduler 默认关闭；创建并审批 automation 后仍需由部署者显式启用 scheduler。
 - Memory、Wiki、Policy、Automations 使用各自的 DSH home 私有路径和独立真源；内嵌 `personalMemory` 默认以 `automaticLearning: true` 开启自动学习（在绑定 owner 签发的有限采用授权前保持 fail-closed，可通过 `personalMemory.automaticLearning: false` 显式关闭，或传入完整 `MemoryLearningAdoptionGrant` 激活采用）。
 - meta 入口先等待 Policy 完成激活，再依次挂载 Memory、Wiki 与 Automations；启动不依赖同步构造或 YAML 行序碰巧成功。

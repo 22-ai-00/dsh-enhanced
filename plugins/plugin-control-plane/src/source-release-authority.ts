@@ -59,7 +59,7 @@ function policy(value: unknown, plugins: readonly string[]): PolicyConfig {
   const item = object(value); const fields = ['targetBranch', 'candidateId', 'packageName', 'packagePath', 'dshBaseline', 'capabilities', 'authorities', 'requires', 'registryId', 'registryLocator', 'catalogId', 'catalogPath', 'minimumReproducibleBuilds']
   keys(item, fields)
   const candidateId = text(item.candidateId, /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u, 64)
-  if (!plugins.includes(candidateId) || item.packageName !== `@dsh-enhanced/${candidateId}` || item.packagePath !== `plugins/${candidateId}`) fail()
+  if (!plugins.includes(candidateId) || item.packageName !== `@dsh-ray/${candidateId}` || item.packagePath !== `plugins/${candidateId}`) fail()
   const locator = text(item.registryLocator, /^[\s\S]+$/u); registryRoot(locator)
   sourceAuthorityCanonicalSafePath(path(item.catalogPath), 'file')
   // Parse a complete envelope through the production policy parser now. The
@@ -109,7 +109,7 @@ function releaseAuthorization(config: SourceReleaseAuthorityConfig, plan: Return
   version: string, privateKey: ReturnType<typeof createPrivateKey>, now: number, expiresAt: number): SourceReleaseAuthorization {
   const root = registryRoot(policyInput.registryLocator)
   sourceAuthorityCanonicalSafePath(policyInput.catalogPath, 'file')
-  const packageName = `@dsh-enhanced/${plan.name}`
+  const packageName = `@dsh-ray/${plan.name}`
   const registryReference = pathToFileURL(join(root, 'packages', encodeURIComponent(packageName), version, 'package.tgz')).href
   const releasePolicy = { ...policyInput, candidateId: plan.name, packageName, packagePath: `plugins/${plan.name}`, packageVersion: version, registryReference }
   const unsigned = { schemaVersion: 1 as const, kind: 'dsh-source-release-authorization' as const,

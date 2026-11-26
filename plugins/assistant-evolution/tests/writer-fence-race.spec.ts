@@ -17,7 +17,7 @@ import {
   type EvaluationScope,
   type OutcomeEnvelope,
   type TrustedTaskLearningProjectionReceipt,
-} from '@dsh-enhanced/assistant-evaluation'
+} from '@dsh-ray/assistant-evaluation'
 import ts from 'typescript'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { EvolutionStore, EvolutionStoreError } from '../src/store.ts'

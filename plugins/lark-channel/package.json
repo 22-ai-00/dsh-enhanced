@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/lark-channel",
+  "name": "@dsh-ray/lark-channel",
   "version": "0.1.88",
   "description": "A thin Feishu/Lark WebSocket adapter for the durable DSH assistant-delivery core.",
   "license": "MIT",
@@ -9,7 +9,7 @@
   "bin": {
     "dsh-lark-setup": "./bin/dsh-lark-setup.js",
     "dsh-supervised-growth-setup": "./bin/dsh-supervised-growth-setup.js",
-    "dsh-rsi-setup": "./bin/dsh-rsi-setup.js"
+    "dsh-ray-setup": "./bin/dsh-ray-setup.js"
   },
   "exports": {
     ".": {
@@ -43,7 +43,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/lark-channel"
   },
   "keywords": [
@@ -65,110 +65,110 @@
     "markdown-it": "14.3.1",
     "qrcode": "1.5.4",
     "yaml": "2.9.0",
-    "@dsh-enhanced/assistant-growth-contract": "workspace:*",
-    "@dsh-enhanced/assistant-isolation": "workspace:*"
+    "@dsh-ray/assistant-growth-contract": "workspace:*",
+    "@dsh-ray/assistant-isolation": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
-    "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-evaluation": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-evolution": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-growth-experiments": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-health": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-heartbeat": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-recovery": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/credentials-keychain": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/personal-assistant": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/preference-learning": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-growth-driver": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/plugin-control-plane": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-verifier": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-memory-learning": ">=0.1.48 <0.2.0",
-    "@dsh-enhanced/personal-memory": ">=0.1.48 <0.2.0"
+    "@dsh-ray/assistant-automations": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-delivery": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-evaluation": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-evolution": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-growth-experiments": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-health": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-heartbeat": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-recovery": ">0.1.7 <0.2.0",
+    "@dsh-ray/credentials-keychain": ">=0.1.0 <0.2.0",
+    "@dsh-ray/personal-assistant": ">0.1.7 <0.2.0",
+    "@dsh-ray/preference-learning": ">0.1.7 <0.2.0",
+    "@dsh-ray/assistant-growth-driver": ">=0.1.0 <0.2.0",
+    "@dsh-ray/plugin-control-plane": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-verifier": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-policy": ">=0.1.33 <0.2.0",
+    "@dsh-ray/assistant-memory-learning": ">=0.1.48 <0.2.0",
+    "@dsh-ray/personal-memory": ">=0.1.48 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-delivery": {
+    "@dsh-ray/assistant-delivery": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-evaluation": {
+    "@dsh-ray/assistant-evaluation": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-evolution": {
+    "@dsh-ray/assistant-evolution": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-growth-experiments": {
+    "@dsh-ray/assistant-growth-experiments": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-health": {
+    "@dsh-ray/assistant-health": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-heartbeat": {
+    "@dsh-ray/assistant-heartbeat": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-automations": {
+    "@dsh-ray/assistant-automations": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-recovery": {
+    "@dsh-ray/assistant-recovery": {
       "optional": true
     },
-    "@dsh-enhanced/credentials-keychain": {
+    "@dsh-ray/credentials-keychain": {
       "optional": true
     },
-    "@dsh-enhanced/personal-assistant": {
+    "@dsh-ray/personal-assistant": {
       "optional": true
     },
-    "@dsh-enhanced/preference-learning": {
+    "@dsh-ray/preference-learning": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-growth-driver": {
+    "@dsh-ray/assistant-growth-driver": {
       "optional": true
     },
-    "@dsh-enhanced/plugin-control-plane": {
+    "@dsh-ray/plugin-control-plane": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-verifier": {
+    "@dsh-ray/assistant-verifier": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-policy": {
+    "@dsh-ray/assistant-policy": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-memory-learning": {
+    "@dsh-ray/assistant-memory-learning": {
       "optional": true
     },
-    "@dsh-enhanced/personal-memory": {
+    "@dsh-ray/personal-memory": {
       "optional": true
     }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
-    "@dsh-enhanced/assistant-automations": "workspace:*",
-    "@dsh-enhanced/assistant-delivery": "workspace:*",
-    "@dsh-enhanced/assistant-evaluation": "workspace:*",
-    "@dsh-enhanced/assistant-evolution": "workspace:*",
-    "@dsh-enhanced/assistant-growth-experiments": "workspace:*",
-    "@dsh-enhanced/assistant-health": "workspace:*",
-    "@dsh-enhanced/assistant-heartbeat": "workspace:*",
-    "@dsh-enhanced/assistant-recovery": "workspace:*",
-    "@dsh-enhanced/credentials-keychain": "workspace:*",
-    "@dsh-enhanced/personal-assistant": "workspace:*",
-    "@dsh-enhanced/preference-learning": "workspace:*",
+    "@dsh-ray/assistant-automations": "workspace:*",
+    "@dsh-ray/assistant-delivery": "workspace:*",
+    "@dsh-ray/assistant-evaluation": "workspace:*",
+    "@dsh-ray/assistant-evolution": "workspace:*",
+    "@dsh-ray/assistant-growth-experiments": "workspace:*",
+    "@dsh-ray/assistant-health": "workspace:*",
+    "@dsh-ray/assistant-heartbeat": "workspace:*",
+    "@dsh-ray/assistant-recovery": "workspace:*",
+    "@dsh-ray/credentials-keychain": "workspace:*",
+    "@dsh-ray/personal-assistant": "workspace:*",
+    "@dsh-ray/preference-learning": "workspace:*",
     "@types/markdown-it": "14.1.2",
     "@types/node": "catalog:",
     "@types/qrcode": "1.5.6",
     "typescript": "catalog:",
     "vitest": "catalog:",
-    "@dsh-enhanced/assistant-growth-driver": "workspace:*",
-    "@dsh-enhanced/plugin-control-plane": "workspace:*",
-    "@dsh-enhanced/assistant-verifier": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
-    "@dsh-enhanced/assistant-memory-learning": "workspace:*",
-    "@dsh-enhanced/personal-memory": "workspace:*",
-    "@dsh-enhanced/assistant-growth-contract": "workspace:*",
+    "@dsh-ray/assistant-growth-driver": "workspace:*",
+    "@dsh-ray/plugin-control-plane": "workspace:*",
+    "@dsh-ray/assistant-verifier": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
+    "@dsh-ray/assistant-memory-learning": "workspace:*",
+    "@dsh-ray/personal-memory": "workspace:*",
+    "@dsh-ray/assistant-growth-contract": "workspace:*",
     "@deepseek-ai/dsh-tool-executor-native": "catalog:"
   }
 }

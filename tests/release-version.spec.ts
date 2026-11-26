@@ -19,7 +19,7 @@ async function readJson(path: string) {
 }
 
 async function createRepository(currentVersion = '0.1.0', withLibrary = false) {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-enhanced-release-'))
+  const root = await mkdtemp(join(tmpdir(), 'dsh-ray-release-'))
   temporaryRoots.push(root)
   await mkdir(join(root, 'plugins', 'example', 'src'), { recursive: true })
   await writeJson(join(root, 'package.json'), {
@@ -73,7 +73,7 @@ function runRelease(root: string, ...args: string[]) {
 }
 
 const installerAssets = {
-  'common.sh': "#!/usr/bin/env bash\n\n# fixture common source\n\nDSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.0-rc.7'\n",
+  'common.sh': "#!/usr/bin/env bash\n\n# fixture common source\n\nDSH_RAY_SOURCE_PINNED_HOST_VERSION='0.1.0-rc.7'\n",
   'lifecycle-config.mjs': 'export const fixtureConfig = true\n',
   'lifecycle-profile.mjs': 'export const fixtureProfile = true\n',
   'host-lifecycle.mjs': 'export const fixtureHost = true\n',
@@ -88,15 +88,15 @@ async function createInstaller(root: string) {
     await writeFile(join(installDirectory, name), contents)
   }
   await writeFile(join(installDirectory, 'install-npm.sh'), [
-    "DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.0'",
-    `DSH_ENHANCED_PINNED_COMMON_SHA256='${'0'.repeat(64)}'`,
-    `DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='${'1'.repeat(64)}'`,
-    `DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='${'2'.repeat(64)}'`,
-    `DSH_ENHANCED_PINNED_HOST_LIFECYCLE_SHA256='${'3'.repeat(64)}'`,
-    `DSH_ENHANCED_PINNED_HOST_PROFILE_UPDATE_SHA256='${'4'.repeat(64)}'`,
-    `DSH_ENHANCED_PINNED_HOST_RSI_UPDATE_SHA256='${'5'.repeat(64)}'`,
-    "DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'",
-    "DSH_ENHANCED_PINNED_HOST_VERSION='0.1.0-rc.7'",
+    "DSH_RAY_PINNED_RELEASE_REF='v0.1.0'",
+    `DSH_RAY_PINNED_COMMON_SHA256='${'0'.repeat(64)}'`,
+    `DSH_RAY_PINNED_LIFECYCLE_CONFIG_SHA256='${'1'.repeat(64)}'`,
+    `DSH_RAY_PINNED_LIFECYCLE_PROFILE_SHA256='${'2'.repeat(64)}'`,
+    `DSH_RAY_PINNED_HOST_LIFECYCLE_SHA256='${'3'.repeat(64)}'`,
+    `DSH_RAY_PINNED_HOST_PROFILE_UPDATE_SHA256='${'4'.repeat(64)}'`,
+    `DSH_RAY_PINNED_HOST_RSI_UPDATE_SHA256='${'5'.repeat(64)}'`,
+    "DSH_RAY_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'",
+    "DSH_RAY_PINNED_HOST_VERSION='0.1.0-rc.7'",
     '',
   ].join('\n'))
   return installDirectory
@@ -288,29 +288,29 @@ describe('release version workflow', () => {
 
     expect(result.status, result.stderr).toBe(0)
     const installer = await readFile(join(installDirectory, 'install-npm.sh'), 'utf8')
-    expect(installer).toContain("DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.1'")
+    expect(installer).toContain("DSH_RAY_PINNED_RELEASE_REF='v0.1.1'")
     expect(installer).toContain(
-      `DSH_ENHANCED_PINNED_COMMON_SHA256='${sha256(await readFile(join(installDirectory, 'common.sh'), 'utf8'))}'`,
+      `DSH_RAY_PINNED_COMMON_SHA256='${sha256(await readFile(join(installDirectory, 'common.sh'), 'utf8'))}'`,
     )
     expect(installer).toContain(
-      `DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='${sha256(installerAssets['lifecycle-config.mjs'])}'`,
+      `DSH_RAY_PINNED_LIFECYCLE_CONFIG_SHA256='${sha256(installerAssets['lifecycle-config.mjs'])}'`,
     )
     expect(installer).toContain(
-      `DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='${sha256(installerAssets['lifecycle-profile.mjs'])}'`,
+      `DSH_RAY_PINNED_LIFECYCLE_PROFILE_SHA256='${sha256(installerAssets['lifecycle-profile.mjs'])}'`,
     )
     expect(installer).toContain(
-      `DSH_ENHANCED_PINNED_HOST_LIFECYCLE_SHA256='${sha256(installerAssets['host-lifecycle.mjs'])}'`,
+      `DSH_RAY_PINNED_HOST_LIFECYCLE_SHA256='${sha256(installerAssets['host-lifecycle.mjs'])}'`,
     )
     expect(installer).toContain(
-      `DSH_ENHANCED_PINNED_HOST_PROFILE_UPDATE_SHA256='${sha256(installerAssets['host-profile-update.mjs'])}'`,
+      `DSH_RAY_PINNED_HOST_PROFILE_UPDATE_SHA256='${sha256(installerAssets['host-profile-update.mjs'])}'`,
     )
     expect(installer).toContain(
-      `DSH_ENHANCED_PINNED_HOST_RSI_UPDATE_SHA256='${sha256(installerAssets['host-rsi-update.mjs'])}'`,
+      `DSH_RAY_PINNED_HOST_RSI_UPDATE_SHA256='${sha256(installerAssets['host-rsi-update.mjs'])}'`,
     )
-    expect(installer).toContain("DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'")
-    expect(installer).toContain("DSH_ENHANCED_PINNED_HOST_VERSION='0.1.2-rc.1'")
+    expect(installer).toContain("DSH_RAY_PINNED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'")
+    expect(installer).toContain("DSH_RAY_PINNED_HOST_VERSION='0.1.2-rc.1'")
     expect(await readFile(join(installDirectory, 'common.sh'), 'utf8'))
-      .toContain("DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.2-rc.1'")
+      .toContain("DSH_RAY_SOURCE_PINNED_HOST_VERSION='0.1.2-rc.1'")
   })
 
   test.each([
@@ -332,7 +332,7 @@ describe('release version workflow', () => {
     expect(result.status, result.stderr).toBe(0)
     expect((await readJson(ledgerPath)).pending.verifiedHostRange).toBe(verifiedHostRange)
     expect(await readFile(join(installDirectory, 'install-npm.sh'), 'utf8'))
-      .toContain(`DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`)
+      .toContain(`DSH_RAY_PINNED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`)
   })
 
   test.each(invalidVerifiedHostRanges)(
@@ -379,8 +379,8 @@ describe('release version workflow', () => {
   })
 
   test.each([
-    ['duplicate', "DSH_ENHANCED_PINNED_COMMON_SHA256='0000000000000000000000000000000000000000000000000000000000000000'\n"],
-    ['malformed', "DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='not-a-digest'"],
+    ['duplicate', "DSH_RAY_PINNED_COMMON_SHA256='0000000000000000000000000000000000000000000000000000000000000000'\n"],
+    ['malformed', "DSH_RAY_PINNED_LIFECYCLE_CONFIG_SHA256='not-a-digest'"],
   ])('prepare rejects a %s installer pin without writing versions', async (_description, mutation) => {
     const root = await createRepository('0.1.0')
     const installDirectory = await createInstaller(root)
@@ -389,7 +389,7 @@ describe('release version workflow', () => {
     await writeFile(
       installerPath,
       mutation.endsWith('\n') ? `${installer}${mutation}` : installer.replace(
-        /^DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256=.*$/mu,
+        /^DSH_RAY_PINNED_LIFECYCLE_CONFIG_SHA256=.*$/mu,
         mutation,
       ),
     )
@@ -407,15 +407,15 @@ describe('release version workflow', () => {
     const installDirectory = await createInstaller(root)
     const installerPath = join(installDirectory, 'install-npm.sh')
     const injectedInstaller = (await readFile(installerPath, 'utf8')).replace(
-      /^DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE=.*$/mu,
-      "DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'; touch injected; #'",
+      /^DSH_RAY_PINNED_VERIFIED_HOST_RANGE=.*$/mu,
+      "DSH_RAY_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'; touch injected; #'",
     )
     await writeFile(installerPath, injectedInstaller)
 
     const result = runRelease(root, 'prepare')
 
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain('DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE assignment is malformed')
+    expect(result.stderr).toContain('DSH_RAY_PINNED_VERIFIED_HOST_RANGE assignment is malformed')
     expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
     expect((await readJson(join(root, 'plugins', 'example', 'package.json'))).version).toBe('0.1.0')
     expect((await readJson(join(root, 'release-manifest.json'))).pending).toBeNull()
@@ -428,7 +428,7 @@ describe('release version workflow', () => {
     const installerPath = join(installDirectory, 'install-npm.sh')
     const installer = await readFile(installerPath, 'utf8')
     await writeFile(installerPath, installer.replace(
-      /^DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256=.*\n/mu,
+      /^DSH_RAY_PINNED_LIFECYCLE_PROFILE_SHA256=.*\n/mu,
       '',
     ))
 
@@ -436,7 +436,7 @@ describe('release version workflow', () => {
 
     expect(result.status).toBe(1)
     expect(result.stderr).toContain(
-      'install-npm.sh must contain exactly one DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256 assignment',
+      'install-npm.sh must contain exactly one DSH_RAY_PINNED_LIFECYCLE_PROFILE_SHA256 assignment',
     )
     expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
     expect((await readJson(join(root, 'release-manifest.json'))).pending).toBeNull()
@@ -475,11 +475,11 @@ describe('release version workflow', () => {
 
     expect(result.status, result.stderr).toBe(0)
     const installer = await readFile(join(installDirectory, 'install-npm.sh'), 'utf8')
-    expect(installer).toContain("DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.2'")
+    expect(installer).toContain("DSH_RAY_PINNED_RELEASE_REF='v0.1.2'")
     for (const [name, contents] of Object.entries(installerAssets)) {
       const pinName = name === 'common.sh'
-        ? 'DSH_ENHANCED_PINNED_COMMON'
-        : name.replace(/\.mjs$/u, '').replace(/-/gu, '_').replace(/^/u, 'DSH_ENHANCED_PINNED_').toUpperCase()
+        ? 'DSH_RAY_PINNED_COMMON'
+        : name.replace(/\.mjs$/u, '').replace(/-/gu, '_').replace(/^/u, 'DSH_RAY_PINNED_').toUpperCase()
       const pinnedContents = name === 'common.sh'
         ? await readFile(join(installDirectory, name), 'utf8')
         : contents
@@ -1138,28 +1138,28 @@ describe('release version workflow', () => {
     expect(manifest.scripts.build).toMatch(/^pnpm run build:bootstrap &&/)
     expect(manifest.scripts['build:bootstrap']).toBe(
       'pnpm run build:packages'
-      + ' && pnpm --filter @dsh-enhanced/assistant-policy run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-evaluation run build:core'
-      + ' && pnpm --filter @dsh-enhanced/assistant-delivery run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-isolation run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-evaluation run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-verifier run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-automations run build'
-      + ' && pnpm --filter @dsh-enhanced/preference-learning run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-health run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-evolution run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-growth-experiments run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-heartbeat run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-recovery run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-goals run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-skills run build'
-      + ' && pnpm --filter @dsh-enhanced/plugin-control-plane run build'
-      + ' && pnpm --filter @dsh-enhanced/personal-memory run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-memory-learning run build'
-      + ' && pnpm --filter @dsh-enhanced/credentials-keychain run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-actions run build'
-      + ' && pnpm --filter @dsh-enhanced/event-triggers run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-dreaming run build',
+      + ' && pnpm --filter @dsh-ray/assistant-policy run build'
+      + ' && pnpm --filter @dsh-ray/assistant-evaluation run build:core'
+      + ' && pnpm --filter @dsh-ray/assistant-delivery run build'
+      + ' && pnpm --filter @dsh-ray/assistant-isolation run build'
+      + ' && pnpm --filter @dsh-ray/assistant-evaluation run build'
+      + ' && pnpm --filter @dsh-ray/assistant-verifier run build'
+      + ' && pnpm --filter @dsh-ray/assistant-automations run build'
+      + ' && pnpm --filter @dsh-ray/preference-learning run build'
+      + ' && pnpm --filter @dsh-ray/assistant-health run build'
+      + ' && pnpm --filter @dsh-ray/assistant-evolution run build'
+      + ' && pnpm --filter @dsh-ray/assistant-growth-experiments run build'
+      + ' && pnpm --filter @dsh-ray/assistant-heartbeat run build'
+      + ' && pnpm --filter @dsh-ray/assistant-recovery run build'
+      + ' && pnpm --filter @dsh-ray/assistant-goals run build'
+      + ' && pnpm --filter @dsh-ray/assistant-skills run build'
+      + ' && pnpm --filter @dsh-ray/plugin-control-plane run build'
+      + ' && pnpm --filter @dsh-ray/personal-memory run build'
+      + ' && pnpm --filter @dsh-ray/assistant-memory-learning run build'
+      + ' && pnpm --filter @dsh-ray/credentials-keychain run build'
+      + ' && pnpm --filter @dsh-ray/assistant-actions run build'
+      + ' && pnpm --filter @dsh-ray/event-triggers run build'
+      + ' && pnpm --filter @dsh-ray/assistant-dreaming run build',
     )
     expect(manifest.scripts.test).toBe('pnpm run build && pnpm run test:built')
     expect(manifest.scripts['test:root']).toBe('vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests')
@@ -1170,9 +1170,9 @@ describe('release version workflow', () => {
     // t=0 while the remainder keeps two in flight. The pcp lane alone raises its vitest
     // workers to 3 so the two halves of its former single spec file run at once; every other
     // package keeps the repository-wide VITEST_MAX_WORKERS of 2.
-    expect(manifest.scripts['test:packages:control-plane']).toBe('pnpm --filter @dsh-enhanced/plugin-control-plane run test --testTimeout=15000')
-    expect(manifest.scripts['test:packages:lark-channel']).toBe('pnpm --filter @dsh-enhanced/lark-channel run test --testTimeout=15000')
-    expect(manifest.scripts['test:packages:rest']).toBe("pnpm --recursive --no-sort --if-present --workspace-concurrency=2 --filter '!@dsh-enhanced/plugin-control-plane' --filter '!@dsh-enhanced/lark-channel' run test --testTimeout=15000")
+    expect(manifest.scripts['test:packages:control-plane']).toBe('pnpm --filter @dsh-ray/plugin-control-plane run test --testTimeout=15000')
+    expect(manifest.scripts['test:packages:lark-channel']).toBe('pnpm --filter @dsh-ray/lark-channel run test --testTimeout=15000')
+    expect(manifest.scripts['test:packages:rest']).toBe("pnpm --recursive --no-sort --if-present --workspace-concurrency=2 --filter '!@dsh-ray/plugin-control-plane' --filter '!@dsh-ray/lark-channel' run test --testTimeout=15000")
     expect(manifest.scripts['check:quick']).toBe('pnpm run validate && pnpm run lint && pnpm --filter "{origin/dev}..." --if-present run build && pnpm --filter "{origin/dev}..." --if-present run typecheck && pnpm --filter "{origin/dev}" --if-present run test --testTimeout=15000')
     expect(manifest.scripts.typecheck).toMatch(/^pnpm run build &&/)
     expect(manifest.scripts['typecheck:built']).toBe('pnpm --recursive --if-present run typecheck')

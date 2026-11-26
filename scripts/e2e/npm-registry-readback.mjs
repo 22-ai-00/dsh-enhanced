@@ -28,7 +28,7 @@ const evidence = { schemaVersion: 1, kind: 'npm-registry-readback', startedAt: n
   limits: ['No publication, owner signing, source-release receipt, installation, Host activation or rollback was exercised.',
     'Network success does not establish full WP16 delivery or npm/Sigstore provenance verification.'] }
 try {
-  for (const name of ['@dsh-enhanced/plugin-control-plane', '@dsh-enhanced/personal-memory']) {
+  for (const name of ['@dsh-ray/plugin-control-plane', '@dsh-ray/personal-memory']) {
     const approved = baseline.registry.results.find(item => item.name === name && item.version === '0.1.32' && item.ok)
     if (!approved) throw new Error(`Missing committed baseline for ${name}`)
     const started = Date.now()
@@ -42,7 +42,7 @@ try {
   }
   let rejected = false
   try {
-    await fetchRegistryArtifact({ registry, packageName: '@dsh-enhanced/personal-memory', version: '0.1.32',
+    await fetchRegistryArtifact({ registry, packageName: '@dsh-ray/personal-memory', version: '0.1.32',
       expectedIntegrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}`, timeoutMs: 30_000 }, {})
   } catch (error) {
     if (!(error instanceof Error) || !/integrity/u.test(error.message)) throw error

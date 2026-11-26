@@ -1,6 +1,6 @@
-import { acceptanceDigest, acceptanceProtocolForTask, createTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
-import type { AcceptanceCriterion, AcceptanceTaskIdentity } from '@dsh-enhanced/task-acceptance-contract'
-import type { AcceptanceHandle, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
+import { acceptanceDigest, acceptanceProtocolForTask, createTaskAcceptanceContract } from '@dsh-ray/task-acceptance-contract'
+import type { AcceptanceCriterion, AcceptanceTaskIdentity } from '@dsh-ray/task-acceptance-contract'
+import type { AcceptanceHandle, TaskAcceptanceRegistration } from '@dsh-ray/assistant-verifier'
 import type { GoalDefinition } from './types.js'
 
 const HEX = /^[a-f0-9]{64}$/u

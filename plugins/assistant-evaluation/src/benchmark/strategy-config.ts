@@ -1,5 +1,5 @@
 /** Strict, side-effect-free operator configuration for the native Goal strategy benchmarks. */
-import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-ray/assistant-isolation'
 import type { NativeModelConfig } from './native.js'
 import { isAbsolute, relative } from 'node:path'
 import { isStrategySuite, strategyCasesForSuite, strategyTaskForSuite, type StrategySuite } from './strategy-corpus-v2.js'

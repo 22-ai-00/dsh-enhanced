@@ -1,4 +1,4 @@
-# @dsh-enhanced/task-acceptance-contract
+# @dsh-ray/task-acceptance-contract
 
 An inert shared wire library for immutable task acceptance contracts and
 independently produced verification receipts. It declares no DSH bundle and

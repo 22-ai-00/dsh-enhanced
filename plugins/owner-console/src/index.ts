@@ -4,7 +4,7 @@ import { version } from './version.js'
 import { OwnerConsoleService } from './service.js'
 import { TYPERT } from './typert.js'
 
-export const name = 'dsh-enhanced-owner-console'
+export const name = 'dsh-ray-owner-console'
 export { version }
 export {
   handleOwnerConsoleControlAction,

@@ -33,12 +33,12 @@ if(p.mutateInstaller)await writeFile(new URL(import.meta.url),'export const repl
 return p;
 }`, { mode: 0o600 })
   const cohort = { root: join(homePath, 'rsi-local-cohorts', profile), version: '0.1.65', receiptDigest: 'candidate', bundles: ['target'], allowBuilds: { esbuild: true },
-    packages: [{ name: '@dsh-enhanced/target', path: 'plugins/target', runtimeDependencies: [] as string[], bundle: true, tarball: join(homePath, 'rsi-local-cohorts', profile, 'artifacts/target.tgz') }] }
+    packages: [{ name: '@dsh-ray/target', path: 'plugins/target', runtimeDependencies: [] as string[], bundle: true, tarball: join(homePath, 'rsi-local-cohorts', profile, 'artifacts/target.tgz') }] }
   await writeFile(join(profilePath, 'cohort.json'), JSON.stringify(cohort), { mode: 0o600 })
-  const workspace = `packages: []\nnodeLinker: isolated\nallowBuilds:\n  esbuild: true\noverrides:\n  '@dsh-enhanced/target': file:${cohort.packages[0]!.tarball}\n`
+  const workspace = `packages: []\nnodeLinker: isolated\nallowBuilds:\n  esbuild: true\noverrides:\n  '@dsh-ray/target': file:${cohort.packages[0]!.tarball}\n`
   await writeFile(join(profilePath, 'pnpm-workspace.yaml'), workspace, { mode: 0o600 })
-  await writeFile(join(profilePath, 'package.json'), JSON.stringify({ dependencies: { '@dsh-enhanced/target': `file:${cohort.packages[0]!.tarball}` },
-    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@dsh-enhanced/target'] } } }), { mode: 0o600 })
+  await writeFile(join(profilePath, 'package.json'), JSON.stringify({ dependencies: { '@dsh-ray/target': `file:${cohort.packages[0]!.tarball}` },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@dsh-ray/target'] } } }), { mode: 0o600 })
   await writeFile(join(lib, 'rsi-local-cohort.js'), `import { readFile } from 'node:fs/promises';import { join } from 'node:path';
 export async function readRsiLocalCohort({dshHome,profile}) { return JSON.parse(await readFile(join(dshHome,'profiles',profile,'cohort.json'),'utf8')) }
 export async function rsiLocalPeerOverrides() { return {} }
@@ -49,14 +49,14 @@ export async function rsiLocalPeerOverrides() { return {} }
   }
   await writeFile(join(lib, 'rsi-local-pair-install.js'), `export async function planRsiLocalProfilePackages(input) {
 if(input.rootExtension && input.rootExtension!=='memory-learning') throw Error('unsupported extension');
-return {workspace:input.source,bundles:[...input.bundles],tarballs:input.bundles.map(s=>input.candidate.packages.find(p=>p.name==='@dsh-enhanced/'+s).tarball)}
+return {workspace:input.source,bundles:[...input.bundles],tarballs:input.bundles.map(s=>input.candidate.packages.find(p=>p.name==='@dsh-ray/'+s).tarball)}
 }`, { mode: 0o600 })
   await writeFile(join(lib, 'rsi-local-install.js'), `import { readFile, writeFile } from 'node:fs/promises';import { join } from 'node:path';import { parseDocument } from 'yaml';
-export function rsiLocalDependencyOverrides(c,b) { return Object.fromEntries(b.map(s=>{const p=c.packages.find(p=>p.name==='@dsh-enhanced/'+s);return [p.name,'file:'+p.tarball]})) }
+export function rsiLocalDependencyOverrides(c,b) { return Object.fromEntries(b.map(s=>{const p=c.packages.find(p=>p.name==='@dsh-ray/'+s);return [p.name,'file:'+p.tarball]})) }
 export function mergeRsiLocalOverrides(source,overrides,builds) {const d=parseDocument(source);for(const[k,v]of Object.entries(overrides))if(d.getIn(['overrides',k])!==v)throw Error('override changed');for(const[k,v]of Object.entries(builds))if(d.getIn(['allowBuilds',k])!==v)throw Error('build changed');return source}
 export async function installRsiLocalProfile(input) {
 const manifestPath=join(input.dshHome,'profiles',input.profile,'package.json');const m=JSON.parse(await readFile(manifestPath,'utf8'));await writeFile(join(input.dshHome,'manifest-before-cli.json'),JSON.stringify(m));
-if(await readFile(join(input.dshHome,'complete-mount'),'utf8').catch(()=>null)==='yes') {m.dsh.profile.bundles.push('@dsh-enhanced/assistant-memory-learning');await writeFile(manifestPath,JSON.stringify(m));}
+if(await readFile(join(input.dshHome,'complete-mount'),'utf8').catch(()=>null)==='yes') {m.dsh.profile.bundles.push('@dsh-ray/assistant-memory-learning');await writeFile(manifestPath,JSON.stringify(m));}
 if(!input.signal||input.signal.aborted)throw Error('no active signal');await writeFile(join(input.dshHome,'install-observed.json'),JSON.stringify({dshHome:input.dshHome,profile:input.profile,cohort:input.cohort,bundles:input.bundles,dsh:input.dsh,initializeFromManifest:input.initializeFromManifest}));}
 `, { mode: 0o600 })
   const installer = await bindLocalSourceInstaller(installerRoot)
@@ -128,7 +128,7 @@ test('bound YAML parser accepts plain mappings and rejects aliases, duplicate ke
 
 
 async function learnerFixture() {
-  const f = await fixture(), name = '@dsh-enhanced/assistant-memory-learning'
+  const f = await fixture(), name = '@dsh-ray/assistant-memory-learning'
   f.cohort.bundles.push('assistant-memory-learning')
   const pkg = { name, path: 'plugins/assistant-memory-learning', runtimeDependencies: [] as string[], bundle: true,
     tarball: join(f.cohort.root, 'artifacts/assistant-memory-learning.tgz') }
@@ -148,7 +148,7 @@ test('authorized learner warm install leaves mount mutation to the native instal
   await writeFile(join(f.homePath, 'complete-mount'), 'yes')
   await installLocalSourceCandidatePackages({ ...f.input, proof: { ...f.input.proof, extension: 'memory-learning' }, plan: f.plan })
   expect(JSON.parse(await readFile(join(f.homePath, 'manifest-before-cli.json'), 'utf8'))).toEqual(f.manifest)
-  expect(JSON.parse(await readFile(f.manifestPath, 'utf8')).dsh.profile.bundles).toContain('@dsh-enhanced/assistant-memory-learning')
+  expect(JSON.parse(await readFile(f.manifestPath, 'utf8')).dsh.profile.bundles).toContain('@dsh-ray/assistant-memory-learning')
 })
 
 test('native installer failing to mount the authorized learner cannot produce a successful candidate proof', async () => {
@@ -162,8 +162,8 @@ test('native installer failing to mount the authorized learner cannot produce a 
 test.each(['unauthorized', 'missing-other', 'extra-mount', 'bad-locator'] as const)('learner warm exception rejects %s before native dispatch', async mode => {
   const f = await learnerFixture(), m = structuredClone(f.manifest)
   if (mode === 'missing-other') m.dsh.profile.bundles = ['@deepseek-ai/dsh-base']
-  if (mode === 'extra-mount') m.dsh.profile.bundles.push('@dsh-enhanced/foreign')
-  if (mode === 'bad-locator') m.dependencies['@dsh-enhanced/target'] = 'file:/foreign.tgz'
+  if (mode === 'extra-mount') m.dsh.profile.bundles.push('@dsh-ray/foreign')
+  if (mode === 'bad-locator') m.dependencies['@dsh-ray/target'] = 'file:/foreign.tgz'
   await writeFile(f.manifestPath, JSON.stringify(m))
   await expect(installLocalSourceCandidatePackages({ ...f.input, proof: { ...f.input.proof, ...(mode === 'unauthorized' ? {} : { extension: 'memory-learning' }) }, plan: f.plan })).rejects.toThrow()
   await expect(readFile(join(f.homePath, 'install-observed.json'))).rejects.toMatchObject({ code: 'ENOENT' })

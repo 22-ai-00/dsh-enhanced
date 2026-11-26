@@ -50,20 +50,20 @@ async function validateHostExecutable(executable: string, dshHome: string): Prom
 }
 
 async function resolveBoundHostExecutable(dshHome: string): Promise<string | undefined> {
-  const bindingPath = join(dshHome, '.dsh-rsi-host.json')
+  const bindingPath = join(dshHome, '.dsh-ray-host.json')
   let handle
   try {
     handle = await open(bindingPath, constants.O_RDONLY | constants.O_NOFOLLOW)
   } catch (error: unknown) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined
-    throw new Error('assistant-policy setup: bound host file .dsh-rsi-host.json is inaccessible or a symlink', { cause: error })
+    throw new Error('assistant-policy setup: bound host file .dsh-ray-host.json is inaccessible or a symlink', { cause: error })
   }
   let raw: string
   try {
     const info = await handle.stat()
     if (!info.isFile() || info.nlink !== 1 || info.size < 1 || info.size > 16_384
       || (info.mode & 0o077) !== 0 || (process.getuid !== undefined && info.uid !== process.getuid())) {
-      throw new Error('assistant-policy setup: bound host file .dsh-rsi-host.json has unsafe permissions or type')
+      throw new Error('assistant-policy setup: bound host file .dsh-ray-host.json has unsafe permissions or type')
     }
     raw = await handle.readFile({ encoding: 'utf8' })
   } finally {
@@ -73,18 +73,18 @@ async function resolveBoundHostExecutable(dshHome: string): Promise<string | und
   try {
     parsed = JSON.parse(raw)
   } catch (error: unknown) {
-    throw new Error('assistant-policy setup: bound host file .dsh-rsi-host.json is invalid JSON', { cause: error })
+    throw new Error('assistant-policy setup: bound host file .dsh-ray-host.json is invalid JSON', { cause: error })
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)
     || Object.keys(parsed).sort().join(',') !== 'cacheRoot,receiptDigest,schemaVersion,version') {
-    throw new Error('assistant-policy setup: bound host file .dsh-rsi-host.json has an unexpected schema')
+    throw new Error('assistant-policy setup: bound host file .dsh-ray-host.json has an unexpected schema')
   }
   const binding = parsed as { schemaVersion?: unknown; cacheRoot?: unknown; version?: unknown; receiptDigest?: unknown }
   if (binding.schemaVersion !== 1 || typeof binding.cacheRoot !== 'string' || !isAbsolute(binding.cacheRoot)
     || resolve(binding.cacheRoot) !== binding.cacheRoot || typeof binding.version !== 'string'
     || !supportedHostVersions.has(binding.version) || typeof binding.receiptDigest !== 'string'
     || !/^[a-f0-9]{64}$/u.test(binding.receiptDigest)) {
-    throw new Error('assistant-policy setup: bound host file .dsh-rsi-host.json names an unsupported or invalid Host')
+    throw new Error('assistant-policy setup: bound host file .dsh-ray-host.json names an unsupported or invalid Host')
   }
   const candidate = join(binding.cacheRoot, binding.version, 'node_modules', '.bin', 'dsh')
   try {

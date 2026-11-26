@@ -56,7 +56,7 @@ describe.sequential('native Host readiness notification on pinned Cordis', () =>
     const staleFirst = [...first.listeners][0]!
     first.commit()
     first.commit()
-    expect(stderrWrites).toEqual(['dsh-enhanced host ready: v1\n'])
+    expect(stderrWrites).toEqual(['dsh-ray host ready: v1\n'])
     expect(stdoutWrites).toEqual([])
     await firstFiber.dispose()
     expect(first.listeners.size).toBe(0)
@@ -68,7 +68,7 @@ describe.sequential('native Host readiness notification on pinned Cordis', () =>
     await provider(ctx, second)
     const staleSecond = [...second.listeners][0]!
     second.commit()
-    expect(stderrWrites).toEqual(['dsh-enhanced host ready: v1\n', 'dsh-enhanced host ready: v1\n'])
+    expect(stderrWrites).toEqual(['dsh-ray host ready: v1\n', 'dsh-ray host ready: v1\n'])
     expect(stdoutWrites).toEqual([])
     await consumer.dispose()
     expect(second.listeners.size).toBe(0)
@@ -95,7 +95,7 @@ describe.sequential('native Host readiness notification on pinned Cordis', () =>
     const replacement = new ReadyPeer()
     await provider(ctx, replacement)
     replacement.commit()
-    expect(writes).toEqual(['dsh-enhanced host ready: v1\n'])
+    expect(writes).toEqual(['dsh-ray host ready: v1\n'])
     await consumer.dispose()
     expect(replacement.listeners.size).toBe(0)
   })

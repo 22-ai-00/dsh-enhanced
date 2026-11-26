@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-enhanced/personal-assistant",
+  "name": "@dsh-ray/personal-assistant",
   "version": "0.1.88",
   "description": "A core-only meta-bundle for the DSH personal assistant policy, memory, Wiki, and automations plugins.",
   "license": "MIT",
@@ -41,7 +41,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "url": "git+https://github.com/22-ai-00/dsh-ray.git",
     "directory": "plugins/personal-assistant"
   },
   "keywords": [
@@ -56,10 +56,10 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/assistant-automations": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*",
-    "@dsh-enhanced/personal-memory": "workspace:*",
-    "@dsh-enhanced/personal-wiki": "workspace:*"
+    "@dsh-ray/assistant-automations": "workspace:*",
+    "@dsh-ray/assistant-policy": "workspace:*",
+    "@dsh-ray/personal-memory": "workspace:*",
+    "@dsh-ray/personal-wiki": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",

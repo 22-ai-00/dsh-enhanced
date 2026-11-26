@@ -10,7 +10,7 @@ import {
   type ApprovalProposalResult,
   type ApprovalProposalSnapshot,
   type ApprovalDispatchRouteV2,
-} from '@dsh-enhanced/assistant-policy'
+} from '@dsh-ray/assistant-policy'
 import {
   hashMemoryProposalIntent,
   isMissingPolicyProposalId,
@@ -28,7 +28,7 @@ import type {
   StoredMemoryProposal,
   StoredMemoryProposalIntent,
 } from './types.js'
-import type { PreferenceMemoryPromotionCancellationReceipt } from '@dsh-enhanced/assistant-growth-contract'
+import type { PreferenceMemoryPromotionCancellationReceipt } from '@dsh-ray/assistant-growth-contract'
 
 export class MemoryPromotionCancelledError extends Error {
   constructor(readonly receipt: Readonly<PreferenceMemoryPromotionCancellationReceipt>) {

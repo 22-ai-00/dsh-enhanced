@@ -408,7 +408,7 @@ function createRequireChain(dshHome: string, profile: string): NodeRequire[] {
   if (existsSync(profilePkg)) {
     const req = createRequire(profilePkg)
     chain.push(req)
-    for (const anchor of ['@dsh-enhanced/personal-assistant/package.json', '@dsh-enhanced/assistant-verifier/package.json']) {
+    for (const anchor of ['@dsh-ray/personal-assistant/package.json', '@dsh-ray/assistant-verifier/package.json']) {
       try {
         chain.push(createRequire(req.resolve(anchor)))
       } catch {
@@ -418,7 +418,7 @@ function createRequireChain(dshHome: string, profile: string): NodeRequire[] {
   }
   const hereReq = createRequire(import.meta.url)
   chain.push(hereReq)
-  for (const anchor of ['@dsh-enhanced/personal-assistant/package.json', '@dsh-enhanced/assistant-verifier/package.json']) {
+  for (const anchor of ['@dsh-ray/personal-assistant/package.json', '@dsh-ray/assistant-verifier/package.json']) {
     try {
       chain.push(createRequire(hereReq.resolve(anchor)))
     } catch {
@@ -429,14 +429,14 @@ function createRequireChain(dshHome: string, profile: string): NodeRequire[] {
 }
 
 const WORKSPACE_ENTRYPOINTS: Readonly<Record<string, string>> = {
-  '@dsh-enhanced/assistant-memory-learning': 'plugins/assistant-memory-learning/lib/index.js',
-  '@dsh-enhanced/assistant-verifier': 'plugins/assistant-verifier/lib/index.js',
-  '@dsh-enhanced/personal-memory': 'plugins/personal-memory/lib/index.js',
-  '@dsh-enhanced/assistant-dreaming': 'plugins/assistant-dreaming/lib/index.js',
-  '@dsh-enhanced/assistant-growth-driver': 'plugins/assistant-growth-driver/lib/index.js',
-  '@dsh-enhanced/assistant-policy': 'plugins/assistant-policy/lib/index.js',
-  '@dsh-enhanced/assistant-delivery': 'plugins/assistant-delivery/lib/index.js',
-  '@dsh-enhanced/assistant-growth-contract': 'packages/assistant-growth-contract/lib/index.js',
+  '@dsh-ray/assistant-memory-learning': 'plugins/assistant-memory-learning/lib/index.js',
+  '@dsh-ray/assistant-verifier': 'plugins/assistant-verifier/lib/index.js',
+  '@dsh-ray/personal-memory': 'plugins/personal-memory/lib/index.js',
+  '@dsh-ray/assistant-dreaming': 'plugins/assistant-dreaming/lib/index.js',
+  '@dsh-ray/assistant-growth-driver': 'plugins/assistant-growth-driver/lib/index.js',
+  '@dsh-ray/assistant-policy': 'plugins/assistant-policy/lib/index.js',
+  '@dsh-ray/assistant-delivery': 'plugins/assistant-delivery/lib/index.js',
+  '@dsh-ray/assistant-growth-contract': 'packages/assistant-growth-contract/lib/index.js',
 }
 
 function loadSiblingModule(packageName: string, chain: readonly NodeRequire[], repoRoot: string | undefined): Record<string, unknown> {
@@ -487,43 +487,43 @@ export function resolveAutonomyValidators(
   const repoRoot = findMonorepoRoot()
   const load = (pkg: string) => loadSiblingModule(pkg, chain, repoRoot)
 
-  const learningMod = needMemory && needs('validateLearningConfig') ? load('@dsh-enhanced/assistant-memory-learning') : {}
-  const verifierMod = needMemory && needs('validateMemoryReviewConfig') ? load('@dsh-enhanced/assistant-verifier') : {}
-  const memoryMod = needMemory && needs('validateMemoryLearningAdoptionGrant') ? load('@dsh-enhanced/personal-memory') : {}
-  const dreamingMod = needDreaming && needs('validateDreamingConfig') ? load('@dsh-enhanced/assistant-dreaming') : {}
-  const growthMod = needGrowth && needs('validateGrowthConfig') ? load('@dsh-enhanced/assistant-growth-driver') : {}
-  const contractMod = needs('growthObjectDigest') ? load('@dsh-enhanced/assistant-growth-contract') : {}
+  const learningMod = needMemory && needs('validateLearningConfig') ? load('@dsh-ray/assistant-memory-learning') : {}
+  const verifierMod = needMemory && needs('validateMemoryReviewConfig') ? load('@dsh-ray/assistant-verifier') : {}
+  const memoryMod = needMemory && needs('validateMemoryLearningAdoptionGrant') ? load('@dsh-ray/personal-memory') : {}
+  const dreamingMod = needDreaming && needs('validateDreamingConfig') ? load('@dsh-ray/assistant-dreaming') : {}
+  const growthMod = needGrowth && needs('validateGrowthConfig') ? load('@dsh-ray/assistant-growth-driver') : {}
+  const contractMod = needs('growthObjectDigest') ? load('@dsh-ray/assistant-growth-contract') : {}
   const deliveryMod = needs('ownerRouteAuthorityHash')
     || needs('externalPrincipalId')
     || needs('inspectActiveWebOwnerBindingLocally')
     || needs('listActiveIdleWebOwnerBindingsLocally')
-    ? load('@dsh-enhanced/assistant-delivery')
+    ? load('@dsh-ray/assistant-delivery')
     : {}
-  const policyMod = needs('policy') ? load('@dsh-enhanced/assistant-policy') : {}
+  const policyMod = needs('policy') ? load('@dsh-ray/assistant-policy') : {}
 
   const disabledPassthrough = (value: unknown): Record<string, unknown> => asPlainObject(value) ?? {}
 
   return {
     validateLearningConfig: overrides.validateLearningConfig
-      ?? (needMemory ? requireFn(learningMod, 'validateLearningConfig', '@dsh-enhanced/assistant-memory-learning') : disabledPassthrough),
+      ?? (needMemory ? requireFn(learningMod, 'validateLearningConfig', '@dsh-ray/assistant-memory-learning') : disabledPassthrough),
     validateMemoryReviewConfig: overrides.validateMemoryReviewConfig
-      ?? (needMemory ? requireFn(verifierMod, 'validateMemoryReviewConfig', '@dsh-enhanced/assistant-verifier') : disabledPassthrough),
+      ?? (needMemory ? requireFn(verifierMod, 'validateMemoryReviewConfig', '@dsh-ray/assistant-verifier') : disabledPassthrough),
     validateMemoryLearningAdoptionGrant: overrides.validateMemoryLearningAdoptionGrant
-      ?? (needMemory ? requireFn(memoryMod, 'validateMemoryLearningAdoptionGrant', '@dsh-enhanced/personal-memory') : disabledPassthrough),
+      ?? (needMemory ? requireFn(memoryMod, 'validateMemoryLearningAdoptionGrant', '@dsh-ray/personal-memory') : disabledPassthrough),
     validateDreamingConfig: overrides.validateDreamingConfig
-      ?? (needDreaming ? requireFn(dreamingMod, 'normalizeConfig', '@dsh-enhanced/assistant-dreaming') : disabledPassthrough),
+      ?? (needDreaming ? requireFn(dreamingMod, 'normalizeConfig', '@dsh-ray/assistant-dreaming') : disabledPassthrough),
     validateGrowthConfig: overrides.validateGrowthConfig
-      ?? (needGrowth ? requireFn(growthMod, 'normalizeConfig', '@dsh-enhanced/assistant-growth-driver') : disabledPassthrough),
+      ?? (needGrowth ? requireFn(growthMod, 'normalizeConfig', '@dsh-ray/assistant-growth-driver') : disabledPassthrough),
     growthObjectDigest: overrides.growthObjectDigest
-      ?? requireFn(contractMod, 'growthObjectDigest', '@dsh-enhanced/assistant-growth-contract'),
+      ?? requireFn(contractMod, 'growthObjectDigest', '@dsh-ray/assistant-growth-contract'),
     ownerRouteAuthorityHash: overrides.ownerRouteAuthorityHash
-      ?? requireFn(deliveryMod, 'ownerRouteAuthorityHash', '@dsh-enhanced/assistant-delivery'),
+      ?? requireFn(deliveryMod, 'ownerRouteAuthorityHash', '@dsh-ray/assistant-delivery'),
     externalPrincipalId: overrides.externalPrincipalId
-      ?? requireFn(deliveryMod, 'externalPrincipalId', '@dsh-enhanced/assistant-delivery'),
+      ?? requireFn(deliveryMod, 'externalPrincipalId', '@dsh-ray/assistant-delivery'),
     inspectActiveWebOwnerBindingLocally: overrides.inspectActiveWebOwnerBindingLocally
-      ?? requireFn(deliveryMod, 'inspectActiveWebOwnerBindingLocally', '@dsh-enhanced/assistant-delivery'),
+      ?? requireFn(deliveryMod, 'inspectActiveWebOwnerBindingLocally', '@dsh-ray/assistant-delivery'),
     listActiveIdleWebOwnerBindingsLocally: overrides.listActiveIdleWebOwnerBindingsLocally
-      ?? requireFn(deliveryMod, 'listActiveIdleWebOwnerBindingsLocally', '@dsh-enhanced/assistant-delivery'),
+      ?? requireFn(deliveryMod, 'listActiveIdleWebOwnerBindingsLocally', '@dsh-ray/assistant-delivery'),
     policy: overrides.policy ?? (policyMod as unknown as AutonomyPolicyHelpers),
   }
 }
@@ -645,7 +645,7 @@ function resolveModelRouteInternal(
   }
 
   if (!candidate) {
-    for (const rowId of ['dsh-enhanced-assistant-dreaming', 'dsh-enhanced-assistant-growth-driver']) {
+    for (const rowId of ['dsh-ray-assistant-dreaming', 'dsh-ray-assistant-growth-driver']) {
       const merged = mergedRowConfig(patchState, effectiveState, rowId).config
       if (typeof merged.provider === 'string' && typeof merged.model === 'string'
         && merged.provider.trim() && merged.model.trim()) {
@@ -670,12 +670,12 @@ function resolveModelRouteInternal(
   }
 
   if (candidate.route.provider === 'traex-agent' || candidate.route.provider === 'agy-agent') {
-    const acp = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-traex-acp-provider')
+    const acp = mergedRowConfig(patchState, effectiveState, 'dsh-ray-traex-acp-provider')
     if (acp.rowExists && acp.disabled) {
-      return { ok: false, reason: `model provider '${candidate.route.provider}' requires dsh-enhanced-traex-acp-provider to be enabled` }
+      return { ok: false, reason: `model provider '${candidate.route.provider}' requires dsh-ray-traex-acp-provider to be enabled` }
     }
     if (candidate.route.provider === 'agy-agent' && acp.rowExists && acp.config.agyEnabled === false) {
-      return { ok: false, reason: "model provider 'agy-agent' is disabled on dsh-enhanced-traex-acp-provider (agyEnabled: false)" }
+      return { ok: false, reason: "model provider 'agy-agent' is disabled on dsh-ray-traex-acp-provider (agyEnabled: false)" }
     }
   }
 
@@ -725,9 +725,9 @@ function resolveActiveWebOwnerInternal(
   const principalSpec = { channel: 'web' as const, account: profile, tenant: 'local' as const, user: 'operator' as const }
   const principalId = validators.externalPrincipalId(principalSpec)
 
-  const webOwner = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-web-owner')
+  const webOwner = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-web-owner')
   if (!webOwner.rowExists || webOwner.disabled) {
-    return { ok: false, principalId, reason: 'dsh-enhanced-assistant-web-owner must be enabled in the profile' }
+    return { ok: false, principalId, reason: 'dsh-ray-assistant-web-owner must be enabled in the profile' }
   }
   const rawWorkspace = input.workspace ?? (typeof webOwner.config.workspace === 'string' ? webOwner.config.workspace : undefined)
   const rawPreset = input.preset ?? (typeof webOwner.config.preset === 'string' ? webOwner.config.preset : 'standard')
@@ -743,9 +743,9 @@ function resolveActiveWebOwnerInternal(
     return { ok: false, principalId, reason: error instanceof Error ? error.message : String(error) }
   }
 
-  const delivery = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-delivery')
+  const delivery = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-delivery')
   if (!delivery.rowExists || delivery.disabled) {
-    return { ok: false, workspace, preset, principalId, reason: 'dsh-enhanced-assistant-delivery must be enabled in the profile' }
+    return { ok: false, workspace, preset, principalId, reason: 'dsh-ray-assistant-delivery must be enabled in the profile' }
   }
   const rawDeliveryDb = typeof delivery.config.databasePath === 'string' ? delivery.config.databasePath : undefined
   if (!rawDeliveryDb) {
@@ -983,19 +983,19 @@ function resolveExistingModuleState(patchState: ProfileBundleState, effectiveSta
   usageLearning: boolean
   workItemExperiences: boolean
 } {
-  const learningRow = patchState.byId.get('dsh-enhanced-assistant-memory-learning')
-  const learningEff = effectiveState.byId.get('dsh-enhanced-assistant-memory-learning')
+  const learningRow = patchState.byId.get('dsh-ray-assistant-memory-learning')
+  const learningEff = effectiveState.byId.get('dsh-ray-assistant-memory-learning')
   const learningCfg = asPlainObject(learningRow?.config)
   const memoryLearning = Boolean(learningRow && learningRow.disabled !== true && typeof learningCfg?.authorityId === 'string')
     || Boolean(!learningRow && learningEff && learningEff.disabled !== true && asPlainObject(learningEff.config)?.authorityId)
 
-  const dreamingCfg = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-dreaming').config
+  const dreamingCfg = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-dreaming').config
   let dreaming: DreamingMode = 'disabled'
   if (dreamingCfg.enabled === true) {
     dreaming = dreamingCfg.retired === true ? 'paused' : 'enabled'
   }
 
-  const growthCfg = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-growth-driver').config
+  const growthCfg = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-growth-driver').config
   const growth = growthCfg.enabled === true
   const usageLearning = asPlainObject(growthCfg.usageLearning)?.enabled === true
   const workItemExperiences = typeof learningCfg?.authorityId === 'string'
@@ -1037,15 +1037,15 @@ function assertExistingPluginDbPathsScoped(
   effectiveState: ProfileBundleState,
   canonicalHome: string,
 ): void {
-  const learning = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-memory-learning').config
+  const learning = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-memory-learning').config
   if (typeof learning.databasePath === 'string' && learning.databasePath.length > 0) {
     resolveConfiguredSqlitePath(learning.databasePath, 'assistant-memory-learning.databasePath', canonicalHome)
   }
-  const dreaming = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-dreaming').config
+  const dreaming = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-dreaming').config
   if (typeof dreaming.databasePath === 'string' && dreaming.databasePath.length > 0) {
     resolveConfiguredSqlitePath(dreaming.databasePath, 'assistant-dreaming.databasePath', canonicalHome)
   }
-  const growth = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-growth-driver').config
+  const growth = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-growth-driver').config
   const usageDb = asPlainObject(growth.usageLearning)?.databasePath
   if (typeof usageDb === 'string' && usageDb.length > 0) {
     resolveConfiguredSqlitePath(usageDb, 'assistant-growth-driver.usageLearning.databasePath', canonicalHome)
@@ -1069,12 +1069,12 @@ export function compileWebOwnerAutonomyGrants(
   const memoryLearning = input.memoryLearning ?? existingModules.memoryLearning
   const dreaming = normalizeDreamingInput(input.dreaming) ?? existingModules.dreaming
   const growth = input.growth ?? existingModules.growth
-  const hasMemoryBundle = patchState.byId.has('dsh-enhanced-assistant-memory-learning')
-    || effectiveState.byId.has('dsh-enhanced-assistant-memory-learning')
-  const hasDreamingBundle = patchState.byId.has('dsh-enhanced-assistant-dreaming')
-    || effectiveState.byId.has('dsh-enhanced-assistant-dreaming')
-  const hasGrowthBundle = patchState.byId.has('dsh-enhanced-assistant-growth-driver')
-    || effectiveState.byId.has('dsh-enhanced-assistant-growth-driver')
+  const hasMemoryBundle = patchState.byId.has('dsh-ray-assistant-memory-learning')
+    || effectiveState.byId.has('dsh-ray-assistant-memory-learning')
+  const hasDreamingBundle = patchState.byId.has('dsh-ray-assistant-dreaming')
+    || effectiveState.byId.has('dsh-ray-assistant-dreaming')
+  const hasGrowthBundle = patchState.byId.has('dsh-ray-assistant-growth-driver')
+    || effectiveState.byId.has('dsh-ray-assistant-growth-driver')
   const manageMemoryRow = memoryLearning || input.memoryLearning === false || hasMemoryBundle
   const manageDreamingRow = dreaming !== 'disabled' || hasDreamingBundle
   const manageGrowthRow = growth || hasGrowthBundle
@@ -1354,10 +1354,10 @@ export function compileWebOwnerAutonomyGrants(
 
   // Update assistant-delivery ownerRoutes in-place preserving existing tags and unrelated routes,
   // while restating required paths so Cordis whole-value replacement never drops them on minimal patches.
-  const deliveryRow = ensureRowMap(patchDoc, 'dsh-enhanced-assistant-delivery', '@dsh-enhanced/assistant-delivery')
+  const deliveryRow = ensureRowMap(patchDoc, 'dsh-ray-assistant-delivery', '@dsh-ray/assistant-delivery')
   deliveryRow.delete('disabled')
   const deliveryCfgMap = ensureChildMap(patchDoc, deliveryRow, 'config')
-  const mergedDeliveryCfg = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-delivery').config
+  const mergedDeliveryCfg = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-delivery').config
   if (!deliveryCfgMap.has('databasePath')) {
     const effectiveDeliveryDb = typeof mergedDeliveryCfg.databasePath === 'string' && isAbsolute(mergedDeliveryCfg.databasePath.trim())
       ? mergedDeliveryCfg.databasePath.trim()
@@ -1389,10 +1389,10 @@ export function compileWebOwnerAutonomyGrants(
 
   // Update personal-assistant policy, automaticLearning, and automations scheduler in-place preserving !!js tags
   // and restating all 4 required sub-configs (`assistantPolicy`, `personalMemory`, `personalWiki`, `assistantAutomations`).
-  const personalRow = ensureRowMap(patchDoc, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
+  const personalRow = ensureRowMap(patchDoc, 'dsh-ray-personal-assistant', '@dsh-ray/personal-assistant')
   personalRow.delete('disabled')
   const personalCfgMap = ensureChildMap(patchDoc, personalRow, 'config')
-  const mergedPersonalCfg = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-personal-assistant').config
+  const mergedPersonalCfg = mergedRowConfig(patchState, effectiveState, 'dsh-ray-personal-assistant').config
   const mergedPolicySource = asPlainObject(mergedPersonalCfg.assistantPolicy)
   const mergedPolicy = validators.policy.mergeAssistantPolicyGrants(mergedPolicySource, {
     rules: addRules,
@@ -1426,13 +1426,13 @@ export function compileWebOwnerAutonomyGrants(
   automationsMap.set('schedulerEnabled', schedulerEnabled)
   automationsMap.set('allowUnbudgetedExecution', false)
 
-  if (compiledReviews || input.memoryLearning === false || patchState.byId.has('dsh-enhanced-assistant-verifier')) {
+  if (compiledReviews || input.memoryLearning === false || patchState.byId.has('dsh-ray-assistant-verifier')) {
     // Update assistant-verifier.memoryReviews in-place while restating required databasePath & surviving keys
     // (Cordis patch config is a whole-value replacement).
-    const verifierRow = ensureRowMap(patchDoc, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier')
+    const verifierRow = ensureRowMap(patchDoc, 'dsh-ray-assistant-verifier', '@dsh-ray/assistant-verifier')
     verifierRow.delete('disabled')
     const verifierCfgMap = ensureChildMap(patchDoc, verifierRow, 'config')
-    const mergedVerifierCfg = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-verifier').config
+    const mergedVerifierCfg = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-verifier').config
     if (!verifierCfgMap.has('databasePath')) {
       const effectiveDb = typeof mergedVerifierCfg.databasePath === 'string' && isAbsolute(mergedVerifierCfg.databasePath.trim())
         ? mergedVerifierCfg.databasePath.trim()
@@ -1465,7 +1465,7 @@ export function compileWebOwnerAutonomyGrants(
 
   // Update assistant-memory-learning row when enabled, explicitly disabled, or already present.
   if (manageMemoryRow) {
-    const memoryRow = ensureRowMap(patchDoc, 'dsh-enhanced-assistant-memory-learning', '@dsh-enhanced/assistant-memory-learning')
+    const memoryRow = ensureRowMap(patchDoc, 'dsh-ray-assistant-memory-learning', '@dsh-ray/assistant-memory-learning')
     if (compiledLearning) {
       memoryRow.set('disabled', false)
       memoryRow.set('config', plainNode(compiledLearning))
@@ -1479,14 +1479,14 @@ export function compileWebOwnerAutonomyGrants(
 
   // Update assistant-dreaming row when enabled/paused or present in the profile.
   if (manageDreamingRow) {
-    const dreamingRow = ensureRowMap(patchDoc, 'dsh-enhanced-assistant-dreaming', '@dsh-enhanced/assistant-dreaming')
+    const dreamingRow = ensureRowMap(patchDoc, 'dsh-ray-assistant-dreaming', '@dsh-ray/assistant-dreaming')
     dreamingRow.delete('disabled')
     dreamingRow.set('config', plainNode(dreamingYamlConfig))
   }
 
   // Update assistant-growth-driver row when enabled or present in the profile.
   if (manageGrowthRow) {
-    const growthRow = ensureRowMap(patchDoc, 'dsh-enhanced-assistant-growth-driver', '@dsh-enhanced/assistant-growth-driver')
+    const growthRow = ensureRowMap(patchDoc, 'dsh-ray-assistant-growth-driver', '@dsh-ray/assistant-growth-driver')
     growthRow.delete('disabled')
     growthRow.set('config', plainNode(growthYamlConfig))
   }

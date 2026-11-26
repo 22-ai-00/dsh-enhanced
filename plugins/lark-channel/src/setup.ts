@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline/promises'
 import { spawnSync } from 'node:child_process'
-import type { ExternalPrincipalKey } from '@dsh-enhanced/assistant-delivery'
+import type { ExternalPrincipalKey } from '@dsh-ray/assistant-delivery'
 import { registerApp } from '@larksuiteoapi/node-sdk'
 import * as QRCode from 'qrcode'
 import { isMap, isSeq, parseDocument, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
@@ -178,7 +178,7 @@ export function createLarkRegistrationOptions(input: LarkRegistrationOptionsInpu
   return {
     domain: input.domain === 'lark' ? 'accounts.larksuite.com' : 'accounts.feishu.cn',
     larkDomain: 'accounts.larksuite.com',
-    source: 'dsh-enhanced/lark-channel',
+    source: 'dsh-ray/lark-channel',
     ...(input.appId === undefined ? {} : { appId: input.appId }),
     signal: input.signal,
     appPreset: {
@@ -283,7 +283,7 @@ export function createVersionedCredentialLocator(input: VersionedCredentialLocat
 }
 
 const windowsPowerShell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-const windowsDpapiWriteCommand = "$secret = [Console]::In.ReadToEnd(); $secure = ConvertTo-SecureString $secret -AsPlainText -Force; $credential = [pscredential]::new('dsh-enhanced', $secure); $credential | Export-Clixml -LiteralPath $args[0]"
+const windowsDpapiWriteCommand = "$secret = [Console]::In.ReadToEnd(); $secure = ConvertTo-SecureString $secret -AsPlainText -Force; $credential = [pscredential]::new('dsh-ray', $secure); $credential | Export-Clixml -LiteralPath $args[0]"
 const windowsDpapiReadCommand = '$credential = Import-Clixml -LiteralPath $args[0]; [Console]::Out.Write($credential.GetNetworkCredential().Password)'
 
 export function credentialProviderForPlatform(platform: NodeJS.Platform): SetupCredentialProvider {
@@ -633,7 +633,7 @@ export interface LarkCredentialProviderSelectionOptions extends LinuxSecretServi
 async function assertLinuxProtectedFileRuntimeSupported(): Promise<void> {
   let providers: unknown
   try {
-    const keychain = await import('@dsh-enhanced/credentials-keychain/capabilities')
+    const keychain = await import('@dsh-ray/credentials-keychain/capabilities')
     providers = keychain.supportedCredentialProviders
   } catch (error) {
     throw new Error(
@@ -1041,7 +1041,7 @@ async function storeSecret(
   if (credentialPath === undefined || (!isAbsolute(credentialPath) && !win32.isAbsolute(credentialPath))) {
     throw new Error('lark-channel setup: invalid DPAPI credential path')
   }
-  const manualCommand = "$secure = Read-Host 'Feishu App Secret' -AsSecureString; $credential = [pscredential]::new('dsh-enhanced', $secure); $credential | Export-Clixml -LiteralPath $args[0]"
+  const manualCommand = "$secure = Read-Host 'Feishu App Secret' -AsSecureString; $credential = [pscredential]::new('dsh-ray', $secure); $credential | Export-Clixml -LiteralPath $args[0]"
   const result = spawnSync(windowsPowerShell, [
     '-NoLogo', '-NoProfile', '-Command', manualCommand, credentialPath,
   ], { encoding: 'utf8', env: { PATH: 'C:\\Windows\\System32;C:\\Windows', SystemRoot: 'C:\\Windows' }, stdio: 'inherit' })
@@ -1148,7 +1148,7 @@ function exactManagedCredentialHandleShape(handle: YAMLMap, provider: SetupCrede
     : ['account', 'consumers', 'id', 'maxLeaseMs', 'provider', 'purposes', 'service']
   const value = handle.toJSON() as Record<string, unknown>
   return Object.keys(value).sort().join('\0') === expectedKeys.join('\0')
-    && exactYamlStringSequence(handle.get('consumers', true) as Node | undefined, ['dsh-enhanced-lark-channel'])
+    && exactYamlStringSequence(handle.get('consumers', true) as Node | undefined, ['dsh-ray-lark-channel'])
     && exactYamlStringSequence(handle.get('purposes', true) as Node | undefined, ['connect'])
     && handle.get('maxLeaseMs') === 86_400_000
 }
@@ -1176,8 +1176,8 @@ export function findManagedLarkCredentialLocator(
 ): SetupCredentialLocator | undefined {
   const document = parseDocument(input.profilePatch)
   if (document.errors.length > 0 || !isSeq(document.contents)) return undefined
-  const larkRow = findYamlRow(document.contents, 'dsh-enhanced-lark-channel')
-  const credentialRow = findYamlRow(document.contents, 'dsh-enhanced-credentials-keychain')
+  const larkRow = findYamlRow(document.contents, 'dsh-ray-lark-channel')
+  const credentialRow = findYamlRow(document.contents, 'dsh-ray-credentials-keychain')
   if (larkRow === undefined || credentialRow === undefined) return undefined
   const channel = larkRow.get('config', true) as Node | undefined
   const credentialConfig = credentialRow.get('config', true) as Node | undefined
@@ -1406,7 +1406,7 @@ export function dshHomeLifecycleRendezvousPath(dshHome: string, uid = process.ge
     throw new Error('lark-channel setup: cannot determine the user id for lifecycle locking')
   }
   const canonicalHome = normalizeSetupResourcePath(dshHome)
-  return `/tmp/.dsh-enhanced-lifecycle-${uid}-${textSha256(canonicalHome)}.lock`
+  return `/tmp/.dsh-ray-lifecycle-${uid}-${textSha256(canonicalHome)}.lock`
 }
 
 async function assertDshHomeLifecycleLockIdentity(
@@ -1757,7 +1757,7 @@ function profileReferencesCredentialLocator(profilePatch: string, locator: Setup
     throw new Error('lark-channel setup: cannot prove a deferred credential is inactive in an invalid profile')
   }
   const rows = document.contents.items.filter(item => isMap(item)
-    && (item.get('id') as unknown) === 'dsh-enhanced-credentials-keychain') as YAMLMap[]
+    && (item.get('id') as unknown) === 'dsh-ray-credentials-keychain') as YAMLMap[]
   for (const row of rows) {
     const config = row.get('config', true) as Node | undefined
     if (!isMap(config)) {
@@ -2137,10 +2137,10 @@ export function deliveryDatabasePathFromEffectiveProfile(effectiveProfile: strin
     throw new Error('lark-channel setup: effective profile must be a valid YAML sequence')
   }
   const deliveries = document.contents.items.filter(item => isMap(item)
-    && (item.get('id') as unknown) === 'dsh-enhanced-assistant-delivery') as YAMLMap[]
+    && (item.get('id') as unknown) === 'dsh-ray-assistant-delivery') as YAMLMap[]
   const delivery = deliveries[0]
   if (deliveries.length !== 1
-    || delivery?.get('name') !== '@dsh-enhanced/assistant-delivery'
+    || delivery?.get('name') !== '@dsh-ray/assistant-delivery'
     || !setupRowIsEnabled(delivery)) {
     throw new Error('lark-channel setup: effective profile has no enabled assistant-delivery row')
   }
@@ -2155,10 +2155,10 @@ function effectiveProfileHasEnabledLarkChannel(effectiveProfile: string, profile
     throw new Error(`lark-channel setup: cannot verify effective Lark ownership in profile ${profile}`)
   }
   const rows = document.contents.items.filter(item => isMap(item)
-    && (item.get('id') as unknown) === 'dsh-enhanced-lark-channel') as YAMLMap[]
+    && (item.get('id') as unknown) === 'dsh-ray-lark-channel') as YAMLMap[]
   if (rows.length === 0) return false
   const lark = rows[0]!
-  if (rows.length !== 1 || lark.get('name') !== '@dsh-enhanced/lark-channel') {
+  if (rows.length !== 1 || lark.get('name') !== '@dsh-ray/lark-channel') {
     throw new Error(`lark-channel setup: profile ${profile} has an invalid effective Lark package row`)
   }
   if (!setupRowIsEnabled(lark)) return false
@@ -2182,9 +2182,9 @@ function effectiveDeliveryConsumerDatabasePaths(
     if (!isMap(row)) continue
     const id = row.get('id') as unknown
     const name = row.get('name') as unknown
-    if (id !== 'dsh-enhanced-assistant-delivery' && name !== '@dsh-enhanced/assistant-delivery') continue
+    if (id !== 'dsh-ray-assistant-delivery' && name !== '@dsh-ray/assistant-delivery') continue
     if (!setupRowIsEnabled(row)) continue
-    if (name !== '@dsh-enhanced/assistant-delivery') {
+    if (name !== '@dsh-ray/assistant-delivery') {
       throw new Error(`lark-channel setup: profile ${profile} has an invalid effective Delivery package row`)
     }
     const config = row.get('config', true) as Node | undefined
@@ -2233,8 +2233,8 @@ const managedPolicyRulePrefixes = [
   'lark-owner-reply-',
   'lark-owner-capability-',
   'lark-owner-tool-',
-  'dsh-enhanced-foreground-capability-',
-  'dsh-enhanced-foreground-tool-',
+  'dsh-ray-foreground-capability-',
+  'dsh-ray-foreground-tool-',
   'lark-foreground-capability-',
   'lark-foreground-tool-',
 ] as const
@@ -2269,13 +2269,13 @@ function assertEffectiveManagedPolicyMatchesCandidate(input: {
       throw new Error('profile is not a valid YAML sequence')
     }
     const rows = document.contents.items.filter(item => isMap(item)
-      && (item.get('id') as unknown) === 'dsh-enhanced-personal-assistant') as YAMLMap[]
+      && (item.get('id') as unknown) === 'dsh-ray-personal-assistant') as YAMLMap[]
     const personal = rows[0]
     if (rows.length !== 1 || personal === undefined) {
       throw new Error('profile does not have the expected enabled personal-assistant package')
     }
     if (!setupRowIsEnabled(personal)
-      || (effective && personal.get('name') !== '@dsh-enhanced/personal-assistant')) {
+      || (effective && personal.get('name') !== '@dsh-ray/personal-assistant')) {
       throw new Error('profile does not have the expected enabled personal-assistant package')
     }
     const config = personal.get('config', true) as Node | undefined
@@ -2359,7 +2359,7 @@ function refreshLarkAgentPolicyFromEffective(input: {
   }
   const workingPersonal = uniqueProfileRow(
     working.contents,
-    'dsh-enhanced-personal-assistant',
+    'dsh-ray-personal-assistant',
     'policy refresh candidate',
   )
   if (workingPersonal === undefined) {
@@ -2367,8 +2367,8 @@ function refreshLarkAgentPolicyFromEffective(input: {
   }
   const effectivePersonal = requireEffectivePackageRow(
     effective.contents,
-    'dsh-enhanced-personal-assistant',
-    '@dsh-enhanced/personal-assistant',
+    'dsh-ray-personal-assistant',
+    '@dsh-ray/personal-assistant',
   )!
   const workingPolicy = workingPersonal.get('config', true) as Node | undefined
   const assistantPolicy = isMap(workingPolicy)
@@ -2381,21 +2381,21 @@ function refreshLarkAgentPolicyFromEffective(input: {
 
   const effectiveDelivery = requireEffectivePackageRow(
     effective.contents,
-    'dsh-enhanced-assistant-delivery',
-    '@dsh-enhanced/assistant-delivery',
+    'dsh-ray-assistant-delivery',
+    '@dsh-ray/assistant-delivery',
   )!
-  replaceProfileRow(working.contents, 'dsh-enhanced-assistant-delivery', effectiveDelivery)
+  replaceProfileRow(working.contents, 'dsh-ray-assistant-delivery', effectiveDelivery)
   const effectiveLark = requireEffectivePackageRow(
     effective.contents,
-    'dsh-enhanced-lark-channel',
-    '@dsh-enhanced/lark-channel',
+    'dsh-ray-lark-channel',
+    '@dsh-ray/lark-channel',
     true,
   )
   const effectiveLarkConfig = effectiveLark?.get('config', true) as Node | undefined
   const channelEnabled = isMap(effectiveLarkConfig) && effectiveLarkConfig.get('enabled') === true
   replaceProfileRow(
     working.contents,
-    'dsh-enhanced-lark-channel',
+    'dsh-ray-lark-channel',
     channelEnabled ? effectiveLark : undefined,
   )
 
@@ -2412,12 +2412,12 @@ function refreshLarkAgentPolicyFromEffective(input: {
   }
   const refreshedPersonal = uniqueProfileRow(
     refreshedDocument.contents,
-    'dsh-enhanced-personal-assistant',
+    'dsh-ray-personal-assistant',
     'refreshed profile',
   )!
   const resultPersonal = uniqueProfileRow(
     result.contents,
-    'dsh-enhanced-personal-assistant',
+    'dsh-ray-personal-assistant',
     'policy refresh result',
   )!
   const resultConfig = resultPersonal.get('config', true) as Node | undefined
@@ -2440,11 +2440,11 @@ function inspectLarkOwnerBinding(input: {
     throw new Error('profile is not a valid YAML sequence')
   }
   const larkRows = document.contents.items
-    .filter(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-lark-channel') as YAMLMap[]
+    .filter(item => isMap(item) && (item.get('id') as unknown) === 'dsh-ray-lark-channel') as YAMLMap[]
   if (larkRows.length !== 1 || !setupRowIsEnabled(larkRows[0]!)) {
     throw new Error('profile does not have exactly one enabled Lark channel row')
   }
-  if (input.effective && larkRows[0]!.get('name') !== '@dsh-enhanced/lark-channel') {
+  if (input.effective && larkRows[0]!.get('name') !== '@dsh-ray/lark-channel') {
     throw new Error('effective Lark row does not mount the expected package')
   }
   const channel = larkRows[0]!.get('config', true) as Node | undefined
@@ -2476,18 +2476,18 @@ function inspectLarkOwnerBinding(input: {
     throw new Error('Lark channel credential does not match the staged setup credential')
   }
   const credentialRows = document.contents.items
-    .filter(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-credentials-keychain') as YAMLMap[]
+    .filter(item => isMap(item) && (item.get('id') as unknown) === 'dsh-ray-credentials-keychain') as YAMLMap[]
   if (credentialRows.length !== 1
     || !setupRowIsEnabled(credentialRows[0]!)
-    || (input.effective && credentialRows[0]!.get('name') !== '@dsh-enhanced/credentials-keychain')) {
+    || (input.effective && credentialRows[0]!.get('name') !== '@dsh-ray/credentials-keychain')) {
     throw new Error('profile does not have the expected enabled credentials-keychain package')
   }
   const personalRows = document.contents.items
-    .filter(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-personal-assistant') as YAMLMap[]
+    .filter(item => isMap(item) && (item.get('id') as unknown) === 'dsh-ray-personal-assistant') as YAMLMap[]
   if (personalRows.length !== 1 || !setupRowIsEnabled(personalRows[0]!)) {
     throw new Error('profile does not have exactly one enabled personal-assistant row')
   }
-  if (input.effective && personalRows[0]!.get('name') !== '@dsh-enhanced/personal-assistant') {
+  if (input.effective && personalRows[0]!.get('name') !== '@dsh-ray/personal-assistant') {
     throw new Error('effective personal-assistant row does not mount the expected package')
   }
   const personal = personalRows[0]!.get('config', true) as Node | undefined
@@ -2973,7 +2973,7 @@ async function defaultPairPrincipal(input: {
   // Load the local-only control plane only after the candidate profile has
   // passed composition/schema validation. A rejected profile therefore has
   // no opportunity to mutate pairing state.
-  const { pairPrincipalLocally } = await import('@dsh-enhanced/assistant-delivery')
+  const { pairPrincipalLocally } = await import('@dsh-ray/assistant-delivery')
   pairPrincipalLocally(input)
 }
 
@@ -3697,7 +3697,7 @@ export async function runLarkSetup(
         if (args.businessTools) businessBinding = { appSecret: ownerInput.appSecret, owner }
         const previousDocument = parseDocument(await readEffectiveProfile(args.profile), { uniqueKeys: true })
         const previousRow = isSeq(previousDocument.contents)
-          ? previousDocument.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-lark-channel')
+          ? previousDocument.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-ray-lark-channel')
           : undefined
         const previousConfig = isMap(previousRow) ? previousRow.get('config', true) : undefined
         const previousAccount = isMap(previousConfig) ? previousConfig.get('account') : undefined

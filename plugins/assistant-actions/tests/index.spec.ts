@@ -7,7 +7,7 @@ import plugin, { apply, name, version } from '../src/index.ts'
 
 test('publishes a stable bundle and disposes its actual empty-grant Host service', async () => {
   expect(plugin.name).toBe(name)
-  expect(name).toBe('dsh-enhanced-assistant-actions')
+  expect(name).toBe('dsh-ray-assistant-actions')
   expect(version).toBe(JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version)
   const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-index-'))); const ctx = new Context()
   try {

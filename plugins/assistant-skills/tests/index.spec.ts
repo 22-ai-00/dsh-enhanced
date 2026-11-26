@@ -12,9 +12,9 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 
 const hostPackages = ['@deepseek-ai/dsh-fs', '@deepseek-ai/dsh-fs-local', '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-tool-fs', '@deepseek-ai/dsh-working-directory']
 
-describe('dsh-enhanced-assistant-skills', () => {
+describe('dsh-ray-assistant-skills', () => {
   it('exposes stable plugin identity', () => {
-    expect(name).toBe('dsh-enhanced-assistant-skills')
+    expect(name).toBe('dsh-ray-assistant-skills')
     expect(version).toBe(manifest.version)
   })
 
@@ -33,8 +33,8 @@ describe('dsh-enhanced-assistant-skills', () => {
       expect(manifest.peerDependencies[dependency]).toBe('>=0.2.2-rc.5 <0.3.0')
       expect(manifest.peerDependenciesMeta[dependency]?.optional).toBe(true)
     }
-    expect(manifest.dependencies['@dsh-enhanced/assistant-recovery']).toBeUndefined()
-    expect(manifest.peerDependencies['@dsh-enhanced/assistant-recovery']).toBe('>=0.1.0 <0.2.0')
-    expect(manifest.peerDependenciesMeta['@dsh-enhanced/assistant-recovery']?.optional).toBe(true)
+    expect(manifest.dependencies['@dsh-ray/assistant-recovery']).toBeUndefined()
+    expect(manifest.peerDependencies['@dsh-ray/assistant-recovery']).toBe('>=0.1.0 <0.2.0')
+    expect(manifest.peerDependenciesMeta['@dsh-ray/assistant-recovery']?.optional).toBe(true)
   })
 })

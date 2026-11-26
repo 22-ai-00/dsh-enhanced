@@ -1,4 +1,4 @@
-# @dsh-enhanced/assistant-evaluation
+# @dsh-ray/assistant-evaluation
 
 个人助理的可信自评测账本。它把一次任务的三个事实分开记录：执行是否正常、目标是否达成、结果是否送达；不会再把“Agent loop 正常结束”误当成“用户目标已经完成”。
 
@@ -7,7 +7,7 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/assistant-evaluation
+dsh plugin --profile web add @dsh-ray/assistant-evaluation
 dsh --profile web --dump-config
 ```
 
@@ -187,7 +187,7 @@ Delivery 事实可带 `route: { kind: 'linked', originBindingId }`（经 owner l
 
 ## 配对评测 Host SDK（实验性）
 
-`@dsh-enhanced/assistant-evaluation/benchmark` 提供 `parseBenchmarkPlan`、`benchmarkPlanDigest`、`benchmarkSchedule`、`BenchmarkStore`、`runBenchmark` 和 `benchmarkReport`。这是可独立导入的 Host 集成入口，不自动启用，也不注册模型工具。它使用单独的 benchmark SQLite 文件，不改变日常任务评价数据库。
+`@dsh-ray/assistant-evaluation/benchmark` 提供 `parseBenchmarkPlan`、`benchmarkPlanDigest`、`benchmarkSchedule`、`BenchmarkStore`、`runBenchmark` 和 `benchmarkReport`。这是可独立导入的 Host 集成入口，不自动启用，也不注册模型工具。它使用单独的 benchmark SQLite 文件，不改变日常任务评价数据库。
 
 计划冻结数据集版本与摘要、逐题输入/验收摘要、模型、prompt、skills、tools、policy 和 runtime 的 SHA-256 配置/内容摘要。模型摘要应覆盖实际 provider、具体模型版本、采样参数和计价配置，不能只记录别名。能力比较要求模型相同；模型比较只能改变模型配置。消融必须与唯一候选保持版本一致，并只关闭记忆、规划、复核或成长中的一项。变体共享完全相同的预算与逐题 seed；执行顺序轮换。seed 记录不意味着模型服务一定支持确定性采样，adapter 必须如实记录提供商能力。
 
@@ -205,7 +205,7 @@ Delivery 事实可带 `route: { kind: 'linked', originBindingId }`（经 owner l
 
 ### 独立留出 provider Host SDK（实验性）
 
-`@dsh-enhanced/assistant-evaluation/benchmark/holdout` 是 inert Host SDK：导入它不会挂载 Cordis 插件、启动 provider、创建数据库或注册模型工具。普通 `runIndependentHoldout()` 也只在可信 Host 显式调用时运行。若调用发生在插件生命周期内，应使用 `runIndependentHoldoutInContext(ctx, options)`；它把 benchmark journal、evidence store、authority/delegate session 和取消控制注册为当前 Cordis Fiber 的一个 owned effect。Fiber 卸载会停止新准入、abort 运行、等待有界清理并关闭两个 store；自然完成也会关闭资源并移除该 effect。`providerTimeoutMs` 为任意 Host provider 的启动、每个请求和关闭设置上限；在 abort 或期限后才解析的 provider 会只做一次有界 `close()`，不会再请求 manifest 或写入 store。它没有把 `ctx.isolate()` 当作进程、凭据或数据集隔离。
+`@dsh-ray/assistant-evaluation/benchmark/holdout` 是 inert Host SDK：导入它不会挂载 Cordis 插件、启动 provider、创建数据库或注册模型工具。普通 `runIndependentHoldout()` 也只在可信 Host 显式调用时运行。若调用发生在插件生命周期内，应使用 `runIndependentHoldoutInContext(ctx, options)`；它把 benchmark journal、evidence store、authority/delegate session 和取消控制注册为当前 Cordis Fiber 的一个 owned effect。Fiber 卸载会停止新准入、abort 运行、等待有界清理并关闭两个 store；自然完成也会关闭资源并移除该 effect。`providerTimeoutMs` 为任意 Host provider 的启动、每个请求和关闭设置上限；在 abort 或期限后才解析的 provider 会只做一次有界 `close()`，不会再请求 manifest 或写入 store。它没有把 `ctx.isolate()` 当作进程、凭据或数据集隔离。
 
 operator 必须同时固定 `{ id, version, digest }` 数据集 pin 和 Ed25519 authority public key。authority 按顺序返回四类严格 envelope：
 

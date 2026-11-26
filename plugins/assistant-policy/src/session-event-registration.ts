@@ -20,7 +20,7 @@ const LEGACY_SESSION_FORMAT_VERSION = 0
 // refusal running before per-type structural adoption), so the reader-identity
 // probe below proves a single live reader unchanged across all three formats.
 const SUPPORTED_SESSION_FORMATS = new Set([LEGACY_SESSION_FORMAT_VERSION, 3, 4])
-const SESSION_REGISTRATIONS_GLOBAL_KEY = '__dshEnhancedApprovalReviewerSessionRegistrationsV1__'
+const SESSION_REGISTRATIONS_GLOBAL_KEY = '__dshRayApprovalReviewerSessionRegistrationsV1__'
 
 interface MutableEventTypeRegistry extends ReadonlySet<string> {
   add(value: string): this

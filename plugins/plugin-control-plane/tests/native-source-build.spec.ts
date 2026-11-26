@@ -8,7 +8,7 @@ import { packNativeCreatedPlugin } from '../src/native-source-pack.js'
 
 const modulesPath = realpathSync(join(import.meta.dirname, '..', '..', '..', 'node_modules'))
 const fixed = new Map([
-  ['package.json', JSON.stringify({ name: '@dsh-enhanced/rsi-helper', version: '0.1.0',
+  ['package.json', JSON.stringify({ name: '@dsh-ray/rsi-helper', version: '0.1.0',
     main: './lib/index.js', types: './lib/index.d.ts',
     files: ['lib', 'cordis.patch.yml', 'README.md', 'LICENSE'], dsh: { bundle: { patch: './cordis.patch.yml' } } })],
   ['README.md', '# Helper\n'], ['LICENSE', 'MIT\n'], ['cordis.patch.yml', 'plugins: []\n'],

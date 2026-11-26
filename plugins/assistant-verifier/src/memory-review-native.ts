@@ -4,9 +4,9 @@ import { createUserMessage, ReasoningEffortId, type GenerateOptions, type Stream
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { matchesIsolatedModelMessages, hasWorkItemLearningFeedbackText, type MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
+import { matchesIsolatedModelMessages, hasWorkItemLearningFeedbackText, type MemoryLearningReviewRequest } from '@dsh-ray/assistant-growth-contract'
 import type { SourceReviewModelSelection } from './source-review.js'
 
 const instruction = [
@@ -44,7 +44,7 @@ export interface MemoryReviewTarget {
   managed: true
   kind: 'fact' | 'experience'
   content: string
-  knowledge?: import('@dsh-enhanced/assistant-growth-contract').MemoryLearningEntry['knowledge']
+  knowledge?: import('@dsh-ray/assistant-growth-contract').MemoryLearningEntry['knowledge']
 }
 
 export interface MemoryReviewVerdict { status: 'approved' | 'rejected'; reason: string; outputDigest: string }

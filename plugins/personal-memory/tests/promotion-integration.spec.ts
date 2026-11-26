@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { type Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import { AssistantPolicyService, type ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService, type ApprovalDispatchRouteV2 } from '@dsh-ray/assistant-policy'
 import {
   AssistantDeliveryService,
   externalPrincipalId,
@@ -15,13 +15,13 @@ import {
   type DeliveryPrincipal,
   type ExternalPrincipalKey,
   type InboundEnvelope,
-} from '@dsh-enhanced/assistant-delivery'
+} from '@dsh-ray/assistant-delivery'
 import {
   PREFERENCE_MEMORY_PROMOTION_CONTENT,
   PREFERENCE_MEMORY_PROMOTION_RENDERER_ID,
   withPreferenceMemoryPromotionCancellationDigest,
   withPreferenceMemoryPromotionRequestDigest,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 import { afterEach, describe, expect, test } from 'vitest'
 import { MemoryPromotionCancelledError, MemoryProposalManager } from '../src/proposals.ts'
 import { PersonalMemoryService } from '../src/service.ts'
@@ -62,7 +62,7 @@ function namespace(principalRecordId = 'principal-row-owner', principalVersion =
 function dispatch(bindingGeneration = 1, principalVersion = 1): ApprovalDispatchRouteV2 {
   return Object.freeze({
     routeVersion: 2,
-    sourceId: 'dsh-enhanced-personal-memory',
+    sourceId: 'dsh-ray-personal-memory',
     bindingId: `binding-owner-${bindingGeneration}`,
     bindingVersion: bindingGeneration,
     bindingGeneration,
@@ -380,7 +380,7 @@ describe('preference Memory cross-instance and owner integration', () => {
     expect(confirmedA1.record?.content).toBe(confirmedMutation.entry.content)
     const request = promotionRequest(3, bindingA1.generation, ownerA1.version)
     const route = delivery.prepareOwnerApprovalForPreference({
-      sourceId: 'dsh-enhanced-personal-memory', scope, principalId: externalPrincipalId(principalKey),
+      sourceId: 'dsh-ray-personal-memory', scope, principalId: externalPrincipalId(principalKey),
       principalLineage: { principalRecordId: ownerA1.id, principalVersion: ownerA1.version },
       ownerGeneration: bindingA1.generation,
     })
@@ -398,7 +398,7 @@ describe('preference Memory cross-instance and owner integration', () => {
       proposal => {
         if (proposal.namespace.mode !== 'delivery' || proposal.promotion === undefined) return 'current'
         const current = delivery.prepareOwnerApprovalForPreference({
-          sourceId: 'dsh-enhanced-personal-memory', scope: proposal.promotion.scope,
+          sourceId: 'dsh-ray-personal-memory', scope: proposal.promotion.scope,
           principalId: proposal.principal,
           principalLineage: {
             principalRecordId: proposal.namespace.principalRecordId,

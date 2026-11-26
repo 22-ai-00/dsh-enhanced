@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest } from '@dsh-ray/task-acceptance-contract'
 import { mkdir, mkdtemp, realpath, rm, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -9,15 +9,15 @@ import { createStrategyGoalRuntime, strategyGoalTaskDigests, type StrategyGoalTa
 import { strategyBenchmarkCapabilityVersions, strategyBenchmarkJournalPlan, strategyBenchmarkProtocol, type StrategyBenchmarkPlan } from '../../src/benchmark/strategy-plan.js'
 import { StrategyEvidenceStore } from '../../src/benchmark/strategy-evidence.js'
 import { benchmarkSchedule } from '../../src/benchmark/schema.js'
-import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
+import type { AssistantGoalsService } from '@dsh-ray/assistant-goals'
 import type { NativeModelConfig } from '../../src/benchmark/native.js'
 import { nativeExecution } from './helpers/native-runtime.ts'
 
 // Cancellation cases stop before any isolated process starts. Mount the plugin
 // shape without a real runtime-tree verification; the gated live cases keep
 // the real module.
-vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
-  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+vi.mock('@dsh-ray/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-ray/assistant-isolation')>()
   if (process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME !== undefined) return actual
   const { syntheticIsolationModule } = await import('./helpers/synthetic-isolation.ts')
   return syntheticIsolationModule(actual)

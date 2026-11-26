@@ -8,8 +8,8 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
+import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { CredentialsKeychainService } from '@dsh-ray/credentials-keychain'
 import { createHash } from 'node:crypto'
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -49,9 +49,9 @@ async function fixture(enabled = true) {
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow', rules: [
     { id: 'action', effect: 'allow', subject: { kind: 'agent', id: 'primary' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:fix' } },
-    { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
+    { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-ray-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
   ] })
-  await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(root, 'secret'), consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }] })
+  await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(root, 'secret'), consumers: ['dsh-ray-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }] })
   ctx.provide('agents' as never, { get: (value: string) => value === id ? owner : undefined } as never)
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } }) } as never)
   ctx.on('approval/request', async () => 'rejected')
@@ -62,7 +62,7 @@ async function fixture(enabled = true) {
     inspect: vi.fn(async () => ({ observed: { full_name: 'owner/repository' } })),
   }
   let plugin: { dispose(): Promise<void> }
-  const load = async () => { plugin = await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) { new AssistantActionsService(runtime, { stateRoot: join(root, 'actions'), grants: enabled ? [grant] : [] }, undefined, workflow) } }) as unknown as typeof plugin }
+  const load = async () => { plugin = await ctx.plugin({ name: 'dsh-ray-assistant-actions', apply(runtime: Context) { new AssistantActionsService(runtime, { stateRoot: join(root, 'actions'), grants: enabled ? [grant] : [] }, undefined, workflow) } }) as unknown as typeof plugin }
   await load()
   const result = { ctx, workflow, grant, load,
     dispose: async () => await plugin.dispose(),

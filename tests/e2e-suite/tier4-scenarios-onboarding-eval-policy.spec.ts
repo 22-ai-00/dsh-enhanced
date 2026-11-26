@@ -196,12 +196,12 @@ describe('Tier 4 Real-World Scenarios — S1–S3: Cold-Start Onboarding, Eval/W
     )
     const effectiveSource = [
       bundleSnippets.join('\n'),
-      '- id: dsh-enhanced-assistant-goals',
-      '  name: "@dsh-enhanced/assistant-goals"',
-      '- id: dsh-enhanced-assistant-web-owner',
-      '  name: "@dsh-enhanced/assistant-web-owner"',
-      '- id: dsh-enhanced-assistant-association',
-      '  name: "@dsh-enhanced/assistant-association"',
+      '- id: dsh-ray-assistant-goals',
+      '  name: "@dsh-ray/assistant-goals"',
+      '- id: dsh-ray-assistant-web-owner',
+      '  name: "@dsh-ray/assistant-web-owner"',
+      '- id: dsh-ray-assistant-association',
+      '  name: "@dsh-ray/assistant-association"',
     ].join('\n')
     const prepare = getExportFn<(input: Record<string, unknown>, source: string, effective: string) => {
       patch: string
@@ -486,14 +486,14 @@ describe('Tier 4 Real-World Scenarios — S1–S3: Cold-Start Onboarding, Eval/W
     expect(dreamDefaultCfg.enabled).toBe(true)
 
     const bundlesYaml = [
-      '- id: dsh-enhanced-assistant-work-items',
-      '  name: "@dsh-enhanced/assistant-work-items"',
+      '- id: dsh-ray-assistant-work-items',
+      '  name: "@dsh-ray/assistant-work-items"',
       '  config:',
       '    enabled: false',
       `    databasePath: ${wiDb}`,
       `    workRoot: ${ws.workspace}`,
-      '- id: dsh-enhanced-assistant-evaluation',
-      '  name: "@dsh-enhanced/assistant-evaluation"',
+      '- id: dsh-ray-assistant-evaluation',
+      '  name: "@dsh-ray/assistant-evaluation"',
       '  config:',
       `    databasePath: ${evalDb}`,
       '    notificationOutcomesEnabled: false',
@@ -507,8 +507,8 @@ describe('Tier 4 Real-World Scenarios — S1–S3: Cold-Start Onboarding, Eval/W
     const presetRes = await applyPreset({ dshHome: ws.dshHome, profile: 'web' }, { readDump: createPresetFixtureDump(bundlesYaml) })
     expect(presetRes.changed).toBe(true)
     const patchDoc = parseCordisPatch(await readFile(join(profileDir, 'cordis.patch.yml'), 'utf8'))
-    expect(getPatchConfig(findPatchRow(patchDoc.document, 'dsh-enhanced-assistant-work-items')).enabled).toBe(true)
-    expect(getPatchConfig(findPatchRow(patchDoc.document, 'dsh-enhanced-assistant-evaluation')).attentionLooseningEnabled).toBe(true)
+    expect(getPatchConfig(findPatchRow(patchDoc.document, 'dsh-ray-assistant-work-items')).enabled).toBe(true)
+    expect(getPatchConfig(findPatchRow(patchDoc.document, 'dsh-ray-assistant-evaluation')).attentionLooseningEnabled).toBe(true)
 
     const env = await createIsolatedEnv(ws)
     const dryRun = await runBashCommand(

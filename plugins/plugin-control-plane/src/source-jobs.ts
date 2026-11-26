@@ -4,8 +4,8 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { realpath } from 'node:fs/promises'
 import { SourceGrowthRunUnavailableError, isSourceOwnerContinuation, validateAnySourceGrowthRunBinding as validateSourceGrowthRunBinding,
   revisionBenefitContractDigest, validateRevisionBenefitContract,
-  type AnySourceGrowthRunBinding as SourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import { automationDefinitionDigest, type AssistantAutomationsService, type HostAutomationDefinition, type HostAutomationExecutor, type HostAutomationExecutorInput, type HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
+  type AnySourceGrowthRunBinding as SourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding } from '@dsh-ray/assistant-growth-contract'
+import { automationDefinitionDigest, type AssistantAutomationsService, type HostAutomationDefinition, type HostAutomationExecutor, type HostAutomationExecutorInput, type HostAutomationExecutorResult } from '@dsh-ray/assistant-automations'
 import { controlPlaneDigest, expectedSourceRelease, type ControlPlaneStore } from './store.js'
 import { awaitSourceSignal, inspectSourceContext } from './source-context.js'
 import { assertPluginModificationAllowed, removeSourceJobWorktree, validateScopedPluginFiles, type ScopedPluginFile } from './source-workspace.js'
@@ -14,7 +14,7 @@ import { resolveSourceBaseline, validateSourceBaselineConfig } from './source-ba
 import { validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { inspectSourceRevisionContext, normalizeSourceRevisionGrant, validateSourceRevisionGrant } from './source-revision.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
-import type { PluginCreationVerificationCertificate, PluginRevisionParentBinding } from '@dsh-enhanced/assistant-growth-contract'
+import type { PluginCreationVerificationCertificate, PluginRevisionParentBinding } from '@dsh-ray/assistant-growth-contract'
 import { extractCandidatePluginKindFromFiles, extractCandidatePluginKindFromManifestText,
   inspectSourceCreationContext, normalizeCandidatePluginKind,
   validateSourceCreationFiles, validateSourceCreationGrant, type CandidatePluginKind } from './source-creation.js'
@@ -74,7 +74,7 @@ export interface SourceJobPorts {
   delivery: { validateOwnerRoute(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }): SourceJobOwnerReceipt }
 }
 type Trust = Awaited<ReturnType<typeof loadTrustConfig>>
-export { SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-contract'
+export { SourceGrowthRunUnavailableError } from '@dsh-ray/assistant-growth-contract'
 class SourceGrowthNativeMismatchError extends Error {}
 
 export function validateSourceJobsConfig(value: SourceJobsConfig, build?: SourceBuildConfig): void {
@@ -153,7 +153,7 @@ export class SourceJobRuntime {
   private readonly diagnostics = new Map<string, SourceBuildDiagnostics>()
   constructor(private readonly options: {
     config: SourceJobsConfig; build: SourceBuildConfig; statePath: string; store: ControlPlaneStore; ports: SourceJobPorts
-    withWorkItemGrowthRunFence?: <T>(run:WorkItemSourceGrowthRunBinding|import('@dsh-enhanced/assistant-growth-contract').WorkItemRevisionSourceGrowthRunBinding,gapId:string,owner:SourceJobOwnerReceipt,generation:boolean,callback:()=>T)=>T
+    withWorkItemGrowthRunFence?: <T>(run:WorkItemSourceGrowthRunBinding|import('@dsh-ray/assistant-growth-contract').WorkItemRevisionSourceGrowthRunBinding,gapId:string,owner:SourceJobOwnerReceipt,generation:boolean,callback:()=>T)=>T
     withGapSourceFence?: <T>(gapId: string, owner: SourceJobOwnerReceipt, callback: () => T) => T
     assertGrowthRun?: (growthRun: SourceGrowthRunBinding, gapId: string, owner: SourceJobOwnerReceipt, generation: boolean) => void
     trust: () => Promise<Trust>
@@ -720,7 +720,7 @@ export class SourceJobRuntime {
         generatorDigest: (source as Awaited<ReturnType<typeof inspectSourceRevisionContext>>).generatorDigest, parent: structuredClone(parent!.parent),
         // Task-failure revisions pin a growth run; owner-instruction revisions have none.
         ...(input.growthRun === undefined ? {}
-          : { growthRun: structuredClone(input.growthRun! as import('@dsh-enhanced/assistant-growth-contract').SourceGrowthRunBinding) }) } } : {}),
+          : { growthRun: structuredClone(input.growthRun! as import('@dsh-ray/assistant-growth-contract').SourceGrowthRunBinding) }) } } : {}),
       gapId: gap.id, gapRevision: gap.revision, gapDigest: controlPlaneDigest(gap), baseCommit: source.baseCommit,
       files: structuredClone(input.files), ttlMs: input.ttlMs, build: structuredClone(this.options.build),
       worktree: join(this.options.statePath, 'source-worktrees', `worktree-job-${token}`),

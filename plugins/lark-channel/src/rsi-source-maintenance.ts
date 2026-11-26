@@ -3,7 +3,7 @@ import { lstat, realpath, rename, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { sourceMaintenanceDigest, verifySourceMaintenanceRecords,
-  type SourceMaintenanceAnchor, type SourceMaintenanceRecord } from '@dsh-enhanced/plugin-control-plane'
+  type SourceMaintenanceAnchor, type SourceMaintenanceRecord } from '@dsh-ray/plugin-control-plane'
 import { rsiBuildResources as io } from './rsi-build.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
 
@@ -70,7 +70,7 @@ async function noAlternates(root: string, bare: boolean): Promise<void> {
 }
 async function packageVersion(repository: string, ref: string, signal: AbortSignal): Promise<string> {
   const value = JSON.parse(await git(repository, ['show', `${ref}:package.json`], signal)) as Record<string, unknown>
-  if (value.name !== 'dsh-enhanced' || typeof value.version !== 'string' || !VERSION.test(value.version)) fail('source package version is invalid')
+  if (value.name !== 'dsh-ray' || typeof value.version !== 'string' || !VERSION.test(value.version)) fail('source package version is invalid')
   return value.version as string
 }
 interface Original {

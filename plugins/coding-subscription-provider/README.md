@@ -1,4 +1,4 @@
-# @dsh-enhanced/coding-subscription-provider
+# @dsh-ray/coding-subscription-provider
 
 把同一台机器、同一 OS 用户已经登录的 Codex、Claude Code、Cursor Agent 与 Grok Build 注册为 DeepSeek Harness provider。发布 bundle 默认让 Codex 直接使用本机 ChatGPT/Codex 订阅的 Responses 通道；Codex CLI 是显式 fallback，其他 provider 使用各自的官方 CLI。
 
@@ -27,7 +27,7 @@ Codex direct 使用原生 function call，CLI route 使用严格的 `dsh-tool-ca
 2. 安装并检查 bundle：
 
 ```sh
-dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider
+dsh plugin --profile web add @dsh-ray/coding-subscription-provider
 dsh --profile web --dump-config
 ```
 

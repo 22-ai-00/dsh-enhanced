@@ -3,8 +3,8 @@ import { constants } from 'node:fs'
 import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { join, relative, isAbsolute, normalize, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import * as Delivery from '@dsh-enhanced/assistant-delivery'
-import { inspectIsolationGrant } from '@dsh-enhanced/assistant-isolation'
+import * as Delivery from '@dsh-ray/assistant-delivery'
+import { inspectIsolationGrant } from '@dsh-ray/assistant-isolation'
 import { prepareWebOwnerProfile, type WebOwnerSetupInput } from './setup.js'
 import { prepareGoalAdmission, parseGoalAdmissionTask } from './goal-admission.js'
 import { inspectAutonomyProfile } from './doctor.js'
@@ -88,7 +88,7 @@ export async function configureGoalAdmission(input: WebOwnerSetupInput, effectiv
     const inspectGrant = () => inspectIsolationGrant({ stateRoot: profile.stateRoot, grant: profile.grant })
     if (inspectGrant().status !== 'available') fail('persisted isolation grant unavailable; setup does not renew grants')
     const eventSupport = parseGoalAdmissionTask(taskSource).repositoryDelivery?.events
-      ? await import('@dsh-enhanced/event-triggers').catch(() => fail('install matching event-triggers support for repository events')) : undefined
+      ? await import('@dsh-ray/event-triggers').catch(() => fail('install matching event-triggers support for repository events')) : undefined
     const plan = prepareGoalAdmission(input, prepared.patch, effectiveSource, taskSource, observed.snapshot, Date.now(), settingsSource, eventSupport)
     const recheck = async () => {
       if (await patch(path) !== before || !isDeepStrictEqual(await defaultModelSettings(input.dshHome), settingsSource)

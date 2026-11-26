@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, test } from 'vitest'
-import { AssistantEvaluationService, canonicalEvaluationHostScope } from '@dsh-enhanced/assistant-evaluation'
+import { AssistantEvaluationService, canonicalEvaluationHostScope } from '@dsh-ray/assistant-evaluation'
 import { WorkItemEvaluationExporter } from '../src/evaluation.ts'
 import { settleOutcomes, type SettlementOptions } from '../src/settlement.ts'
 import type { PeerDeliveryService, PeerOwnerForegroundTaskSource, PeerOwnerForegroundTaskSourcePage } from '../src/peers.ts'

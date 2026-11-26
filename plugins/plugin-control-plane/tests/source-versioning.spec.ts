@@ -12,7 +12,7 @@ async function fixture(version = '1.2.3', name = 'helper') {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'source-versioning-')); roots.push(root)
   const repository = join(root, 'repo'); const plugin = join(repository, 'plugins', name); const source = join(plugin, 'src')
   await mkdir(source, { recursive: true })
-  const manifest = { name: `@dsh-enhanced/${name}`, version, dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { check: 'pnpm check' }, dependencies: { leftpad: '1.0.0' }, metadata: { alpha: 1, beta: 2 } }
+  const manifest = { name: `@dsh-ray/${name}`, version, dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { check: 'pnpm check' }, dependencies: { leftpad: '1.0.0' }, metadata: { alpha: 1, beta: 2 } }
   await writeFile(join(plugin, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
   await writeFile(join(source, 'version.ts'), `export const version = '${version}'\n`)
   await writeFile(join(source, 'index.ts'), 'export const stable = true\n')
@@ -42,7 +42,7 @@ test('derives the next stable patch only from tracked base blobs and returns Hos
     expect.objectContaining({ path: 'package.json' }),
     { path: 'src/version.ts', content: "export const version = '1.2.4'\n" },
   ])
-  expect(JSON.parse(result.files[0]!.content)).toMatchObject({ name: '@dsh-enhanced/helper', version: '1.2.4', scripts: { check: 'pnpm check' } })
+  expect(JSON.parse(result.files[0]!.content)).toMatchObject({ name: '@dsh-ray/helper', version: '1.2.4', scripts: { check: 'pnpm check' } })
 })
 
 test('accepts semantic manifest formatting changes only when every non-version field remains the base value', async () => {
@@ -55,7 +55,7 @@ test('accepts semantic manifest formatting changes only when every non-version f
   for (const mutate of [
     (value: MutableManifest) => { value.dependencies.leftpad = '2.0.0' },
     (value: MutableManifest) => { value.scripts.check = 'attacker' },
-    (value: MutableManifest) => { value.name = '@dsh-enhanced/other' },
+    (value: MutableManifest) => { value.name = '@dsh-ray/other' },
     (value: MutableManifest) => { value.unreviewed = true },
   ]) {
     const changed = JSON.parse(result.files[0]!.content) as MutableManifest
@@ -86,7 +86,7 @@ test('rejects pre-release, overflow, protected, malformed base identities, and c
   await expect(managedPatchVersionFiles(input(overflow))).rejects.toThrow(/safe increment/u)
   const protectedPlugin = await fixture('1.2.3', 'assistant-policy')
   await expect(managedPatchVersionFiles(input(protectedPlugin))).rejects.toThrow(/protected safety root/u)
-  const bad = await fixture(); const manifest = { ...bad.manifest, name: '@dsh-enhanced/other' }
+  const bad = await fixture(); const manifest = { ...bad.manifest, name: '@dsh-ray/other' }
   await writeFile(join(bad.plugin, 'package.json'), JSON.stringify(manifest));
   execFileSync('/usr/bin/git', ['add', '--all'], { cwd: bad.repository, env: bad.environment })
   execFileSync('/usr/bin/git', ['-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'bad'], { cwd: bad.repository, env: bad.environment })

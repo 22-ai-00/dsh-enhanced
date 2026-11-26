@@ -2,11 +2,11 @@ import type {
   WorkflowAutomationTemplate,
   WorkflowScope,
   WorkflowStepFingerprint,
-} from '@dsh-enhanced/assistant-growth-contract'
+} from '@dsh-ray/assistant-growth-contract'
 
 // The wire protocol has one owner. Re-exporting the shared contract keeps this
 // package convenient to consume without maintaining a second, drifting copy.
-export * from '@dsh-enhanced/assistant-growth-contract'
+export * from '@dsh-ray/assistant-growth-contract'
 
 export type WorkflowCandidateState =
   | 'conflicted'
