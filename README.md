@@ -11,9 +11,9 @@
   <img alt="status" src="https://img.shields.io/badge/status-experimental-orange">
 </p>
 
-**文鳐 Ray**（小名小鳐，出自《山海经》「小鳐小鳐，游而化飞」，基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)）是在本机运行的个人自成长 AI 助手，默认支持 **飞书 + 本地 Web 控制台**双端使用，可接入主流大模型或本机 **TraeX (`traex`) / Antigravity (`agy`)**，在日常使用与纠偏中积累记忆、生成并沙箱验收新技能与工作流，支持一键启停自迭代与一键升级回滚。**目前为实验版，完整自动闭环的长期真实效果仍在验证中**，能力与限制详见[当前状态](docs/rsi-status.md)。
+**文鳐 Ray**（小名小鳐，出自《山海经》「小鳐小鳐，游而化飞」，基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)）是在本机运行的个人自成长 AI 助手，默认支持 **飞书 + 本地 Web / 桌面端 DSH「文鳐」控制台**使用，可接入主流大模型或本机 **TraeX (`traex`) / Antigravity (`agy`)**，在日常使用与纠偏中积累记忆、生成并沙箱验收新技能与工作流，支持一键启停自迭代与一键升级回滚。**目前为实验版，完整自动闭环的长期真实效果仍在验证中**，能力与限制详见[当前状态](docs/rsi-status.md)。
 
-- **随时对话**：飞书私聊与本机 Web 控制台随时交互，后台常驻运行，支持日程、仓库与 Webhook 主动提醒。
+- **随时对话**：飞书私聊、本机 Web 与桌面端 DSH「文鳐」控制台随时交互，后台常驻运行，支持日程、仓库与 Webhook 主动提醒。
 - **懂你办事**：自由选择云端模型或本机 TraeX / Antigravity 编程助手，自动拆解长任务并跨断点推进。
 - **自我成长闭环**：从日常对话与纠偏沉淀偏好和经验，在原生沙箱独立验收新技能后有界启用，异常可一键回滚。
 - **本机安全护航**：记忆与凭据默认留在本机，敏感操作须经你授权，随时可通过对话或命令行启停自迭代与升级恢复。
@@ -33,6 +33,27 @@ npm i -g dsh-ray && dsh-ray install
 ```sh
 npm i -g dsh-ray && dsh-ray install --scenario web --model skip --yes && dsh-ray open --profile web
 ```
+
+### 桌面端 DSH 左栏插件（`DeepSeek Harness`）
+
+前置条件：已安装 DeepSeek Harness 桌面端（`@deepseek-ai/dsh >=0.2.2-rc.5 <0.3.0`）并至少启动初始化过一次。
+
+1. 打开 DeepSeek Harness 桌面端 → 左侧栏 **插件** → **添加插件** → **安装第三方插件**。
+2. 在 **包名或地址** 中填入 `@dsh-ray/owner-console`（本地源码安装须先在仓库根目录执行 `pnpm install && pnpm run build`，再填入 `plugins/owner-console` 的**绝对路径**，如 `/path/to/dsh-ray/plugins/owner-console`），点击 **安装**（无需先装 `@dsh-ray/assistant-web-owner`）。
+3. 完全退出并重启桌面端（如 macOS `Cmd+Q` 后重新打开）。重启后左侧栏即出现 **「文鳐」** 入口（及 **设置 → 文鳐助手**），可在面板内直接对话、扫码接入飞书（`lark-channel`）、配置本机编码工具及加装其它 `@dsh-ray/*` 插件。
+
+如需为**已有普通 CLI profile**（非 `desktop`）单独补充控制台插件（标准 `dsh-ray install` 与 `--scenario web` 已默认包含 `@dsh-ray/owner-console`）：
+
+```sh
+dsh plugin --profile <profile> add @dsh-ray/owner-console
+dsh --profile <profile> --dump-config
+# 或通过 dsh-ray 追加安装：
+dsh-ray install --profile <profile> --with console
+```
+
+> **注意**：
+> - `desktop` profile 由 Electron 桌面端独占托管，**不要**执行 npm 版 `dsh plugin --profile desktop`（`dsh` CLI 会直接拒绝）或 `dsh-ray install --profile desktop`（会在准备 Host 后于 `dsh plugin --profile desktop` 步骤失败）。如需用命令行体检或升级桌面端，须先安装 `dsh-ray` CLI（`npm i -g dsh-ray`）并确保已绑定私有 Host 或全局 `PATH` 中存在 `dsh`（`@deepseek-ai/dsh`），再执行 `dsh-ray doctor --profile desktop` 或 `dsh-ray upgrade --yes --profile desktop --confirm-dsh-home-stopped`（升级前需先完全退出桌面端）；否则也可直接在桌面端 UI 的 **插件** 或 **设置 → 文鳐助手** 中管理或升级 `@dsh-ray/owner-console`。
+> - **不要**在与桌面端或 Web 端内置 Host 共用的同一 profile 中启用 `@dsh-ray/acp`，否则会触发 `DUPLICATE INSERT ID: cordis-host-runner` 冲突。
 
 ### 首次连接（3 步完成）
 
@@ -79,6 +100,7 @@ npm i -g dsh-ray && dsh-ray install --scenario web --model skip --yes && dsh-ray
 | 添加或切换模型（含 `traex` / `agy`） | [模型配置](docs/models.md) |
 | 飞书绑定、权限与消息排查 | [飞书接入](plugins/lark-channel/docs/setup.md) |
 | `dsh-ray` 完整命令、升级与卸载 | [命令参考](packages/dsh-ray/README.md) |
+| 桌面端左栏「文鳐」控制台插件（`@dsh-ray/owner-console`） | [控制台插件](plugins/owner-console/README.md) |
 | 已支持能力与当前限制 | [当前状态](docs/rsi-status.md) · [验收合同](docs/rsi-acceptance.md) |
 | 全部插件与共享库清单 | [插件目录](plugins/README.md) · [共享包目录](packages/README.md) |
 
