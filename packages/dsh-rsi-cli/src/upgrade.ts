@@ -763,12 +763,16 @@ export const KNOWN_ENHANCED_PACKAGES: readonly string[] = [
   '@dsh-enhanced/traex-acp-provider',
 ]
 
-function extractEnhancedPackageFromExclude(entry: string): string | undefined {
+function parseEnhancedExcludeRule(
+  entry: string,
+): { readonly name: string; readonly versions: string[]; readonly unversioned: boolean } | undefined {
   if (!entry.startsWith('@dsh-enhanced/') || entry === '@dsh-enhanced/*') return undefined
   const atIndex = entry.indexOf('@', '@dsh-enhanced/'.length)
   const name = atIndex > 0 ? entry.slice(0, atIndex) : entry
   if (!/^@dsh-enhanced\/[a-z0-9][a-z0-9-]*$/u.test(name)) return undefined
-  return name
+  if (atIndex === -1) return { name, versions: [], unversioned: true }
+  const versions = entry.slice(atIndex + 1).split('||').map(part => part.trim()).filter(Boolean)
+  return { name, versions, unversioned: false }
 }
 
 async function readRegistryEnhancedDepsFromManifest(profileDir: string): Promise<string[]> {
@@ -849,21 +853,55 @@ async function updatePnpmWorkspaceOverrides(
     } else if (!isSeq(excludeNode)) {
       throw new Error(`profile ${profile} pnpm-workspace.yaml minimumReleaseAgeExclude 必须为数组`)
     } else {
-      const existingEntries = new Set<string>()
-      for (const item of excludeNode.items) {
+      // pnpm 11 evaluates only the first minimumReleaseAgeExclude rule per package,
+      // so merge retained/duplicate versions onto that first rule with `||`.
+      const grouped = new Map<string, { firstIndex: number; versions: string[]; unversioned: boolean }>()
+      const duplicateIndices: number[] = []
+      for (const [index, item] of excludeNode.items.entries()) {
         const val = isScalar(item) ? item.value : item
         if (typeof val !== 'string') continue
-        existingEntries.add(val)
-        const pkg = extractEnhancedPackageFromExclude(val)
-        if (pkg) packageNames.add(pkg)
-      }
-      for (const pkg of [...packageNames].sort()) {
-        const entry = `${pkg}@${targetVersion}`
-        if (!existingEntries.has(entry)) {
-          excludeNode.add(entry)
-          existingEntries.add(entry)
+        const parsed = parseEnhancedExcludeRule(val)
+        if (!parsed) continue
+        packageNames.add(parsed.name)
+        const existing = grouped.get(parsed.name)
+        if (!existing) {
+          grouped.set(parsed.name, {
+            firstIndex: index,
+            versions: [...parsed.versions],
+            unversioned: parsed.unversioned,
+          })
+        } else {
+          if (parsed.unversioned) existing.unversioned = true
+          for (const version of parsed.versions) {
+            if (!existing.versions.includes(version)) existing.versions.push(version)
+          }
+          duplicateIndices.push(index)
           changed = true
         }
+      }
+      for (const pkg of [...packageNames].sort()) {
+        const group = grouped.get(pkg)
+        if (!group) {
+          excludeNode.add(`${pkg}@${targetVersion}`)
+          changed = true
+          continue
+        }
+        if (group.unversioned) continue
+        if (!group.versions.includes(targetVersion)) {
+          group.versions.push(targetVersion)
+          changed = true
+        }
+        const expected = `${pkg}@${group.versions.join(' || ')}`
+        const currentNode = excludeNode.items[group.firstIndex]
+        const currentVal = isScalar(currentNode) ? currentNode.value : currentNode
+        if (currentVal !== expected) {
+          if (isScalar(currentNode)) currentNode.value = expected
+          else excludeNode.set(group.firstIndex, expected)
+          changed = true
+        }
+      }
+      for (let i = duplicateIndices.length - 1; i >= 0; i--) {
+        excludeNode.items.splice(duplicateIndices[i]!, 1)
       }
     }
   }

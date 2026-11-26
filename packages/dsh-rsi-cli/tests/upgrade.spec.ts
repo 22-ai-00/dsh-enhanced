@@ -1045,7 +1045,7 @@ overrides:
     }
   })
 
-  test('F28: updates minimumReleaseAgeExclude without overrides, preserves prefix order/duplicates, and respects minimumReleaseAgeStrict', async () => {
+  test('F28: merges minimumReleaseAgeExclude versions onto first rule without duplicates and respects minimumReleaseAgeStrict', async () => {
     const f = await createHomeFixture({ profile: 'assistant', enhancedVersion: '0.1.82' })
     const wsPath = join(f.profileDir, 'pnpm-workspace.yaml')
     const fakeBinDir = join(f.root, 'fake-bin-f28-exclude')
@@ -1054,7 +1054,7 @@ overrides:
     await writeFile(fakePnpm, '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 })
     await chmod(fakePnpm, 0o755)
 
-    // 1. Workspace WITHOUT overrides: preserves comments and old @0.1.82 prefix, deduplicates, appends @0.1.85 for all KNOWN_ENHANCED_PACKAGES
+    // 1. Workspace WITHOUT overrides: preserves comments, merges versions onto first entry with `||`, removes duplicates, appends @0.1.85 for all KNOWN_ENHANCED_PACKAGES
     const wsWithoutOverrides = `# assistant workspace
 nodeLinker: isolated
 autoInstallPeers: false
@@ -1079,14 +1079,15 @@ minimumReleaseAgeExclude:
     expect(updatedRaw).toContain('# assistant workspace')
     expect(updatedRaw).toContain('nodeLinker: isolated')
     const parsed = parseDocument(updatedRaw).toJS() as { minimumReleaseAgeExclude: string[] }
-    expect(parsed.minimumReleaseAgeExclude.slice(0, 3)).toEqual([
-      '@dsh-enhanced/assistant-delivery@0.1.82',
-      '@dsh-enhanced/assistant-policy@0.1.82',
-      '@dsh-enhanced/assistant-delivery@0.1.85',
+    expect(parsed.minimumReleaseAgeExclude.slice(0, 2)).toEqual([
+      '@dsh-enhanced/assistant-delivery@0.1.82 || 0.1.85',
+      '@dsh-enhanced/assistant-policy@0.1.82 || 0.1.85',
     ])
-    // Deduplicated: delivery@0.1.85 appears only once
-    expect(parsed.minimumReleaseAgeExclude.filter(x => x === '@dsh-enhanced/assistant-delivery@0.1.85')).toHaveLength(1)
+    // Deduplicated: delivery appears only once with merged semver OR versions
+    expect(parsed.minimumReleaseAgeExclude.filter(x => x.startsWith('@dsh-enhanced/assistant-delivery@'))).toHaveLength(1)
+    expect(parsed.minimumReleaseAgeExclude.filter(x => x.startsWith('@dsh-enhanced/assistant-policy@'))).toHaveLength(1)
     for (const pkg of KNOWN_ENHANCED_PACKAGES) {
+      if (pkg === '@dsh-enhanced/assistant-delivery' || pkg === '@dsh-enhanced/assistant-policy') continue
       expect(parsed.minimumReleaseAgeExclude).toContain(`${pkg}@0.1.85`)
     }
 
