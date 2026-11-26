@@ -290,19 +290,78 @@ const schema = Schema.object({
   }).default(undefined as never),
 }) as Schema<AssistantGrowthDriverConfig>
 
+const explicitConfigInputs = new WeakMap<object, AssistantGrowthDriverConfig>()
+
+function snapshotExplicitInput(raw: unknown): AssistantGrowthDriverConfig | undefined {
+  if (raw === undefined) return {}
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(raw)) {
+    out[key] = value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? { ...(value as Record<string, unknown>) }
+      : value
+  }
+  return out as AssistantGrowthDriverConfig
+}
+
 export const Config = new Proxy(schema, {
   apply(target, thisArg, argumentsList: [unknown]) {
     const value = argumentsList[0]
     if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value))) throw new Error('assistant-growth-driver: config must be an object')
     if (value !== undefined) for (const key of Object.keys(value as object)) if (!fields.has(key)) throw new Error(`assistant-growth-driver: unknown config field: ${key}`)
-    return Reflect.apply(target, thisArg, argumentsList) as AssistantGrowthDriverConfig
+    const explicit = (value !== null && typeof value === 'object' ? explicitConfigInputs.get(value) : undefined)
+      ?? snapshotExplicitInput(value)
+    const parsed = Reflect.apply(target, thisArg, argumentsList) as AssistantGrowthDriverConfig
+    if (parsed !== null && typeof parsed === 'object' && explicit !== undefined) {
+      explicitConfigInputs.set(parsed, explicit)
+    }
+    return parsed
+  },
+  get(target, prop, receiver) {
+    if (prop === '~standard') {
+      const std = Reflect.get(target, prop, target) as {
+        version: number
+        vendor: string
+        validate: (value: unknown, options?: unknown) => { value?: unknown; issues?: readonly { message: string }[] }
+          | Promise<{ value?: unknown; issues?: readonly { message: string }[] }>
+      }
+      return {
+        ...std,
+        validate(value: unknown, options?: unknown) {
+          if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value))) {
+            return { issues: [{ message: 'assistant-growth-driver: config must be an object' }] }
+          }
+          if (value !== undefined) {
+            for (const key of Object.keys(value as object)) {
+              if (!fields.has(key)) {
+                return { issues: [{ message: `assistant-growth-driver: unknown config field: ${key}` }] }
+              }
+            }
+          }
+          const explicit = (value !== null && typeof value === 'object' ? explicitConfigInputs.get(value) : undefined)
+            ?? snapshotExplicitInput(value)
+          const result = std.validate(value, options)
+          const attach = (res: { value?: unknown; issues?: readonly { message: string }[] }) => {
+            if (res && typeof res === 'object' && !res.issues && res.value !== null && typeof res.value === 'object'
+              && explicit !== undefined) {
+              explicitConfigInputs.set(res.value as object, explicit)
+            }
+            return res
+          }
+          return result instanceof Promise ? result.then(attach) : attach(result)
+        },
+      }
+    }
+    return Reflect.get(target, prop, receiver)
   },
 }) as Schema<AssistantGrowthDriverConfig>
 
 export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<NormalizedGrowthDriverConfig> {
-  if (input?.usageLearning && Object.hasOwn(input.usageLearning, 'workItemFailures')
-    && typeof input.usageLearning.workItemFailures !== 'boolean') throw new Error('assistant-growth-driver: workItemFailures must be a boolean')
-  const rawInput = (input !== undefined && input !== null && typeof input === 'object' && !Array.isArray(input)) ? input : undefined
+  const rawInput = (input !== undefined && input !== null && typeof input === 'object' && !Array.isArray(input))
+    ? (explicitConfigInputs.get(input) ?? input)
+    : undefined
+  if (rawInput?.usageLearning && Object.hasOwn(rawInput.usageLearning, 'workItemFailures')
+    && typeof rawInput.usageLearning.workItemFailures !== 'boolean') throw new Error('assistant-growth-driver: workItemFailures must be a boolean')
   const explicitEnabled = rawInput?.enabled
   const explicitWorkflow = rawInput?.workflowOwnerAnchored?.enabled
   const explicitSource = rawInput?.pluginSourceProposals?.enabled

@@ -626,6 +626,71 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     expect(() => new AssistantGrowthDriverService(ctx, { enabled: true })).toThrow(/owner scope/)
   })
 
+  it('activates through Cordis Standard Schema validation for standby {} / undefined and RSI owner configs without workItemAuthorities', async () => {
+    const standbyEmpty = await mount()
+    await standbyEmpty.ctx.plugin(plugin, {})
+    const emptyDriver = standbyEmpty.ctx.get('assistantGrowthDriver' as never) as unknown as Pick<AssistantGrowthDriverService, 'wake' | 'health'> | undefined
+    expect(emptyDriver).toBeDefined()
+    await emptyDriver!.wake()
+    expect(emptyDriver!.health()).toMatchObject({ outcome: 'skipped', reason: 'missing-scope', run: null })
+
+    const standbyUndefined = await mount()
+    await standbyUndefined.ctx.plugin(plugin)
+    const undefinedDriver = standbyUndefined.ctx.get('assistantGrowthDriver' as never) as unknown as Pick<AssistantGrowthDriverService, 'wake' | 'health'> | undefined
+    expect(undefinedDriver).toBeDefined()
+    await undefinedDriver!.wake()
+    expect(undefinedDriver!.health()).toMatchObject({ outcome: 'skipped', reason: 'missing-scope', run: null })
+
+    const ownerMounted = await mount()
+    await ownerMounted.ctx.plugin(plugin, {
+      enabled: true,
+      intervalMs: 0,
+      budgetId: 'growth-budget',
+      budgetAmount: 1,
+      scope: { workspace: ownerMounted.root, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: OWNER_ROUTE },
+      workflowOwnerAnchored: { enabled: true },
+      usageLearning: {
+        enabled: true,
+        databasePath: join(ownerMounted.root, 'growth.sqlite'),
+        scanBudgetId: 'growth-budget',
+        scanBudgetAmount: 1,
+      },
+      pluginSourceProposals: {
+        enabled: true,
+        preparationMode: 'durable',
+        repository: ownerMounted.root,
+        offline: true,
+        allowCreation: true,
+      },
+    })
+    const ownerDriver = ownerMounted.ctx.get('assistantGrowthDriver' as never) as unknown as Pick<AssistantGrowthDriverService, 'health'> | undefined
+    expect(ownerDriver).toBeDefined()
+    expect(ownerDriver!.health()).toMatchObject({ outcome: 'never-run', reason: null })
+
+    const unknownValidation = Config['~standard'].validate({ unknownField: 1 } as never) as { issues?: readonly { message: string }[] }
+    expect(unknownValidation.issues?.[0]?.message).toContain('unknown config field')
+
+    const explicitEnabledNoScope = Config['~standard'].validate({ enabled: true }) as { value?: AssistantGrowthDriverService['Config'] }
+    expect(() => normalizeConfig(explicitEnabledNoScope.value as never)).toThrow(/explicit owner scope/)
+
+    const explicitWorkItemNoPins = Config['~standard'].validate({
+      enabled: true,
+      scope: { workspace: ownerMounted.root, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: OWNER_ROUTE },
+      usageLearning: {
+        enabled: true,
+        workItemFailures: true,
+      },
+      pluginSourceProposals: {
+        enabled: true,
+        preparationMode: 'durable',
+        repository: ownerMounted.root,
+        offline: true,
+        allowCreation: true,
+      },
+    }) as { value?: unknown }
+    expect(() => normalizeConfig(explicitWorkItemNoPins.value as never)).toThrow(/explicit authorities/)
+  })
+
   it('supports wake and health through a real injected Cordis service proxy', async () => {
     const h = await mount()
     new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { apiKeyEnv: 'TEST_PROVIDER_API_KEY' }))
