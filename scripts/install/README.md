@@ -14,7 +14,7 @@
 在**交互式终端**运行一行安装命令：
 
 ```sh
-npm i -g dsh-ray && dsh-ray install
+npm i -g @dsh-ray/cli && dsh-ray install
 ```
 
 默认 `supervised` 包含飞书常驻助理、`owner-console`（「文鳐」控制台与原生设置 UI）、`assistant-proactive` / `assistant-growth-driver` / `assistant-memory-learning` / `assistant-work-items` 等自主组件。安装器解析并固定兼容的 DSH Host（`0.2.2-rc.5`）和同批插件版本；遇到未知 Host 版本会拒绝安装，并把绑定的 Host 写入 `$DSH_HOME/.dsh-ray-host.json`。第一次安装请按终端向导完成飞书应用、本人绑定、模型与可选能力选择。
@@ -49,7 +49,7 @@ dsh-ray web-url --profile web       # 仅读取已运行服务的带 token URL
 适合先在本机体验聊天与「文鳐」控制台，暂不连接飞书；无需 Docker。`--scenario web` 直接包含 `owner-console` 与 `assistant-web-owner`；极简 `--scenario core` 可按需追加 `--with console`。两者都不默认注册常驻服务，安装后直接运行 `dsh-ray open --profile web` 即可自动读取 `.dsh-ray-host.json` 绑定的 `0.2.2-rc.5` 私有 Host 前台启动并打开浏览器：
 
 ```sh
-npm i -g dsh-ray && dsh-ray install --scenario web --model skip --yes && dsh-ray open --profile web
+npm i -g @dsh-ray/cli && dsh-ray install --scenario web --model skip --yes && dsh-ray open --profile web
 ```
 
 如需手动在前台直接拉起新安装的 `0.2.2-rc.5` 私有 Host，可运行（旧 Home 或自定义路径请先[查找绑定的 Host 入口](maintenance.md#查找私有-host-入口)）：
@@ -76,7 +76,7 @@ dsh-ray restart --profile web
 dsh-ray install --help
 ```
 
-只需升级全局 CLI：`dsh-ray update`；普通日常用户的就地自助升级与自动回滚用 `dsh-ray upgrade --check` / `--dry-run` / `--yes`。受支持的**现有 Linux 原 Docker 冻结 owner/cohort** 可先用 `dsh-ray update --all --dry-run --yes` 看计划，再运行 `dsh-ray update --all --yes`，从原绑定官方源码一次性迁移至 native 并更新至 `0.2.2-rc.5`（保留原 owner、授权与历史；空历史与代码层已实现的非空采用封存/审查库 v2 handoff 均尚未完成完整 live 实机验收）；旧 CLI 须先单独运行一次 `dsh-ray update`。完整条件与恢复步骤见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)及 [CLI 升级说明](../../packages/dsh-ray/README.md#升级与重装)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-ray reinstall` 属于破坏性清理重装；先核对 [CLI 重装与 purge 说明](../../packages/dsh-ray/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
+只需升级全局 CLI：`dsh-ray update`；普通日常用户的就地自助升级与自动回滚用 `dsh-ray upgrade --check` / `--dry-run` / `--yes`。受支持的**现有 Linux 原 Docker 冻结 owner/cohort** 可先用 `dsh-ray update --all --dry-run --yes` 看计划，再运行 `dsh-ray update --all --yes`，从原绑定官方源码一次性迁移至 native 并更新至 `0.2.2-rc.5`（保留原 owner、授权与历史；空历史与代码层已实现的非空采用封存/审查库 v2 handoff 均尚未完成完整 live 实机验收）；旧 CLI 须先单独运行一次 `dsh-ray update`。完整条件与恢复步骤见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)及 [CLI 升级说明](../../packages/cli/README.md#升级与重装)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-ray reinstall` 属于破坏性清理重装；先核对 [CLI 重装与 purge 说明](../../packages/cli/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
 
 ## 配置插件
 
@@ -112,7 +112,7 @@ CLI 先读取原生有效配置，单项修改时自动保留整行其它配置�
 - `--proactive <auto|on|off>`、`--dreaming <auto|on|off>`、`--growth <auto|on|off>`：显式覆盖对应自主能力的安装决策并持久化到 `install-intent.json`（`dreaming` 启用前仍要求明确授权/作用域/模型与预算齐备，默认 fail-closed 休眠）。
 - `--model-provider <route>`：指定 `deepseek-official`、自定义网关、`traex-agent` 或 `agy-agent`。
 
-`dsh-ray install --help` 显示全部安装器参数；[CLI 指南](../../packages/dsh-ray/README.md)说明 `open`、`doctor`、`install`、`update`、`reinstall`、`purge` 的边界。开发 checkout 的构建和本地安装命令见[维护说明](maintenance.md#本地-checkout-安装)。场景能力基础叠加为 `core ⊂ lark ⊂ supervised`；显式 `--lark skip` 或 `--no-service` 是有限安装，不等同于完整默认场景。
+`dsh-ray install --help` 显示全部安装器参数；[CLI 指南](../../packages/cli/README.md)说明 `open`、`doctor`、`install`、`update`、`reinstall`、`purge` 的边界。开发 checkout 的构建和本地安装命令见[维护说明](maintenance.md#本地-checkout-安装)。场景能力基础叠加为 `core ⊂ lark ⊂ supervised`；显式 `--lark skip` 或 `--no-service` 是有限安装，不等同于完整默认场景。
 
 ## 故障排查
 
@@ -124,7 +124,7 @@ CLI 先读取原生有效配置，单项修改时自动保留整行其它配置�
 - **模型无法对话**：检查默认模型、登录或 API Key。安装时的模型设置会选择当前 profile 默认模型；参照[模型指南](../../docs/models.md)，勿把密钥贴入命令行或日志。
 - **Linux 依赖构建被 pnpm 拒绝**：当前安装器已在 `dsh plugin add` 前自动写入经评审决策（`koffi: true`、`protobufjs: false`）；仅旧版安装器首装、报出决策表之外的未知待审包、或 profile 预设有冲突值时才需手工处理——在报错的 profile 目录用相同 pnpm 版本运行 `pnpm approve-builds <包名>`（或在 `pnpm-workspace.yaml` 写明布尔），再以同一 Home / profile 重试；不要批准全部待审脚本。更多首次安装依赖说明见[维护说明](maintenance.md#首次安装依赖审批)。
 - **半装 bundle 残留（早期中断恢复）**：若历史首装在 `dsh plugin add` 阶段中断导致包已在 `dependencies` 中但未写入 `dsh.profile.bundles`，当前安装器会在 add 前自动移除同类半装残留并完成注册；极端历史现场的手工处理见[维护说明](maintenance.md#失败-add-的半装-bundle-自愈)。
-- **升级或恢复被拒绝**：保留报错与状态，查看[维护说明](maintenance.md)和 [CLI 指南](../../packages/dsh-ray/README.md)；不要通过删账本或重装掩盖未知结果。
+- **升级或恢复被拒绝**：保留报错与状态，查看[维护说明](maintenance.md)和 [CLI 指南](../../packages/cli/README.md)；不要通过删账本或重装掩盖未知结果。
 
 <details>
 <summary>高级维护入口（保留旧章节链接）</summary>

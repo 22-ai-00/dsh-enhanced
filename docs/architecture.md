@@ -51,7 +51,7 @@ plugins/<name>/
 
 Web owner 适配通过内存 `EntryTree` 将宿主 Session Controller 的 client 元数据与 owner-scoped 的 Host 包装绑定，只在浏览器加载同源原生 client，不复制旧版 Session 协议；子树由 Cordis effect 释放，不回写 profile 或 `node_modules`。
 
-此外，跨插件纯契约库放在 `packages/*`（如 `assistant-growth-contract`、`task-acceptance-contract`、`llm-route-capabilities`、`dsh-ray`），而 `assistant-dreaming`、`assistant-association` 等需要感知兄弟能力但不必强制装入的插件通过**可选 `peerDependencies`** 接入，保证独立包边界不被拉链锁定。
+此外，跨插件纯契约库放在 `packages/*`（如 `assistant-growth-contract`、`task-acceptance-contract`、`llm-route-capabilities`、`cli`（`@dsh-ray/cli`）），而 `assistant-dreaming`、`assistant-association` 等需要感知兄弟能力但不必强制装入的插件通过**可选 `peerDependencies`** 接入，保证独立包边界不被拉链锁定。
 
 ## 分发
 

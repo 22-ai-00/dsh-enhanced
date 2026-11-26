@@ -149,7 +149,7 @@ export async function runProgramUpgrade(options) {
   const abort = () => controller.abort(new Error('program upgrade preparation interrupted'))
   process.on('SIGINT', abort); process.on('SIGTERM', abort)
   try {
-    const { prepareHostUpdatePlan } = await import(pathToFileURL(join(root, 'packages/dsh-ray/lib/install-host.js')).href)
+    const { prepareHostUpdatePlan } = await import(pathToFileURL(join(root, 'packages/cli/lib/install-host.js')).href)
     const hostPlan = await prepareHostUpdatePlan({ dshHome: home, selector: options.selector, signal: controller.signal })
     if (!['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1', '0.2.2-rc.3', '0.2.2-rc.5'].includes(hostPlan.originalRuntime.version)
       || hostPlan.candidateRuntime.version !== '0.2.2-rc.5'

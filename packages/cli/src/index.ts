@@ -693,7 +693,7 @@ install / reinstall：
                       install --help 会展示安装器完整参数清单（也见 scripts/install/README.md）
 
 update：
-  不带参数            只升级全局 dsh-ray 自身（npm install --global dsh-ray@latest）
+  不带参数            只升级全局 dsh-ray 自身（npm install --global @dsh-ray/cli@latest）
   --all               自身升级成功后，先升级插件集合，再将已绑定的私有 Host 更新到最新兼容版本；
                       保留 patch、凭据、Session、Goal 等状态
   --dsh-version <v>   --all 时指定兼容的私有 Host 版本；默认 latest（现有未绑定 Home 保持原 Host）
@@ -1230,7 +1230,7 @@ export interface MainDeps {
 }
 
 async function assertFreshCliBin(prefix: string, version: string): Promise<string> {
-  const packageRoot = join(prefix, 'lib', 'node_modules', 'dsh-ray')
+  const packageRoot = join(prefix, 'lib', 'node_modules', '@dsh-ray', 'cli')
   const binDirectory = join(packageRoot, 'bin')
   const bin = join(binDirectory, 'dsh-ray.js')
   for (const path of [packageRoot, binDirectory]) {
@@ -1257,7 +1257,7 @@ async function assertFreshCliBin(prefix: string, version: string): Promise<strin
     manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
   } finally { await descriptor.close() }
   if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)
-    || (manifest as { name?: unknown }).name !== 'dsh-ray'
+    || (manifest as { name?: unknown }).name !== '@dsh-ray/cli'
     || (manifest as { version?: unknown }).version !== version) {
     throw new PurgeError('新 CLI 包 manifest 版本与 npm 安装结果不一致。')
   }

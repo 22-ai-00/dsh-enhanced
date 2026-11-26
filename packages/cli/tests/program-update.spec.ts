@@ -524,7 +524,7 @@ test('frozen owner keeps a newer official local CLI when npm latest lags, then d
     expect(await main(['update', '--all', '--yes'], { DSH_HOME: f.home }, {
       platform: 'linux', frozenUpdate,
       selfUpdate: options => runSelfUpdate({ ...options,
-        packageRoot: '/test/global/lib/node_modules/dsh-ray',
+        packageRoot: '/test/global/lib/node_modules/@dsh-ray/cli',
         runner: (command, args) => {
           calls.push([command, ...args].join(' '))
           return { status: 0, stdout: args[0] === 'view' ? '0.1.54\n' : '', stderr: '' }
@@ -538,11 +538,11 @@ test('frozen owner keeps a newer official local CLI when npm latest lags, then d
 
 test('after a changed global CLI install, fresh bin receives preserved arguments once', async () => {
   const f = await fixture(), prefix = join(f.root, 'npm')
-  const bin = join(prefix, 'lib', 'node_modules', 'dsh-ray', 'bin', 'dsh-ray.js')
+  const bin = join(prefix, 'lib', 'node_modules', '@dsh-ray', 'cli', 'bin', 'dsh-ray.js')
   await mkdir(resolve(bin, '..'), { recursive: true })
   await writeFile(bin, '')
-  await writeFile(join(prefix, 'lib', 'node_modules', 'dsh-ray', 'package.json'),
-    JSON.stringify({ name: 'dsh-ray', version: '99.0.0' }))
+  await writeFile(join(prefix, 'lib', 'node_modules', '@dsh-ray', 'cli', 'package.json'),
+    JSON.stringify({ name: '@dsh-ray/cli', version: '99.0.0' }))
   const freshExec = vi.fn(() => 7), frozenUpdate = vi.fn(async () => 0)
   const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
   try {
@@ -557,12 +557,12 @@ test('after a changed global CLI install, fresh bin receives preserved arguments
 
 test('fresh exec rejects a mismatched manifest or unsafe bin before spawning', async () => {
   const f = await fixture(), prefix = join(f.root, 'npm')
-  const packageRoot = join(prefix, 'lib', 'node_modules', 'dsh-ray')
+  const packageRoot = join(prefix, 'lib', 'node_modules', '@dsh-ray', 'cli')
   await mkdir(join(packageRoot, 'bin'), { recursive: true })
   const bin = join(packageRoot, 'bin', 'dsh-ray.js')
   await writeFile(bin, '')
   const manifest = join(packageRoot, 'package.json')
-  await writeFile(manifest, JSON.stringify({ name: 'dsh-ray', version: '98.0.0' }))
+  await writeFile(manifest, JSON.stringify({ name: '@dsh-ray/cli', version: '98.0.0' }))
   const freshExec = vi.fn(() => 0)
   const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
   const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
@@ -571,7 +571,7 @@ test('fresh exec rejects a mismatched manifest or unsafe bin before spawning', a
       globalPrefix: prefix, alreadyCurrent: false, actions: [] }) }
   try {
     expect(await main(['update', '--all', '--yes'], { DSH_HOME: f.home }, deps)).toBe(1)
-    await writeFile(manifest, JSON.stringify({ name: 'dsh-ray', version: '99.0.0' }))
+    await writeFile(manifest, JSON.stringify({ name: '@dsh-ray/cli', version: '99.0.0' }))
     await chmod(bin, 0o666)
     expect(await main(['update', '--all', '--yes'], { DSH_HOME: f.home }, deps)).toBe(1)
     expect(freshExec).not.toHaveBeenCalled()

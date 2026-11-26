@@ -5,9 +5,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from 'vitest'
-import { inspectLaunchdDefinition, inspectLoadedLaunchd } from '../packages/dsh-ray/src/launchd-service.ts'
-import { controlManagedService, stopManagedService } from '../packages/dsh-ray/src/services.ts'
-import { defaultRunner } from '../packages/dsh-ray/src/run.ts'
+import { inspectLaunchdDefinition, inspectLoadedLaunchd } from '../packages/cli/src/launchd-service.ts'
+import { controlManagedService, stopManagedService } from '../packages/cli/src/services.ts'
+import { defaultRunner } from '../packages/cli/src/run.ts'
 import { installDshLaunchAgent, launchAgentPaths } from '../plugins/lark-channel/src/launchd.ts'
 
 test.skipIf(process.platform !== 'darwin' || process.env.DSH_NATIVE_LAUNCHD_TEST !== '1')(

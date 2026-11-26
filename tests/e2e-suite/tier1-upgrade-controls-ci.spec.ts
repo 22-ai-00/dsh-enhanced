@@ -652,7 +652,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
         expect(res.stdout.trim()).toBe(expectedVersion)
       }
 
-      const binRes = await runNodeScript('packages/dsh-ray/bin/dsh-ray.js', ['--version'])
+      const binRes = await runNodeScript('packages/cli/bin/dsh-ray.js', ['--version'])
       expect(binRes.exitCode).toBe(0)
       expect(binRes.stdout.trim()).toBe(expectedVersion)
 
@@ -1124,7 +1124,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       ]
 
       for (const item of cleanCommands) {
-        const res = await runNodeScript('packages/dsh-ray/bin/dsh-ray.js', item.args, { env: { DSH_HOME: absentHome } })
+        const res = await runNodeScript('packages/cli/bin/dsh-ray.js', item.args, { env: { DSH_HOME: absentHome } })
         expect(res.exitCode, `${item.args.join(' ')}: ${res.stderr}`).toBe(0)
         expect(res.stderr, item.args.join(' ')).toBe('')
         expect(res.stderr).not.toContain('ExperimentalWarning')
@@ -1159,7 +1159,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
         const addr = server.address()
         if (!addr || typeof addr === 'string') throw new Error('Expected loopback address')
         const checkRes = await runNodeScript(
-          'packages/dsh-ray/bin/dsh-ray.js',
+          'packages/cli/bin/dsh-ray.js',
           ['upgrade', '--check', '--json', '--dsh-home', seededHome, '--registry', `http://127.0.0.1:${addr.port}`],
           { env: { DSH_HOME: seededHome } },
         )
@@ -1192,7 +1192,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       )
       const res = await runCommandProcess(
         process.execPath,
-        ['--import', pathToFileURL(preloadPath).href, join(repoRoot, 'packages/dsh-ray/bin/dsh-ray.js'), '--version'],
+        ['--import', pathToFileURL(preloadPath).href, join(repoRoot, 'packages/cli/bin/dsh-ray.js'), '--version'],
       )
       expect(res.exitCode, res.stderr).toBe(0)
       expect(res.stdout).toBe(`${expectedVersion}\n`)

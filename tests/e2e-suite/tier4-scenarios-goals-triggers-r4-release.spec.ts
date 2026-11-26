@@ -1065,8 +1065,8 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
       .filter(j => String(j['runs-on'] ?? '').includes('macos') || String(j['runs-on'] ?? '').includes('windows'))
       .flatMap(j => (j.steps ?? []).map(s => s.run ?? ''))
       .join('\n')
-    for (const slug of ['dsh-ray', 'assistant-isolation', 'assistant-actions']) {
-      expect(xplatCommands).toContain(slug)
+    for (const slug of ['cli', 'assistant-isolation', 'assistant-actions']) {
+      expect(xplatCommands).toContain(slug === 'cli' ? 'packages/cli' : slug)
     }
 
     // Check common.sh installer arrays map to real workspace plugin slugs
@@ -1130,7 +1130,7 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
       missingPackage = undefined
 
       // 1 of 40 returning stale version -> non-zero exit naming stale package
-      stalePackage = 'dsh-ray'
+      stalePackage = '@dsh-ray/cli'
       const staleRes = await runNodeScript('scripts/verify-npm-release.mjs', [
         '--tag',
         `v${targetVersion}`,

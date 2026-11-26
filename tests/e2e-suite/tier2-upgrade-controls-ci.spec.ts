@@ -258,7 +258,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
 
     test('T2-F19-04: withDshHomeLifecycleLock rejects concurrent lock acquisition and parseProgramUpgradeArgs rejects invalid flags', async () => {
       const ws = await workspaces.create('f19-lock-')
-      const lockMod = (await loadPackageModule('dsh-ray/home-lifecycle-lock')) as {
+      const lockMod = (await loadPackageModule('cli/home-lifecycle-lock')) as {
         withDshHomeLifecycleLock: <T>(dshHome: string, op: () => Promise<T>) => Promise<T>
         dshHomeLifecycleRendezvousPath: (dshHome: string) => string
       }
@@ -740,7 +740,7 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
     test('T2-F22-04: verify-npm-release.mjs fails 39/40 when 1 package has mismatched packument name or missing dist.tarball', async () => {
       const manifests = await readAllWorkspaceManifests()
       const targetVersion = manifests[0]!.version
-      const targetBad = 'dsh-ray'
+      const targetBad = '@dsh-ray/cli'
       let badMode: 'name-mismatch' | 'no-tarball' = 'name-mismatch'
 
       const server = createServer((req, res) => {

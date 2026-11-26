@@ -276,7 +276,7 @@ describe('optional peer 静态导入守卫（按安装器场景闭包）', () =>
     const reach = mainEntryReach(manifest)
     for (const [peer, scenarioNames] of peerScenarios) {
       test(`${packageName} 主入口不静态值导入 ${peer}（场景 ${scenarioNames.join('/')} 不安装该 peer）`, () => {
-        if (reach === undefined) return // 无主入口的工具包（如 dsh-ray）不适用
+        if (reach === undefined) return // 无主入口的工具包（如 @dsh-ray/cli）不适用
         const violations: string[] = []
         for (const file of reach) {
           const source = readFileSync(file, 'utf8')

@@ -74,7 +74,7 @@ async function createHomeFixture(options: {
 function makeRegistryFetch(enhancedLatest: string, hostLatest: string): typeof globalThis.fetch {
   return (async (input: string | URL | Request) => {
     const url = String(input)
-    if (url.includes('dsh-ray')) {
+    if (url.includes('@dsh-ray/cli')) {
       return new Response(JSON.stringify({ 'dist-tags': { latest: enhancedLatest } }), { status: 200 })
     }
     if (url.includes('@deepseek-ai')) {
@@ -370,10 +370,10 @@ describe('dsh-ray upgrade check, readiness, and transactional execution', () => 
     const fetchStub = (async (input: string | URL | Request) => {
       const url = String(input)
       requestedUrls.push(url)
-      if (url.endsWith('/dsh-ray/latest')) {
+      if (url.endsWith('/@dsh-ray/cli/latest')) {
         return new Response('{}', { status: 404 })
       }
-      if (url.endsWith('/dsh-ray')) {
+      if (url.endsWith('/@dsh-ray/cli')) {
         return new Response(JSON.stringify({ 'dist-tags': { latest: '99.0.0' } }), { status: 200 })
       }
       if (url.endsWith('/@deepseek-ai/dsh/latest')) {
@@ -391,8 +391,8 @@ describe('dsh-ray upgrade check, readiness, and transactional execution', () => 
     )
     expect(clamped.exitCode).toBe(0)
     expect(requestedUrls).toEqual(expect.arrayContaining([
-      'https://registry.npmjs.org/dsh-ray/latest',
-      'https://registry.npmjs.org/dsh-ray',
+      'https://registry.npmjs.org/@dsh-ray/cli/latest',
+      'https://registry.npmjs.org/@dsh-ray/cli',
       'https://registry.npmjs.org/@deepseek-ai/dsh/latest',
     ]))
     expect(requestedUrls.some(url => url.includes('%2F'))).toBe(false)

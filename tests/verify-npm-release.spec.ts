@@ -323,7 +323,7 @@ describe('verify-npm-release', () => {
         res.end('Unavailable')
         return
       }
-      if (packageName === 'dsh-ray' && attempt === 1) {
+      if (packageName === '@dsh-ray/cli' && attempt === 1) {
         res.statusCode = 200
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify(makePackument(url, packageName, ['0.1.83'], '0.1.83')))
@@ -354,7 +354,7 @@ describe('verify-npm-release', () => {
     expect(report.passed).toBe(40)
     expect(counts.get('@dsh-ray/assistant-association')).toBe(3)
     expect(counts.get('@dsh-ray/acp')).toBe(3)
-    expect(counts.get('dsh-ray')).toBe(2)
+    expect(counts.get('@dsh-ray/cli')).toBe(2)
     expect(counts.get('@dsh-ray/assistant-actions')).toBe(2)
   })
 

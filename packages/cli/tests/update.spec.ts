@@ -15,7 +15,7 @@ import {
 import { main, type MainDeps } from '../src/index.ts'
 import { version as VERSION } from '../src/version.ts'
 
-const NEW_GLOBAL = '/Users/test/.npm-global/lib/node_modules/dsh-ray'
+const NEW_GLOBAL = '/Users/test/.npm-global/lib/node_modules/@dsh-ray/cli'
 const OTHER_GLOBAL = '/Users/test/.npm-global/lib/node_modules/@dsh-ray/other-cli'
 
 /** 记录调用的假 runner；按需为 npm 子命令定制返回，uninstall 可单独控制。 */
@@ -56,14 +56,14 @@ describe('runSelfUpdate / 全局自升级', () => {
     expect(prefixFromPackageRoot(NEW_GLOBAL)).toBe('/Users/test/.npm-global')
     // 其他全局包路径或源码 checkout 不是官方 dsh-ray 全局安装 → undefined
     expect(prefixFromPackageRoot(OTHER_GLOBAL)).toBeUndefined()
-    expect(prefixFromPackageRoot('/checkout/packages/dsh-ray')).toBeUndefined()
+    expect(prefixFromPackageRoot('/checkout/packages/cli')).toBeUndefined()
     expect(prefixFromPackageRoot('/checkout/packages/other-cli')).toBeUndefined()
   })
 
   test('runtimePackageKind 区分 new / unknown', () => {
     expect(runtimePackageKind(NEW_GLOBAL)).toBe('new')
     expect(runtimePackageKind(OTHER_GLOBAL)).toBe('unknown')
-    expect(runtimePackageKind('/checkout/packages/dsh-ray')).toBe('unknown')
+    expect(runtimePackageKind('/checkout/packages/cli')).toBe('unknown')
   })
 
   test('新包 fresh install：只装官方包，不卸载任何东西，bin 为 dsh-ray', async () => {
@@ -95,7 +95,7 @@ describe('runSelfUpdate / 全局自升级', () => {
   })
 
   test('latest older than nonofficial runtime fails closed before install', async () => {
-    for (const packageRoot of [OTHER_GLOBAL, '/checkout/packages/dsh-ray']) {
+    for (const packageRoot of [OTHER_GLOBAL, '/checkout/packages/cli']) {
       const { runner, calls } = npmRunner({ viewVersion: '0.1.54' })
       await expect(runSelfUpdate({ runner, packageRoot })).rejects.toThrow(/早于当前 CLI/)
       expect(calls.some(call => call.startsWith('npm install') || call.startsWith('npm uninstall'))).toBe(false)
@@ -104,7 +104,7 @@ describe('runSelfUpdate / 全局自升级', () => {
 
   test('非官方全局路径即使版本号相同也执行一次全局安装（不视为 alreadyCurrent）', async () => {
     const { runner, calls } = npmRunner({ prefix: '/opt/npm', viewVersion: VERSION })
-    const report = await runSelfUpdate({ runner, packageRoot: '/checkout/packages/dsh-ray' })
+    const report = await runSelfUpdate({ runner, packageRoot: '/checkout/packages/cli' })
     expect(report.alreadyCurrent).toBe(false)
     expect(report.globalPrefix).toBe('/opt/npm')
     expect(calls).toContain(`npm install --global --prefix /opt/npm ${RSI_CLI_PACKAGE}@${VERSION} --location=global`)

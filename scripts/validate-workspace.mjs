@@ -638,7 +638,7 @@ for (const entry of packageEntries) {
     continue
   }
 
-  const expectedName = entry.name === 'dsh-ray' ? 'dsh-ray' : `@dsh-ray/${entry.name}`
+  const expectedName = `@dsh-ray/${entry.name}`
   if (typeof manifest.name !== 'string' || manifest.name !== expectedName) {
     report(manifestPath, `package name must equal ${expectedName}`)
   } else if (packageNames.has(manifest.name)) {

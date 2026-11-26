@@ -914,7 +914,7 @@ describe('Tier 3 Pairwise — F15–F23, F04, F07 & F14: Goals, Recovery, Trigge
       ])
       expect(okRes.exitCode).toBe(0)
 
-      stalePackage = 'dsh-ray'
+      stalePackage = '@dsh-ray/cli'
       const failRes = await runNodeScript('scripts/verify-npm-release.mjs', [
         '--tag',
         `v${targetVersion}`,
@@ -957,9 +957,9 @@ describe('Tier 3 Pairwise — F15–F23, F04, F07 & F14: Goals, Recovery, Trigge
       .flatMap(j => (j.steps ?? []).map(s => s.run ?? ''))
       .join('\n')
 
-    for (const targetSlug of ['dsh-ray', 'assistant-isolation', 'assistant-actions']) {
+    for (const targetSlug of ['cli', 'assistant-isolation', 'assistant-actions']) {
       expect(allSlugs.has(targetSlug)).toBe(true)
-      expect(xplatRuns).toContain(targetSlug)
+      expect(xplatRuns).toContain(targetSlug === 'cli' ? 'packages/cli' : targetSlug)
     }
 
     const releaseRaw = await readFile(join(repoRoot, '.github/workflows/release.yml'), 'utf8')
@@ -1508,7 +1508,7 @@ describe('Tier 3 Pairwise — F15–F23, F04, F07 & F14: Goals, Recovery, Trigge
     await chmod(join(shimBin, 'npm'), 0o755)
     await writeFile(
       join(shimBin, 'dsh-ray'),
-      `#!/usr/bin/env bash\nexec "${process.execPath}" "${join(repoRoot, 'packages/dsh-ray/bin/dsh-ray.js')}" "$@"\n`,
+      `#!/usr/bin/env bash\nexec "${process.execPath}" "${join(repoRoot, 'packages/cli/bin/dsh-ray.js')}" "$@"\n`,
       'utf8',
     )
     await chmod(join(shimBin, 'dsh-ray'), 0o755)

@@ -804,7 +804,7 @@ describe('assistant-association S4 Cordis/Service integration', () => {
 
     // Live growth-report (collectGrowthReport) reads real Schema v4 SQLite DB!
     const growthReportModuleUrl = new URL(
-      '../../../packages/dsh-ray/src/growth-report.ts',
+      '../../../packages/cli/src/growth-report.ts',
       import.meta.url,
     ).href
     const { collectGrowthReport, formatGrowthReport } = (await import(growthReportModuleUrl)) as {

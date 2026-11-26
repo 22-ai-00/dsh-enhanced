@@ -3,10 +3,10 @@ import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from 'vitest'
-import { withLaunchdProfileLock } from '../packages/dsh-ray/src/launchd-lock.ts'
+import { withLaunchdProfileLock } from '../packages/cli/src/launchd-lock.ts'
 import { withLaunchAgentTargetLock } from '../plugins/lark-channel/src/launchd-target-lock.ts'
 import { dshHomeLifecycleRendezvousPath as cliHomeLockPath,
-  withDshHomeLifecycleLock as withCliHomeLock } from '../packages/dsh-ray/src/home-lifecycle-lock.ts'
+  withDshHomeLifecycleLock as withCliHomeLock } from '../packages/cli/src/home-lifecycle-lock.ts'
 import { dshHomeLifecycleRendezvousPath as installerHomeLockPath,
   withDshHomeLifecycleLock as withInstallerHomeLock } from '../plugins/lark-channel/src/setup.ts'
 

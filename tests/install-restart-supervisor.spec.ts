@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { installRestartSupervisorPlan, planRestartSupervisorInstall } from '../scripts/install/restart-supervisor.mjs'
-import { KNOWN_ENHANCED_PACKAGES, runUpgrade } from '../packages/dsh-ray/src/upgrade.ts'
+import { KNOWN_ENHANCED_PACKAGES, runUpgrade } from '../packages/cli/src/upgrade.ts'
 import { inspectRestartPolicyAndCode, validateRestartSupervisorConfig, type RestartSupervisorConfig } from '../plugins/assistant-delivery/src/restart-supervisor.ts'
 
 const sha = (source: string | Uint8Array) => createHash('sha256').update(source).digest('hex')
@@ -213,7 +213,7 @@ describe('external restart supervisor installer', () => {
         if (!entry.isDirectory() || entry.name.startsWith('.')) continue
         const manifestText = await readFile(join(repoRoot, parent, entry.name, 'package.json'), 'utf8')
         const pkg = JSON.parse(manifestText) as { name?: string }
-        if (pkg.name && pkg.name !== 'dsh-ray') workspaceNonCli.push(pkg.name)
+        if (pkg.name && pkg.name !== '@dsh-ray/cli') workspaceNonCli.push(pkg.name)
       }
     }
     expect([...KNOWN_ENHANCED_PACKAGES].sort()).toEqual(workspaceNonCli.sort())
@@ -221,17 +221,17 @@ describe('external restart supervisor installer', () => {
     const manifest = JSON.parse(await readFile(join(repoRoot, 'release-manifest.json'), 'utf8')) as {
       current: { packages: Record<string, string> }
     }
-    if ('dsh-ray' in manifest.current.packages) {
+    if ('@dsh-ray/cli' in manifest.current.packages) {
       const expectedNonCli = Object.keys(manifest.current.packages)
-        .filter(name => name !== 'dsh-ray')
+        .filter(name => name !== '@dsh-ray/cli')
         .sort()
       expect([...KNOWN_ENHANCED_PACKAGES].sort()).toEqual(expectedNonCli)
     } else {
       // Pre-first-dsh-ray-release historical 0.1.88 ledger: verify package-slug parity without touching release-manifest.json.
       const manifestSlugs = Object.keys(manifest.current.packages)
-        .map(name => (name === 'dsh-ray' || name.endsWith('-cli') ? 'dsh-ray' : name.slice(name.indexOf('/') + 1)))
+        .map(name => (name === '@dsh-ray/cli' || name === 'dsh-ray' || name.endsWith('-cli') ? 'cli' : name.slice(name.indexOf('/') + 1)))
         .sort()
-      const knownSlugs = ['dsh-ray', ...KNOWN_ENHANCED_PACKAGES.map(name => name.slice(name.indexOf('/') + 1))].sort()
+      const knownSlugs = ['cli', ...KNOWN_ENHANCED_PACKAGES.map(name => name.slice(name.indexOf('/') + 1))].sort()
       expect(knownSlugs).toEqual(manifestSlugs)
     }
 

@@ -57,7 +57,7 @@
     "pinnedHostVersion": "0.2.2-rc.5",
     "packages": {
       "@dsh-ray/assistant-growth-contract": "0.1.89",
-      "dsh-ray": "0.1.89",
+      "@dsh-ray/cli": "0.1.89",
       "@dsh-ray/llm-route-capabilities": "0.1.89",
       "@dsh-ray/task-acceptance-contract": "0.1.89",
       "@dsh-ray/acp": "0.1.89",

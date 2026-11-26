@@ -82,7 +82,7 @@ purge_locate_rsi() {
     [[ -n "$purge_cand" && -e "$purge_cand" ]] && { printf '%s\n' "$purge_cand"; return 0; }
   done
   # .js 入口（包名路径）：需用 node 执行。
-  purge_prefix_js="${purge_prefix:+$purge_prefix/lib/node_modules/dsh-ray/bin/dsh-ray.js}"
+  purge_prefix_js="${purge_prefix:+$purge_prefix/lib/node_modules/@dsh-ray/cli/bin/dsh-ray.js}"
   [[ -n "$purge_prefix_js" && -e "$purge_prefix_js" ]] && { printf 'node %s\n' "$purge_prefix_js"; return 0; }
   return 1
 }

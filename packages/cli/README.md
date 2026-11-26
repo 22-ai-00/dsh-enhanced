@@ -3,7 +3,7 @@
 `dsh-ray` 管理 macOS / Linux 上的 DSH Ray 插件集合。安装器会安装这个全局命令；也可单独安装 CLI（`package.json` 声明 `engines.node >=24.9.0`，当前安装脚本预检仍兼容 22.19+ / 24+，详见[兼容性基线](../../docs/compatibility.md)）：
 
 ```sh
-npm install --global dsh-ray
+npm install --global @dsh-ray/cli
 ```
 
 常用操作从这里开始：

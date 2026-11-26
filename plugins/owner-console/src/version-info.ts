@@ -604,7 +604,7 @@ function parseJsonObject(raw: unknown): Record<string, unknown> {
 function readOptionalCliVersion(): string | undefined {
   try {
     const req = createRequire(import.meta.url)
-    const resolved = req.resolve('dsh-ray/package.json')
+    const resolved = req.resolve('@dsh-ray/cli/package.json')
     const parsed = JSON.parse(readFileSync(resolved, 'utf8')) as { version?: unknown }
     return boundNonEmptyString(parsed.version, 128)
   } catch {

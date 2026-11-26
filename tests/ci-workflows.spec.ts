@@ -193,7 +193,7 @@ describe('CI and Release workflows', () => {
     expect(macosCommands).toContain('tests/native-macos.spec.ts')
     expect(macosCommands).toContain('tests/native-verifier-runner.spec.ts')
     expect(macosCommands).toContain('@dsh-ray/assistant-actions')
-    expect(macosCommands).toContain('--filter ./packages/dsh-ray ')
+    expect(macosCommands).toContain('--filter ./packages/cli ')
     expect(macosCommands).not.toContain('--filter dsh-ray ')
     expect(macosCommands).not.toContain('@dsh-ray/dsh-ray')
     expect(macosCommands).toContain('@dsh-ray/plugin-control-plane')
@@ -212,7 +212,7 @@ describe('CI and Release workflows', () => {
     expect(windowsCommands).toContain('pnpm run build')
     expect(windowsCommands).toContain('@dsh-ray/acp')
     expect(windowsCommands).toContain('plugins/acp/scripts/stdio-smoke.mjs')
-    expect(windowsCommands).toContain('--filter ./packages/dsh-ray ')
+    expect(windowsCommands).toContain('--filter ./packages/cli ')
     expect(windowsCommands).not.toContain('--filter dsh-ray ')
     expect(windowsCommands).not.toContain('@dsh-ray/dsh-ray')
     expect(windowsCommands).toContain('@dsh-ray/assistant-isolation')
@@ -250,7 +250,7 @@ describe('CI and Release workflows', () => {
     }
 
     const requiredWindowsSpecs = [
-      join('packages', 'dsh-ray', 'tests', 'index.spec.ts'),
+      join('packages', 'cli', 'tests', 'index.spec.ts'),
       join('plugins', 'assistant-isolation', 'tests', 'cross-platform-config.spec.ts'),
       join('plugins', 'assistant-isolation', 'tests', 'windows-job-backend.spec.ts'),
       join('plugins', 'assistant-actions', 'tests', 'broker-protocol-v2.spec.ts'),

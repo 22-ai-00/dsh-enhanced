@@ -568,7 +568,7 @@ jobs:
           pnpm --filter @dsh-ray/assistant-actions test -- --testTimeout=15000
           pnpm --filter @dsh-ray/lark-channel exec vitest run --testTimeout=15000 tests/rsi-native-profile.spec.ts tests/rsi-native-install.spec.ts tests/rsi-native-launchd.spec.ts tests/rsi-native-runtime-bootstrap.spec.ts tests/native-lifecycle-lock.spec.ts tests/rsi-local-install.spec.ts tests/rsi-release-build.spec.ts tests/rsi-source.spec.ts tests/rsi-source-cli.spec.ts tests/setup.spec.ts
           pnpm --filter @dsh-ray/lark-channel exec vitest run --testTimeout=15000 tests/launchd.spec.ts tests/launchd-control.spec.ts
-          pnpm --filter ./packages/dsh-ray exec vitest run --testTimeout=15000
+          pnpm --filter ./packages/cli exec vitest run --testTimeout=15000
           pnpm exec vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests tests/macos-launchd-lock.spec.ts tests/macos-launchd-service.spec.ts tests/macos-purge-fallback.spec.ts tests/install-setup-runtime.spec.ts tests/ci-workflows.spec.ts tests/verify-npm-release.spec.ts tests/workspace-version-alignment.spec.ts tests/dsh-compatibility.spec.ts
 
   windows-acp-smoke:
@@ -616,7 +616,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "::notice::Running dsh-ray Windows suite"
-          pnpm --filter ./packages/dsh-ray exec vitest run --testTimeout=15000 tests/doctor.spec.ts tests/maintenance.spec.ts tests/process-guard.spec.ts tests/services.spec.ts tests/weburl.spec.ts tests/index.spec.ts
+          pnpm --filter ./packages/cli exec vitest run --testTimeout=15000 tests/doctor.spec.ts tests/maintenance.spec.ts tests/process-guard.spec.ts tests/services.spec.ts tests/weburl.spec.ts tests/index.spec.ts
           if ($LASTEXITCODE -ne 0) { throw "dsh-ray Windows suite failed with exit code $LASTEXITCODE" }
 
           Write-Host "::notice::Running @dsh-ray/assistant-isolation Windows suite"

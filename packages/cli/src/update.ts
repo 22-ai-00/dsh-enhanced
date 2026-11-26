@@ -5,17 +5,17 @@ import { defaultRunner, type CommandRunner } from './run.ts'
 import { version as VERSION } from './version.ts'
 import { compareExactVersions } from './program-update.ts'
 
-/** 全局 dsh-ray 自身的 npm 包名。 */
-export const RSI_CLI_PACKAGE = 'dsh-ray'
+/** 全局 dsh-ray 自身的 npm 包名（`@dsh-ray/cli`）。 */
+export const RSI_CLI_PACKAGE = '@dsh-ray/cli'
 /** 精确版本或 dist-tag：只接受 x.y.z、带预发布后缀的 x.y.z-tag.n，或纯字母 dist-tag。 */
 const SELECTOR_PATTERN = /^(?:\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?|[A-Za-z][A-Za-z0-9-]{0,63})$/u
 const runtimePackageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * 全局包在现行布局下的路径后缀：
- *   <prefix>/lib/node_modules/dsh-ray
+ *   <prefix>/lib/node_modules/@dsh-ray/cli
  */
-const GLOBAL_PACKAGE_SUFFIX = `${sep}lib${sep}node_modules${sep}dsh-ray`
+const GLOBAL_PACKAGE_SUFFIX = `${sep}lib${sep}node_modules${sep}@dsh-ray${sep}cli`
 
 /** 从真实 npm 全局包路径反推 prefix；源码 checkout/测试环境回退 npm prefix -g。 */
 export function prefixFromPackageRoot(packageRoot: string): string | undefined {
@@ -28,7 +28,7 @@ export function prefixFromPackageRoot(packageRoot: string): string | undefined {
 
 /**
  * 判断当前进程实际是否由官方全局包加载。
- * - `new`：官方全局包 `dsh-ray`
+ * - `new`：官方全局包 `@dsh-ray/cli`
  * - `unknown`：checkout / 临时目录运行（非官方全局安装）。
  */
 export function runtimePackageKind(packageRoot: string): 'new' | 'unknown' {
@@ -59,7 +59,7 @@ export interface SelfUpdateReport {
 /**
  * 升级全局 dsh-ray 自身。
  *
- * 只做一件事：把 `dsh-ray@<selector>` 安装到全局。
+ * 只做一件事：把 `@dsh-ray/cli@<selector>` 安装到全局。
  * 调用方决定是否从安装后的精确新 bin 复执行；
  * 本函数只负责自身升级与返回安装结果，不继续执行 Home 更新。
  *
@@ -103,7 +103,7 @@ export async function runSelfUpdate(options: {
     const lines = view.stdout.trim().split('\n').map(line => line.trim()).filter(line => line.length > 0)
     const last = lines.at(-1)
     if (last !== undefined) {
-      // 多版本行形如 `dsh-ray@0.1.47 '0.1.47'`，取末尾引号内的值。
+      // 多版本行形如 `@dsh-ray/cli@0.1.47 '0.1.47'`，取末尾引号内的值。
       const matched = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)'?$/u.exec(last)
       const captured = matched?.[1]
       if (captured !== undefined) report.resolvedVersion = captured

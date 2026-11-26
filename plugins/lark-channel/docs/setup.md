@@ -7,7 +7,7 @@
 还没安装时，在本机终端运行：
 
 ```sh
-npm install --global dsh-ray
+npm install --global @dsh-ray/cli
 dsh-ray install
 ```
 

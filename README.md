@@ -5,7 +5,7 @@
 <h1 align="center">dsh-ray · 文鳐 Ray</h1>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/dsh-ray"><img alt="npm" src="https://img.shields.io/npm/v/dsh-ray?color=2f6f6f"></a>
+  <a href="https://www.npmjs.com/package/@dsh-ray/cli"><img alt="npm" src="https://img.shields.io/npm/v/%40dsh-ray%2Fcli?color=2f6f6f"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D24.9.0-339933">
   <img alt="status" src="https://img.shields.io/badge/status-experimental-orange">
@@ -25,13 +25,13 @@
 **标准安装（推荐：飞书 + 本地 Web + 自成长全能力，交互式向导）**：
 
 ```sh
-npm i -g dsh-ray && dsh-ray install
+npm i -g @dsh-ray/cli && dsh-ray install
 ```
 
 **纯本地 Web 速览体验（暂不配飞书，一键安装并打开控制台）**：
 
 ```sh
-npm i -g dsh-ray && dsh-ray install --scenario web --model skip --yes && dsh-ray open --profile web
+npm i -g @dsh-ray/cli && dsh-ray install --scenario web --model skip --yes && dsh-ray open --profile web
 ```
 
 ### 桌面端 DSH 左栏插件（`DeepSeek Harness`）
@@ -52,7 +52,7 @@ dsh-ray install --profile <profile> --with console
 ```
 
 > **注意**：
-> - `desktop` profile 由 Electron 桌面端独占托管，**不要**执行 npm 版 `dsh plugin --profile desktop`（`dsh` CLI 会直接拒绝）或 `dsh-ray install --profile desktop`（会在准备 Host 后于 `dsh plugin --profile desktop` 步骤失败）。如需用命令行体检或升级桌面端，须先安装 `dsh-ray` CLI（`npm i -g dsh-ray`）并确保已绑定私有 Host 或全局 `PATH` 中存在 `dsh`（`@deepseek-ai/dsh`），再执行 `dsh-ray doctor --profile desktop` 或 `dsh-ray upgrade --yes --profile desktop --confirm-dsh-home-stopped`（升级前需先完全退出桌面端）；否则也可直接在桌面端 UI 的 **插件** 或 **设置 → 文鳐助手** 中管理或升级 `@dsh-ray/owner-console`。
+> - `desktop` profile 由 Electron 桌面端独占托管，**不要**执行 npm 版 `dsh plugin --profile desktop`（`dsh` CLI 会直接拒绝）或 `dsh-ray install --profile desktop`（会在准备 Host 后于 `dsh plugin --profile desktop` 步骤失败）。如需用命令行体检或升级桌面端，须先安装 `dsh-ray` CLI（`npm i -g @dsh-ray/cli`）并确保已绑定私有 Host 或全局 `PATH` 中存在 `dsh`（`@deepseek-ai/dsh`），再执行 `dsh-ray doctor --profile desktop` 或 `dsh-ray upgrade --yes --profile desktop --confirm-dsh-home-stopped`（升级前需先完全退出桌面端）；否则也可直接在桌面端 UI 的 **插件** 或 **设置 → 文鳐助手** 中管理或升级 `@dsh-ray/owner-console`。
 > - **不要**在与桌面端或 Web 端内置 Host 共用的同一 profile 中启用 `@dsh-ray/acp`，否则会触发 `DUPLICATE INSERT ID: cordis-host-runner` 冲突。
 
 ### 首次连接（3 步完成）
@@ -90,7 +90,7 @@ dsh-ray install --profile <profile> --with console
 | 查看只读成长计分卡 | `dsh-ray growth-report --since 7d` |
 | 查看最近日志或重启服务 | `dsh-ray logs --profile web --lines 100` / `dsh-ray restart --profile web` |
 
-> 浏览器关闭后，默认安装的常驻服务仍会在后台运行。注意：`dsh-ray reinstall` 会删除旧数据后重装，日常升级请使用 `dsh-ray upgrade --yes` 或 `dsh-ray update`（详见[命令参考](packages/dsh-ray/README.md)与[维护说明](scripts/install/maintenance.md)）。
+> 浏览器关闭后，默认安装的常驻服务仍会在后台运行。注意：`dsh-ray reinstall` 会删除旧数据后重装，日常升级请使用 `dsh-ray upgrade --yes` 或 `dsh-ray update`（详见[命令参考](packages/cli/README.md)与[维护说明](scripts/install/maintenance.md)）。
 
 ## 按需阅读
 
@@ -99,7 +99,7 @@ dsh-ray install --profile <profile> --with console
 | 首次安装、场景选择、安装排障 | [安装指南](scripts/install/README.md) |
 | 添加或切换模型（含 `traex` / `agy`） | [模型配置](docs/models.md) |
 | 飞书绑定、权限与消息排查 | [飞书接入](plugins/lark-channel/docs/setup.md) |
-| `dsh-ray` 完整命令、升级与卸载 | [命令参考](packages/dsh-ray/README.md) |
+| `dsh-ray` 完整命令、升级与卸载 | [命令参考](packages/cli/README.md) |
 | 桌面端左栏「文鳐」控制台插件（`@dsh-ray/owner-console`） | [控制台插件](plugins/owner-console/README.md) |
 | 已支持能力与当前限制 | [当前状态](docs/rsi-status.md) · [验收合同](docs/rsi-acceptance.md) |
 | 全部插件与共享库清单 | [插件目录](plugins/README.md) · [共享包目录](packages/README.md) |

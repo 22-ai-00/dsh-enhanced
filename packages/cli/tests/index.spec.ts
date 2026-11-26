@@ -819,7 +819,7 @@ describe('F27: subprocess stderr cleanliness and non-SQLite warning preservation
     const server = createServer((req, res) => {
       const url = req.url ?? '/'
       res.writeHead(200, { 'content-type': 'application/json' })
-      if (url.includes('dsh-ray')) {
+      if (url.includes('@dsh-ray/cli')) {
         res.end(JSON.stringify({ 'dist-tags': { latest: version } }))
       } else {
         res.end(JSON.stringify({ 'dist-tags': { latest: '0.2.2-rc.5' } }))

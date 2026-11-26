@@ -832,8 +832,8 @@ dsh_ray_ensure_pnpm() {
   fi
 }
 
-# 安装插件集合的同时提供全局 dsh-ray 控制/诊断/卸载命令（dsh-ray）。
-# npm 形态安装与 cohort 完全一致的精确版本；local 形态从当前 checkout 的 packages/dsh-ray 安装。
+# 安装插件集合的同时提供全局 dsh-ray 控制/诊断/卸载命令（dsh-ray，npm 包 @dsh-ray/cli）。
+# npm 形态安装与 cohort 完全一致的精确版本；local 形态从当前 checkout 的 packages/cli 安装。
 # 纯库包无 install 脚本、无原生依赖，全局安装安全；install/upgrade 均调用，保证老安装补齐该命令。
 dsh_ray_ensure_rsi_cli() {
   local source_mode="$1"
@@ -843,20 +843,20 @@ dsh_ray_ensure_rsi_cli() {
   printf '\ndsh-ray 控制命令：\n'
   if [[ "$source_mode" == 'local' ]]; then
     if [[ "$dry_run" == '1' ]]; then
-      dsh_ray_print_command npm install --global "$repo_root/packages/dsh-ray"
+      dsh_ray_print_command npm install --global "$repo_root/packages/cli"
       return 0
     fi
-    npm install --global "$repo_root/packages/dsh-ray" || {
-      dsh_ray_fail 1 'dsh-ray 安装失败（local 形态）；可手工执行 npm install --global '"$repo_root/packages/dsh-ray"。
+    npm install --global "$repo_root/packages/cli" || {
+      dsh_ray_fail 1 'dsh-ray 安装失败（local 形态）；可手工执行 npm install --global '"$repo_root/packages/cli"。
       return $?
     }
   else
     if [[ "$dry_run" == '1' ]]; then
-      dsh_ray_print_command npm install --global "dsh-ray@$plugin_version"
+      dsh_ray_print_command npm install --global "@dsh-ray/cli@$plugin_version"
       return 0
     fi
-    npm install --global "dsh-ray@$plugin_version" || {
-      dsh_ray_fail 1 "dsh-ray 安装失败（npm 形态 @$plugin_version）；可手工执行 npm install --global dsh-ray@$plugin_version。"
+    npm install --global "@dsh-ray/cli@$plugin_version" || {
+      dsh_ray_fail 1 "dsh-ray 安装失败（npm 形态 @$plugin_version）；可手工执行 npm install --global @dsh-ray/cli@$plugin_version。"
       return $?
     }
   fi
@@ -3429,8 +3429,8 @@ dsh_ray_doctor_live_summary() {
   local profile="$1" dsh_home="$2"
   local script_dir cli_entry='' cli_lib=''
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 0
-  cli_entry="$script_dir/../../packages/dsh-ray/bin/dsh-ray.js"
-  cli_lib="$script_dir/../../packages/dsh-ray/lib/index.js"
+  cli_entry="$script_dir/../../packages/cli/bin/dsh-ray.js"
+  cli_lib="$script_dir/../../packages/cli/lib/index.js"
   if [[ -f "$cli_entry" && -f "$cli_lib" ]] && command -v node >/dev/null 2>&1; then
     node "$cli_entry" --dsh-home "$dsh_home" doctor --profile "$profile"
     return $?

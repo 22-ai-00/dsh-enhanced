@@ -1724,7 +1724,7 @@ export async function runUpgrade(
   const shouldCheckRegistry = typeof fetchImpl === 'function'
   if (shouldCheckRegistry) {
     const [cliQuery, dshQuery] = await Promise.all([
-      fetchNpmLatestVersion(fetchImpl, registryUrl, 'dsh-ray', timeoutMs),
+      fetchNpmLatestVersion(fetchImpl, registryUrl, '@dsh-ray/cli', timeoutMs),
       mode === 'frozen-linux-systemd'
         ? Promise.resolve({ ok: true as const, latest: FROZEN_DSH_SELECTOR })
         : fetchNpmLatestVersion(fetchImpl, registryUrl, '@deepseek-ai/dsh', timeoutMs),

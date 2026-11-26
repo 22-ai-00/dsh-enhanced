@@ -13,7 +13,7 @@ import { applyDogfoodPluginPreset } from '../plugins/assistant-policy/lib/plugin
 import { applyWebOwnerAutonomySetup } from '../plugins/assistant-web-owner/lib/index.js'
 import { prepareWebOwnerProfile } from '../plugins/assistant-web-owner/src/setup.ts'
 import { AssistantWorkItemsService, ConfigSchema as WorkItemsConfigSchema } from '../plugins/assistant-work-items/lib/index.js'
-import { collectGrowthReport } from '../packages/dsh-ray/lib/index.js'
+import { collectGrowthReport } from '../packages/cli/lib/index.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const installer = join(root, 'scripts', 'install', 'install-local.sh')

@@ -3046,7 +3046,7 @@ if [[ "$*" == 'install --global @deepseek-ai/dsh@0.2.2-rc.5' ]]; then
   cp "$FAKE_BIN/dsh-new" "$FAKE_BIN/dsh"
   chmod 755 "$FAKE_BIN/dsh"
 fi
-if [[ "\${1:-}" == 'install' && "$*" == *dsh-ray* ]]; then
+if [[ "\${1:-}" == 'install' && ( "$*" == *'@dsh-ray/cli'* || "$*" == *'/packages/cli'* ) ]]; then
   printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-ray"
   chmod 755 "$FAKE_BIN/dsh-ray"
 fi
@@ -3180,7 +3180,7 @@ exec "$FIXTURE_REAL_NODE" "$@"
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 if [[ "\${1:-}" == 'prefix' ]]; then printf '%s\\n' "$FAKE_PREFIX"; fi
-if [[ "\${1:-}" == 'install' && "$*" == *dsh-ray* ]]; then
+if [[ "\${1:-}" == 'install' && ( "$*" == *'@dsh-ray/cli'* || "$*" == *'/packages/cli'* ) ]]; then
   printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-ray"
   chmod 755 "$FAKE_BIN/dsh-ray"
 fi
@@ -3517,7 +3517,7 @@ exit 0
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.33"\\n'; fi
-if [[ "\${1:-}" == 'install' && "$*" == *dsh-ray* ]]; then
+if [[ "\${1:-}" == 'install' && ( "$*" == *'@dsh-ray/cli'* || "$*" == *'/packages/cli'* ) ]]; then
   printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-ray"
   chmod 755 "$FAKE_BIN/dsh-ray"
 fi

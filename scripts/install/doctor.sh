@@ -56,14 +56,14 @@ if [[ "$JSON_OUTPUT" == '1' && ( "$PHASE" != 'postflight' || "$REQUIRE_ISOLATION
 fi
 dsh_ray_prepend_bound_host_bin "$DSH_HOME_PATH"
 if [[ "$JSON_OUTPUT" == '1' ]]; then
-  CLI_ENTRY="$SCRIPT_DIRECTORY/../../packages/dsh-ray/bin/dsh-ray.js"
-  if [[ -f "$CLI_ENTRY" && -f "$SCRIPT_DIRECTORY/../../packages/dsh-ray/lib/index.js" ]] && command -v node >/dev/null 2>&1; then
+  CLI_ENTRY="$SCRIPT_DIRECTORY/../../packages/cli/bin/dsh-ray.js"
+  if [[ -f "$CLI_ENTRY" && -f "$SCRIPT_DIRECTORY/../../packages/cli/lib/index.js" ]] && command -v node >/dev/null 2>&1; then
     exec node "$CLI_ENTRY" --dsh-home "$DSH_HOME_PATH" doctor --profile "$PROFILE" --json
   fi
   if command -v dsh-ray >/dev/null 2>&1; then
     exec dsh-ray --dsh-home "$DSH_HOME_PATH" doctor --profile "$PROFILE" --json
   fi
-  dsh_ray_fail 1 'doctor --json 需要已构建的 dsh-ray 或 packages/dsh-ray/bin/dsh-ray.js。'
+  dsh_ray_fail 1 'doctor --json 需要已构建的 dsh-ray 或 packages/cli/bin/dsh-ray.js。'
   exit $?
 fi
 if [[ "$REQUIRE_ISOLATION" == '1' ]]; then

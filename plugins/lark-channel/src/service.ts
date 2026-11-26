@@ -624,7 +624,7 @@ async function runDefaultAssistantUpgrade(input: Readonly<{
   env: Readonly<Record<string, string | undefined>>
 }>): Promise<OwnerSelfIterationControlResult> {
   try {
-    const cliPath = requireOptionalPeer.resolve('dsh-ray')
+    const cliPath = requireOptionalPeer.resolve('@dsh-ray/cli')
     const cliMod = await import(cliPath) as {
       upgradeAssistantAndRecover?: (opts: Record<string, unknown>) => Promise<{
         ok: boolean
