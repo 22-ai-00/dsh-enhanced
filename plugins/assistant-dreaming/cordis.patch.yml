@@ -1,3 +1,5 @@
 - insert:
     - id: dsh-ray-assistant-dreaming
       name: '@dsh-ray/assistant-dreaming'
+      config:
+        databasePath: !!js dshHomePath('assistant-dreaming/state.sqlite')

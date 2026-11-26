@@ -400,6 +400,12 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     budgetIds as { reviews: string; discovery: string; source: string; observations: string }, memory, creation, input.upgradeExistingOwner === true)
   const verifier = cloneEffectiveConfig(target, effective, 'dsh-ray-assistant-verifier')
   // Keep all existing verifier settings, replacing only the finite review grant.
+  // Empty/absent static profiles must not deadlock ordinary Feishu chat on requireAcceptance.
+  const verifierProfiles = verifier.get('profiles', true) as Node | undefined
+  const parsedVerifierProfiles = verifierProfiles === undefined ? undefined : nodeJson(verifierProfiles)
+  if (!Array.isArray(parsedVerifierProfiles) || parsedVerifierProfiles.length === 0) {
+    replaceNode(target.document, verifier, 'requireAcceptance', false)
+  }
   replaceNode(target.document, verifier, 'sourceReviews', input.manifest.sourceReviews)
   if (memory) {
     const existing = verifier.get('memoryReviews', true) as Node | undefined

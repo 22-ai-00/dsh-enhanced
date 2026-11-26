@@ -529,4 +529,25 @@ describe('ordinary-use RSI manifest factory', () => {
       })).rejects.toThrow('memory learner must be the inactive installed bundle or exact current learning configuration')
     } finally { await rm(root, { recursive: true, force: true }) }
   })
+
+  test('normalizes stale requireAcceptance: true with empty profiles to false with matching runtimeObserver digest', async () => {
+    const { root, input } = await fixture()
+    try {
+      const staleRows = parse(input.targetEffective) as Array<{ id: string; config?: Record<string, unknown> }>
+      const verifierRow = staleRows.find(r => r.id === 'dsh-ray-assistant-verifier')!
+      verifierRow.config = { ...verifierRow.config, profiles: [], requireAcceptance: true }
+      const staleInput: RsiBootstrapManifestInput = { ...input, targetEffective: stringify(staleRows) }
+      const manifest = createRsiBootstrapManifest(staleInput)
+      const compiled = await compileRsiProfiles({
+        manifest, dshHome: staleInput.dshHome, targetPatch: '[]\n',
+        targetEffective: staleInput.targetEffective, coordinatorPatch: '[]\n',
+        coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: staleInput.owner,
+      })
+      const compiledRows = parse(compiled.targetPatch) as Array<{ id: string; config: Record<string, unknown> }>
+      const compiledVerifier = compiledRows.find(r => r.id === 'dsh-ray-assistant-verifier')!.config
+      expect(compiledVerifier.requireAcceptance).toBe(false)
+      expect(manifest.controlPlane.runtimeObserver!.targets.find(t => t.entryId === 'dsh-ray-assistant-verifier')!.configDigest)
+        .toBe(runtimeConfigDigest(compiledVerifier))
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
 })

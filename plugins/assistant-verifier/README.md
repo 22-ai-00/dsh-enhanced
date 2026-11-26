@@ -13,9 +13,9 @@ dsh plugin --profile web add @dsh-ray/assistant-verifier
 dsh --profile web --dump-config
 ```
 
-默认配置创建独立账本，且默认启用 `requireAcceptance: true`：已支持的 Host 入口必须在提交任务前取得匹配的验收契约；缺少 owner 身份或验收配置会阻止该次提交。显式设置 `requireAcceptance: false` 时，没有匹配 profile 的任务继续原有执行路径，其结果不会由本插件授予可信成功。它不拦截第三方绕过 Host 入口的任意代码。
+程序化 `AssistantVerifierService.Config` schema 默认启用 `requireAcceptance: true`（代码直接实例化且未传入覆盖值时保持 fail-closed：已支持的 Host 入口必须在提交任务前取得匹配的验收契约，缺少 owner 身份或验收配置会阻止该次提交）。随包发布的 `cordis.patch.yml` 默认配置创建独立账本并携带 `profiles: []` 与 `requireAcceptance: false`，因为尚未配置静态 `foreground-turn` profile 时，普通日常对话不应被预置任务场景阻塞；`sourceReviews` / `memoryReviews` / `creationReviews` / `revisionReviews` / `revisionRegressions` 评审套件与显式目标契约仍继续强制独立验收。显式设置 `requireAcceptance: false` 时，没有匹配 profile 的任务继续原有执行路径，其结果不会由本插件授予可信成功。它不拦截第三方绕过 Host 入口的任意代码。
 
-> **注意**：因此，仅挂载 `AssistantVerifierService` 用于 `memoryReviews` 或尚未配置匹配 Host-approved `profiles`（如 `profiles: []`）的部署 profile 与测试 fixture，若同容器挂载了 `assistantDelivery` / `assistantAutomations` / `assistantGoals`，默认 `requireAcceptance: true` 会在 `prepare()` 阶段 fail-closed 拒绝任务提交；此类场景须显式传递 `requireAcceptance: false` 或配置匹配的 `profiles`。
+> **注意**：因此，在代码中直接实例化 `AssistantVerifierService` 仅用于 `memoryReviews` 或尚未配置匹配 Host-approved `profiles`（如 `profiles: []`）的部署与测试 fixture，若同容器挂载了 `assistantDelivery` / `assistantAutomations` / `assistantGoals`，程序化 `Config` 默认 `requireAcceptance: true` 仍会在 `prepare()` 阶段 fail-closed 拒绝任务提交；此类场景须显式传递 `requireAcceptance: false` 或配置匹配的 `profiles`。
 
 本包接入 Delivery 的普通前台 AgentLoop 任务，以及 Automations 的 production AgentLoop 任务，原始目标分别来自入站文字与已批准 definition 的 prompt。`/stop` 等控制命令、preview 和独立的 Host runbook executor 不在这个入口范围；它们继续使用各自的执行协议。Host runbook 没有原始用户 prompt，不能用生成的文字冒充其目标契约；该类执行也不能作为行为学习的目标样本。
 

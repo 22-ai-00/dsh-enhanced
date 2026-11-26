@@ -447,11 +447,15 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   if (!verifier || verifier.get('disabled') === true) fail('effective verifier is missing')
   const verifierRaw = rawLoaderConfig(rowConfig(verifier, 'verifier'), 'verifier')
   if (!verifierRaw || typeof verifierRaw !== 'object' || Array.isArray(verifierRaw)) fail('invalid verifier config')
+  const verifierBase = verifierRaw as Record<string, unknown>
+  const verifierEmptyProfiles = !Array.isArray(verifierBase.profiles) || verifierBase.profiles.length === 0
   manifest.controlPlane.runtimeObserver!.targets.push(
     { entryId: 'dsh-ray-assistant-growth-driver', module: '@dsh-ray/assistant-growth-driver',
       configDigest: runtimeConfigDigest(manifest.growthDriver), services: ['assistantGrowthDriver'] },
     { entryId: 'dsh-ray-assistant-verifier', module: '@dsh-ray/assistant-verifier',
-      configDigest: runtimeConfigDigest({ ...verifierRaw, sourceReviews: manifest.sourceReviews,
+      configDigest: runtimeConfigDigest({ ...verifierBase,
+        ...(verifierEmptyProfiles ? { requireAcceptance: false } : {}),
+        sourceReviews: manifest.sourceReviews,
         ...(memoryLearning === undefined ? {} : { memoryReviews: memoryLearning.reviews }),
         ...(manifest.pluginCreation ? { creationReviews: manifest.pluginCreation.reviews } : {}),
         ...(manifest.pluginRevision ? { revisionReviews: manifest.pluginRevision.reviews,

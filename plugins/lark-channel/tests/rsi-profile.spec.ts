@@ -376,6 +376,15 @@ describe('RSI profile compiler', () => {
       const fixedOutput = await compileRsiProfiles({ ...input, manifest: fixed })
       const fixedRows = parse(fixedOutput.targetPatch) as Array<{ id: string; config: any }>
       expect(fixedRows.find(row => row.id === 'dsh-ray-assistant-growth-driver')!.config).toMatchObject({ provider: 'custom-gateway', model: 'day1', reasoningEffort: 'high' })
+
+      // Stale effective requireAcceptance: true with empty profiles must be cleared to false.
+      const staleVerifierEffective = targetEffective.replace(
+        '  config: { databasePath: /tmp/verifier.sqlite }',
+        '  config: { databasePath: /tmp/verifier.sqlite, profiles: [], requireAcceptance: true }',
+      )
+      const clearedOutput = await compileRsiProfiles({ ...input, targetEffective: staleVerifierEffective })
+      const clearedRows = parse(clearedOutput.targetPatch) as Array<{ id: string; config: any }>
+      expect(clearedRows.find(row => row.id === 'dsh-ray-assistant-verifier')!.config.requireAcceptance).toBe(false)
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 })

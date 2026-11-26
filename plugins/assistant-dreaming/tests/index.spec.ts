@@ -30,9 +30,11 @@ describe('dsh-ray-assistant-dreaming entrypoint', () => {
     expect(bundle).toContain('- insert:')
     expect(bundle).toContain('id: dsh-ray-assistant-dreaming')
     expect(bundle).toContain("name: '@dsh-ray/assistant-dreaming'")
-    // The bundle row carries no config: installing the package is a dormant,
-    // zero-write state and enabling is a separate owner decision.
+    // The bundle row supplies canonical databasePath while staying dormant
+    // (enabled unset/false) until all 6 prerequisites are configured.
+    expect(bundle).toContain("databasePath: !!js dshHomePath('assistant-dreaming/state.sqlite')")
     expect(bundle).not.toContain('enabled: true')
+    expect(normalizeConfig({ databasePath: '/tmp/dreaming/state.sqlite' }).enabled).toBe(false)
   })
 
   test('declares every runtime Host import and sibling DSH bundle as an optional peer', () => {

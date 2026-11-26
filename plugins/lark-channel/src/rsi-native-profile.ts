@@ -369,6 +369,11 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   const embeddedMemory = mapping(personal.get('personalMemory', true) as Node | undefined, 'personalMemory')
   setGrant(embeddedMemory, 'automaticLearning', memory.adoption, 'memory adoption')
   const verifier = copyConfig(out, effective, 'verifier')
+  const verifierProfiles = verifier.get('profiles', true) as Node | undefined
+  const parsedVerifierProfiles = verifierProfiles === undefined ? undefined : verifierProfiles.toJSON()
+  if (!Array.isArray(parsedVerifierProfiles) || parsedVerifierProfiles.length === 0) {
+    verifier.set('requireAcceptance', out.document.createNode(false))
+  }
   setGrant(verifier, 'memoryReviews', memory.reviews, 'memory review')
   setGrant(verifier, 'creationReviews', creation.reviews, 'creation review')
   if (revision) {

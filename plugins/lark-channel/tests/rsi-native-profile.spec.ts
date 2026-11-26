@@ -462,4 +462,17 @@ describe('native owner learning profile', () => {
       })).toThrow(`existing ${grantKey} grant differs`)
     }
   })
+
+  test('normalizes stale requireAcceptance: true with empty profiles to false and keeps runtimeObserver digest matching', async () => {
+    const input = await fixture()
+    const rows = parse(input.targetEffective) as Array<{ id: string; config?: Record<string, unknown> }>
+    const verifierRow = rows.find(row => row.id === 'dsh-ray-assistant-verifier')!
+    verifierRow.config = { ...verifierRow.config, profiles: [], requireAcceptance: true }
+    const compiled = compileNativeRsiProfile({ ...input, targetEffective: stringify(rows) })
+    const compiledRows = parse(compiled.targetPatch) as Array<{ id: string; config: Record<string, unknown> }>
+    const compiledVerifier = compiledRows.find(row => row.id === 'dsh-ray-assistant-verifier')!.config
+    expect(compiledVerifier.requireAcceptance).toBe(false)
+    const verifierTarget = compiled.manifest.controlPlane.runtimeObserver!.targets.find(t => t.entryId === 'dsh-ray-assistant-verifier')!
+    expect(verifierTarget.configDigest).toBe(runtimeConfigDigest(compiledVerifier))
+  })
 })

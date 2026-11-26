@@ -1405,6 +1405,22 @@ function errorChainHasName(error: unknown, expected: string): boolean {
   return false
 }
 
+function isAcceptanceConfigurationError(error: unknown): boolean {
+  let current = error
+  const visited = new Set<unknown>()
+  while (current instanceof Error && !visited.has(current)) {
+    if (
+      current.message.includes('no Host-approved acceptance profile matches')
+      || current.message.includes('required task acceptance profile did not produce a contract')
+    ) {
+      return true
+    }
+    visited.add(current)
+    current = current.cause
+  }
+  return false
+}
+
 function assertAdoptableUnstartedSession(
   session: Session,
   workspace: string,
@@ -4418,38 +4434,6 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       let turnFrom = agent.session.snapshotEvents().length
       const automaticCompletionTurns = new Map<number, AutomaticCompletionKind>()
       const automaticCompletionToolViolations = new Set<number>()
-      removeProgress = this.ctx.on('session/event', (session, event) => {
-        if (session !== agent.session) return
-        const eventTurn = 'turn' in event.data && typeof event.data.turn === 'number' ? event.data.turn : undefined
-        if (event.type === 'turn/start' || event.type === 'step/start') currentSessionTurn = eventTurn
-        const progressTurn = eventTurn ?? currentSessionTurn
-        const progressOrigin: DeliveryProgressOrigin = progressTurn !== undefined && foregroundTurns.has(progressTurn)
-          ? 'foreground' : 'background'
-        if (event.type === 'step/start') {
-          const automaticKind = automaticCompletionTurns.get(event.data.turn)
-          if (automaticKind !== undefined) {
-            publishProgress({
-              kind: 'step',
-              text: automaticKind === 'compact' ? '正在压缩并补全回答…' : '正在自动补全回答…',
-            })
-            return
-          }
-        }
-        if (event.type === 'tool/call' && automaticCompletionTurns.has(event.data.turn)) {
-          if (!automaticCompletionToolViolations.has(event.data.turn)) {
-            automaticCompletionToolViolations.add(event.data.turn)
-            agent.cancel(
-              { kind: 'hook', reason: 'assistant-delivery-automatic-completion-tool-call' },
-              { keepInbox: true },
-            )
-          }
-          return
-        }
-        if (event.type === 'tool/result' && automaticCompletionTurns.has(event.data.turn)) return
-        const update = deliveryProgressFromSessionEvent(event)
-        if (update !== undefined) publishProgress(update, progressOrigin)
-      })
-      publishProgress({ kind: 'started' })
       const abort = () => {
         const command = this.activeSessionControls.get(binding.sessionId)?.command
         agent.cancel(command === undefined
@@ -4499,6 +4483,38 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       // Once the durable marker exists, even a synchronous followup failure is ambiguous:
       // implementations may enqueue before throwing, so no retry is safe.
       dispatched = true
+      removeProgress = this.ctx.on('session/event', (session, event) => {
+        if (session !== agent.session) return
+        const eventTurn = 'turn' in event.data && typeof event.data.turn === 'number' ? event.data.turn : undefined
+        if (event.type === 'turn/start' || event.type === 'step/start') currentSessionTurn = eventTurn
+        const progressTurn = eventTurn ?? currentSessionTurn
+        const progressOrigin: DeliveryProgressOrigin = progressTurn !== undefined && foregroundTurns.has(progressTurn)
+          ? 'foreground' : 'background'
+        if (event.type === 'step/start') {
+          const automaticKind = automaticCompletionTurns.get(event.data.turn)
+          if (automaticKind !== undefined) {
+            publishProgress({
+              kind: 'step',
+              text: automaticKind === 'compact' ? '正在压缩并补全回答…' : '正在自动补全回答…',
+            })
+            return
+          }
+        }
+        if (event.type === 'tool/call' && automaticCompletionTurns.has(event.data.turn)) {
+          if (!automaticCompletionToolViolations.has(event.data.turn)) {
+            automaticCompletionToolViolations.add(event.data.turn)
+            agent.cancel(
+              { kind: 'hook', reason: 'assistant-delivery-automatic-completion-tool-call' },
+              { keepInbox: true },
+            )
+          }
+          return
+        }
+        if (event.type === 'tool/result' && automaticCompletionTurns.has(event.data.turn)) return
+        const update = deliveryProgressFromSessionEvent(event)
+        if (update !== undefined) publishProgress(update, progressOrigin)
+      })
+      publishProgress({ kind: 'started' })
       const message = restartContinuation === undefined ? createUserMessage({ content, source: {
         kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId,
         trust: 'untrusted',
@@ -4789,6 +4805,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         } catch {
           return { outcome: 'not-processed', failureCode: 'adapter-tool-protocol-notice-failed', retryable: true }
         }
+      }
+      if (isAcceptanceConfigurationError(error)) {
+        this.ctx.logger.warn(
+          `assistant-delivery: acceptance-profile-missing for session ${sessionFingerprint(binding.sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+        return { outcome: 'not-processed', failureCode: 'acceptance-profile-missing', retryable: false }
       }
       this.ctx.logger.warn(
         `assistant-delivery: ${sessionResumeFailureCode(error)} for session ${sessionFingerprint(binding.sessionId)}`,

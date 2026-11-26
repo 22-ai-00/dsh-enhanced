@@ -67,7 +67,7 @@ Agent，并把
 | `enabled` | 条件默认（前提齐备且未 `retired` 时 `true`，否则 `false`） | 显式设为 `false` 时强制关闭（即使前提齐备也不注册 automation、不打开数据库、零写入）；显式 `true` 时若缺前提则 fail-closed 拒绝加载。 |
 | `retired` | `false` | owner 暂停开关：`enabled: true` 且 `retired: true` 时加载即把 system automation 收敛为 paused、不注册执行器（账本照常打开并执行保留期），用于暂停后再关闭/卸载。必须同时 `enabled: true`；`enabled: false` 时保留 `retired: true` 会 fail-closed 报错（disabled 路径无法 pause，不能让 owner 误以为已退役）。去掉该标志后的下一次加载用新的 reconcile key 恢复 active。 |
 | `scope` | 无 | `workspace/preset/principalId/ownerRouteId`；启用时必填。 |
-| `databasePath` | 无 | 私有 SQLite 绝对规范路径；启用时必填，目录不可组/全局可写。 |
+| `databasePath` | `!!js dshHomePath('assistant-dreaming/state.sqlite')`（随包 `cordis.patch.yml` 提供；程序化 `Config` 缺省为空） | 私有 SQLite 绝对规范路径；启用时必填，目录不可组/全局可写。 |
 | `baseIntervalMs` | `3600000` | 抽签节拍（15 分钟–24 小时），复用原生 Automations `every`。 |
 | `runProbabilityPpm` | `250000` | 每节拍抽中率（0–1,000,000）。 |
 | `idleMinMs` | `1800000` | 距最近可信活动至少 30 分钟才触发；冷启动完全无任务投影（`latestActivityAt === null`）时回退到账本持久化的 per-lane 冷启动锚点（`dream_lane_state.cold_start_anchor_at`），锚点经过 `idleMinMs` 后解锁空闲门，若完全没有真实目标/技能/非敏感记忆材料则以 `no-recallable-material` 干净跳过，绝不伪造任务证据；两者皆无时 fail-closed。 |
@@ -103,7 +103,7 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
    ```
 
    `dsh plugin add` 会把包注册进 profile 的 `dsh.profile.bundles`，bundle patch 插入
-   一行 `dsh-ray-assistant-dreaming`（无 config，即关闭状态）。
+   一行 `dsh-ray-assistant-dreaming`（默认仅含 `databasePath: !!js dshHomePath('assistant-dreaming/state.sqlite')`，缺少完整前提时保持关闭休眠态）。
 
 2. 在 profile 的 `cordis.patch.yml` 里按 id 覆盖该行，写入启用配置（值按实际 owner
    替换；行内 config 是整段替换，不是深合并）：

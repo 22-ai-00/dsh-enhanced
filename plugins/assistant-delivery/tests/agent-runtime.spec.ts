@@ -1052,6 +1052,7 @@ function runtimeStore(service: AssistantDeliveryService): {
   getInbox(id: string): {
     status: string
     failureCode?: string
+    attemptCount?: number
     leaseUntil?: number
     nextAttemptAt?: number
     admissionCursor: Readonly<{ epoch: string; sequence: number }>
@@ -1060,6 +1061,8 @@ function runtimeStore(service: AssistantDeliveryService): {
   getInboxByProviderEvent(channel: string, account: string, eventId: string): {
     id: string
     status: string
+    failureCode?: string
+    attemptCount?: number
     bindingId?: string
     admissionCursor: Readonly<{ epoch: string; sequence: number }>
     receivedAt: number
@@ -3911,9 +3914,16 @@ describe('real native Delivery Agent runtime', () => {
       await fixture.ctx.plugin(AssistantVerifierService, {
         databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: true,
       })
-      await fixture.service.acceptInbound(message('evt-no-acceptance-profile', 'An unapproved task'))
+      const accepted = await fixture.service.acceptInbound(message('evt-no-acceptance-profile', 'An unapproved task'))
       await drive(fixture.service)
       expect(fixture.llm.requests).toHaveLength(0)
+      expect(fixture.progresses).toEqual([])
+      expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({
+        status: 'dead_letter',
+        failureCode: 'acceptance-profile-missing',
+        attemptCount: 1,
+      })
+      expect(fixture.sends.some(s => s.text.includes('已有操作的结果尚未确认'))).toBe(false)
       const database = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
       try { expect(database.prepare('SELECT count(*) AS count FROM acceptance_contracts').get()).toMatchObject({ count: 0 }) }
       finally { database.close() }
@@ -3944,11 +3954,49 @@ describe('real native Delivery Agent runtime', () => {
       const replacement = await fixture.ctx.plugin(AssistantVerifierService, {
         databasePath: join(root, 'replacement.sqlite'), tickIntervalMs: 0, requireAcceptance: false,
       })
-      await fixture.service.acceptInbound(message('evt-acceptance-latch', 'A new unmatched foreground task.'))
+      const accepted = await fixture.service.acceptInbound(message('evt-acceptance-latch', 'A new unmatched foreground task.'))
       await drive(fixture.service)
       expect(fixture.llm.requests).toHaveLength(0)
+      expect(fixture.progresses).toEqual([])
+      expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({
+        status: 'dead_letter',
+        failureCode: 'acceptance-profile-missing',
+        attemptCount: 1,
+      })
+      expect(fixture.sends.some(s => s.text.includes('已有操作的结果尚未确认'))).toBe(false)
       await replacement.dispose()
     } finally { await fixture.ctx.fiber.restart() }
+  })
+
+  test('does not emit or orphan a started progress bubble when markDispatching throws pre-dispatch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-mark-dispatching-throw-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+      vi.spyOn(store, 'markInboxDispatching').mockImplementationOnce(() => {
+        throw new Error('simulated markDispatching failure')
+      })
+      const accepted = await fixture.service.acceptInbound(message('evt-mark-dispatching-throw', 'run once'))
+      await fixture.service.tick()
+      await fixture.service.whenIdle()
+      expect(fixture.llm.requests).toHaveLength(0)
+      expect(fixture.progresses).toEqual([])
+      expect(fixture.sends.some(s => s.text.includes('已有操作的结果尚未确认'))).toBe(false)
+      expect(store.getInbox(accepted.inboxId)).toMatchObject({
+        status: 'retry_wait',
+        failureCode: 'processor-threw-before-dispatch',
+      })
+      // Even if the failed inbox is dead-lettered, recoverProgress must stay empty
+      // because no started progress row was ever emitted before dispatch.
+      store.deadLetterInbox(accepted.inboxId, 'processor-threw-before-dispatch')
+      expect(store.recoverProgress('lark', 'bot-1', '0'.repeat(64), 100)).toEqual([])
+      expect(fixture.sends.some(s => s.text.includes('已有操作的结果尚未确认'))).toBe(false)
+    } finally {
+      await fixture.ctx.fiber.restart()
+    }
   })
 
   test('persists one owner session, resumes across turns/restart, and deduplicates provider events', async () => {

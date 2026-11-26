@@ -17,7 +17,7 @@
 |---|---|---|---|
 | [assistant-policy](assistant-policy) | `@dsh-ray/assistant-policy` | 实验性 | 个人助理的默认拒绝授权、硬预算、审批提案和脱敏审计边界。 |
 | [assistant-evaluation](assistant-evaluation) | `@dsh-ray/assistant-evaluation` | 实验性 | 区分执行、目标与投递的本地评测账本；Host 写可信事实，模型只能在精确 scope 内追加独立的低信任自评。 |
-| [assistant-verifier](assistant-verifier) | `@dsh-ray/assistant-verifier` | 实验性 | 默认开启 `requireAcceptance: true`：事前冻结 AgentLoop 任务验收，独立核对结果、支持 `'tool' | 'service' | 'channel' | 'ui'` 候选行为验收并记录可信反馈修订。 |
+| [assistant-verifier](assistant-verifier) | `@dsh-ray/assistant-verifier` | 实验性 | 程序化 `Config` 默认 `requireAcceptance: true`，随包 `cordis.patch.yml` 在空 `profiles: []` 下默认 `requireAcceptance: false`：事前冻结 AgentLoop 任务验收，独立核对结果、支持 `'tool' | 'service' | 'channel' | 'ui'` 候选行为验收并记录可信反馈修订。 |
 | [assistant-goals](assistant-goals) | `@dsh-ray/assistant-goals` | 实验性 | 按 owner 持久保存原生目标的上下文、下一步和阻塞；跨会话检索，完成状态等待独立验收。 |
 | [preference-learning](preference-learning) | `@dsh-ray/preference-learning` | 实验性 | 默认开启 `enabled` 与 `autonomousT1Enabled`：从有界 typed feedback 形成可衰减偏好假设；只允许 Host 固定目录中的 T1 局部偏好临时生效并自动回滚，不把推断伪装成长期 Memory。 |
 | [personal-memory](personal-memory) | `@dsh-ray/personal-memory` | 实验性 | 有界、分域的长期记忆，默认开启 `automaticLearning: true`，支持手动审批及独立审查后的有限事实/经验采用。 |

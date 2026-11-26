@@ -2435,4 +2435,127 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       expect(toggledOff).toContain('@dsh-ray/assistant-isolation')
     }
   })
+
+  it('detects and repairs verifier requireAcceptance: true with empty profiles in patch row and descriptor-only without dropping databasePath or memoryReviews', async () => {
+    const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+
+    // Case 1: issue present in cordis.patch.yml row
+    {
+      const { dshHome, profileDir, patchPath } = makeTempHome()
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+        name: '@dsh-profile/desktop',
+        bundles: { '@dsh-ray/assistant-verifier': true },
+      }, null, 2))
+      writeFileSync(patchPath, [
+        '- id: dsh-ray-assistant-verifier',
+        "  name: '@dsh-ray/assistant-verifier'",
+        '  config:',
+        "    databasePath: !!js dshHomePath('assistant-verifier/verification.sqlite')",
+        '    profiles: []',
+        '    requireAcceptance: true',
+        '    memoryReviews:',
+        '      authorityId: mem-rev-desktop',
+        '      maxReviews: 200',
+        '',
+      ].join('\n'), 'utf8')
+      const host = makeHost(dshHome, profileDir, 'desktop')
+      const status = baseStatus({
+        bundles: [
+          { name: '@dsh-ray/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-verifier', moduleName: '@dsh-ray/assistant-verifier' }] },
+        ],
+      })
+      const before = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'linux', env: {}, now: 100 })
+      expect(before.issues.some(i => i.id === 'verifier-require-acceptance-without-profiles')).toBe(true)
+
+      const repaired = await applyDoctorRepair({
+        host, status, descriptors: [], settings: undefined, manager: undefined, prober,
+        issueIds: ['verifier-require-acceptance-without-profiles'], platform: 'linux', env: {}, now: 101,
+      })
+      expect(repaired.applied).toBe(true)
+
+      const repairedRaw = readFileSync(patchPath, 'utf8')
+      expect(repairedRaw).toContain("!!js dshHomePath('assistant-verifier/verification.sqlite')")
+      const rows = parseDocument(repairedRaw, JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, unknown> }>
+      const verifierCfg = rows.find(r => r.id === 'dsh-ray-assistant-verifier')!.config!
+      expect(verifierCfg['requireAcceptance']).toBe(false)
+      expect(verifierCfg['databasePath']).toBe("dshHomePath('assistant-verifier/verification.sqlite')")
+      expect(verifierCfg['memoryReviews']).toEqual({ authorityId: 'mem-rev-desktop', maxReviews: 200 })
+
+      const after = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'linux', env: {}, now: 102 })
+      expect(after.issues.some(i => i.id === 'verifier-require-acceptance-without-profiles')).toBe(false)
+    }
+
+    // Case 2: descriptor-only (no patch row yet), preserving databasePath !!js dshHomePath(...) and memoryReviews
+    {
+      const { dshHome, profileDir, patchPath } = makeTempHome()
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+        name: '@dsh-profile/desktop',
+        bundles: { '@dsh-ray/assistant-verifier': true },
+      }, null, 2))
+      writeFileSync(patchPath, '[]\n', 'utf8')
+      const host = makeHost(dshHome, profileDir, 'desktop')
+      const status = baseStatus({
+        bundles: [
+          { name: '@dsh-ray/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-verifier', moduleName: '@dsh-ray/assistant-verifier' }] },
+        ],
+      })
+      const descriptors: SettingsDescriptor[] = [{
+        ns: 'dsh-ray-assistant-verifier',
+        schema: {},
+        value: {
+          requireAcceptance: true,
+          profiles: [],
+          memoryReviews: { authorityId: 'mem-rev-desc', maxReviews: 100 },
+        },
+        revision: 1,
+        applies: 'live',
+      }]
+      const before = await inspectSetupDoctor({ host, status, descriptors, prober, platform: 'linux', env: {}, now: 200 })
+      expect(before.issues.some(i => i.id === 'verifier-require-acceptance-without-profiles')).toBe(true)
+
+      const repaired = await applyDoctorRepair({
+        host, status, descriptors, settings: undefined, manager: undefined, prober,
+        issueIds: ['verifier-require-acceptance-without-profiles'], platform: 'linux', env: {}, now: 201,
+      })
+      expect(repaired.applied).toBe(true)
+
+      const repairedRaw = readFileSync(patchPath, 'utf8')
+      expect(repairedRaw).toContain("!!js dshHomePath('assistant-verifier/verification.sqlite')")
+      const rows = parseDocument(repairedRaw, JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, unknown> }>
+      const verifierCfg = rows.find(r => r.id === 'dsh-ray-assistant-verifier')!.config!
+      expect(verifierCfg['requireAcceptance']).toBe(false)
+      expect(verifierCfg['databasePath']).toBe("dshHomePath('assistant-verifier/verification.sqlite')")
+      expect(verifierCfg['memoryReviews']).toEqual({ authorityId: 'mem-rev-desc', maxReviews: 100 })
+
+      const after = await inspectSetupDoctor({ host, status, descriptors, prober, platform: 'linux', env: {}, now: 202 })
+      expect(after.issues.some(i => i.id === 'verifier-require-acceptance-without-profiles')).toBe(false)
+    }
+
+    // Case 3: non-empty profiles with requireAcceptance: true must NOT be flagged
+    {
+      const { dshHome, profileDir, patchPath } = makeTempHome()
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+        name: '@dsh-profile/desktop',
+        bundles: { '@dsh-ray/assistant-verifier': true },
+      }, null, 2))
+      writeFileSync(patchPath, [
+        '- id: dsh-ray-assistant-verifier',
+        "  name: '@dsh-ray/assistant-verifier'",
+        '  config:',
+        "    databasePath: !!js dshHomePath('assistant-verifier/verification.sqlite')",
+        '    profiles:',
+        '      - id: configured-profile',
+        '    requireAcceptance: true',
+        '',
+      ].join('\n'), 'utf8')
+      const host = makeHost(dshHome, profileDir, 'desktop')
+      const status = baseStatus({
+        bundles: [
+          { name: '@dsh-ray/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-verifier', moduleName: '@dsh-ray/assistant-verifier' }] },
+        ],
+      })
+      const report = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'linux', env: {}, now: 300 })
+      expect(report.issues.some(i => i.id === 'verifier-require-acceptance-without-profiles')).toBe(false)
+    }
+  })
 })

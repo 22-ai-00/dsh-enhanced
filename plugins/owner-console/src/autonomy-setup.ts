@@ -342,6 +342,7 @@ export function ensureVerifierDefaults(
   }
   const survivingOptionalKeys = [
     'sourceReviews',
+    'memoryReviews',
     'creationReviews',
     'revisionReviews',
     'revisionRegressions',
@@ -365,10 +366,14 @@ export function ensureVerifierDefaults(
     const profiles = Array.isArray(runtimeVerifierCfg?.['profiles']) ? runtimeVerifierCfg['profiles'] : []
     verifierCfgNode.set('profiles', createPlainNode(doc, profiles))
   }
+  const resolvedProfiles = yamlNodeToJs(verifierCfgNode.get('profiles', true), doc)
+  const hasProfiles = Array.isArray(resolvedProfiles) && resolvedProfiles.length > 0
   if (!verifierCfgNode.has('requireAcceptance')) {
-    const req = typeof runtimeVerifierCfg?.['requireAcceptance'] === 'boolean'
-      ? runtimeVerifierCfg['requireAcceptance']
-      : true
+    const req = !hasProfiles
+      ? false
+      : typeof runtimeVerifierCfg?.['requireAcceptance'] === 'boolean'
+        ? runtimeVerifierCfg['requireAcceptance']
+        : true
     verifierCfgNode.set('requireAcceptance', createPlainNode(doc, req))
   }
 }

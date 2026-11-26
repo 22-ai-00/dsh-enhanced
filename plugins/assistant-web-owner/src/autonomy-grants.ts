@@ -1453,8 +1453,16 @@ export function compileWebOwnerAutonomyGrants(
     if (!verifierCfgMap.has('profiles')) {
       verifierCfgMap.set('profiles', plainNode(Array.isArray(mergedVerifierCfg.profiles) ? mergedVerifierCfg.profiles : []))
     }
+    const resolvedProfiles = verifierCfgMap.get('profiles', true)
+    const profilesValue = isSeq(resolvedProfiles) ? resolvedProfiles.toJSON() : resolvedProfiles
+    const hasProfiles = Array.isArray(profilesValue) && profilesValue.length > 0
     if (!verifierCfgMap.has('requireAcceptance')) {
-      verifierCfgMap.set('requireAcceptance', plainNode(typeof mergedVerifierCfg.requireAcceptance === 'boolean' ? mergedVerifierCfg.requireAcceptance : true))
+      const req = !hasProfiles
+        ? false
+        : typeof mergedVerifierCfg.requireAcceptance === 'boolean'
+          ? mergedVerifierCfg.requireAcceptance
+          : true
+      verifierCfgMap.set('requireAcceptance', plainNode(req))
     }
     if (compiledReviews) {
       verifierCfgMap.set('memoryReviews', plainNode(compiledReviews))

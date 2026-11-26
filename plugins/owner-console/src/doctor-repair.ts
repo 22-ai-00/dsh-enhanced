@@ -904,6 +904,24 @@ export async function inspectSetupDoctor(input: InspectSetupDoctorInput): Promis
         fixLabel: '一键补齐 verifier 数据库路径',
       })
     }
+    const verifierMergedCfg = mergeDescriptorConfig(
+      input.descriptors,
+      'dsh-ray-assistant-verifier',
+      seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-verifier') : {},
+    )
+    const verifierProfiles = verifierMergedCfg['profiles']
+    if (verifierMergedCfg['requireAcceptance'] === true && (!Array.isArray(verifierProfiles) || verifierProfiles.length === 0)) {
+      coveredPackages.add('@dsh-ray/assistant-verifier')
+      issues.push({
+        id: 'verifier-require-acceptance-without-profiles',
+        severity: 'error',
+        category: 'config',
+        title: 'assistant-verifier 在空 profiles 下启用了 requireAcceptance，会阻塞日常对话',
+        detail: '检测到 assistant-verifier 的 profiles 为空但 requireAcceptance 为 true，会导致所有日常消息在验收预检阶段被拦截。自动修复会将 requireAcceptance 设为 false，同时完整保留 databasePath 与评审配置。',
+        autoFixable: mutatable,
+        fixLabel: '一键修复 verifier 验收阻断配置',
+      })
+    }
   }
 
   if (seq !== undefined) {
@@ -1281,6 +1299,18 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
       ensureVerifierDefaults(doc, verifierCfg, runtimeVerifierDesc ? asPlainRecord(runtimeVerifierDesc.value) : undefined)
       patchDirty = true
       notes.push('已补齐 assistant-verifier 缺失的 databasePath 与默认配置')
+      needsRestart = true
+      continue
+    }
+    if (issue.id === 'verifier-require-acceptance-without-profiles') {
+      const verifierRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-verifier', '@dsh-ray/assistant-verifier')
+      verifierRow.delete('disabled')
+      const verifierCfg = ensureConfigMap(doc, verifierRow, 'config')
+      const runtimeVerifierDesc = findEntry(input.descriptors, candidate => candidate === 'dsh-ray-assistant-verifier')
+      ensureVerifierDefaults(doc, verifierCfg, runtimeVerifierDesc ? asPlainRecord(runtimeVerifierDesc.value) : undefined)
+      verifierCfg.set('requireAcceptance', createPlainNode(doc, false))
+      patchDirty = true
+      notes.push('已将空 profiles 下阻塞日常对话的 assistant-verifier requireAcceptance 设为 false 并保留完整配置')
       needsRestart = true
       continue
     }

@@ -268,7 +268,7 @@ describe('web-owner RSI autonomy grants', () => {
     expect(rowConfig(first.grants.patch, 'dsh-ray-assistant-memory-learning').workItemExperiences).toBe(false)
     expect(Object.hasOwn(rowConfig(first.grants.patch, 'dsh-ray-assistant-verifier').memoryReviews, 'workItemExperiences')).toBe(false)
     expect(Object.hasOwn(rowConfig(first.grants.patch, 'dsh-ray-personal-assistant').personalMemory.automaticLearning, 'workItemExperiences')).toBe(false)
-    expect(rowConfig(first.grants.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(true)
+    expect(rowConfig(first.grants.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(false)
 
     // Pause dreaming without mentioning memoryLearning/growth -> preserves both and retains dream.* foreground rules.
     const paused = await applyWebOwnerAutonomySetup(
@@ -522,7 +522,7 @@ describe('web-owner RSI autonomy grants', () => {
     expect(Array.isArray(deliveryCfg.ownerRoutes) && deliveryCfg.ownerRoutes.length > 0).toBe(true)
   })
 
-  test('defaults assistant-verifier requireAcceptance to true while preserving explicit false opt-out', async () => {
+  test('defaults assistant-verifier requireAcceptance based on profiles while preserving explicit overrides', async () => {
     const f = await createWebAutonomyFixture()
     const effDoc = parseDocument(f.effective, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] })
     const effRows = effDoc.toJS() as Array<{ id?: string; config?: Record<string, unknown> }>
@@ -545,7 +545,31 @@ describe('web-owner RSI autonomy grants', () => {
       basePatch,
       verifierWithoutFlagEffective,
     )
-    expect(rowConfig(compiledDefault.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(true)
+    expect(rowConfig(compiledDefault.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(false)
+
+    // Stale 0.1.88 effective config with requireAcceptance: true & profiles: [] also defaults to false.
+    if (verifierIdx >= 0) {
+      effDoc.setIn([verifierIdx, 'config', 'requireAcceptance'], true)
+      effDoc.setIn([verifierIdx, 'config', 'profiles'], [])
+    }
+    const compiledStaleEffective = compileWebOwnerAutonomyGrants(
+      { dshHome: f.dshHome, profile: 'web', memoryLearning: true, dailyBudget: 4 },
+      basePatch,
+      effDoc.toString(),
+    )
+    expect(rowConfig(compiledStaleEffective.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(false)
+
+    // Non-empty profiles keep requireAcceptance: true when omitted from patch.
+    if (verifierIdx >= 0) {
+      effDoc.deleteIn([verifierIdx, 'config', 'requireAcceptance'])
+      effDoc.setIn([verifierIdx, 'config', 'profiles'], [{ id: 'static-profile' }])
+    }
+    const compiledWithProfiles = compileWebOwnerAutonomyGrants(
+      { dshHome: f.dshHome, profile: 'web', memoryLearning: true, dailyBudget: 4 },
+      basePatch,
+      effDoc.toString(),
+    )
+    expect(rowConfig(compiledWithProfiles.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(true)
 
     const optOutPatch = [
       basePatch.trimEnd(),
@@ -558,8 +582,24 @@ describe('web-owner RSI autonomy grants', () => {
     const compiledOptOut = compileWebOwnerAutonomyGrants(
       { dshHome: f.dshHome, profile: 'web', memoryLearning: true, dailyBudget: 4 },
       optOutPatch,
-      verifierWithoutFlagEffective,
+      effDoc.toString(),
     )
     expect(rowConfig(compiledOptOut.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(false)
+
+    const explicitTruePatch = [
+      basePatch.trimEnd(),
+      '- id: dsh-ray-assistant-verifier',
+      '  name: "@dsh-ray/assistant-verifier"',
+      '  config:',
+      '    requireAcceptance: true',
+      '    profiles: []',
+      '',
+    ].join('\n')
+    const compiledExplicitTrue = compileWebOwnerAutonomyGrants(
+      { dshHome: f.dshHome, profile: 'web', memoryLearning: true, dailyBudget: 4 },
+      explicitTruePatch,
+      verifierWithoutFlagEffective,
+    )
+    expect(rowConfig(compiledExplicitTrue.patch, 'dsh-ray-assistant-verifier').requireAcceptance).toBe(true)
   })
 })

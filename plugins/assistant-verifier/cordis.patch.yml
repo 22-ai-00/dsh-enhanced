@@ -6,4 +6,5 @@
         tickIntervalMs: 5000
         authorities: []
         profiles: []
-        requireAcceptance: true
+        # Bundled patch ships profiles: [] (no static foreground-turn profiles); ordinary chat must not be blocked on preconfigured task scenarios.
+        requireAcceptance: false

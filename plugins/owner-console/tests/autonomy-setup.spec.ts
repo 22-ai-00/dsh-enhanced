@@ -319,7 +319,7 @@ describe('autonomy-setup wizard', () => {
     } as never)
     expect(verifierRow.config['databasePath']).toBe("dshHomePath('assistant-verifier/verification.sqlite')")
     expect(parsedVerifier.tickIntervalMs).toBe(5000)
-    expect(parsedVerifier.requireAcceptance).toBe(true)
+    expect(parsedVerifier.requireAcceptance).toBe(false)
     const reviewCfg = verifierRow.config['memoryReviews'] as Record<string, unknown>
     const adoptCfg = (paRow.config['personalMemory'] as Record<string, unknown>)['automaticLearning'] as Record<string, unknown>
     const learnCfg = memRow.config
@@ -1014,21 +1014,45 @@ describe('autonomy-setup wizard', () => {
     expect(() => validateLearningConfig(learnerCfg)).not.toThrow()
   })
 
-  it('preserves explicit requireAcceptance: false opt-out in ensureVerifierDefaults', () => {
+  it('defaults requireAcceptance based on profiles while preserving explicit overrides and wholesale verifier fields in ensureVerifierDefaults', () => {
     const doc = parseDocument('- id: dsh-ray-assistant-verifier\n  config:\n    requireAcceptance: false\n')
     const cfgNode = doc.getIn([0, 'config']) as import('yaml').YAMLMap
     ensureVerifierDefaults(doc, cfgNode, { requireAcceptance: true })
     expect(cfgNode.get('requireAcceptance')).toBe(false)
 
+    const docExplicitTrue = parseDocument('- id: dsh-ray-assistant-verifier\n  config:\n    requireAcceptance: true\n    profiles: []\n')
+    const explicitTrueCfgNode = docExplicitTrue.getIn([0, 'config']) as import('yaml').YAMLMap
+    ensureVerifierDefaults(docExplicitTrue, explicitTrueCfgNode, { requireAcceptance: false })
+    expect(explicitTrueCfgNode.get('requireAcceptance')).toBe(true)
+
     const docFromRuntime = parseDocument('- id: dsh-ray-assistant-verifier\n  config: {}\n')
     const runtimeCfgNode = docFromRuntime.getIn([0, 'config']) as import('yaml').YAMLMap
-    ensureVerifierDefaults(docFromRuntime, runtimeCfgNode, { requireAcceptance: false })
+    ensureVerifierDefaults(docFromRuntime, runtimeCfgNode, {
+      requireAcceptance: true,
+      profiles: [],
+      memoryReviews: { authorityId: 'mem-rev-1' },
+    })
     expect(runtimeCfgNode.get('requireAcceptance')).toBe(false)
+    expect(runtimeCfgNode.get('memoryReviews', true)?.toJSON?.()).toEqual({ authorityId: 'mem-rev-1' })
+    expect(docFromRuntime.toString()).toContain("!!js dshHomePath('assistant-verifier/verification.sqlite')")
 
     const docDefault = parseDocument('- id: dsh-ray-assistant-verifier\n  config: {}\n')
     const defaultCfgNode = docDefault.getIn([0, 'config']) as import('yaml').YAMLMap
     ensureVerifierDefaults(docDefault, defaultCfgNode, undefined)
-    expect(defaultCfgNode.get('requireAcceptance')).toBe(true)
+    expect(defaultCfgNode.get('requireAcceptance')).toBe(false)
+
+    const docWithProfiles = parseDocument('- id: dsh-ray-assistant-verifier\n  config:\n    profiles:\n      - id: p1\n')
+    const withProfilesCfgNode = docWithProfiles.getIn([0, 'config']) as import('yaml').YAMLMap
+    ensureVerifierDefaults(docWithProfiles, withProfilesCfgNode, undefined)
+    expect(withProfilesCfgNode.get('requireAcceptance')).toBe(true)
+
+    const docWithRuntimeProfilesFalse = parseDocument('- id: dsh-ray-assistant-verifier\n  config: {}\n')
+    const withRuntimeProfilesFalseCfgNode = docWithRuntimeProfilesFalse.getIn([0, 'config']) as import('yaml').YAMLMap
+    ensureVerifierDefaults(docWithRuntimeProfilesFalse, withRuntimeProfilesFalseCfgNode, {
+      profiles: [{ id: 'p1' }],
+      requireAcceptance: false,
+    })
+    expect(withRuntimeProfilesFalseCfgNode.get('requireAcceptance')).toBe(false)
   })
 
   it('preserves workItemExperiences: false without false configDigest rotation on re-application', async () => {
