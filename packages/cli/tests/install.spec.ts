@@ -624,7 +624,7 @@ describe('main：install / reinstall 分发', () => {
         passthrough: ['--operation', 'upgrade', '--yes', '--allow-non-empty-history-migration'],
         executor: {
           download: async () => '#!/usr/bin/env bash\n',
-          prepareHost: async () => ({ binDirectory: '/hosts/cur' }) as never,
+          prepareHost: async ({ environment }) => ({ ...environment, DSH_HOME: home }),
           prepareHostUpdate: async () => ({
             schemaVersion: 1,
             status: 'noop',
@@ -659,7 +659,7 @@ describe('main：install / reinstall 分发', () => {
         passthrough: ['--operation', 'upgrade', '--yes', '--allow-non-empty-history-migration'],
         executor: {
           download: async () => '#!/usr/bin/env bash\n',
-          prepareHost: async () => ({ binDirectory: '/hosts/old' }) as never,
+          prepareHost: async ({ environment }) => ({ ...environment, DSH_HOME: home }),
           prepareHostUpdate: async () => plan as never,
           runTransactionalUpgrade: (async (opts: { allowNonEmptyHistoryMigration?: boolean }) => {
             transactionalCalls.push(opts)

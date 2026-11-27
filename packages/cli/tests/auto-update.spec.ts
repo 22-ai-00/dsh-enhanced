@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -28,7 +28,7 @@ afterEach(() => {
 })
 
 function makeHome(profile = 'web'): { root: string; dshHome: string; osHome: string; binDir: string } {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-cli-auto-update-'))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-cli-auto-update-')))
   cleanupDirs.push(root)
   const dshHome = join(root, 'dsh-home')
   const osHome = join(root, 'user-home')
@@ -375,14 +375,18 @@ describe('packages/cli auto-update shared runtime', () => {
     writeFileSync(fakeDshRay, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
     let installedUpdated = false
 
-    const exitCode = await runAutoUpdateWorker(parseAutoUpdateWorkerArgs([
-      '--dsh-home', dshHome,
-      '--run-id', runId,
-      '--profile', 'web',
-      '--to-npm',
-      '--target-version', '0.2.2',
-      '--delay-ms', '2500',
-    ], { HOME: osHome, PATH: binDir }), {
+    const exitCode = await runAutoUpdateWorker({
+      ...parseAutoUpdateWorkerArgs([
+        '--dsh-home', dshHome,
+        '--run-id', runId,
+        '--profile', 'web',
+        '--to-npm',
+        '--target-version', '0.2.2',
+        '--delay-ms', '2500',
+      ], { HOME: osHome, PATH: binDir }),
+      platform: 'linux',
+      osHome,
+    }, {
       sleep: async (ms) => {
         sleepCalls.push(ms)
         slept = true
@@ -481,6 +485,8 @@ describe('packages/cli auto-update shared runtime', () => {
       runId,
       profile: 'web',
       delayMs: 0,
+      platform: 'linux',
+      osHome: root,
       env: { HOME: root, PATH: binDir },
     }, {
       detailedRunner: (cmd, args) => {
