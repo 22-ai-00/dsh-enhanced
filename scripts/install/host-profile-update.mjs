@@ -373,7 +373,7 @@ export async function bindInstalledPnpmStore(preparation, profilePath, rewrite =
 
 function pnpmEnvironment(preparationRoot, more = {}, trustVerifiedLockfile = false) {
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:p?npm_config_|PNPM_HOME$|NODE_OPTIONS$|NODE_PATH$|XDG_)/iu.test(key)))
-  return { ...inherited, ...more, HOME: join(preparationRoot, 'home'), XDG_CONFIG_HOME: join(preparationRoot, 'config'),
+  return { ...inherited, CI: 'true', ...more, HOME: join(preparationRoot, 'home'), XDG_CONFIG_HOME: join(preparationRoot, 'config'),
     pnpm_config_userconfig: join(preparationRoot, 'home', '.npmrc'), pnpm_config_store_dir: join(preparationRoot, 'store'),
     pnpm_config_cache_dir: join(preparationRoot, 'cache'), pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true',
     pnpm_config_trust_lockfile: trustVerifiedLockfile ? 'true' : 'false' }
@@ -501,8 +501,9 @@ async function oldHostLinks(path, oldHostRoot, candidateHostRoot, remove) {
 
 async function defaultRunPnpm(args, options) {
   const executable = options.pnpmPath || 'pnpm'
+  const env = { CI: 'true', ...(options.env ?? process.env) }
   await new Promise((accept, reject) => {
-    const child = spawn(executable, args, { cwd: options.cwd, env: options.env, stdio: 'ignore', signal: options.signal })
+    const child = spawn(executable, args, { cwd: options.cwd, env, stdio: 'ignore', signal: options.signal })
     child.once('error', reject)
     child.once('close', code => code === 0 ? accept() : reject(new Error(`pnpm ${options.phase} exited ${code}`)))
   })

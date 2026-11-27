@@ -4686,7 +4686,7 @@ function rsiCoordinatorSnapshot(pair) {
 async function assertRsiPairUpgradeSource(homePath, profile, pair) {
   if (await existingIdentity(join(homePath, 'rsi-local-cohorts', profile)) !== undefined
     || pair !== undefined && pair.receipt.sourceRepository !== null) {
-    fail('RSI 本地冻结 cohort 需要连同源码/制品收据迁移；尚未停服或修改安装，不能只升级两个 profile 的包。')
+    fail('RSI 本地冻结 cohort 需要连同源码/制品收据迁移；尚未停服或修改安装，不能只升级两个 profile 的包。如需切换为纯 npm 升级，请运行 dsh-ray update --all --yes --to-npm（或 dsh-ray upgrade --yes --to-npm）。')
   }
 }
 
@@ -5640,7 +5640,7 @@ async function resolvedPnpmStorePath(pnpmPath, homePath, profilePath, pnpmExecut
   try {
     output = await run(pnpmPath, ['store', 'path'], {
       cwd: profilePath, capture: true,
-      env: { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true',
+      env: { ...process.env, CI: 'true', NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true',
         ...(pnpmExecutable === undefined ? {} : localSourcePnpmManagerEnvironment()) },
     })
   }
@@ -5663,6 +5663,7 @@ async function resolvedPnpmStorePath(pnpmPath, homePath, profilePath, pnpmExecut
       env: {
         PATH: process.env.PATH ?? '/usr/bin:/bin',
         HOME: process.env.HOME ?? dirname(homePath),
+        CI: 'true',
         TMPDIR: '/tmp',
         DSH_HOME: homePath,
         pnpm_config_store_dir: canonical,
@@ -5768,13 +5769,13 @@ function localSourcePnpmManagerEnvironment() {
 }
 
 function localSourceOriginalNpmEnvironment() {
-  return { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, ...localSourcePnpmManagerEnvironment(),
+  return { ...process.env, CI: 'true', NODE_OPTIONS: undefined, NODE_PATH: undefined, ...localSourcePnpmManagerEnvironment(),
     pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false' }
 }
 
 function localSourcePrivateNpmEnvironment(cachePath, storePath) {
   const isolated = isolatedNpmEnvironment(cachePath, { storePath })
-  return { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'C', LC_ALL: 'C', TMPDIR: '/tmp',
+  return { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'C', LC_ALL: 'C', TMPDIR: '/tmp', CI: 'true',
     ...localSourcePnpmManagerEnvironment(), HOME: isolated.HOME, XDG_CONFIG_HOME: isolated.XDG_CONFIG_HOME,
     pnpm_config_userconfig: isolated.pnpm_config_userconfig,
     pnpm_config_store_dir: isolated.pnpm_config_store_dir, pnpm_config_cache_dir: cachePath,
@@ -5816,7 +5817,7 @@ function npmConfigurationSnapshot(config) {
 function isolatedNpmEnvironment(cachePath, pnpmStore) {
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:p?npm_config_|PNPM_HOME$|NODE_OPTIONS$|NODE_PATH$|XDG_)/iu.test(key)))
   return {
-    ...inherited, HOME: join(cachePath, 'home'), XDG_CONFIG_HOME: join(cachePath, 'config'),
+    ...inherited, CI: 'true', HOME: join(cachePath, 'home'), XDG_CONFIG_HOME: join(cachePath, 'config'),
     pnpm_config_userconfig: join(cachePath, 'home', '.npmrc'),
     pnpm_config_store_dir: pnpmStore.storePath,
     pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false',
@@ -5900,7 +5901,7 @@ async function prepareNpmUpgrade({ current, profile, pnpmPath, dshExecutable, ta
     fail('npm cohort metadata preparation does not yet support a profile .npmrc; original profile is unchanged')
   }
   const original = await readNpmMetadata(current.profilePath)
-  const sourceEnvironment = { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false' }
+  const sourceEnvironment = { ...process.env, CI: 'true', NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false' }
   const sourceConfig = await npmEffectiveConfig(pnpmPath, await realpath(current.profilePath), sourceEnvironment)
   const configuration = npmConfigurationSnapshot(sourceConfig)
   const rootPath = await mkdtemp('/tmp/dsh-ray-npm-')
@@ -6155,7 +6156,7 @@ async function installUpgradeIntoStage({ sandbox, current, stagedProfile, target
       extraEnvironment: {
         HOME: '/run/dsh-ray-pnpm-cache/home', XDG_CONFIG_HOME: '/run/dsh-ray-pnpm-cache/config',
         pnpm_config_userconfig: '/run/dsh-ray-pnpm-cache/home/.npmrc',
-        ...(process.env.CI === undefined ? {} : { CI: process.env.CI }),
+        CI: 'true',
         pnpm_config_offline: 'true', pnpm_config_frozen_store: 'true', pnpm_config_package_import_method: 'copy',
         pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false',
         pnpm_config_store_dir: pnpmStore.storePath, pnpm_config_cache_dir: '/run/dsh-ray-pnpm-cache',
@@ -6172,6 +6173,7 @@ async function installUpgradeIntoStage({ sandbox, current, stagedProfile, target
   } else {
     await sandboxRun(sandbox, [dshExecutable, 'plugin', '--profile', profile, 'add', ...targets], {
       extraEnvironment: {
+        CI: 'true',
         pnpm_config_offline: 'true', pnpm_config_package_import_method: 'copy', pnpm_config_ignore_scripts: 'true',
         pnpm_config_ignore_pnpmfile: 'true',
         ...(pnpmStore === undefined ? {} : {
@@ -6970,7 +6972,7 @@ async function localSourceSandbox(context, action, input, pnpmStore, packageCach
       join(dirname(SCRIPT_PATH), 'local-source-maintenance.mjs'), action, join(context.homePath, inputName)], {
       capture: true, pnpmStore, readonlyRoots: [input.proof.installer.root, dirname(SCRIPT_PATH)],
       ...(packageCaches === undefined ? {} : { localPackageRoots: packageCaches.roots }),
-      extraEnvironment: { pnpm_config_offline: 'true', pnpm_config_ignore_scripts: 'true',
+      extraEnvironment: { CI: 'true', pnpm_config_offline: 'true', pnpm_config_ignore_scripts: 'true',
         pnpm_config_ignore_pnpmfile: 'true', pnpm_config_package_import_method: 'copy',
         pnpm_config_trust_lockfile: 'false',
         ...(packageCaches === undefined ? {} : {
@@ -8345,7 +8347,7 @@ async function hostSandboxRun({ bwrapExecutable, preparationRoot, stageHome, log
   const logical = isPreparation ? preparationRoot : logicalHome
   const physical = isPreparation ? preparationRoot : stageHome
   const env = {
-    PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: preparationRoot,
+    PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: preparationRoot, CI: environment.CI ?? 'true',
     TMPDIR: '/tmp', DSH_HOME: logicalHome, XDG_CACHE_HOME: join(preparationRoot, 'cache'),
     pnpm_config_store_dir: join(preparationRoot, 'store'),
     pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true',

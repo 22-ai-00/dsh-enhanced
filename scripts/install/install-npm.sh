@@ -482,9 +482,13 @@ done
 INSTALL_NEEDS_LIFECYCLE_HELPERS='0'
 INSTALL_NEEDS_HOST_HELPERS='0'
 case "$INSTALL_OPERATION" in
-  upgrade|uninstall) INSTALL_NEEDS_LIFECYCLE_HELPERS='1' ;;
+  upgrade|uninstall)
+    INSTALL_NEEDS_LIFECYCLE_HELPERS='1'
+    INSTALL_NEEDS_HOST_HELPERS='1'
+    ;;
 esac
 if [[ -n "${DSH_RAY_HOST_UPDATE_PLAN:-}" || "${DSH_RAY_HOST_RECOVERY_ONLY:-}" == '1' ]]; then
+  INSTALL_NEEDS_LIFECYCLE_HELPERS='1'
   INSTALL_NEEDS_HOST_HELPERS='1'
 fi
 
@@ -535,7 +539,11 @@ else
   fi
   if [[ "$INSTALL_NEEDS_HOST_HELPERS" == '1' ]]; then
     for host_digest in "$INSTALL_HOST_LIFECYCLE_SHA256" "$INSTALL_HOST_PROFILE_UPDATE_SHA256" "$INSTALL_HOST_RSI_UPDATE_SHA256"; do
-      if [[ ! "$host_digest" =~ ^[0-9a-f]{64}$ || "$host_digest" == '0000000000000000000000000000000000000000000000000000000000000000' ]]; then
+      if [[ ! "$host_digest" =~ ^[0-9a-f]{64}$ ]]; then
+        printf 'dsh-ray installer: 远程 Host helper SHA-256 无效。\n' >&2
+        exit 2
+      fi
+      if [[ "$host_digest" == '0000000000000000000000000000000000000000000000000000000000000000' ]]; then
         printf 'dsh-ray installer: 固定发布未包含已校验的 Host helper；拒绝受管 Host 更新/恢复。\n' >&2
         exit 1
       fi

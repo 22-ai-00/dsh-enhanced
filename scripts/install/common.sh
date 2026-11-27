@@ -1483,7 +1483,11 @@ dsh_ray_ensure_agent_bundle() {
     dsh_ray_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
     dsh_ray_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "$target" || return $?
   fi
-  dsh_ray_run "$dry_run" dsh plugin --profile "$profile" add "$target"
+  if [[ "$dry_run" == '1' ]]; then
+    dsh_ray_print_command dsh plugin --profile "$profile" add "$target"
+  else
+    CI=true dsh plugin --profile "$profile" add "$target"
+  fi
 }
 
 # pnpm 11 requires an explicit decision for every build script. Write the
@@ -1509,7 +1513,7 @@ dsh_ray_prepare_profile_build_policy() {
       dsh_ray_fail 1 "现有 profile 缺少 pnpm-workspace.yaml；不会创建不完整的 Host workspace：$profile_directory"
       return $?
     fi
-    dsh plugin --profile "$profile" version-exemptions >/dev/null || {
+    CI=true dsh plugin --profile "$profile" version-exemptions >/dev/null || {
       dsh_ray_fail 1 "Host 无法初始化 profile workspace：$profile_directory"
       return $?
     }
@@ -4350,7 +4354,7 @@ dsh_ray_macos_stopped_upgrade() {
     dsh_ray_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || failure='build policy preparation failed'
   fi
   if [[ -z "$failure" ]]; then
-    npm_config_loglevel=error dsh plugin --profile "$profile" add "$@" || failure='package update failed'
+    CI=true npm_config_loglevel=error dsh plugin --profile "$profile" add "$@" || failure='package update failed'
   fi
   if [[ -z "$failure" ]] && ! dsh --profile "$profile" --dump-config >/dev/null; then
     failure='profile composition failed'
@@ -4766,7 +4770,7 @@ dsh_ray_install() {
   if [[ "$operation" != 'install' ]]; then
     local lifecycle_directory
     lifecycle_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 1
-    for lifecycle_asset in lifecycle-config.mjs lifecycle-profile.mjs; do
+    for lifecycle_asset in lifecycle-config.mjs lifecycle-profile.mjs host-lifecycle.mjs host-profile-update.mjs host-rsi-update.mjs; do
       if [[ ! -f "$lifecycle_directory/$lifecycle_asset" || -L "$lifecycle_directory/$lifecycle_asset" ]]; then
         dsh_ray_fail 1 "缺少可信的生命周期资产：$lifecycle_directory/$lifecycle_asset"
         return $?
@@ -5330,10 +5334,10 @@ dsh_ray_install() {
       fi
       dsh_ray_print_command pnpm --dir "$repo_root" build
     elif [[ "$operation" == 'upgrade' ]]; then
-      pnpm --dir "$repo_root" install --offline --frozen-lockfile || return $?
+      CI=true pnpm --dir "$repo_root" install --offline --frozen-lockfile --config.confirmModulesPurge=false || return $?
       pnpm --dir "$repo_root" build || return $?
     else
-      (cd "$repo_root" && pnpm install && pnpm build)
+      (cd "$repo_root" && CI=true pnpm install --config.confirmModulesPurge=false && pnpm build)
     fi
   fi
 
@@ -5661,7 +5665,7 @@ NODE
       dsh_ray_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
       dsh_ray_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "${targets[@]}" || return $?
     fi
-    npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}" || return $?
+    CI=true npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}" || return $?
   fi
   if [[ "$scenario" != 'core' ]]; then
     if [[ "$dry_run" == '1' ]]; then

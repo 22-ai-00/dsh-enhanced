@@ -535,6 +535,27 @@ function withPinnedLifecycleHashes(source: string, configHash: string, profileHa
     )
 }
 
+function withPinnedHostHashes(
+  source: string,
+  hostLifecycleHash: string,
+  hostProfileUpdateHash: string,
+  hostRsiUpdateHash: string,
+): string {
+  return source
+    .replace(
+      /^DSH_RAY_PINNED_HOST_LIFECYCLE_SHA256='[0-9a-f]{64}'$/mu,
+      `DSH_RAY_PINNED_HOST_LIFECYCLE_SHA256='${hostLifecycleHash}'`,
+    )
+    .replace(
+      /^DSH_RAY_PINNED_HOST_PROFILE_UPDATE_SHA256='[0-9a-f]{64}'$/mu,
+      `DSH_RAY_PINNED_HOST_PROFILE_UPDATE_SHA256='${hostProfileUpdateHash}'`,
+    )
+    .replace(
+      /^DSH_RAY_PINNED_HOST_RSI_UPDATE_SHA256='[0-9a-f]{64}'$/mu,
+      `DSH_RAY_PINNED_HOST_RSI_UPDATE_SHA256='${hostRsiUpdateHash}'`,
+    )
+}
+
 interface RemoteBootstrapFixture {
   assets: Record<'common.sh' | 'lifecycle-config.mjs' | 'lifecycle-profile.mjs' | 'host-lifecycle.mjs' | 'host-profile-update.mjs' | 'host-rsi-update.mjs', string>
   assetDirectory: string
@@ -648,6 +669,7 @@ function runRemoteNpmBootstrap(
   options: {
     lifecycleDigests?: boolean
     hostDigests?: boolean
+    hostPlan?: boolean
     foreignStatPath?: string
     rootStatPaths?: readonly string[]
     tamper?: keyof RemoteBootstrapFixture['assets']
@@ -675,6 +697,8 @@ function runRemoteNpmBootstrap(
         DSH_RAY_INSTALL_HOST_LIFECYCLE_SHA256: fixture.hashes['host-lifecycle.mjs'],
         DSH_RAY_INSTALL_HOST_PROFILE_UPDATE_SHA256: fixture.hashes['host-profile-update.mjs'],
         DSH_RAY_INSTALL_HOST_RSI_UPDATE_SHA256: fixture.hashes['host-rsi-update.mjs'],
+      } : {}),
+      ...(options.hostPlan ? {
         DSH_RAY_HOST_UPDATE_PLAN: '/private/plan.json',
       } : {}),
       REMOTE_BOOTSTRAP_ASSETS: fixture.assetDirectory,
@@ -1200,13 +1224,40 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-ray/personal-assistant'" '  co
   )
 
   test.each(['upgrade', 'uninstall'] as const)(
+    'remote npm %s with host zero sentinels fails before downloads or source',
+    async operation => {
+      const fixture = await remoteBootstrapFixture()
+      const zeroHostInstallerSource = withPinnedHostHashes(
+        withPinnedLifecycleHashes(pinnedInstallerSource, fixture.hashes['lifecycle-config.mjs'], fixture.hashes['lifecycle-profile.mjs']),
+        zeroSha256,
+        zeroSha256,
+        zeroSha256,
+      )
+
+      const result = runRemoteNpmBootstrap(zeroHostInstallerSource, fixture, [
+        '--operation', operation, '--confirm-dsh-home-stopped', '--scenario', 'web', '--dry-run',
+      ])
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('固定发布未包含已校验的 Host helper')
+      await expect(readFile(fixture.logPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await readdir(fixture.temporaryDirectory)).toEqual([])
+    },
+  )
+
+  test.each(['upgrade', 'uninstall'] as const)(
     'remote npm %s lifecycle bootstrap downloads one release cohort and verifies every asset before source',
     async operation => {
       const fixture = await remoteBootstrapFixture()
 
       const result = runRemoteNpmBootstrap(pinnedInstallerSource, fixture, [
         '--operation', operation, '--confirm-dsh-home-stopped', '--scenario', 'web', '--dry-run',
-      ], { lifecycleDigests: true })
+      ], {
+        lifecycleDigests: true,
+        hostDigests: true,
+        // Exercise --operation upgrade/uninstall WITHOUT DSH_RAY_HOST_UPDATE_PLAN
+      })
 
       expect(result.status, result.stderr).toBe(0)
       expect(await readFile(fixture.logPath, 'utf8')).toBe([
@@ -1216,6 +1267,12 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-ray/personal-assistant'" '  co
         'download\thttps://assets.invalid/v9.8.7/lifecycle-profile.mjs',
         'verify\tlifecycle-config.mjs',
         'verify\tlifecycle-profile.mjs',
+        'download\thttps://assets.invalid/v9.8.7/host-lifecycle.mjs',
+        'download\thttps://assets.invalid/v9.8.7/host-profile-update.mjs',
+        'download\thttps://assets.invalid/v9.8.7/host-rsi-update.mjs',
+        'verify\thost-lifecycle.mjs',
+        'verify\thost-profile-update.mjs',
+        'verify\thost-rsi-update.mjs',
         'source:common',
         `run\tnpm\t\t--operation\t${operation}\t--confirm-dsh-home-stopped\t--scenario\tweb\t--dry-run`,
         '',
@@ -1225,14 +1282,14 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-ray/personal-assistant'" '  co
     },
   )
 
-  test.each(['common.sh', 'lifecycle-config.mjs', 'lifecycle-profile.mjs'] as const)(
+  test.each(['common.sh', 'lifecycle-config.mjs', 'lifecycle-profile.mjs', 'host-lifecycle.mjs', 'host-profile-update.mjs', 'host-rsi-update.mjs'] as const)(
     'remote npm lifecycle bootstrap rejects tampered %s before source or home mutation',
     async tamperedAsset => {
       const fixture = await remoteBootstrapFixture()
 
       const result = runRemoteNpmBootstrap(pinnedInstallerSource, fixture, [
         '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--scenario', 'web', '--dry-run',
-      ], { lifecycleDigests: true, tamper: tamperedAsset })
+      ], { lifecycleDigests: true, hostDigests: true, tamper: tamperedAsset })
 
       expect(result.status).toBe(1)
       expect(result.stderr).toContain('远程 ' + tamperedAsset + ' 完整性校验失败')
@@ -1248,7 +1305,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-ray/personal-assistant'" '  co
     const fixture = await remoteBootstrapFixture()
     const result = runRemoteNpmBootstrap(pinnedInstallerSource, fixture, [
       '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--scenario', 'web',
-    ], { lifecycleDigests: true, hostDigests: true })
+    ], { lifecycleDigests: true, hostDigests: true, hostPlan: true })
     expect(result.status, result.stderr).toBe(0)
     const log = await readFile(fixture.logPath, 'utf8')
     for (const asset of ['host-lifecycle.mjs', 'host-profile-update.mjs', 'host-rsi-update.mjs']) {
@@ -1263,7 +1320,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-ray/personal-assistant'" '  co
       const fixture = await remoteBootstrapFixture()
       const result = runRemoteNpmBootstrap(pinnedInstallerSource, fixture, [
         '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--scenario', 'web',
-      ], { lifecycleDigests: true, hostDigests: true, tamper: tamperedAsset })
+      ], { lifecycleDigests: true, hostDigests: true, hostPlan: true, tamper: tamperedAsset })
       expect(result.status).toBe(1)
       expect(result.stderr).toContain(`远程 ${tamperedAsset} 完整性校验失败`)
       expect(await readFile(fixture.logPath, 'utf8')).not.toContain('source:common')
