@@ -505,4 +505,396 @@ describe('DSH request serialization', () => {
     expect(serialized).toContain('FIRST_CATALOG_KEEP')
     expect(serialized).toContain('SECOND_CATALOG_KEEP')
   })
+
+  it('compacts a realistic 99-tool (~69 KB) schema while preserving structural constraints and tool-call parsing', () => {
+    const options = request()
+    const tools = Array.from({ length: 99 }, (_, index) => ({
+      name: `dsh_tool_${String(index).padStart(2, '0')}`,
+      description: `Execute structured operation ${index} across workspace resources with validation. ${'Verbose usage guidance. '.repeat(10)}`,
+      parameters: index === 0
+        ? {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            title: 'Tool0Input',
+            description: 'Root schema description for tool 0',
+            type: 'object',
+            additionalProperties: false,
+            required: ['action', 'target'],
+            examples: [{ action: 'read', target: { path: 'README.md' } }],
+            properties: {
+              action: {
+                type: 'string',
+                enum: ['read', 'list', 'inspect'],
+                title: 'ActionTitle',
+                description: `Action selector for tool 0. ${'Detailed prose '.repeat(8)}`,
+              },
+              target: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['path'],
+                description: 'Target object description',
+                properties: {
+                  path: {
+                    type: 'string',
+                    description: 'Deep nested path description that should be stripped in compact mode',
+                  },
+                  title: {
+                    type: 'string',
+                    description: 'A real parameter literally named title',
+                  },
+                },
+              },
+              tags: {
+                type: 'array',
+                items: {
+                  anyOf: [
+                    { type: 'string', description: 'Deep branch description' },
+                    { type: 'number' },
+                  ],
+                },
+              },
+            },
+          }
+        : {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            title: `Tool${index}Input`,
+            description: `Root schema description for tool ${index}`,
+            type: 'object',
+            additionalProperties: false,
+            required: ['path'],
+            examples: [{ path: 'README.md', mode: 'read' }],
+            properties: {
+              path: {
+                type: 'string',
+                title: 'PathTitle',
+                description: `Target file path for tool ${index}. ${'Detailed parameter guidance. '.repeat(6)}`,
+              },
+              mode: {
+                type: 'string',
+                enum: ['read', 'inspect'],
+                description: `Mode selector for tool ${index}. ${'Mode guidance. '.repeat(4)}`,
+              },
+            },
+          },
+    }))
+    const rawToolsBytes = Buffer.byteLength(JSON.stringify(tools), 'utf8')
+    expect(rawToolsBytes).toBeGreaterThanOrEqual(65_000)
+
+    options.tools = tools
+    const prompt = buildPrompt(options, 184_320, 'Antigravity')
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      constraints: {
+        tools: {
+          available: Array<{
+            name: string
+            description?: string
+            parameters: Record<string, unknown>
+          }>
+        }
+      }
+    }
+
+    const available = payload.constraints.tools.available
+    const compactedToolsBytes = Buffer.byteLength(JSON.stringify(available), 'utf8')
+    expect(available).toHaveLength(99)
+    expect(compactedToolsBytes).toBeLessThan(35_000)
+    expect(compactedToolsBytes).toBeLessThan(Math.floor(rawToolsBytes * 0.45))
+
+    const sample = available[0]!
+    expect(sample.name).toBe('dsh_tool_00')
+    expect(sample.description?.length).toBeLessThanOrEqual(80)
+    expect(sample.parameters).toEqual({
+      type: 'object',
+      additionalProperties: false,
+      required: ['action', 'target'],
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['read', 'list', 'inspect'],
+        },
+        target: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['path'],
+          properties: {
+            path: { type: 'string' },
+            title: { type: 'string' },
+          },
+        },
+        tags: {
+          type: 'array',
+          items: {
+            anyOf: [
+              { type: 'string' },
+              { type: 'number' },
+            ],
+          },
+        },
+      },
+    })
+
+    const envelope = JSON.stringify({
+      protocol: 'dsh-tool-calls/v1',
+      calls: [{
+        name: 'dsh_tool_98',
+        arguments: { path: 'src/prompt.ts', mode: 'read' },
+      }],
+    })
+    expect(parseDelegatedToolCalls(envelope, tools)).toEqual([{
+      name: 'dsh_tool_98',
+      arguments: '{"path":"src/prompt.ts","mode":"read"}',
+    }])
+  })
+
+  it('keeps concise top-level and parameter descriptions on small tool catalogs while stripping non-structural metadata', () => {
+    const options = request()
+    options.tools = [{
+      name: 'lookup',
+      description: 'Lookup a workspace symbol by name and optional scope.',
+      parameters: {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        title: 'LookupInput',
+        description: 'Duplicate root schema description',
+        type: 'object',
+        required: ['query'],
+        examples: [{ query: 'buildPrompt' }],
+        properties: {
+          query: {
+            type: 'string',
+            title: 'QueryTitle',
+            description: 'Symbol query string.',
+          },
+          nested: {
+            type: 'object',
+            properties: {
+              filter: {
+                type: 'string',
+                description: 'Deep nested description omitted even on small catalogs.',
+              },
+            },
+          },
+        },
+      },
+    }]
+
+    const prompt = buildPrompt(options, 100_000, 'Antigravity')
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      constraints: { tools: { available: Array<Record<string, unknown>> } }
+    }
+    expect(payload.constraints.tools.available).toEqual([{
+      name: 'lookup',
+      description: 'Lookup a workspace symbol by name and optional scope.',
+      parameters: {
+        type: 'object',
+        required: ['query'],
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Symbol query string.',
+          },
+          nested: {
+            type: 'object',
+            properties: {
+              filter: { type: 'string' },
+            },
+          },
+        },
+      },
+    }])
+  })
+
+  it('bounds earlier tool outputs under 184_320 bytes while preserving the latest trailing tool-result batch verbatim', () => {
+    const options = request()
+    options.system = 'S'.repeat(6_000)
+    options.tools = Array.from({ length: 99 }, (_, index) => ({
+      name: `tool_${index}`,
+      description: `Tool ${index} performs action ${index}. ${'Extra description text. '.repeat(8)}`,
+      parameters: {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        required: ['path'],
+        properties: {
+          path: { type: 'string', description: 'Workspace path argument '.repeat(5) },
+          mode: { type: 'string', enum: ['full', 'slice'], description: 'Read mode '.repeat(5) },
+        },
+      },
+    }))
+
+    const skillCatalog = createMessage({
+      role: 'user',
+      source: {
+        kind: 'skill-catalog',
+        form: 'catalog',
+        update: true,
+        entries: [{ name: 'dsh-doc', description: 'Docs' }],
+      } as never,
+      content: [{ type: 'text', text: `<available_skills>${'K'.repeat(41_000)}</available_skills>` }],
+    })
+    const olderCallA = 'call-old-a' as never
+    const olderCallB = 'call-old-b' as never
+    const olderCallC = 'call-old-c' as never
+    const latestCall1 = 'call-latest-1' as never
+    const latestCall2 = 'call-latest-2' as never
+    const oldOutputA = `${'OLD_A_中文😀'.repeat(2_000)}_END_A`
+    const oldOutputB = `${'OLD_B_'.repeat(6_500)}_END_B`
+    const oldOutputC = `${'OLD_C_'.repeat(6_500)}_END_C`
+    const latestOutput1 = `LATEST_BATCH_1_${'L1'.repeat(12_000)}_TAIL1`
+    const latestOutput2 = `LATEST_BATCH_2_${'L2'.repeat(10_000)}_TAIL2`
+    const totalToolBytes = Buffer.byteLength(
+      oldOutputA + oldOutputB + oldOutputC + latestOutput1 + latestOutput2,
+      'utf8',
+    )
+    expect(totalToolBytes).toBeGreaterThan(150_000)
+
+    options.messages = [
+      skillCatalog,
+      createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Inspect files' }] }),
+      createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: 'agy-agent', model: 'gemini-4-hydrogen' },
+        content: [
+          { type: 'tool-call', id: olderCallA, name: 'tool_0', arguments: '{"path":"a.ts"}' },
+          { type: 'tool-call', id: olderCallB, name: 'tool_0', arguments: '{"path":"b.ts"}' },
+        ],
+      }),
+      createMessage({
+        role: 'tool',
+        source: { kind: 'tool', callId: olderCallA },
+        toolCallId: olderCallA,
+        content: [{ type: 'text', text: oldOutputA }],
+      }),
+      createMessage({
+        role: 'tool',
+        source: { kind: 'tool', callId: olderCallB },
+        toolCallId: olderCallB,
+        content: [{ type: 'text', text: oldOutputB }],
+      }),
+      createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: 'agy-agent', model: 'gemini-4-hydrogen' },
+        content: [{ type: 'tool-call', id: olderCallC, name: 'tool_0', arguments: '{"path":"c.ts"}' }],
+      }),
+      createMessage({
+        role: 'tool',
+        source: { kind: 'tool', callId: olderCallC },
+        toolCallId: olderCallC,
+        content: [{ type: 'text', text: oldOutputC }],
+      }),
+      createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: 'agy-agent', model: 'gemini-4-hydrogen' },
+        content: [
+          { type: 'tool-call', id: latestCall1, name: 'tool_0', arguments: '{"path":"latest1.ts"}' },
+          { type: 'tool-call', id: latestCall2, name: 'tool_0', arguments: '{"path":"latest2.ts"}' },
+        ],
+      }),
+      createMessage({
+        role: 'tool',
+        source: { kind: 'tool', callId: latestCall1 },
+        toolCallId: latestCall1,
+        content: [{ type: 'text', text: latestOutput1 }],
+      }),
+      createMessage({
+        role: 'tool',
+        source: { kind: 'tool', callId: latestCall2 },
+        toolCallId: latestCall2,
+        content: [{ type: 'text', text: latestOutput2 }],
+      }),
+      createMessage({
+        role: 'user',
+        source: { kind: 'runtime-context', form: 'snapshot', sections: [{ name: 'cwd', text: '/workspace' }] } as never,
+        content: [{ type: 'text', text: '<system-reminder>cwd=/workspace</system-reminder>' }],
+      }),
+    ]
+
+    const prompt = buildPrompt(options, 184_320, 'Antigravity')
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThanOrEqual(184_320)
+    expect(prompt).not.toMatch(/[\ud800-\udfff]/u)
+
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      conversation: Array<{
+        role: string
+        content: Array<{ type: string; toolCallId?: string; content?: Array<{ type: string; text?: string }> }>
+      }>
+    }
+    const toolMessages = payload.conversation.filter(message => message.role === 'tool')
+    expect(toolMessages).toHaveLength(5)
+
+    for (const earlier of toolMessages.slice(0, 3)) {
+      const text = earlier.content[0]?.content?.[0]?.text ?? ''
+      expect(text).toContain('…[earlier tool output truncated to fit local ACP prompt byte limit; re-read specific line range if needed]')
+    }
+    expect(toolMessages[0]!.content[0]?.content?.[0]?.text).not.toContain('_END_A')
+    expect(toolMessages[3]!.content[0]?.content?.[0]?.text).toBe(latestOutput1)
+    expect(toolMessages[4]!.content[0]?.content?.[0]?.text).toBe(latestOutput2)
+  })
+
+  it('bounds already-answered historical tool output on later turns but fails closed with prompt-limit when trailing batch or single message is irreducible', () => {
+    const answeredCall = 'call-answered' as never
+    const answeredOptions = request()
+    answeredOptions.messages = [
+      createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Read file' }] }),
+      createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: 'agy-agent', model: 'default' },
+        content: [{ type: 'tool-call', id: answeredCall, name: 'read', arguments: '{}' }],
+      }),
+      createMessage({
+        role: 'tool',
+        source: { kind: 'tool', callId: answeredCall },
+        toolCallId: answeredCall,
+        content: [{ type: 'text', text: 'A'.repeat(25_000) }],
+      }),
+      createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: 'agy-agent', model: 'default' },
+        content: [{ type: 'text', text: 'Summarized the file.' }],
+      }),
+      createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Follow-up question.' }],
+      }),
+    ]
+    const boundedAnsweredPrompt = buildPrompt(answeredOptions, 10_000, 'Antigravity')
+    expect(Buffer.byteLength(boundedAnsweredPrompt, 'utf8')).toBeLessThanOrEqual(10_000)
+    expect(boundedAnsweredPrompt).toContain('…[earlier tool output truncated to fit local ACP prompt byte limit; re-read specific line range if needed]')
+
+    const trailingOnlyCall = 'call-oversized-trailing' as never
+    const oversizedTrailing = request()
+    oversizedTrailing.messages = [
+      createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Read huge file' }] }),
+      createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: 'agy-agent', model: 'default' },
+        content: [{ type: 'tool-call', id: trailingOnlyCall, name: 'read', arguments: '{}' }],
+      }),
+      createMessage({
+        role: 'tool',
+        source: { kind: 'tool', callId: trailingOnlyCall },
+        toolCallId: trailingOnlyCall,
+        content: [{ type: 'text', text: 'Z'.repeat(190_000) }],
+      }),
+    ]
+    let trailingError: unknown
+    try {
+      buildPrompt(oversizedTrailing, 184_320, 'Antigravity')
+    } catch (error) {
+      trailingError = error
+    }
+    expect(trailingError).toBeInstanceOf(Error)
+    expect((trailingError as Error).cause).toBe('prompt-limit')
+
+    const oversizedUser = request()
+    oversizedUser.messages = [
+      createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'U'.repeat(190_000) }] }),
+    ]
+    let userError: unknown
+    try {
+      buildPrompt(oversizedUser, 184_320, 'Antigravity')
+    } catch (error) {
+      userError = error
+    }
+    expect(userError).toBeInstanceOf(Error)
+    expect((userError as Error).cause).toBe('prompt-limit')
+  })
 })

@@ -1594,7 +1594,7 @@ describe('TraeX ACP LLM adapter', () => {
     await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-4-hydrogen')).resolves.toMatchObject({
       provider: 'agy-agent',
       id: 'gemini-4-hydrogen',
-      context: { contextWindow: 112_000 },
+      context: { contextWindow: 128_000 },
       reasoning: {
         efforts: [{ id: 'high', name: 'High' }, { id: 'xhigh', name: 'XHigh' }],
         defaultEffort: 'medium',
@@ -1732,6 +1732,70 @@ describe('TraeX ACP LLM adapter', () => {
       })) { /* drain */ }
     })()).rejects.toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
     expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('streams agy-agent cleanly with 99 tools and 150 KB multi-turn tool outputs without preflight prompt-limit', async () => {
+    let capturedPrompt = ''
+    const adapter = new TraexAcpAdapter(Config({ agyEnabled: true } as never), {
+      runText(invocation, options) {
+        capturedPrompt = invocation.prompt
+        return (async function* () {
+          yield 'continued'
+          options?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+    const tools = Array.from({ length: 99 }, (_, index) => ({
+      name: `tool_${index}`,
+      description: `Tool ${index} detailed guidance. ${'prose '.repeat(20)}`,
+      parameters: {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        required: ['path'],
+        properties: { path: { type: 'string', description: 'File path '.repeat(12) } },
+      },
+    }))
+    const oldCall = 'call-old' as never
+    const newCall = 'call-new' as never
+    const latestOutput = `LATEST_ADAPTER_${'X'.repeat(45_000)}_END`
+    const multiTurnRequest: GenerateOptions = {
+      provider: AGY_PROVIDER_ROUTE,
+      model: 'default',
+      system: 'S'.repeat(6_000),
+      tools,
+      messages: [
+        createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Read files' }] }),
+        createMessage({
+          role: 'assistant',
+          source: { kind: 'model', provider: AGY_PROVIDER_ROUTE, model: 'default' },
+          content: [{ type: 'tool-call', id: oldCall, name: 'tool_0', arguments: '{"path":"old.ts"}' }],
+        }),
+        createMessage({
+          role: 'tool',
+          source: { kind: 'tool', callId: oldCall },
+          toolCallId: oldCall,
+          content: [{ type: 'text', text: 'O'.repeat(110_000) }],
+        }),
+        createMessage({
+          role: 'assistant',
+          source: { kind: 'model', provider: AGY_PROVIDER_ROUTE, model: 'default' },
+          content: [{ type: 'tool-call', id: newCall, name: 'tool_0', arguments: '{"path":"new.ts"}' }],
+        }),
+        createMessage({
+          role: 'tool',
+          source: { kind: 'tool', callId: newCall },
+          toolCallId: newCall,
+          content: [{ type: 'text', text: latestOutput }],
+        }),
+      ],
+    }
+
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream(multiTurnRequest)) chunks.push(chunk)
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    expect(Buffer.byteLength(capturedPrompt, 'utf8')).toBeLessThanOrEqual(184_320)
+    expect(capturedPrompt).toContain(latestOutput)
+    expect(capturedPrompt).toContain('…[earlier tool output truncated to fit local ACP prompt byte limit; re-read specific line range if needed]')
   })
 
   it('completes DSH 0.2 compaction end-to-end on agy-agent with defaultEffort materialization and 65536 maxTokens', async () => {

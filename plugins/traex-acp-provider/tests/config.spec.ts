@@ -30,7 +30,8 @@ describe('configuration', () => {
       extraEnvNames: [],
       logDiagnostics: false,
     })
-    expect(config.agyContextWindow).toBe(112_000)
+    expect(DEFAULT_AGY_CONTEXT_WINDOW).toBe(128_000)
+    expect(config.agyContextWindow).toBe(128_000)
     expect(config.agyMaxPromptBytes).toBe(184_320)
     expect(config.agyMaxPromptBytes).toBeLessThanOrEqual(AGY_MAX_PROMPT_BYTES_CEILING)
     expect(config.timeoutMs).toBeGreaterThan(0)

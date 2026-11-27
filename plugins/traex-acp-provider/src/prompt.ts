@@ -110,6 +110,122 @@ const COMPACTION_OMISSION_MARKER: TranscriptMessage = {
   }],
 }
 
+const COMPACTED_TOOL_DESCRIPTION_MAX_CHARS = 160
+const COMPACTED_PARAM_DESCRIPTION_MAX_CHARS = 80
+const TIGHT_TOOL_DESCRIPTION_MAX_CHARS = 80
+const LARGE_TOOL_CATALOG_BYTES_THRESHOLD = 24_576
+const PROMPT_COMPACT_PRESSURE_RATIO = 0.65
+const NON_STRUCTURAL_SCHEMA_KEYS = new Set(['$schema', '$id', '$comment', 'title', 'examples'])
+
+const EARLIER_TOOL_RESULT_TRUNCATION_SUFFIX =
+  '…[earlier tool output truncated to fit local ACP prompt byte limit; re-read specific line range if needed]'
+const EARLIER_TOOL_RESULT_BYTE_CAPS = [2_048, 1_024, 512, 256, 0] as const
+
+interface ToolSchemaCompactionPolicy {
+  readonly toolDescriptionMaxChars: number
+  readonly paramDescriptionMaxChars: number
+  readonly stripParamDescriptionsFromDepth: number
+}
+
+const DEFAULT_TOOL_SCHEMA_COMPACTION: ToolSchemaCompactionPolicy = {
+  toolDescriptionMaxChars: COMPACTED_TOOL_DESCRIPTION_MAX_CHARS,
+  paramDescriptionMaxChars: COMPACTED_PARAM_DESCRIPTION_MAX_CHARS,
+  stripParamDescriptionsFromDepth: 2,
+}
+
+const TIGHT_TOOL_SCHEMA_COMPACTION: ToolSchemaCompactionPolicy = {
+  toolDescriptionMaxChars: TIGHT_TOOL_DESCRIPTION_MAX_CHARS,
+  paramDescriptionMaxChars: 0,
+  stripParamDescriptionsFromDepth: 1,
+}
+
+function compactDescription(value: unknown, maxChars: number): string {
+  if (typeof value !== 'string' || maxChars <= 0) return ''
+  const normalized = value.replace(/\s+/gu, ' ').trim()
+  if (normalized.length === 0) return ''
+  let codePoints = 0
+  for (const _character of normalized) {
+    codePoints += 1
+    if (codePoints > maxChars) return boundedDescription(normalized, maxChars)
+  }
+  return normalized
+}
+
+function compactSchemaNode(
+  node: unknown,
+  depth: number,
+  policy: ToolSchemaCompactionPolicy,
+): unknown {
+  if (Array.isArray(node)) {
+    return node.map(item => compactSchemaNode(item, depth, policy))
+  }
+  if (!isRecord(node)) return node
+
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(node)) {
+    if (NON_STRUCTURAL_SCHEMA_KEYS.has(key)) continue
+    if (key === 'description') {
+      // Root `parameters.description` duplicates `tool.description`, and deep sub-descriptions
+      // bloat large tool catalogs without changing argument schema validation.
+      if (depth === 0 || depth >= policy.stripParamDescriptionsFromDepth) continue
+      const summary = compactDescription(value, policy.paramDescriptionMaxChars)
+      if (summary.length > 0) result[key] = summary
+      continue
+    }
+    if (key === 'properties' && isRecord(value)) {
+      const properties: Record<string, unknown> = {}
+      for (const [propName, propSchema] of Object.entries(value)) {
+        properties[propName] = compactSchemaNode(propSchema, depth + 1, policy)
+      }
+      result[key] = properties
+      continue
+    }
+    if (key === 'items') {
+      result[key] = compactSchemaNode(value, depth + 1, policy)
+      continue
+    }
+    if ((key === 'anyOf' || key === 'oneOf' || key === 'allOf') && Array.isArray(value)) {
+      result[key] = value.map(branch => compactSchemaNode(branch, depth + 1, policy))
+      continue
+    }
+    if ((key === 'not' || key === 'if' || key === 'then' || key === 'else' || key === 'propertyNames')
+      && isRecord(value)) {
+      result[key] = compactSchemaNode(value, depth + 1, policy)
+      continue
+    }
+    if ((key === '$defs' || key === 'definitions' || key === 'patternProperties' || key === 'dependentSchemas')
+      && isRecord(value)) {
+      const defs: Record<string, unknown> = {}
+      for (const [defName, defSchema] of Object.entries(value)) {
+        defs[defName] = compactSchemaNode(defSchema, depth + 1, policy)
+      }
+      result[key] = defs
+      continue
+    }
+    if (key === 'additionalProperties' && isRecord(value)) {
+      result[key] = compactSchemaNode(value, depth + 1, policy)
+      continue
+    }
+    result[key] = value
+  }
+  return result
+}
+
+function projectAvailableTools(
+  tools: readonly ToolSchema[],
+  policy: ToolSchemaCompactionPolicy,
+): Array<Record<string, unknown>> {
+  return tools.map((tool) => {
+    const description = compactDescription(tool.description, policy.toolDescriptionMaxChars)
+    return {
+      ...(tool.deferLoading === undefined ? {} : { deferLoading: tool.deferLoading }),
+      name: tool.name,
+      ...(description.length === 0 ? {} : { description }),
+      parameters: compactSchemaNode(tool.parameters, 0, policy),
+    }
+  })
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -267,6 +383,85 @@ function boundCompactionConversation(
   return bestPrompt
 }
 
+function boundEarlierToolResultBlock(block: TranscriptBlock, maxBytes: number): TranscriptBlock {
+  if (block.type === 'text' && typeof block.text === 'string') {
+    const originalBytes = Buffer.byteLength(block.text, 'utf8')
+    if (originalBytes <= maxBytes) return block
+    const truncated = `${sliceUtf8Bounded(block.text, maxBytes)}${EARLIER_TOOL_RESULT_TRUNCATION_SUFFIX}`
+    if (Buffer.byteLength(truncated, 'utf8') >= originalBytes) return block
+    return { ...block, text: truncated }
+  }
+  if (block.type === 'tool-result' && Array.isArray(block.content)) {
+    return { ...block, content: block.content.map(child => boundEarlierToolResultBlock(child, maxBytes)) }
+  }
+  return block
+}
+
+function boundEarlierToolResults(
+  request: SerializedPromptRequest,
+  maxPromptBytes: number,
+): string | undefined {
+  const { conversation } = request
+  let lastAssistantIdx = -1
+  let lastToolIdx = -1
+  for (let index = conversation.length - 1; index >= 0; index -= 1) {
+    const role = conversation[index]?.role
+    if (lastToolIdx < 0 && role === 'tool') lastToolIdx = index
+    if (lastAssistantIdx < 0 && role === 'assistant') lastAssistantIdx = index
+    if (lastToolIdx >= 0 && lastAssistantIdx >= 0) break
+  }
+  if (lastToolIdx < 0) return undefined
+
+  let latestBatchStart = lastToolIdx
+  while (latestBatchStart > 0 && conversation[latestBatchStart - 1]?.role === 'tool') {
+    latestBatchStart -= 1
+  }
+
+  const candidateLimits: number[] = []
+  if (latestBatchStart > 0 && conversation.slice(0, latestBatchStart).some(message => message.role === 'tool')) {
+    candidateLimits.push(latestBatchStart)
+  }
+  // If the assistant already responded after the last tool result, there is no pending
+  // trailing tool batch, so all historical tool results are eligible when earlier batches alone fail.
+  if (lastToolIdx < lastAssistantIdx) {
+    candidateLimits.push(lastToolIdx + 1)
+  }
+
+  for (const boundExclusiveEnd of candidateLimits) {
+    for (const byteCap of EARLIER_TOOL_RESULT_BYTE_CAPS) {
+      const boundedConversation = conversation.map((message, index) => (
+        message.role === 'tool' && index < boundExclusiveEnd
+          ? { ...message, content: message.content.map(block => boundEarlierToolResultBlock(block, byteCap)) }
+          : message
+      ))
+      const candidate = renderPrompt({ ...request, conversation: boundedConversation })
+      if (Buffer.byteLength(candidate, 'utf8') <= maxPromptBytes) return candidate
+    }
+  }
+  return undefined
+}
+
+function buildToolConstraints(
+  tools: readonly ToolSchema[],
+  purpose: GenerateOptions['purpose'],
+  policy: ToolSchemaCompactionPolicy,
+): Record<string, unknown> {
+  if (purpose === 'compaction') {
+    return { available: tools.map(tool => ({ name: tool.name })) }
+  }
+  if (tools.length === 0) {
+    return { available: [] }
+  }
+  return {
+    responseProtocol: DSH_TOOL_CALL_PROTOCOL,
+    responseFormat: {
+      protocol: DSH_TOOL_CALL_PROTOCOL,
+      calls: [{ name: '<exact available tool name>', arguments: { '<parameter name>': '<value matching that parameter schema>' } }],
+    },
+    available: projectAvailableTools(tools, policy),
+  }
+}
+
 /** Serialize one provider-neutral DSH call into a stateless ACP turn. */
 export function buildPrompt(
   options: GenerateOptions,
@@ -282,22 +477,11 @@ export function buildPrompt(
     : tools.length === 0
     ? `Continue the conversation as the assistant within the DSH system and user instructions in this request. Return only the next assistant response. Do not modify files or execute commands inside ${agentLabel}.`
     : `Continue the conversation as the assistant within the DSH system and user instructions in this request. Do not modify files or execute commands inside ${agentLabel} and do not invoke ${agentLabel}-native tools; they are unavailable in this backend session. Tools can only be used through DSH. Declared tools describe availability, not authorization: follow the applicable DSH system, user, policy, and prior tool-result constraints before requesting one. If a tool action was rejected or denied by the user, by policy, or because authorization is absent, do not retry it, bypass the rejection, or substitute an equivalent action unless a later authorized user or system instruction explicitly permits it. You may correct invalid arguments through authorized read-only discovery when the tool result recommends it. You may continue independent permitted work, or honestly report that the requested work is blocked; do not claim completion for work that did not occur. When an authorized tool call is needed, request it now instead of merely describing future work: return exactly one JSON object matching constraints.tools.responseFormat. Each call.arguments value must be a JSON object matching that tool's parameter schema, never a JSON-encoded string. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. Otherwise, return only the next assistant response as normal text.`
-  const request: SerializedPromptRequest = {
+  const buildRequest = (policy: ToolSchemaCompactionPolicy): SerializedPromptRequest => ({
     protocol: 'dsh-traex-acp-provider/v1',
     instruction: `${baseInstruction}${planGuard}`,
     constraints: {
-      tools: options.purpose === 'compaction'
-        ? { available: tools.map(tool => ({ name: tool.name })) }
-        : tools.length === 0
-        ? { available: [] }
-        : {
-            responseProtocol: DSH_TOOL_CALL_PROTOCOL,
-            responseFormat: {
-              protocol: DSH_TOOL_CALL_PROTOCOL,
-              calls: [{ name: '<exact available tool name>', arguments: { '<parameter name>': '<value matching that parameter schema>' } }],
-            },
-            available: tools,
-          },
+      tools: buildToolConstraints(tools, options.purpose, policy),
       stop: options.stop ?? null,
       maxTokens: options.maxTokens ?? null,
       temperature: options.temperature ?? null,
@@ -306,13 +490,36 @@ export function buildPrompt(
     },
     system: options.system ?? null,
     conversation: effectiveMessages(options.messages).map(message => serializeMessage(message, agentLabel)),
+  })
+
+  let request = buildRequest(DEFAULT_TOOL_SCHEMA_COMPACTION)
+  let prompt = renderPrompt(request)
+  let size = Buffer.byteLength(prompt, 'utf8')
+
+  if (options.purpose !== 'compaction' && tools.length > 0) {
+    const available = (request.constraints.tools as { available?: unknown }).available
+    const availableBytes = Buffer.byteLength(JSON.stringify(available), 'utf8')
+    if (availableBytes > LARGE_TOOL_CATALOG_BYTES_THRESHOLD
+      || size > Math.floor(maxPromptBytes * PROMPT_COMPACT_PRESSURE_RATIO)) {
+      request = {
+        ...request,
+        constraints: {
+          ...request.constraints,
+          tools: buildToolConstraints(tools, options.purpose, TIGHT_TOOL_SCHEMA_COMPACTION),
+        },
+      }
+      prompt = renderPrompt(request)
+      size = Buffer.byteLength(prompt, 'utf8')
+    }
   }
-  const prompt = renderPrompt(request)
-  const size = Buffer.byteLength(prompt, 'utf8')
+
   if (size <= maxPromptBytes) return prompt
 
   if (options.purpose === 'compaction') {
     const bounded = boundCompactionConversation(request, maxPromptBytes)
+    if (bounded !== undefined) return bounded
+  } else {
+    const bounded = boundEarlierToolResults(request, maxPromptBytes)
     if (bounded !== undefined) return bounded
   }
 

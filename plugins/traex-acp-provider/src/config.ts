@@ -5,12 +5,17 @@ export type AcpCwdMode = 'session' | 'exact'
 
 /**
  * Antigravity CLI (`agy acp`) wraps `session/prompt` in `<USER_REQUEST>` and silently
- * truncates input above ~192 KiB without raising an ACP error. Keep the default and
- * configurable ceiling safely below that cliff so DSH triggers compaction instead.
+ * truncates input above ~192 KiB without raising an ACP error. Keep the prompt ceiling
+ * safely below that cliff, while setting `DEFAULT_AGY_CONTEXT_WINDOW` to `128_000`:
+ * `@deepseek-ai/dsh-compaction-basic` reserves `headroomTokens` (`65_536`) + request
+ * `maxTokens` (`8_192`), so `128_000` yields a `54_272`-token pressure threshold and
+ * `19_169`-token retention budget (avoiding both `MODEL_SWITCH_COMPACTION_FAILED` below
+ * `86_212` and double-compaction thrashing at `112_000`), while `buildPrompt` compacts
+ * large tool schemas and older tool outputs to stay within `DEFAULT_AGY_MAX_PROMPT_BYTES`.
  */
 export const AGY_MAX_PROMPT_BYTES_CEILING = 190_000
 export const DEFAULT_AGY_MAX_PROMPT_BYTES = 180 * 1024
-export const DEFAULT_AGY_CONTEXT_WINDOW = 112_000
+export const DEFAULT_AGY_CONTEXT_WINDOW = 128_000
 
 export interface TraexAcpProviderConfig {
   /** Register the experimental TraeX route (`traex-agent`) after the local runtime is prepared. */
