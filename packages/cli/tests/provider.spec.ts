@@ -17,6 +17,7 @@ import {
   renderUpdatedCordisPatchYaml,
   renderUpdatedCredentialsYaml,
   runProvider,
+  selectTargetProfile,
   type DshConfigurableProvider,
   type DshDiscoveredModel,
   type DshModelDiscoveryRequest,
@@ -1468,5 +1469,84 @@ describe('dsh-ray provider commands', () => {
 
     const cancelState: RawSecretReaderState = { buffer: 'partial', escapeState: 'none' }
     expect(consumeRawSecretChunk(cancelState, '\u0003')).toEqual({ action: 'cancel' })
+  })
+
+  test('selectTargetProfile excludes managed RSI coordinator profiles and rejects targeting them explicitly', async () => {
+    const root = makeTempDir()
+    const { home, dshHome, patchPath } = seedHomeWithProfile(root, 'web')
+    const coordinatorProfile = 'rsi-web-4b5e57f6eb2f'
+    mkdirSync(join(dshHome, 'profiles', coordinatorProfile), { recursive: true })
+    writeFileSync(join(dshHome, 'profiles', coordinatorProfile, 'package.json'), JSON.stringify({
+      name: `dsh-profile-${coordinatorProfile}`,
+      private: true,
+    }), 'utf8')
+    writeFileSync(join(dshHome, '.rsi-coordinator-0123456789abcdef.json'), JSON.stringify({
+      schemaVersion: 1,
+      targetProfile: 'web',
+      coordinatorProfile,
+    }), 'utf8')
+
+    let asked = false
+    const failingPrompter: ProviderPrompter = {
+      ask: async () => {
+        asked = true
+        throw new Error('should not prompt when coordinator is filtered out')
+      },
+      askSecret: async () => 'sk-test-secret',
+    }
+    expect(await selectTargetProfile(dshHome, undefined, failingPrompter, true)).toBe('web')
+    expect(asked).toBe(false)
+
+    await expect(selectTargetProfile(dshHome, coordinatorProfile, failingPrompter, true)).rejects.toMatchObject({
+      exitCode: PROVIDER_EXIT_USAGE,
+      message: expect.stringContaining('受管自迭代协调器内部 profile'),
+    })
+
+    const out = createBufferWriter()
+    const listExit = await runProvider(dshHome, ['list', '--json'], {
+      home,
+      platform: 'linux',
+      env: {},
+      isTTY: true,
+      stdout: out.writer,
+      runner: () => ({ status: 1, stdout: '', stderr: '' }),
+      loadRuntime: async () => createTestRuntime(),
+      dumpProfileConfig: async () => readDumpFromPatch(patchPath, 'web'),
+      prompter: failingPrompter,
+    })
+    expect(listExit).toBe(0)
+    expect(JSON.parse(out.text())).toMatchObject({ ok: true, profile: 'web' })
+    expect(asked).toBe(false)
+  })
+
+  test('provider list skips TTY profile prompt when multiple user profiles exist and defaults to web', async () => {
+    const root = makeTempDir()
+    const { home, dshHome, patchPath } = seedHomeWithProfile(root, 'web')
+    seedHomeWithProfile(root, 'work')
+
+    let asked = false
+    const noPromptPrompter: ProviderPrompter = {
+      ask: async () => {
+        asked = true
+        throw new Error('list subcommand must not block on TTY prompt')
+      },
+      askSecret: async () => '',
+    }
+
+    const out = createBufferWriter()
+    const exit = await runProvider(dshHome, ['list', '--json'], {
+      home,
+      platform: 'linux',
+      env: {},
+      isTTY: true,
+      stdout: out.writer,
+      runner: () => ({ status: 1, stdout: '', stderr: '' }),
+      loadRuntime: async () => createTestRuntime(),
+      dumpProfileConfig: async () => readDumpFromPatch(patchPath, 'web'),
+      prompter: noPromptPrompter,
+    })
+    expect(exit).toBe(0)
+    expect(JSON.parse(out.text())).toMatchObject({ ok: true, profile: 'web' })
+    expect(asked).toBe(false)
   })
 })

@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
@@ -1230,15 +1230,50 @@ export async function inspectProfileProviderState(input: {
   }
 }
 
+async function readManagedCoordinatorProfiles(dshHome: string): Promise<Set<string>> {
+  const coordinatorProfiles = new Set<string>()
+  let entries: string[]
+  try {
+    entries = await readdir(dshHome)
+  } catch {
+    return coordinatorProfiles
+  }
+  for (const name of entries) {
+    if (!name.startsWith('.rsi-coordinator-') || !name.endsWith('.json')) continue
+    try {
+      const raw = await readFile(join(dshHome, name), 'utf8')
+      const parsed: unknown = JSON.parse(raw)
+      if (
+        isRecord(parsed)
+        && typeof parsed.coordinatorProfile === 'string'
+        && parsed.coordinatorProfile.trim() !== ''
+      ) {
+        coordinatorProfiles.add(parsed.coordinatorProfile)
+      }
+    } catch {
+      // ignore unreadable/malformed coordinator markers
+    }
+  }
+  return coordinatorProfiles
+}
+
 export async function selectTargetProfile(
   dshHome: string,
   explicitProfile?: string,
   prompter?: ProviderPrompter,
   isTTY = false,
 ): Promise<string> {
+  const coordinatorProfiles = await readManagedCoordinatorProfiles(dshHome)
+
   if (explicitProfile !== undefined) {
     if (!isValidProfileName(explicitProfile)) {
       throw new ProviderCommandError(`非法的 profile 名称：${explicitProfile}`, PROVIDER_EXIT_USAGE)
+    }
+    if (coordinatorProfiles.has(explicitProfile)) {
+      throw new ProviderCommandError(
+        `profile "${explicitProfile}" 是受管自迭代协调器内部 profile，不能配置或修改模型 Provider；请针对主 profile（如 web）操作。`,
+        PROVIDER_EXIT_USAGE,
+      )
     }
     const dir = join(profilesDirectory(dshHome), explicitProfile)
     if (!existsSync(dir)) {
@@ -1250,10 +1285,10 @@ export async function selectTargetProfile(
     return explicitProfile
   }
 
-  const profiles = await listProfiles(dshHome)
+  const profiles = (await listProfiles(dshHome)).filter(profile => !coordinatorProfiles.has(profile))
   if (profiles.length === 0) {
     throw new ProviderCommandError(
-      `在 ${dshHome} 下未找到任何 profile。请先运行 dsh-ray install 初始化实例。`,
+      `在 ${dshHome} 下未找到任何可用 profile。请先运行 dsh-ray install 初始化实例。`,
       PROVIDER_EXIT_USAGE,
     )
   }
@@ -3499,7 +3534,12 @@ export async function runProvider(
     platform,
   })
 
-  const profile = await selectTargetProfile(effectiveDshHome, args.profile, basePrompter, isTTY)
+  const profile = await selectTargetProfile(
+    effectiveDshHome,
+    args.profile,
+    args.action === 'list' ? undefined : basePrompter,
+    isTTY,
+  )
   const state = await inspectProfileProviderState({
     dshHome: effectiveDshHome,
     profile,
