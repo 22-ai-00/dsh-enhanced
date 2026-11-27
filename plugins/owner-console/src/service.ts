@@ -21,6 +21,7 @@ import {
 } from './typert.js'
 import { componentState, missingRemedy, repairPatch } from './state.js'
 import { persistAllowedBuilds, persistConfirmModulesPurgeDisabled } from './build-approvals.js'
+import { reconcileProfilePnpmStore } from './pnpm-store.js'
 import { CodingToolProber, discoverCodingToolBinary, type CodingToolId } from './probes.js'
 import {
   applyAutonomyWizardSetup, atomicWritePatchWithBackup, findPatchRow, getPatchRowConfig,
@@ -58,6 +59,12 @@ const PROVIDER_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
 const APP_ID_ENV = ['LARK_APP_ID', 'FEISHU_APP_ID'] as const
 const ACCOUNT = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
 
+export interface OwnerConsoleServiceDeps {
+  readonly reconcileStore?: (dir: string, manager: unknown) => Promise<boolean>
+}
+
+export { reconcileProfilePnpmStore, type ReconcileProfilePnpmStoreOptions } from './pnpm-store.js'
+
 /** Read-only status plus owner-clicked, one-step writes through the Host settings service.
  * Only `.volatile()` config fields are editable by that service; every write addresses one
  * entry, uses CAS on its revision, and returns a business reason instead of throwing. */
@@ -69,6 +76,7 @@ export class OwnerConsoleService extends TypertRemoteService {
   private readonly assistantChat: AssistantChatRegistry
   private readonly feishuQr: FeishuQrOnboardingManager
   private readonly restartProfileFn: (input: TriggerProfileRestartInput) => Promise<OwnerConsoleWriteResult>
+  private readonly reconcileStoreFn: (dir: string, manager: unknown) => Promise<boolean>
 
   constructor(
     ctx: Context,
@@ -79,6 +87,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     assistantChat: AssistantChatRegistry = new AssistantChatRegistry(ctx),
     feishuQr: FeishuQrOnboardingManager = new FeishuQrOnboardingManager(),
     restartProfileFn: (input: TriggerProfileRestartInput) => Promise<OwnerConsoleWriteResult> = triggerProfileRestart,
+    deps: OwnerConsoleServiceDeps = {},
   ) {
     super(ctx, 'ownerConsole')
     this.host = ctx
@@ -88,6 +97,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     this.assistantChat = assistantChat
     this.feishuQr = feishuQr
     this.restartProfileFn = restartProfileFn
+    this.reconcileStoreFn = deps.reconcileStore ?? reconcileProfilePnpmStore
     this.installAssistantPromptScope()
     this.installSelfIterationControlTool()
     this.installVersionInfoTool()
@@ -766,7 +776,9 @@ export class OwnerConsoleService extends TypertRemoteService {
   async removeProjectBundle(name: string): Promise<OwnerConsoleWriteResult> {
     if (!isProjectPackage(name)) return refuse('', '只允许移除本项目的 @dsh-ray/* bundle')
     const manager = this.manager()
-    const result = applyChange(await manager.removeBundle(name))
+    const dir = this.profileDirectory()
+    const raw = await executeWithPnpmRecovery(dir, manager, this.reconcileStoreFn, () => manager.removeBundle(name))
+    const result = applyChange(raw)
     if (result.applied) this.catalogReader.invalidate()
     return result
   }
@@ -803,14 +815,13 @@ export class OwnerConsoleService extends TypertRemoteService {
       // Non-TTY Electron/daemon bundle installs invoke pnpm without stdin TTY; disable interactive modules-purge prompt safely.
       await persistConfirmModulesPurgeDisabled(dir).catch(() => false)
     }
-    let raw = await manager.installBundle(trimmed, { enabled: true, saveExact: true })
-    if (isNoTtyModulesPurgeError(raw) && dir !== undefined) {
-      const updated = await persistConfirmModulesPurgeDisabled(dir).catch(() => false)
-      if (updated) {
-        raw = await manager.installBundle(trimmed, { enabled: true, saveExact: true })
-      }
-    }
-    const result = applyInstall(raw)
+    const raw = await executeWithPnpmRecovery(
+      dir,
+      manager,
+      this.reconcileStoreFn,
+      () => manager.installBundle(trimmed, { enabled: true, saveExact: true }),
+    )
+    const result = applyInstall(raw, dir)
     if (result.applied) this.catalogReader.invalidate()
     return result
   }
@@ -1379,10 +1390,47 @@ function isNoTtyModulesPurgeError(result: ChangeResultLike): boolean {
   return /ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY/u.test(text)
 }
 
+/** Detect pnpm store-version / modules breaking-change aborts (`ERR_PNPM_UNEXPECTED_STORE` or `ERR_PNPM_MODULES_BREAKING_CHANGE`). */
+export function isUnexpectedStoreError(result: ChangeResultLike): boolean {
+  const text = `${result.error?.diagnostic ?? ''}\n${result.packageResult?.output ?? ''}`.replace(ANSI_SEQUENCE, '')
+  return /ERR_PNPM_(?:UNEXPECTED_STORE|MODULES_BREAKING_CHANGE)/u.test(text)
+}
+
+async function executeWithPnpmRecovery(
+  dir: string | undefined,
+  manager: unknown,
+  reconcileStore: (dir: string, manager: unknown) => Promise<boolean>,
+  invoke: () => Promise<ChangeResultLike>,
+): Promise<ChangeResultLike> {
+  let raw = await invoke()
+  let retriedNoTty = false
+  let retriedStore = false
+  for (;;) {
+    if (!retriedNoTty && dir !== undefined && isNoTtyModulesPurgeError(raw)) {
+      retriedNoTty = true
+      const updated = await persistConfirmModulesPurgeDisabled(dir).catch(() => false)
+      if (updated) {
+        raw = await invoke()
+        continue
+      }
+    }
+    if (!retriedStore && dir !== undefined && existsSync(dir) && isUnexpectedStoreError(raw)) {
+      retriedStore = true
+      const reconciled = await reconcileStore(dir, manager).catch(() => false)
+      if (reconciled) {
+        raw = await invoke()
+        continue
+      }
+    }
+    break
+  }
+  return raw
+}
+
 /** Install-specific refusal mapping: surface every build name pnpm reported (the Host's own record
  * may be empty when its parser misses pnpm's coloured line), and turn a raw error box or a
  * compatibility denial into the concrete owner-facing next step. */
-export function applyInstall(result: ChangeResultLike): OwnerConsoleWriteResult {
+export function applyInstall(result: ChangeResultLike, profileDir?: string): OwnerConsoleWriteResult {
   const pending = normalizeBuildNames(result.pendingBuilds)
   const log = result.packageResult?.logPath === undefined
     ? '' : `；pnpm 日志：${boundedText(result.packageResult.logPath, 300)}`
@@ -1405,6 +1453,15 @@ export function applyInstall(result: ChangeResultLike): OwnerConsoleWriteResult 
       entry: result.target,
       ...(pending.length === 0 ? {} : { pendingBuilds: pending }),
       note: `安装被 pnpm 非交互终端安全确认拦截（ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY）；请在 profile 目录 pnpm-workspace.yaml 写入 confirmModulesPurge: false 或在环境设置 CI=true 后重试。${log}`,
+    })
+  }
+  if (isUnexpectedStoreError(result)) {
+    const dirArg = profileDir !== undefined && profileDir.trim() !== '' ? profileDir.trim() : '<profile目录>'
+    return Object.freeze({
+      applied: false,
+      entry: result.target,
+      ...(pending.length === 0 ? {} : { pendingBuilds: pending }),
+      note: `安装因 pnpm store 版本/路径不兼容被中止（v10/v11 store 不一致，ERR_PNPM_UNEXPECTED_STORE / ERR_PNPM_MODULES_BREAKING_CHANGE）；自动重建未成功，请在终端运行 pnpm install --dir "${dirArg}" --config.confirmModulesPurge=false 后重试。${log}`,
     })
   }
   const buildBlocked = result.packageResult?.kind === 'build-blocked'

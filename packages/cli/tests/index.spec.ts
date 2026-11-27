@@ -876,6 +876,56 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  test('update --all --yes --profile <custom> 保留并透传 --profile 与 --dsh-version 到 install', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-ray-update-profile-'))
+    const dshHome = join(root, '.dsh')
+    const installCalls: Array<{ releaseRef: string; passthrough: readonly string[]; dshHome?: string }> = []
+    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    try {
+      mkdirSync(join(dshHome, 'profiles', 'custom-prof'), { recursive: true })
+      const code = await main(
+        ['update', '--all', '--yes', '--profile', 'custom-prof', '--dsh-version', '0.2.2-rc.5'],
+        { HOME: root, DSH_HOME: dshHome },
+        {
+          platform: 'linux',
+          detectFrozenOwner: async () => undefined,
+          findRunning: () => ({ active: [] }),
+          managedServicePids: async () => ({ pids: [], errors: [] }),
+          selfUpdate: async () => ({
+            fromVersion: version,
+            selector: 'latest',
+            resolvedVersion: version,
+            installedVersion: version,
+            alreadyCurrent: true,
+            actions: [],
+          }),
+          install: async (options) => {
+            installCalls.push({
+              releaseRef: options.releaseRef,
+              passthrough: options.passthrough,
+              ...(options.dshHome === undefined ? {} : { dshHome: options.dshHome }),
+            })
+            return 0
+          },
+        },
+      )
+      expect(code).toBe(0)
+      expect(installCalls).toHaveLength(1)
+      expect(installCalls[0]!.dshHome).toBe(dshHome)
+      expect(installCalls[0]!.releaseRef).toBe(`v${version}`)
+      expect(installCalls[0]!.passthrough).toEqual([
+        '--yes',
+        '--dsh-version', '0.2.2-rc.5',
+        '--profile', 'custom-prof',
+        '--operation', 'upgrade',
+        '--confirm-dsh-home-stopped',
+      ])
+    } finally {
+      outSpy.mockRestore()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('F27: subprocess stderr cleanliness and non-SQLite warning preservation', () => {

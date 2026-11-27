@@ -2060,7 +2060,8 @@ export async function main(
             throw new PurgeError(`${args.toNpm ? '--to-npm ' : '已迁移 npm RSI Home '}update --all 不支持附加安装器参数：${extraPassthrough.join(' ')}`)
           }
           if (!args.dryRun && await hasPendingHostRecovery(args.dshHome)) {
-            const recoveryPassthrough = args.passthrough.filter(token => token !== '--allow-non-empty-history-migration')
+            const baseRecoveryInstallOptions = buildInstallOptions(args)
+            const recoveryPassthrough = baseRecoveryInstallOptions.passthrough.filter(token => token !== '--allow-non-empty-history-migration')
             if (!recoveryPassthrough.includes('--operation')) recoveryPassthrough.push('--operation', 'upgrade')
             if (!recoveryPassthrough.includes('--confirm-dsh-home-stopped')) {
               recoveryPassthrough.push('--confirm-dsh-home-stopped')
@@ -2069,7 +2070,7 @@ export async function main(
               throw new PurgeError('无法把 dsh-ray 目标 selector 解析为精确发布版本；为避免 CLI 与安装器版本错配，未开始插件升级。')
             }
             const recovery = await install({
-              ...buildInstallOptions(args), releaseRef: `v${releaseVersion}`, passthrough: recoveryPassthrough,
+              ...baseRecoveryInstallOptions, releaseRef: `v${releaseVersion}`, passthrough: recoveryPassthrough,
               recoveryOnly: true,
             })
             if (recovery !== 0) return recovery
@@ -2091,7 +2092,8 @@ export async function main(
             ...(args.toNpm ? { toNpm: true } : {}),
           })
         }
-        const passthrough = [...args.passthrough]
+        const baseInstallOptions = buildInstallOptions(args)
+        const passthrough = [...baseInstallOptions.passthrough]
         if (!passthrough.includes('--operation')) passthrough.push('--operation', 'upgrade')
         if (platform !== 'darwin' && !passthrough.includes('--confirm-dsh-home-stopped')) {
           passthrough.push('--confirm-dsh-home-stopped')
@@ -2104,7 +2106,7 @@ export async function main(
         if (!args.dryRun && await hasPendingHostRecovery(args.dshHome)) {
           const recoveryPassthrough = passthrough.filter(token => token !== '--allow-non-empty-history-migration')
           const recovery = await install({
-            ...buildInstallOptions(args), releaseRef: `v${releaseVersion}`, passthrough: recoveryPassthrough,
+            ...baseInstallOptions, releaseRef: `v${releaseVersion}`, passthrough: recoveryPassthrough,
             recoveryOnly: true,
           })
           if (recovery !== 0) return recovery
@@ -2133,7 +2135,7 @@ export async function main(
           ? '\n插件集合升级：已确认除受管服务外没有其它 Host；生命周期事务将安全停服、升级并恢复。\n'
           : '\n插件集合升级：已确认目标 profile 无运行中 Host，正在继承现有部署场景并原地升级。\n')
         return await install({
-          ...buildInstallOptions(args),
+          ...baseInstallOptions,
           releaseRef: `v${releaseVersion}`,
           passthrough,
         })

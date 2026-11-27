@@ -1657,6 +1657,99 @@ minimumReleaseAgeExclude:
     expect(strictHealth.error).toContain('autonomy readiness 未就绪')
   })
 
+  test('prefers macOS desktop bundled DeepSeek Harness.app pnpm over ~/Library/pnpm/pnpm for profile desktop while non-desktop keeps user pnpm', async () => {
+    const f = await createHomeFixture({ profile: 'desktop', enhancedVersion: '0.2.0' })
+    await writeFile(join(f.profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+
+    // Seed both ~/Library/pnpm/pnpm (v10 system pnpm) and ~/Applications/DeepSeek Harness.app/.../pnpm.cjs
+    const libPnpmDir = join(f.osHome, 'Library', 'pnpm')
+    await mkdir(libPnpmDir, { recursive: true })
+    const libPnpm = join(libPnpmDir, 'pnpm')
+    await writeFile(libPnpm, '#!/bin/sh\necho v10\nexit 0\n', { mode: 0o755 })
+    await chmod(libPnpm, 0o755)
+
+    const appBinDir = join(
+      f.osHome,
+      'Applications',
+      'DeepSeek Harness.app',
+      'Contents',
+      'Resources',
+      'runtime',
+      'primary-runtime',
+      'dependencies',
+      'pnpm',
+      'bin',
+    )
+    await mkdir(appBinDir, { recursive: true })
+    const bundledCjs = join(appBinDir, 'pnpm.cjs')
+    await writeFile(bundledCjs, '// bundled v11 pnpm.cjs\n', { mode: 0o644 })
+
+    const { defaultRunner } = await import('../src/run.ts')
+    const desktopCalls: Array<{ cmd: string; args: readonly string[] }> = []
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: 'desktop',
+      targetVersion: '0.2.2',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-ray/assistant-web-owner'],
+      runner: defaultRunner,
+      detailedRunner: (cmd, args) => {
+        desktopCalls.push({ cmd, args })
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      platform: 'darwin',
+      osHome: f.osHome,
+      env: { PATH: '', HOME: f.osHome },
+    })
+
+    expect(desktopCalls).toEqual([{
+      cmd: process.execPath,
+      args: [
+        bundledCjs,
+        'install',
+        '--dir', f.profileDir,
+        '--no-frozen-lockfile',
+        '--ignore-scripts',
+        '--config.confirmModulesPurge=false',
+        '--registry', 'https://registry.npmjs.org',
+      ],
+    }])
+
+    // Non-desktop profile without DSH_DESKTOP_NODE_EXECUTABLE still resolves ~/Library/pnpm/pnpm first
+    const webDir = join(f.dshHome, 'profiles', 'web')
+    await mkdir(webDir, { recursive: true })
+    await writeFile(join(webDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true, dependencies: { '@dsh-ray/assistant-web-owner': '0.2.0' } }), { mode: 0o600 })
+    await writeFile(join(webDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+    const webCalls: Array<{ cmd: string; args: readonly string[] }> = []
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: 'web',
+      targetVersion: '0.2.2',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-ray/assistant-web-owner'],
+      runner: defaultRunner,
+      detailedRunner: (cmd, args) => {
+        webCalls.push({ cmd, args })
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      platform: 'darwin',
+      osHome: f.osHome,
+      env: { PATH: '', HOME: f.osHome },
+    })
+
+    expect(webCalls).toEqual([{
+      cmd: libPnpm,
+      args: [
+        'install',
+        '--dir', webDir,
+        '--no-frozen-lockfile',
+        '--ignore-scripts',
+        '--config.confirmModulesPurge=false',
+        '--registry', 'https://registry.npmjs.org',
+      ],
+    }])
+  })
+
   test('rolls back node_modules/.pnpm/@dsh-ray+* virtual store and .modules.yaml so restored symlinks are never dangling', async () => {
     const f = await createHomeFixture({ profile: 'desktop', hostVersion: '0.2.2-rc.5', enhancedVersion: '0.2.0' })
     await rm(f.enhancedDir, { recursive: true, force: true })

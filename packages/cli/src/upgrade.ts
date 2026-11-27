@@ -220,8 +220,8 @@ const NON_REGISTRY_SPEC_PREFIXES = [
   'https:',
   'npm:',
 ] as const
-const DSH_APP_PNPM_SCRIPT = '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs'
-const DSH_APP_PNPM_REL_FROM_CONTENTS = join('Resources', 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
+const DSH_APP_PNPM_SCRIPT_FILENAMES = ['pnpm.mjs', 'pnpm.cjs'] as const
+const DSH_APP_PNPM_BIN_REL_FROM_CONTENTS = join('Resources', 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin')
 
 const CREATION_ROW_TABLES = [
   'source_creation_verifications',
@@ -1064,23 +1064,25 @@ async function resolveDesktopAppPnpmScript(
   platform: NodeJS.Platform,
 ): Promise<string | undefined> {
   if (platform !== 'darwin') return undefined
-  const candidates: string[] = []
+  const contentsDirs: string[] = []
   const desktopExec = env.DSH_DESKTOP_NODE_EXECUTABLE?.trim()
   if (desktopExec) {
     const marker = `.app${sep}Contents${sep}`
     const markerIdx = desktopExec.indexOf(marker)
     if (markerIdx !== -1) {
-      const contentsDir = desktopExec.slice(0, markerIdx + `.app${sep}Contents`.length)
-      candidates.push(join(contentsDir, DSH_APP_PNPM_REL_FROM_CONTENTS))
+      contentsDirs.push(desktopExec.slice(0, markerIdx + `.app${sep}Contents`.length))
     }
   }
-  candidates.push(
-    DSH_APP_PNPM_SCRIPT,
-    join(osHome, 'Applications', 'DeepSeek Harness.app', 'Contents', DSH_APP_PNPM_REL_FROM_CONTENTS),
-  )
-  for (const candidate of candidates) {
-    if (await checkRegularFileAccess(candidate, constants.R_OK)) {
-      return candidate
+  if (resolve(osHome) === resolve(homedir())) {
+    contentsDirs.push('/Applications/DeepSeek Harness.app/Contents')
+  }
+  contentsDirs.push(join(osHome, 'Applications', 'DeepSeek Harness.app', 'Contents'))
+  for (const contentsDir of contentsDirs) {
+    for (const scriptName of DSH_APP_PNPM_SCRIPT_FILENAMES) {
+      const candidate = join(contentsDir, DSH_APP_PNPM_BIN_REL_FROM_CONTENTS, scriptName)
+      if (await checkRegularFileAccess(candidate, constants.R_OK)) {
+        return candidate
+      }
     }
   }
   return undefined
@@ -1090,12 +1092,32 @@ async function resolvePnpmCommand(
   env: NodeJS.ProcessEnv,
   osHome: string,
   platform: NodeJS.Platform,
+  profile?: string,
 ): Promise<{
   command: string
   prefixArgs: readonly string[]
   envOverrides: NodeJS.ProcessEnv
   binDirs: readonly string[]
 }> {
+  const resolveBundledPnpm = async () => {
+    const bundledScript = await resolveDesktopAppPnpmScript(env, osHome, platform)
+    if (bundledScript === undefined) return undefined
+    const nodeRt = await resolveNodeRuntime(env, osHome, platform)
+    return {
+      command: nodeRt.command,
+      prefixArgs: [bundledScript],
+      envOverrides: nodeRt.envOverrides,
+      binDirs: nodeRt.binDir ? [nodeRt.binDir] : [],
+    }
+  }
+
+  const preferBundled = platform === 'darwin'
+    && (Boolean(env.DSH_DESKTOP_NODE_EXECUTABLE?.trim()) || profile === 'desktop')
+  if (preferBundled) {
+    const bundled = await resolveBundledPnpm()
+    if (bundled !== undefined) return bundled
+  }
+
   const pathDirs = (env.PATH ?? '').split(delimiter).filter(Boolean)
   const extraDirs = platform === 'darwin' ? [join(osHome, 'Library', 'pnpm')] : []
   const fallbackBin = await resolveFallbackBinary('pnpm', env, osHome, platform, extraDirs)
@@ -1108,15 +1130,9 @@ async function resolvePnpmCommand(
       return { command: candidate, prefixArgs: [], envOverrides: {}, binDirs: [dir] }
     }
   }
-  const bundledScript = await resolveDesktopAppPnpmScript(env, osHome, platform)
-  if (bundledScript !== undefined) {
-    const nodeRt = await resolveNodeRuntime(env, osHome, platform)
-    return {
-      command: nodeRt.command,
-      prefixArgs: [bundledScript],
-      envOverrides: nodeRt.envOverrides,
-      binDirs: nodeRt.binDir ? [nodeRt.binDir] : [],
-    }
+  if (!preferBundled) {
+    const bundled = await resolveBundledPnpm()
+    if (bundled !== undefined) return bundled
   }
   return { command: 'pnpm', prefixArgs: [], envOverrides: {}, binDirs: [] }
 }
@@ -1165,7 +1181,7 @@ export async function defaultUpgradeProfilePackages(input: {
   if (isPnpmProfile) {
     await updatePnpmProfilePackageJson(profileDir, input.profile, input.targetVersion, input.npmPlugins, toNpm)
     await updatePnpmWorkspaceOverrides(profileDir, input.profile, input.targetVersion, input.npmPlugins, toNpm)
-    const pnpmCmd = await resolvePnpmCommand(env, osHome, platform)
+    const pnpmCmd = await resolvePnpmCommand(env, osHome, platform, input.profile)
     const res = await runPmCommand(
       pnpmCmd.command,
       [
