@@ -15,6 +15,7 @@
 
 ## 阻塞项与下一步验收
 
+- **next/dev 在研修复与工具能力**：已在 `dev` 完成四项改进（尚未发版）：（1）`@dsh-ray/assistant-verifier` 修复 pnpm 内容寻址硬链接（`nlink > 1`）行为资产校验失败并规范化 `packageRoot` 路径；（2）`@dsh-ray/lark-channel` 支持在 Linux 安全归档未落盘 owner config/coordinator 的中断 `0.2.0` 预备源码与配套运行时目录后切入恢复或新来源；（3）`@dsh-ray/cli` 新增 `dsh-ray provider [setup|list|remove|help]` 复用 DSH Host 模型目录与 `.credentials.yaml`（0600）引导配置第三方/兼容网关与 CLI 路由并支持回滚校验；（4）`@dsh-ray/owner-console` 在「本项目插件管理」新增未安装 `@dsh-ray/*` 拓扑下拉菜单与一键批量安装（保留手工输入与中止控制）。
 - **平台验证边界（Linux 宿主与 Windows Named Pipe 边界）**：当前物理验证宿主为 Linux，Linux 原生隔离/cgroup、`SO_PEERCRED`、独立沙箱仓与全部服务端链路已在本地实测通过；macOS（`macos-seatbelt`、`LOCAL_PEERCRED`、`launchd`）与 Windows（`windows-job`、Named Pipe/ACL）路径由跨平台 CI（`macos-verify`、`windows-acp-smoke`）门禁覆盖。在真实 Windows Node.js `net.Socket` Named Pipe 上，`socket._handle` 不暴露底层 Win32 句柄，默认 `inspectWindowsPeerCredentials` 按 fail-closed 返回 `undefined`（仅在具备句柄或注入 FFI 绑定时执行进程与 `TokenUser` SID 核验）。
 - **D 类纵向验证边界**：真实用户在长期普通使用中的质量、成本、延迟、打扰分布与长期因果收益（D 类纵向证据）属于发布后（post-release）真实使用观测范围，显式排除在发版前工程验收门禁之外。
 - **下一步验收**：基于已发布的 `@dsh-ray/*@0.2.0` 基线开展新装与从 `0.1.88` 迁移升级（`dsh-ray` CLI + 桌面端 DSH 左栏 `@dsh-ray/owner-console` + 飞书 Card 2.0 实机交互）及长期普通使用 D 类纵向观察。

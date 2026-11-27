@@ -38,9 +38,23 @@ Linux native 安装及运行要求已委派给当前用户的 cgroup v1 四控�
 | `start` / `stop` / `restart` | 只切换**已注册**常驻服务的运行状态，保留服务定义和数据；未注册时会报错，需通过 `install` 注册。 |
 | `upgrade` | 检查最新包/Host 版本并安全执行就地升级：`--check`（仅检查状态）、`--dry-run`（输出只读升级计划）、`--yes`（执行备份、升级、`doctor` 核验与失败自动回滚）；支持 `--json`、`--registry`、`--version`、`--dsh-version`、`--confirm-dsh-home-stopped`。 |
 | `maintenance` | 运维结算两个没有模型入口的台账：`dead-letters` / `resolve` 结算 Delivery 死信，`system-automations` / `pause-system` 暂停卡在未授权恢复重试上的系统自有 automation。写操作会先在同一事务里落不可变 receipt，再做精确状态与版本的 CAS 更新；重复提交同一决定会重放，换操作者或相反决定会冲突。 |
+| `provider` | 交互式引导配置三方/自定义模型 Provider（也可传 `--provider <id>` 非交互执行；支持 `list` 查看已配置路由与内置目录，`remove <id>` 移除配置与派生凭据引用）。直接复用已绑定的 DSH Host 内置目录、`supportedProtocols()`、`discoverModels()`、`llm-pi-ai` / `agent-default-model` patch 结构与 `.credentials.yaml` v1 `refs:` 布局（`0600`），写入后用 `dsh --dump-config` 校验并在失败时回滚。 |
 | `version` | 查看助手（`dsh-ray`）、私有/运行 Host（`@deepseek-ai/dsh`）、已安装核心与自演进插件版本以及只读自迭代/进化统计（累计迭代次数、工作项、Dreaming/Recovery/GoalStrategy、候选生成与采用、插件创建与修订、回滚、演化规则、联想参数档案、评估调优与放宽采用、活跃记忆/偏好叠加、工作流晋升、技能部署与自我升级/备份快照；严格区分 `no-data` 与 `zero`）；支持 `--dsh-home`、`--profile`、`--json`（`dsh-ray/version/v1`）与 `--short`。顶层 `dsh-ray --version` / `-V` 仅输出简洁版本号。 |
 
 不带 `--profile` 时，服务、日志和 Web URL 命令面向当前 DSH Home 下的全部真实 profile。可用 `--profile <name>` 指定一个。`status` / `doctor` 返回 0 只说明诊断命令执行成功，不证明真实模型可用或普通使用学习闭环通过；当前能力边界见[RSI 状态](../../docs/rsi-status.md)。
+
+## 模型与三方 Provider 引导（`dsh-ray provider`）
+
+```sh
+dsh-ray provider                                       # 交互式引导配置三方/自定义 Provider
+dsh-ray provider list --profile web                    # 查看当前配置与 DSH 内置三方 Provider 目录
+dsh-ray provider --profile web --provider openrouter --model anthropic/claude-sonnet-4 --prompt-key
+DSH_RAY_MODEL_API_KEY=... dsh-ray provider --provider moonshotai-cn --store-key --json
+dsh-ray provider --provider my-gw --custom --base-url https://gw.example/v1 --api openai-completions --discover --store-key
+dsh-ray provider remove openrouter --profile web --yes
+```
+
+`dsh-ray provider` 运行时直接加载已安装/绑定 `@deepseek-ai/dsh` Host 的 `@deepseek-ai/dsh-llm-pi-ai`（内置 Provider 目录、`supportedProtocols()`、`discoverModels()`）与 `@deepseek-ai/dsh-llm-deepseek`；绝不在 stdout/stderr 或 `--json` 中输出明文 API Key，并支持 `traex-agent` / `agy-agent` / `deepseek-official` 默认路由切换。
 
 ## 升级与重装
 
@@ -83,13 +97,14 @@ dsh-ray purge --yes --keep-keychain      # 保留外部凭据
 
 ## 选项与退出码
 
-用法：`dsh-ray [全局选项] <命令> [命令参数]`。`-V` / `--version` 在顶层调用时仅输出简洁版本号（`update` / `upgrade` 中 `--version <v>` 仍用于指定目标版本）；`--dsh-home <path>` 选择 Home（默认 `$DSH_HOME`，否则 `~/.dsh`）；`--profile <name>` 选择 profile；`--json` 让 `status` / `doctor` / `upgrade` / `growth-report` / `enable` / `disable` / `version` 输出结构化 JSON；`--short` 仅用于 `version` 输出简洁版本号（与 `--json` 互斥）；`--since` 与 `--now` 控制 `growth-report` 统计窗口；`--wait <0..60>` 与 `--no-browser` 控制 `open` / `web-url` 行为；`--dry-run` 预览操作；`--yes` 适用于清理确认并在安装时透传。`-h` / `--help` 查看 CLI 帮助，`install --help` 查看安装器帮助。`--capabilities` 是供救机脚本使用的只读 JSON 探测接口。
+用法：`dsh-ray [全局选项] <命令> [命令参数]`。`-V` / `--version` 在顶层调用时仅输出简洁版本号（`update` / `upgrade` 中 `--version <v>` 仍用于指定目标版本）；`--dsh-home <path>` 选择 Home（默认 `$DSH_HOME`，否则 `~/.dsh`）；`--profile <name>` 选择 profile；`--json` 让 `status` / `doctor` / `upgrade` / `growth-report` / `enable` / `disable` / `provider` / `version` 输出结构化 JSON；`--short` 仅用于 `version` 输出简洁版本号（与 `--json` 互斥）；`--since` 与 `--now` 控制 `growth-report` 统计窗口；`--wait <0..60>` 与 `--no-browser` 控制 `open` / `web-url` 行为；`--dry-run` 预览操作；`--yes` 适用于清理确认并在安装时透传。`-h` / `--help` 查看 CLI 帮助，`provider help` / `install --help` 查看对应子命令参数。`--capabilities` 是供救机脚本使用的只读 JSON 探测接口。
 
 | 退出码 | 含义 |
 | --- | --- |
 | `0` | 命令成功执行，包含只读查看和 dry-run；不代表模型或学习能力已验证。 |
 | `1` | CLI 操作失败，例如服务未注册、Home/进程归属无法确认、备份或清理失败；不存在的 profile 也报错。 |
 | `2` | CLI 参数错误。 |
+| `4` | Live 核验失败（例如 `provider` 写入后 `dsh --dump-config` 校验失败并已自动回滚）。 |
 | 其它非零 | `install` / `reinstall` 委托安装器后，透传其退出码。 |
 
 许可证：MIT。

@@ -35,24 +35,55 @@ async function fixture(version = '0.1.48') {
   return { root, home, source, head, args: { dshHome: home, profile: 'owner', version, sourceRepository: source } }
 }
 
-async function legacyMacFixture() {
-  const f = await fixture('0.1.49')
+async function officialTagFixture(version: string, knownCommit: string) {
+  const f = await fixture(version)
   const old = await prepareRsiSourceWorkspace(f.args)
   const receiptPath = join(f.home, 'rsi-sources', 'owner', 'bootstrap.json')
   const receipt = JSON.parse(await readFile(receiptPath, 'utf8')) as Record<string, any>
   // The known official commit is part of the admission contract. A local
   // fixture cannot reproduce that object, so model it using the receipt's
   // digest envelope and a Git output adapter scoped to this test.
-  const knownCommit = '172bc31ddf0c00a6f0b3252354f2170a14dd7fc2'
   const { receiptDigest: _digest, ...body } = receipt
-  body.origin = { kind: 'official-tag', locator: 'https://github.com/22-ai-00/dsh-ray.git', ref: 'refs/tags/v0.1.49' }
+  body.origin = { kind: 'official-tag', locator: 'https://github.com/22-ai-00/dsh-ray.git', ref: `refs/tags/v${version}` }
   body.sourceCommit = knownCommit
   body.baseline.initialCommit = knownCommit
   await writeFile(receiptPath, JSON.stringify({ ...body, receiptDigest: createHash('sha256').update(JSON.stringify(body)).digest('hex') }))
   return { ...f, old, receiptPath, knownCommit }
 }
 
-async function withLegacyMacGit<T>(f: Awaited<ReturnType<typeof legacyMacFixture>>, run: () => Promise<T>): Promise<T> {
+async function legacyMacFixture() {
+  return officialTagFixture('0.1.49', '172bc31ddf0c00a6f0b3252354f2170a14dd7fc2')
+}
+
+async function interruptedLinux020Fixture() {
+  const f = await officialTagFixture('0.2.0', '17024e2c99d0671ba4076ad4c5b3c231cc92e364')
+  const authorityRoot = join(f.home, 'rsi-authorities', 'owner')
+  await mkdir(authorityRoot, { recursive: true, mode: 0o700 })
+  for (const sub of ['config', 'identities', 'registry', 'state']) {
+    await mkdir(join(authorityRoot, sub), { mode: 0o700 })
+  }
+  await writeFile(join(authorityRoot, 'catalog.json'), JSON.stringify({ schemaVersion: 1, entries: [] }), { mode: 0o600 })
+  await writeFile(join(authorityRoot, 'bootstrap.json'), JSON.stringify({
+    schemaVersion: 1, dshHome: f.home, profile: 'owner',
+  }), { mode: 0o600 })
+  const runtimeRoot = join(f.home, 'rsi-authority-runtimes', 'owner')
+  await mkdir(runtimeRoot, { recursive: true, mode: 0o700 })
+  const runtimeBody = { schemaVersion: 1, packageVersion: '0.2.0', root: runtimeRoot }
+  await writeFile(join(runtimeRoot, 'receipt.json'), JSON.stringify({
+    ...runtimeBody, digest: createHash('sha256').update(JSON.stringify(runtimeBody)).digest('hex'),
+  }), { mode: 0o600 })
+  for (const kind of ['rsi-linux-runtimes', 'rsi-linux-repository-runtimes', 'rsi-release-builds']) {
+    const dir = join(f.home, kind, 'owner')
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    const body = { dshHome: f.home, profile: 'owner', sourceCommit: f.knownCommit }
+    await writeFile(join(dir, 'bootstrap.json'), JSON.stringify({
+      ...body, receiptDigest: createHash('sha256').update(JSON.stringify(body)).digest('hex'),
+    }), { mode: 0o600 })
+  }
+  return f
+}
+
+async function withMappedGit<T>(f: { head: string; knownCommit: string }, targetPlatform: NodeJS.Platform, run: () => Promise<T>): Promise<T> {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
   const nativeSpawn = (await vi.importActual<typeof import('node:child_process')>('node:child_process')).spawn
   const script = `
@@ -64,7 +95,7 @@ async function withLegacyMacGit<T>(f: Awaited<ReturnType<typeof legacyMacFixture
     process.stderr.write(result.stderr||'');
     process.exit(result.status===null?1:result.status);
   `
-  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' })
+  Object.defineProperty(process, 'platform', { ...platform, value: targetPlatform })
   vi.mocked(spawn).mockImplementation((command, args, options) => nativeSpawn(process.execPath,
     ['-e', script, f.head, f.knownCommit, String(command), ...(args as string[])], options))
   try { return await run() }
@@ -72,6 +103,10 @@ async function withLegacyMacGit<T>(f: Awaited<ReturnType<typeof legacyMacFixture
     vi.mocked(spawn).mockImplementation(nativeSpawn)
     Object.defineProperty(process, 'platform', platform)
   }
+}
+
+async function withLegacyMacGit<T>(f: Awaited<ReturnType<typeof legacyMacFixture>>, run: () => Promise<T>): Promise<T> {
+  return withMappedGit(f, 'darwin', run)
 }
 
 async function withPlatform<T>(value: NodeJS.Platform, run: () => Promise<T>): Promise<T> {
@@ -294,6 +329,56 @@ describe('private RSI source workspace', () => {
     await expect(prepareRsiSourceWorkspace(f.args)).rejects.toThrow('Git command failed')
     expect(vi.mocked(spawn).mock.calls[0]?.[0]).toBe('/usr/bin/git')
     expect(await readFile(marker, 'utf8')).toBe('pass')
+  })
+
+  test('archives interrupted unused Linux 0.2.0 source and runtime trees before switching to local-head', { timeout: 120_000 }, async () => {
+    const f = await interruptedLinux020Fixture()
+    const oldReceipt = await readFile(f.receiptPath)
+    const authorityBootstrap = await readFile(join(f.home, 'rsi-authorities', 'owner', 'bootstrap.json'))
+    await writeFile(join(f.source, 'README.md'), 'fixed local\n')
+    git(f.source, 'add', 'README.md'); git(f.source, 'commit', '-m', 'local fix')
+    const next = git(f.source, 'rev-parse', 'HEAD')
+    await withMappedGit(f, 'linux', async () => {
+      const prepared = await prepareRsiSourceWorkspace(f.args)
+      expect(prepared.sourceCommit).toBe(next)
+      expect(prepared.origin).toEqual({ kind: 'local-head', locator: f.source, ref: 'HEAD' })
+      expect(await readFile(join(f.home, 'rsi-authorities', 'owner', 'bootstrap.json'))).toEqual(authorityBootstrap)
+      for (const retired of ['rsi-authority-runtimes', 'rsi-linux-runtimes', 'rsi-linux-repository-runtimes', 'rsi-release-builds']) {
+        await expect(lstat(join(f.home, retired, 'owner'))).rejects.toMatchObject({ code: 'ENOENT' })
+      }
+      const archiveRoot = join(f.home, 'rsi-source-archives', 'owner')
+      const archives = await readdir(archiveRoot)
+      expect(archives).toHaveLength(1)
+      const archived = join(archiveRoot, archives[0]!)
+      expect(await readFile(join(archived, 'rsi-sources', 'bootstrap.json'))).toEqual(oldReceipt)
+      for (const retired of ['rsi-authority-runtimes', 'rsi-linux-runtimes', 'rsi-linux-repository-runtimes', 'rsi-release-builds']) {
+        await expect(lstat(join(archived, retired))).resolves.toBeTruthy()
+      }
+      expect(await prepareRsiSourceWorkspace(f.args)).toEqual(prepared)
+      expect(await readdir(archiveRoot)).toEqual(archives)
+    })
+  })
+
+  test.each(['nonempty-config', 'nonempty-state', 'coordinator-marker', 'existing-archive'] as const)('%s blocks archiving interrupted Linux 0.2.0 source without moving files', async obstruction => {
+    const f = await interruptedLinux020Fixture()
+    await withMappedGit(f, 'linux', async () => {
+      if (obstruction === 'nonempty-config') {
+        await writeFile(join(f.home, 'rsi-authorities', 'owner', 'config', 'manifest.json'), '{}')
+      } else if (obstruction === 'nonempty-state') {
+        await writeFile(join(f.home, 'rsi-authorities', 'owner', 'state', 'control.sqlite'), 'db')
+      } else if (obstruction === 'coordinator-marker') {
+        await writeFile(join(f.home, '.rsi-coordinator-deadbeefdeadbeef.json'), '{}')
+      } else {
+        await mkdir(join(f.home, 'rsi-source-archives', 'owner', 'prior'), { recursive: true, mode: 0o700 })
+      }
+      const original = await readFile(f.receiptPath)
+      await expect(prepareRsiSourceWorkspace(f.args)).rejects.toThrow()
+      expect(await readFile(f.receiptPath)).toEqual(original)
+      await expect(lstat(join(f.home, 'rsi-authority-runtimes', 'owner'))).resolves.toBeTruthy()
+      if (obstruction !== 'existing-archive') {
+        await expect(lstat(join(f.home, 'rsi-source-archives'))).rejects.toMatchObject({ code: 'ENOENT' })
+      }
+    })
   })
 
   test('ignores a caller PATH executable during a real source checkout', async () => {

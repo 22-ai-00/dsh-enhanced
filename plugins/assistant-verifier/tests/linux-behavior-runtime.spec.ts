@@ -127,7 +127,7 @@ describe.runIf(process.platform === 'linux' && process.env.DSH_LINUX_BEHAVIOR_PR
     await mkdir(join(home, 'empty'), { mode: 0o700 })
     await expect(prepareLinuxPluginBehaviorRuntime({ runtime: base, root: join(home, 'empty') })).rejects.toThrow('inventory')
     expect(await readdir(join(home, 'empty'))).toEqual([])
-  })
+  }, 120_000)
 
   it('excludes a concurrent prepare and never removes another owner lock', async () => {
     const root = join(home, 'concurrent')

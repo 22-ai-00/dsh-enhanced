@@ -466,4 +466,43 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
     expect(symlinkPatch.profiles[0]?.configDumpOk).toBe(false)
     expect(symlinkPatch.checks.find(c => c.id === 'profile.desktop.dump')?.status).toBe('fail')
   })
+
+  test('读取 DSH v1 .credentials.yaml (version: 1 + refs:) 时只返回 refs 键名且绝不泄漏密钥', async () => {
+    const root = await makeTempDir('dsh-live-v1-creds-')
+    const dshHome = join(root, 'dsh')
+    const profileDir = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDir, { recursive: true })
+    await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web' }))
+    await writeFile(join(profileDir, 'cordis.patch.yml'), '[]\n')
+    await writeFile(join(dshHome, '.credentials.yaml'), [
+      'version: 1',
+      'refs:',
+      '  OPENROUTER_API_KEY: sk-or-v1-secret-value-888',
+      '  DEEPSEEK_API_KEY: sk-ds-v1-secret-value-999',
+      'records:',
+      '  "llm-pi-ai:anthropic":',
+      '    access: sk-oauth-secret-000',
+      '',
+    ].join('\n'), { mode: 0o600 })
+
+    const runner: DetailedCommandRunner = () => ({ status: 0, stdout: '0.2.2-rc.5\n', stderr: '' })
+    const report = await collectLiveDoctorReport({
+      dshHome,
+      home: root,
+      platform: 'linux',
+      env: { PATH: '' },
+      runner,
+    })
+
+    expect(report.credentials.keyNames).toEqual(['DEEPSEEK_API_KEY', 'OPENROUTER_API_KEY'])
+    expect(report.credentials.keyNames).not.toContain('version')
+    expect(report.credentials.keyNames).not.toContain('refs')
+    expect(report.credentials.keyNames).not.toContain('records')
+
+    const snap = await collectStatus(dshHome, root, 'linux', runner)
+    expect(snap.credentialKeys).toEqual(['DEEPSEEK_API_KEY', 'OPENROUTER_API_KEY'])
+    expect(JSON.stringify(report)).not.toContain('sk-or-v1-secret-value-888')
+    expect(JSON.stringify(snap)).not.toContain('sk-ds-v1-secret-value-999')
+    expect(JSON.stringify(report)).not.toContain('sk-oauth-secret-000')
+  })
 })

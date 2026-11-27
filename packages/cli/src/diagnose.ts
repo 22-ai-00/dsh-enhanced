@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { open, readdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { parseDocument } from 'yaml'
 import { inspectBoundHostRuntime, type BoundHostInspection } from './install-host.ts'
 import { inspectLaunchdDefinition, inspectLoadedLaunchd } from './launchd-service.ts'
 import {
@@ -36,6 +37,37 @@ export function extractYamlTopLevelKeys(source: string): string[] {
     if (match?.[2]) keys.add(match[2])
   }
   return [...keys].sort()
+}
+
+/**
+ * Extract stored credential reference names from `.credentials.yaml` without exposing secret values.
+ * Supports both DSH v1 (`version: 1` + `refs:` mapping) and legacy flat (`KEY: secret`) layouts.
+ */
+export function extractCredentialKeyNames(source: string): string[] {
+  try {
+    const doc = parseDocument(source)
+    if (doc.errors.length === 0) {
+      const parsed: unknown = doc.toJS()
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const record = parsed as Record<string, unknown>
+        if (
+          record.version === 1
+          || (record.refs !== undefined && typeof record.refs === 'object' && record.refs !== null && !Array.isArray(record.refs))
+        ) {
+          const refs = record.refs
+          if (refs && typeof refs === 'object' && !Array.isArray(refs)) {
+            return Object.keys(refs as Record<string, unknown>)
+              .filter(key => key.trim().length > 0)
+              .sort()
+          }
+          return []
+        }
+      }
+    }
+  } catch {
+    // Fall back to line-based top-level key extraction below.
+  }
+  return extractYamlTopLevelKeys(source)
 }
 
 export interface ProfileStatus {
@@ -127,7 +159,7 @@ export async function collectStatus(
     : undefined
   const credentialKeys = homeExists
     ? await readFile(join(dshHome, '.credentials.yaml'), 'utf8')
-        .then(extractYamlTopLevelKeys)
+        .then(extractCredentialKeyNames)
         .catch(() => [] as string[])
     : []
   return {

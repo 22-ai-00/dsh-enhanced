@@ -23,6 +23,8 @@ macOS x64 / Apple Silicon 的 `supervised` 使用一个原生 Node Host，由当
 
 从此前报出 `Linux x64 is required` 的官方 `0.1.49` 安装升级时，macOS 会识别其未使用的源码准备：仅当旧 receipt、干净工作树、初始提交与全部 Git 引用均匹配，且没有授权、构建或运行资源时，才把整个旧目录移入 `rsi-source-archives/<profile>/<UUID>`，再准备请求的新版本或本地来源。已有修改、维护提交或使用迹象会停止迁移，保留原目录；归档后的准备失败会报告归档路径，不删除旧历史。新目录建立后若进程崩溃，仍须人工核对不完整目录与归档，不会自动覆盖。
 
+在 Linux 上，若官方 `0.2.0` 的 `supervised` 安装在 `--install-owner` 之前中断且尚未生成任何 owner `config`、`registry`、`state`、coordinator 标记或 creation/cohort 资源，切换为 `local-head`（或更高发布版本）重试前也会将未使用的 `rsi-sources/<profile>` 及配套 `0.2.0` 运行时/发布预备目录一次性归档到 `rsi-source-archives/<profile>/<UUID>`，同时原地保留 `rsi-authorities/<profile>` 中的签名身份密钥；一旦存在非空 `config`/`state`、coordinator 标记或已有归档，则拒绝迁移并原样保留全部目录。
+
 `ready` 证明部署就绪，长期普通任务收益仍按 [RSI 验收合同](../../../docs/rsi-acceptance.md) 验证。Linux 上的模拟平台测试不能替代真实 Mac 验收。
 
 ## 1. 准备源码、构建环境与两个 profile

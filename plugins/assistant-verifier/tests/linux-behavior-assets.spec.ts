@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { behaviorSha256, extractLinuxBehaviorAsset, LINUX_BEHAVIOR_COMMAND, LINUX_BEHAVIOR_COMPILE_FLAGS,
-  LINUX_BEHAVIOR_MAPPINGS, loadLinuxBehaviorAssets, readBehaviorFile } from '../src/linux-behavior-assets.js'
+  LINUX_BEHAVIOR_MAPPINGS, loadLinuxBehaviorAssets, readBehaviorFile,
+  readInstalledBehaviorAsset } from '../src/linux-behavior-assets.js'
 
 describe('published Linux behavior assets', () => {
   it.runIf(process.platform === 'linux')('ships the original C bytes and maps exactly the Docker worker source', async () => {
@@ -60,14 +61,67 @@ describe('published Linux behavior assets', () => {
   })
 
   it.runIf(process.platform === 'linux')('bounds reads and rejects a symlink rather than reading its target', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'linux-behavior-assets-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'linux-behavior-assets-')))
     try {
       const file = join(root, 'source')
       await writeFile(file, 'private', { mode: 0o444 })
       await symlink('source', join(root, 'link'))
       expect((await readBehaviorFile(file, 7)).toString()).toBe('private')
       await expect(readBehaviorFile(file, 6)).rejects.toThrow('unsafe')
+      await expect(readBehaviorFile(file, -1)).rejects.toThrow('unsafe')
+      await expect(readBehaviorFile(file, Number.NaN)).rejects.toThrow('unsafe')
       await expect(readBehaviorFile(join(root, 'link'), 7)).rejects.toThrow('unsafe')
+
+      for (const badMode of [0o664, 0o646, 0o4444, 0o2444, 0o1444]) {
+        await chmod(file, badMode)
+        await expect(readBehaviorFile(file, 64)).rejects.toThrow('unsafe')
+      }
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it.runIf(process.platform === 'linux')('allows hardlinked installed assets while keeping private behavior reads single-link', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'linux-behavior-installed-')))
+    try {
+      const storeFile = join(root, 'store-asset')
+      const installedFile = join(root, 'installed-asset')
+      await writeFile(storeFile, 'asset-bytes', { mode: 0o600 })
+      await link(storeFile, installedFile)
+
+      await expect(readBehaviorFile(installedFile, 64)).rejects.toThrow('unsafe')
+      expect((await readInstalledBehaviorAsset(installedFile, 64)).toString()).toBe('asset-bytes')
+
+      const secondInstalledFile = join(root, 'installed-asset-2')
+      await link(storeFile, secondInstalledFile)
+      expect((await readInstalledBehaviorAsset(installedFile, 64)).toString()).toBe('asset-bytes')
+
+      await chmod(storeFile, 0o444)
+      expect((await readInstalledBehaviorAsset(installedFile, 11)).toString()).toBe('asset-bytes')
+      await expect(readInstalledBehaviorAsset(installedFile, 10)).rejects.toThrow('unsafe')
+      await expect(readInstalledBehaviorAsset(installedFile, -1)).rejects.toThrow('unsafe')
+      await expect(readInstalledBehaviorAsset(installedFile, Number.NaN)).rejects.toThrow('unsafe')
+
+      if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+        const getuidSpy = vi.spyOn(process, 'getuid')
+        try {
+          getuidSpy.mockReturnValue(65534)
+          await expect(readInstalledBehaviorAsset(installedFile, 64)).rejects.toThrow('unsafe')
+          getuidSpy.mockReturnValue(0)
+          await expect(readInstalledBehaviorAsset(installedFile, 64)).rejects.toThrow('unsafe')
+        } finally { getuidSpy.mockRestore() }
+      }
+
+      const linkPath = join(root, 'symlink-asset')
+      await symlink(installedFile, linkPath)
+      await expect(readInstalledBehaviorAsset(linkPath, 64)).rejects.toThrow('unsafe')
+
+      const dirPath = join(root, 'dir-asset')
+      await mkdir(dirPath)
+      await expect(readInstalledBehaviorAsset(dirPath, 64)).rejects.toThrow('unsafe')
+
+      for (const badMode of [0o664, 0o646, 0o4444, 0o2444, 0o1444]) {
+        await chmod(storeFile, badMode)
+        await expect(readInstalledBehaviorAsset(installedFile, 64)).rejects.toThrow('unsafe')
+      }
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 

@@ -1,8 +1,22 @@
 # 添加与切换模型
 
-日常模型配置在 **Web → 设置 → 模型**完成。添加普通 OpenAI / Anthropic 兼容 API 不需要修改项目代码，也不需要重新安装；配置和 API Key 保存在本机。
+日常模型配置可在终端直接通过 **`dsh-ray provider`** 引导完成，或在 **Web → 设置 → 模型**完成。添加内置三方服务或自定义 OpenAI / Anthropic / Gemini 兼容 API 不需要修改项目代码，也不需要重新安装；配置和 API Key 保存在本机。
 
-## 打开模型设置
+## 终端引导配置（`dsh-ray provider`，推荐）
+
+如果未安装/未绑定 `traex-agent` 或 `agy-agent`，或需要接入第三方 API：
+
+```sh
+dsh-ray provider                                       # 交互式引导选择 DSH 内置 40+ 三方 Provider 或自定义 API
+dsh-ray provider list --profile web                    # 查看当前配置与 DSH Host 内置支持的 Provider 目录
+dsh-ray provider --profile web --provider openrouter --model anthropic/claude-sonnet-4 --prompt-key
+dsh-ray provider --profile web --provider my-gateway --custom --base-url https://gateway.example/v1 --api openai-completions --discover --prompt-key
+dsh-ray provider remove openrouter --profile web --yes # 移除三方路由及对应凭据引用
+```
+
+`dsh-ray provider` 直接复用当前已安装 DSH Host 自带的 `@deepseek-ai/dsh-llm-pi-ai` 目录、Wire 协议列表、配置校验（`internal/config`）与端点模型探测（`discoverModels`），把 API Key 安全写入 `$DSH_HOME/.credentials.yaml` (`0600`, `version: 1` `refs:`)，在 `cordis.patch.yml` 更新 `llm-pi-ai` 与 `agent-default-model`（更新已有三方配置时保留原有的 `headers` / `compat` / 模型元信息；切换到 `traex-agent` / `agy-agent` 时同步启用 `traex-acp-provider` 的 `enabled` / `agyEnabled`），并用 `dsh --dump-config` 复核最终合成结果（如被 `$DSH_HOME/cordis.patch.yml` 覆盖或校验失败则自动回滚）。
+
+## 打开模型设置（Web UI）
 
 默认安装或轻量 `core` / `web` 安装完成后，可直接打开本地 Web 并前往左侧栏 **Settings → Models**（或在 **Settings → 文鳐助手** 中查看本机 ACP Agent）：
 

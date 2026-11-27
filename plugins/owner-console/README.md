@@ -55,7 +55,7 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 | 成长与记忆学习 | `assistant-memory-learning` 剩余额度/授权可用性、`assistant-growth-driver` 最近唤醒、`usageHealth` 与 `dreamingIntake` 统计 | `assistantMemoryLearning` + `assistantGrowthDriver`（可缺省） |
 | 成长计分卡（只读）（`GrowthReportCard`） | 支持切换 `7 天 / 14 天 / 30 天` 窗口，只读汇总五组闭环指标（任务与纠正/重做/撤回率及趋势、新增与有来源记忆/提示词暴露/同类纠正变化、候选生成/验收通过与失败/采用/回退、通知送达/反应/忽略与 `would-accept` 吻合度及 1/4 留出已决样本数、按冻结模型分层的成本与延迟均值/P50/P95）以及记忆通道 14 天预登记口径与主动放宽 20 样本门控，严格区分「无数据（`no-data`）」与「窗口内为 0（`zero`）」 | `growthReport`（复用 `assistantEvaluation` / `pluginControlPlane` / `assistantWorkItems` 只读接口与可选只读 SQLite，零 schema 变更） |
 | 版本与自迭代统计（只读）（`versionInfo`） | 返回 `dsh-ray/version/v1`（`schemaVersion: 1`）整体助手版本、绑定与运行中的 `@deepseek-ai/dsh` Host 版本、core 与 evolved 插件清单（去重不双计），以及 20 余项严格区分 `no-data`（`null`）与 `zero`（`0`）的自迭代/演进/升级计数；同步暴露 Host 工具 `owner_console_version_info`（仅对已授权 Owner 会话可见与执行）与对话端 `/version`、`/autonomy version` 及自然语言查询 | `versionInfo`（`src/version-info.ts` 只读 `DatabaseSync` + `.dsh-ray-host.json` + `.dsh-ray/upgrade-history.jsonl` + `.dsh-ray-upgrade-backups/` + 可选 Cordis `health()` 回退） |
-| 本项目插件管理 | 本项目的 bundle 层（已安装/已启用/已加载、停用/启用、移除）、已加载条目（按 fiber 阶段的启用/禁用/诊断）、安装 `@dsh-ray/*`，以及对 live 字段的合并配置 | `pluginManager`（bundle/entry/安装）+ `settings.describe` / `settings.mutate`（live 字段） |
+| 本项目插件管理 | 本项目的 bundle 层（已安装/已启用/已加载、停用/启用、移除）、已加载条目（按 fiber 阶段的启用/禁用/诊断）、其他未安装 `@dsh-ray/*` 插件下拉列表、一键安装全部可用插件与手动输入安装 `@dsh-ray/*`，以及对 live 字段的合并配置 | `pluginManager`（bundle/entry/安装）+ `settings.describe` / `settings.mutate`（live 字段） |
 | 趋势快照（只读） | 已封存的普通使用趋势快照：序号、计划、窗口边界、会话数、flags、按冻结模型分层的 DiD 与平行趋势、digest 前缀；每页 10 条，可翻到更早一页 | `pluginControlPlane.inspectCreatedCapabilityOrdinaryUseTrendSnapshots`（结构化读取，可缺省） |
 | intake 吻合度（只读） | 填写 Evaluation 作用域（workspace + preset）后读取：窗口、扫描通知数（是否截断）、intake 准入合计与按 level 的吻合 / 不吻合计数与比例、非 intake / 无法判断 / 他 scope 计数；只有计数，不含工作项 id 或正文 | `assistantEvaluation.inspectIntakeAttentionAgreement`（结构化读取，可缺省；开关关闭时显示未启用）+ `loader` 条目配置（只读开关，无需作用域） |
 
@@ -134,9 +134,9 @@ provider/model/reasoningEffort。没有 live 字段的条目不会出现在面�
   profile 中由 DSH 的 pluginManager/pnpm 决定）。
 - **已加载条目**：列出模块属于 `@dsh-ray/*` 的 Loader 条目（entryId、模块名、fiber 阶段），
   可单独启用/禁用；按模块归属而不是 bundle row 归属判断，第三方模块行不在此面板管理。
-- **安装**：只接受 `@dsh-ray/<name>` 形式的包名，走 DSH 自身的 `pluginManager.installBundle`
-  （与 `dsh plugin` 相同的 pnpm 路径），会一并安装该包声明的依赖并默认激活；本地路径和 git 地址
-  不在此面板处理，避免面板成为任意代码源入口。安装/启用后如返回 `restart-required`，按提示重启 profile。
+- **安装（单包下拉 / 手动输入 / 一键安装全部可用插件）**：提供本项目其他未安装 `@dsh-ray/*` bundle 的下拉列表、手动包名输入，以及「一键安装全部可用插件」入口（也可在下拉列表中选中「全部可用插件」查看清单并执行；支持安装中点击「停止后续安装」并自动刷新）。只接受 `@dsh-ray/<name>` 形式的包名，走 DSH 自身的 `pluginManager.installBundle`
+  （与 `dsh plugin` 相同的 pnpm 路径），会一并安装该包声明的 npm 依赖并默认激活；本地路径和 git 地址
+  不在此面板处理，避免面板成为任意代码源入口。一键安装会自动跳过本控制台自身（`@dsh-ray/owner-console`）、与桌面/Web 冲突或需离线/CLI 预配置的专用插件（`@dsh-ray/acp`、`@dsh-ray/assistant-isolation`、`@dsh-ray/assistant-web-owner`、`@dsh-ray/hello`）及与 `personal-assistant` 互斥的拆分版子包（可在下拉或输入框中按需单独选择），按基础服务到上层能力顺序逐个调用，安装/启用后如返回 `restart-required`，按提示重启 profile。
 - **依赖构建脚本**：pnpm 可能拒绝依赖的构建脚本（`ERR_PNPM_IGNORED_BUILDS`）。Host 记录到
   `pendingBuilds` 时，面板会先让主人确认，再用这些精确名称重试。当前 Host 的 ANSI 解析缺陷会丢掉
   依赖名、使 `pendingBuilds` 为空，因此面板也支持从失败输出中读出依赖名交给主人确认；确认后不再

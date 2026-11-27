@@ -161,4 +161,4 @@ CLI 先读取原生有效配置，单项修改时自动保留整行其它配置�
 
 ## 配置默认模型
 
-见[模型指南](../../docs/models.md)。安装器配置模型会设置当前 profile 的默认模型；已有明确选择会保留。
+见[模型指南](../../docs/models.md)。安装器配置模型会设置当前 profile 的默认模型；已有明确选择会保留。安装后如需交互式接入三方 API / 自定义网关或切换默认模型，可随时运行 `dsh-ray provider`（或 `dsh-ray provider list` 查看 DSH 内置支持的全部三方 Provider）。

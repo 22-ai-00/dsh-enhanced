@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const LINUX_BEHAVIOR_COMMAND = 'exec /usr/bin/env LD_PRELOAD=/runtime/0/dsh-plugin-verifier/parent-protect.so /runtime/0/bin/node --disable-sigusr1 /runtime/0/dsh-plugin-verifier/worker.mjs'
@@ -15,13 +16,19 @@ export const LINUX_BEHAVIOR_MAPPINGS = [
 export const LINUX_BEHAVIOR_COMPILE_FLAGS = ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-DDSH_NODE_PATH="/runtime/0/bin/node"'] as const
 export const behaviorSha256 = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 
-/** Bounded descriptor reads: source assets must be ordinary, stable, unlinked files. */
-export async function readBehaviorFile(path: string, limit: number): Promise<Buffer> {
+async function readCheckedBehaviorFile(path: string, limit: number, allowHardlinks: boolean): Promise<Buffer> {
   const before = await lstat(path)
-  if (!before.isFile() || before.nlink !== 1 || before.size > limit || before.mode & 0o022
-    || await realpath(path) !== path) throw new Error('unsafe Linux behavior asset')
+  const disallowedUid = typeof process.getuid === 'function'
+    && before.uid !== process.getuid() && before.uid !== 0
+  if (!before.isFile() || (allowHardlinks ? before.nlink < 1 : before.nlink !== 1)
+    || !Number.isFinite(limit) || limit < 0 || before.size < 0 || before.size > limit
+    || before.mode & 0o7022
+    || disallowedUid || await realpath(path) !== path) throw new Error('unsafe Linux behavior asset')
   const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
-  const stamp = (info: typeof before): string => JSON.stringify([info.dev, info.ino, info.mode, info.uid, info.size, info.mtimeMs, info.ctimeMs])
+  const stamp = (info: typeof before): string => JSON.stringify([
+    info.dev, info.ino, info.mode, info.uid, info.size, info.mtimeMs,
+    ...(allowHardlinks ? [] : [info.nlink, info.ctimeMs]),
+  ])
   try {
     if (stamp(await fd.stat()) !== stamp(before)) throw new Error('Linux behavior asset changed')
     const buffer = Buffer.alloc(before.size + 1)
@@ -35,6 +42,16 @@ export async function readBehaviorFile(path: string, limit: number): Promise<Buf
       || stamp(await lstat(path)) !== stamp(before)) throw new Error('Linux behavior asset changed')
     return buffer.subarray(0, count)
   } finally { await fd.close() }
+}
+
+/** Bounded descriptor reads: private assets must be ordinary, stable, unlinked files. */
+export async function readBehaviorFile(path: string, limit: number): Promise<Buffer> {
+  return readCheckedBehaviorFile(path, limit, false)
+}
+
+/** Installed package assets may be hardlinked into node_modules by pnpm's content-addressable store. */
+export async function readInstalledBehaviorAsset(path: string, limit: number): Promise<Buffer> {
+  return readCheckedBehaviorFile(path, limit, true)
 }
 
 /** Same unique markers and byte limit as the existing Docker asset extractor. */
@@ -58,8 +75,9 @@ export interface LinuxBehaviorAssets {
 }
 
 export async function loadLinuxBehaviorAssets(): Promise<LinuxBehaviorAssets> {
-  const raw = (await readBehaviorFile(fileURLToPath(new URL('../lib/plugin-behavior-runner.js', import.meta.url)), 256 * 1024)).toString('utf8')
-  const launcher = (await readBehaviorFile(fileURLToPath(new URL('../runtime/plugin-observer-launcher.c', import.meta.url)), 64 * 1024)).toString('utf8')
+  const packageRoot = await realpath(fileURLToPath(new URL('..', import.meta.url)))
+  const raw = (await readInstalledBehaviorAsset(join(packageRoot, 'lib', 'plugin-behavior-runner.js'), 256 * 1024)).toString('utf8')
+  const launcher = (await readInstalledBehaviorAsset(join(packageRoot, 'runtime', 'plugin-observer-launcher.c'), 64 * 1024)).toString('utf8')
   const worker = extractLinuxBehaviorAsset(raw, 'WORKER'), candidate = extractLinuxBehaviorAsset(raw, 'CANDIDATE')
   const map = (source: string): string => LINUX_BEHAVIOR_MAPPINGS.reduce((value, [from, to]) => value.replaceAll(from, to), source)
   // Canonical fixed-source identity: only these ordered fields, original UTF-8

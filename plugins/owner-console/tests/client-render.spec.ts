@@ -240,7 +240,11 @@ describe('owner console panel presentation', () => {
     const bundleText = text(bundleNodes)
     expect(bundleText).toContain('由 personal-assistant 托管')
     expect(bundleText).toContain('已安装但未启用')
-    expect(buttons(bundleNodes)).toEqual(['停用', '移除', '移除', '启用', '移除', '禁用', '安装', '应用配置'])
+    expect(buttons(bundleNodes)).toEqual([
+      '停用', '移除', '移除', '启用', '移除', '禁用', '安装', '一键安装全部可用插件（25）', '应用配置',
+    ])
+    const selectNode = bundleNodes.find(node => node.type === 'select' && node.props['aria-label'] === '选择未安装的本项目 bundle')
+    expect(selectNode).toBeDefined()
 
     const proactiveText = text(expand(ProactiveWorkItemsCard({ ctrl: ctrl as never })))
     expect(proactiveText).toContain('未启用（可选）')

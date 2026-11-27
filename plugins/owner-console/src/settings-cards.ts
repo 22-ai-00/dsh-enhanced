@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
 import { KAI_FONT, QUIET_PHRASE } from './art.js'
 import { WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
+import { CUSTOM_BUNDLE_OPTION, INSTALL_ALL_AVAILABLE_OPTION, resolveUninstalledBundles } from './bundle-catalog.js'
 import { CUSTOM_MODEL_OPTION, ModelRouteSelects, resolveEffectiveModelCatalog, resolveEffortOptions, cascadeModelChange } from './model-route-ui.js'
 import type { OwnerSelfIterationAction } from './nl-control.js'
 import { componentState, DEPENDENCY_BUNDLES, missingRemedy, repairPatch, type ComponentState } from './state.js'
@@ -68,6 +69,127 @@ export async function installWithCompanions(
     if (!result.ok || !result.value.applied) return result
   }
   return installWithApproval(remote, spec, confirm)
+}
+
+export interface BatchInstallProgress {
+  readonly total: number
+  readonly index: number
+  readonly current: string
+  readonly completed: readonly string[]
+  readonly needsRestart: boolean
+  readonly stopping: boolean
+}
+
+export interface BatchInstallSummary {
+  readonly requested: readonly string[]
+  readonly completed: readonly string[]
+  readonly needsRestart: boolean
+  readonly stoppedByUser: boolean
+  readonly failure?: { readonly spec: string; readonly reason: string }
+}
+
+export interface BatchInstallHooks {
+  readonly shouldCancel?: () => boolean
+  readonly onProgress?: (progress: BatchInstallProgress) => void
+}
+
+export async function installAvailableBundles(
+  remote: Pick<ConsoleRemote, 'installProjectBundle'>,
+  specs: readonly string[],
+  confirm: (message: string) => boolean,
+  hooks: BatchInstallHooks = {},
+): Promise<BatchInstallSummary> {
+  const targets: string[] = []
+  const seen = new Set<string>()
+  for (const raw of specs) {
+    const trimmed = raw.trim()
+    if (trimmed === '' || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    targets.push(trimmed)
+  }
+  if (targets.length === 0) {
+    return { requested: [], completed: [], needsRestart: false, stoppedByUser: false }
+  }
+
+  const completed: string[] = []
+  let needsRestart = false
+  let stoppedByUser = false
+
+  for (let index = 0; index < targets.length; index++) {
+    if (hooks.shouldCancel?.() === true) {
+      stoppedByUser = true
+      break
+    }
+    const spec = targets[index]!
+    hooks.onProgress?.({
+      total: targets.length,
+      index,
+      current: spec,
+      completed: [...completed],
+      needsRestart,
+      stopping: false,
+    })
+
+    let cancelledDuringConfirm = false
+    const guardedConfirm = (message: string): boolean => {
+      if (hooks.shouldCancel?.() === true) {
+        cancelledDuringConfirm = true
+        return false
+      }
+      return confirm(message)
+    }
+
+    let result: RemoteResult<OwnerConsoleWriteResult>
+    try {
+      result = await installWithApproval(remote, spec, guardedConfirm)
+    } catch (cause) {
+      return {
+        requested: targets,
+        completed,
+        needsRestart,
+        stoppedByUser: false,
+        failure: { spec, reason: cause instanceof Error ? cause.message : String(cause) },
+      }
+    }
+
+    if (cancelledDuringConfirm) {
+      stoppedByUser = true
+      break
+    }
+
+    if (!result.ok) {
+      return {
+        requested: targets,
+        completed,
+        needsRestart,
+        stoppedByUser: false,
+        failure: { spec, reason: remoteFailureText(result.error) },
+      }
+    }
+    if (!result.value.applied) {
+      return {
+        requested: targets,
+        completed,
+        needsRestart,
+        stoppedByUser: false,
+        failure: { spec, reason: result.value.note || '安装未应用' },
+      }
+    }
+
+    completed.push(spec)
+    if (/restart-required|重启/u.test(result.value.note)) needsRestart = true
+    if (index + 1 < targets.length && hooks.shouldCancel?.() === true) {
+      stoppedByUser = true
+      break
+    }
+  }
+
+  return {
+    requested: targets,
+    completed,
+    needsRestart,
+    stoppedByUser,
+  }
 }
 
 const LARK_CONNECTION_LABELS: Readonly<Record<OwnerConsoleStatus['feishu']['connection'], string>> = {
@@ -221,6 +343,7 @@ export interface ConsoleController {
   readonly probingTool: 'traex' | 'agy' | undefined
   readonly checkingUpgrade: boolean
   readonly previewingUpgrade: boolean
+  readonly batchInstall?: BatchInstallProgress | undefined
   readonly busy: boolean
   readonly error: string
   readonly notice: string
@@ -234,6 +357,8 @@ export interface ConsoleController {
   previewUpgrade(): Promise<void>
   run(action: () => Promise<RemoteResult<OwnerConsoleWriteResult>>): Promise<void>
   runInstall(spec: string): Promise<void>
+  runBatchInstall?(specs: readonly string[]): Promise<void>
+  cancelBatchInstall?(): void
   confirmOwner(message: string): boolean
 }
 
@@ -256,11 +381,14 @@ export function useConsoleActions(
   const [probingTool, setProbingTool] = useState<'traex' | 'agy'>()
   const [checkingUpgrade, setCheckingUpgrade] = useState(false)
   const [previewingUpgrade, setPreviewingUpgrade] = useState(false)
+  const [batchInstall, setBatchInstall] = useState<BatchInstallProgress | undefined>(undefined)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
 
   const mounted = useRef(true)
+  const batchCancelRef = useRef(false)
+  const batchRunningRef = useRef(false)
   useEffect(() => {
     mounted.current = true
     return () => { mounted.current = false }
@@ -438,12 +566,86 @@ export function useConsoleActions(
 
   const runInstall = (spec: string) => run(() => installWithApproval(remote, spec, confirmOwner))
 
+  const cancelBatchInstall = () => {
+    batchCancelRef.current = true
+    setBatchInstall(current => current === undefined ? undefined : { ...current, stopping: true })
+  }
+
+  const runBatchInstall = async (specs: readonly string[]) => {
+    if (batchRunningRef.current) return
+    batchRunningRef.current = true
+    batchCancelRef.current = false
+    setBusy(true); setError(''); setNotice('')
+    let blockedConfirmReason: string | undefined
+    const batchConfirm = (message: string): boolean => {
+      const answer = askOwner((globalThis as unknown as { confirm?: (message: string) => boolean }).confirm, message)
+      const note = confirmationNotice(answer, message)
+      if (note !== undefined) {
+        if (answer === 'unavailable') {
+          blockedConfirmReason = note
+          setError(note)
+        } else {
+          blockedConfirmReason = '已取消安装脚本授权'
+          setNotice(note)
+        }
+        return false
+      }
+      blockedConfirmReason = undefined
+      return true
+    }
+    try {
+      const summary = await installAvailableBundles(remote, specs, batchConfirm, {
+        shouldCancel: () => batchCancelRef.current || !mounted.current,
+        onProgress: progress => {
+          if (mounted.current) setBatchInstall(progress)
+        },
+      })
+      if (!mounted.current) return
+      setBatchInstall(undefined)
+      if (summary.requested.length === 0) {
+        setNotice('没有可安装的可用插件。')
+        return
+      }
+      if (summary.completed.length > 0) {
+        await refresh()
+        notifyConsoleRefresh(remote)
+        if (!mounted.current) return
+      }
+      const restartSuffix = summary.needsRestart ? '，请重启 profile 以激活新插件。' : '。'
+      if (summary.failure !== undefined) {
+        if (summary.completed.length > 0) {
+          setNotice(`已安装 ${summary.completed.length}/${summary.requested.length} 个插件（${summary.completed.join('、')}）${restartSuffix}`)
+        }
+        setError(`安装 ${summary.failure.spec} 时停止：${blockedConfirmReason ?? summary.failure.reason}`)
+        return
+      }
+      if (summary.stoppedByUser) {
+        setError('')
+        setNotice(`已停止后续安装：已完成 ${summary.completed.length}/${summary.requested.length} 个（${summary.completed.join('、') || '无'}）${restartSuffix}`)
+        return
+      }
+      setError('')
+      setNotice(`已一键安装 ${summary.completed.length} 个可用插件${restartSuffix}`)
+    } catch (cause) {
+      if (mounted.current) {
+        setBatchInstall(undefined)
+        setError(cause instanceof Error ? cause.message : '批量安装失败')
+      }
+    } finally {
+      batchRunningRef.current = false
+      if (mounted.current) {
+        setBatchInstall(undefined)
+        setBusy(false)
+      }
+    }
+  }
+
   return {
     remote, navigation, status, overview, autonomySetup, modelCatalog, loadingModelCatalog, upgradeStatus, upgradePreview,
     doctorReport, checkingDoctor,
-    traexProbe, agyProbe, probingTool, checkingUpgrade, previewingUpgrade,
+    traexProbe, agyProbe, probingTool, checkingUpgrade, previewingUpgrade, batchInstall,
     busy, error, notice, setError, setNotice, refresh, refreshModelCatalog, checkDoctor, probeTool, checkUpgrade, previewUpgrade,
-    run, runInstall, confirmOwner,
+    run, runInstall, runBatchInstall, cancelBatchInstall, confirmOwner,
   }
 }
 
@@ -2488,10 +2690,110 @@ export function BundlesCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const [customEntryMode, setCustomEntryMode] = useState(false)
   const [bundleJson, setBundleJson] = useState('{}')
   const [installSpec, setInstallSpec] = useState('@dsh-ray/')
+  const [installPickerMode, setInstallPickerMode] = useState<'list' | 'all' | 'custom'>('list')
+  const installInputRef = useRef<{ focus?: () => void } | null>(null)
+  const hasLoadedStatusRef = useRef(false)
+  const prevInstalledBundlesRef = useRef<ReadonlySet<string>>(new Set())
   const pending = status === undefined
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
   const itemStyle = { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, alignItems: 'center', padding: '10px 0', borderTop: `1px solid ${hairline}` }
   const pluginEntries = status?.plugins ?? []
+
+  const uninstalled = resolveUninstalledBundles(status)
+  const availableNames = uninstalled.available.map(item => item.name)
+  const trimmedInstallSpec = installSpec.trim()
+  const selectedBundleItem = uninstalled.all.find(item => item.name === trimmedInstallSpec)
+  const installAllMode = installPickerMode === 'all' && uninstalled.ready && availableNames.length > 0
+
+  useEffect(() => {
+    if (status === undefined) return
+    const currentInstalled = new Set(
+      status.bundles.filter(bundle => bundle.installed).map(bundle => bundle.name),
+    )
+    const wasLoaded = hasLoadedStatusRef.current
+    const prevInstalled = prevInstalledBundlesRef.current
+    hasLoadedStatusRef.current = true
+    prevInstalledBundlesRef.current = currentInstalled
+
+    if (installPickerMode === 'all' && uninstalled.ready && availableNames.length === 0) {
+      setInstallPickerMode('list')
+    }
+    if (
+      wasLoaded
+      && trimmedInstallSpec !== ''
+      && trimmedInstallSpec !== '@dsh-ray/'
+      && !prevInstalled.has(trimmedInstallSpec)
+      && currentInstalled.has(trimmedInstallSpec)
+    ) {
+      setInstallSpec('@dsh-ray/')
+      setInstallPickerMode('list')
+    }
+  }, [installPickerMode, uninstalled.ready, availableNames.length, status, trimmedInstallSpec])
+
+  const selectValue = installAllMode
+    ? INSTALL_ALL_AVAILABLE_OPTION
+    : installPickerMode === 'custom'
+      ? CUSTOM_BUNDLE_OPTION
+      : selectedBundleItem !== undefined
+        ? selectedBundleItem.name
+        : trimmedInstallSpec !== '' && trimmedInstallSpec !== '@dsh-ray/'
+          ? CUSTOM_BUNDLE_OPTION
+          : ''
+
+  const startBatchInstall = (specs: readonly string[]) => {
+    if (ctrl.runBatchInstall !== undefined) {
+      void ctrl.runBatchInstall(specs)
+      return
+    }
+    void ctrl.run(async () => {
+      const summary = await installAvailableBundles(remote, specs, ctrl.confirmOwner)
+      if (summary.requested.length === 0) {
+        return {
+          ok: true,
+          value: { applied: true, entry: '', note: '没有可安装的可用插件。' },
+        }
+      }
+      const restartSuffix = summary.needsRestart ? '，请重启 profile 以激活新插件。' : '。'
+      if (summary.failure !== undefined) {
+        if (summary.completed.length > 0) {
+          await ctrl.refresh()
+          notifyConsoleRefresh(remote)
+        }
+        const completedPrefix = summary.completed.length > 0
+          ? `已安装 ${summary.completed.length}/${summary.requested.length} 个；`
+          : ''
+        return {
+          ok: false,
+          error: {
+            code: 'BATCH_INSTALL_FAILED',
+            message: `${completedPrefix}${summary.failure.spec}: ${summary.failure.reason}`,
+          },
+        }
+      }
+      if (summary.stoppedByUser) {
+        if (summary.completed.length > 0) {
+          await ctrl.refresh()
+          notifyConsoleRefresh(remote)
+        }
+        return {
+          ok: true,
+          value: {
+            applied: true,
+            entry: summary.completed.at(-1) ?? '',
+            note: `已停止后续安装：已完成 ${summary.completed.length}/${summary.requested.length} 个（${summary.completed.join('、') || '无'}）${restartSuffix}`,
+          },
+        }
+      }
+      return {
+        ok: true,
+        value: {
+          applied: true,
+          entry: summary.completed.at(-1) ?? '',
+          note: `已一键安装 ${summary.completed.length} 个可用插件${restartSuffix}`,
+        },
+      }
+    })
+  }
 
   const bundleRows = pending
     ? placeholder('正在读取…')
@@ -2538,16 +2840,165 @@ export function BundlesCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
     }))
 
   return card('本项目插件管理',
-    el('div', { style: { display: 'grid', gap: 10 } },
+    el('div', { style: { display: 'grid', gap: 10, minWidth: 0 } },
       el('h4', { style: subheadStyle }, 'Bundle 层'),
       bundleRows,
       el('h4', { style: { ...subheadStyle, marginTop: 6 } }, '已加载条目'),
       pluginRows,
-      el('div', { style: { ...actionsStyle, alignItems: 'end', marginTop: 6 } },
-        field('安装本项目 bundle', installSpec, setInstallSpec, '@dsh-ray/plugin-name'),
-        el('button', { style: btn(primaryButtonStyle), disabled: busy,
-          onClick: () => void ctrl.runInstall(installSpec) }, '安装')),
-      el('p', { style: hintStyle }, '安装走 DSH 自身的 pnpm 路径，只装该包及其 pnpm 依赖；它的 @dsh-ray peer bundle 与 Host 服务不会自动安装，缺失项会显示在卡片里。安装/启用后如提示需要重启 profile，请依提示操作。'),
+      el('div', { style: { display: 'grid', gap: 8, minWidth: 0, marginTop: 6, paddingTop: 10, borderTop: `1px solid ${hairline}` } },
+        el('label', { style: { display: 'grid', gap: 4, fontSize: 12, fontWeight: 500, color: muted, minWidth: 0 } },
+          el('span', {}, '选择本项目其他未安装插件'),
+          el('select', {
+            'aria-label': '选择未安装的本项目 bundle',
+            'data-bundle-install-select': '',
+            value: selectValue,
+            disabled: busy,
+            style: { ...inputStyle, maxWidth: '100%', textOverflow: 'ellipsis' },
+            onChange: (event: { target: { value: string } }) => {
+              const picked = event.target.value
+              if (picked === '') {
+                setInstallPickerMode('list')
+                setInstallSpec('@dsh-ray/')
+                return
+              }
+              if (picked === INSTALL_ALL_AVAILABLE_OPTION) {
+                setInstallPickerMode('all')
+                setInstallSpec('@dsh-ray/')
+                return
+              }
+              if (picked === CUSTOM_BUNDLE_OPTION) {
+                setInstallPickerMode('custom')
+                if (selectedBundleItem !== undefined || trimmedInstallSpec === '') {
+                  setInstallSpec('@dsh-ray/')
+                }
+                installInputRef.current?.focus?.()
+                return
+              }
+              setInstallPickerMode('list')
+              setInstallSpec(picked)
+            },
+          },
+          el('option', { value: '' }, !uninstalled.ready
+            ? (uninstalled.hostUnavailable ? 'Host 插件管理器暂不可用，可下方手动输入…' : '正在读取未安装插件列表…')
+            : uninstalled.all.length === 0
+              ? '所有本项目插件均已安装…'
+              : `选择未安装的插件（共 ${uninstalled.all.length} 个未安装）…`),
+          uninstalled.ready && availableNames.length > 0
+            ? el('option', { value: INSTALL_ALL_AVAILABLE_OPTION },
+              `全部可用插件（一键安装全部 ${availableNames.length} 个）`)
+            : null,
+          uninstalled.ready && uninstalled.available.length > 0
+            ? el('optgroup', { label: `可安装插件（${uninstalled.available.length} 个，按依赖顺序）` },
+              ...uninstalled.available.map(item => el('option', { key: item.name, value: item.name },
+                `${item.name} — ${item.label}`)))
+            : null,
+          uninstalled.ready && uninstalled.excluded.length > 0
+            ? el('optgroup', { label: `专用 / 互斥插件（${uninstalled.excluded.length} 个，不随一键安装）` },
+              ...uninstalled.excluded.map(item => el('option', { key: item.name, value: item.name },
+                `${item.name} — ${item.label}${item.excludeReason ? `（${item.excludeReason}）` : ''}`)))
+            : null,
+          el('option', { value: CUSTOM_BUNDLE_OPTION }, '手动输入其他 @dsh-ray/* 包名…'))),
+        installAllMode
+          ? el('div', {
+            'data-bundle-install-all-preview': '',
+            style: {
+              display: 'grid',
+              gap: 6,
+              minWidth: 0,
+              padding: '8px 10px',
+              borderRadius: 8,
+              background: sunken,
+              border: `1px solid ${hairline}`,
+              fontSize: 12,
+            },
+          },
+          el('span', { style: { fontWeight: 500, color: ink } },
+            `将按依赖顺序依次安装以下 ${availableNames.length} 个可用插件：`),
+          el('span', { style: { fontFamily: monoFont, fontSize: 11, color: muted, overflowWrap: 'anywhere' } },
+            availableNames.join('、')),
+          uninstalled.excluded.length === 0 ? null : el('span', { style: { fontSize: 11, color: caption } },
+            `已自动跳过 ${uninstalled.excluded.length} 个专用 / 互斥插件（${uninstalled.excluded.map(item => item.name).join('、')}），如需单独安装可在上方下拉列表或输入框中指定。`))
+          : null,
+        el('div', { style: { ...actionsStyle, alignItems: 'end' } },
+          el('label', { style: { display: 'grid', gap: 4, fontSize: 12, fontWeight: 500, color: muted, minWidth: 0, flex: '1 1 200px' } },
+            el('span', {}, '安装本项目 bundle'),
+            el('input', {
+              ref: installInputRef,
+              'data-bundle-install-input': '',
+              value: installSpec,
+              disabled: busy,
+              placeholder: '@dsh-ray/plugin-name',
+              style: inputStyle,
+              onChange: (event: { target: { value: string } }) => {
+                const next = event.target.value
+                const trimmedNext = next.trim()
+                setInstallSpec(next)
+                if (trimmedNext === '' || trimmedNext === '@dsh-ray/') {
+                  setInstallPickerMode('list')
+                } else if (uninstalled.all.some(item => item.name === trimmedNext)) {
+                  setInstallPickerMode('list')
+                } else {
+                  setInstallPickerMode('custom')
+                }
+              },
+            })),
+          installAllMode
+            ? el('button', {
+              style: btn(primaryButtonStyle),
+              disabled: busy,
+              onClick: () => startBatchInstall(availableNames),
+            }, `一键安装全部可用插件（${availableNames.length}）`)
+            : el('button', {
+              style: btn(primaryButtonStyle),
+              disabled: busy,
+              onClick: () => void ctrl.runInstall(installSpec),
+            }, '安装'),
+          installAllMode
+            ? el('button', {
+              style: btn(),
+              disabled: busy,
+              onClick: () => setInstallPickerMode('list'),
+            }, '取消全选')
+            : uninstalled.ready
+              ? el('button', {
+                style: availableNames.length === 0 ? idle(buttonStyle, true) : btn(),
+                disabled: busy || availableNames.length === 0,
+                onClick: () => startBatchInstall(availableNames),
+              }, availableNames.length === 0
+                ? '全部可用插件已安装'
+                : `一键安装全部可用插件（${availableNames.length}）`)
+              : null),
+        !installAllMode && selectedBundleItem !== undefined
+          ? el('p', { style: !selectedBundleItem.availableForInstallAll && selectedBundleItem.excludeReason !== undefined ? { ...hintStyle, color: accent } : hintStyle },
+            !selectedBundleItem.availableForInstallAll && selectedBundleItem.excludeReason !== undefined
+              ? `说明：${selectedBundleItem.label} — ${selectedBundleItem.excludeReason}`
+              : `已选：${selectedBundleItem.label}`)
+          : null,
+        ctrl.batchInstall === undefined
+          ? null
+          : el('div', {
+            role: 'status',
+            'data-bundle-batch-progress': '',
+            style: { ...bannerStyle(accent), justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' },
+          },
+          el('span', { style: { display: 'grid', gap: 2, minWidth: 0, overflowWrap: 'anywhere' } },
+            el('span', { style: { fontWeight: 500 } },
+              ctrl.batchInstall.stopping
+                ? `正在完成当前包后停止（${ctrl.batchInstall.index + 1}/${ctrl.batchInstall.total}）：${ctrl.batchInstall.current}`
+                : `正在批量安装可用插件（${ctrl.batchInstall.index + 1}/${ctrl.batchInstall.total}）：${ctrl.batchInstall.current}`),
+            el('span', { style: { fontSize: 12, color: caption } },
+              `已完成 ${ctrl.batchInstall.completed.length}/${ctrl.batchInstall.total}`
+              + (ctrl.batchInstall.needsRestart ? ' · 安装完成后需要重启 profile' : ''))),
+          ctrl.cancelBatchInstall === undefined
+            ? null
+            : el('button', {
+              style: buttonStyle,
+              disabled: ctrl.batchInstall.stopping,
+              onClick: () => ctrl.cancelBatchInstall?.(),
+            }, ctrl.batchInstall.stopping ? '正在停止…' : '停止后续安装'))),
+      el('p', { style: hintStyle },
+        '安装走 DSH 自身的 pnpm 路径，只装该包及其 pnpm 依赖；单装时其 @dsh-ray peer bundle 与 Host 服务不会自动安装，缺失项会显示在卡片里。'
+        + '「一键安装全部可用插件」会跳过本控制台自身、专用冲突包及互斥拆分包，按基础服务到上层能力顺序逐个安装。安装/启用后如提示需要重启 profile，请依提示操作。'),
       el('details', { style: { marginTop: 4, borderTop: `1px solid ${hairline}`, paddingTop: 10 } },
         el('summary', { style: { fontSize: 12, fontWeight: 500, color: muted, cursor: 'pointer' } }, '高级：合并配置（只对声明了 live 字段的条目生效）'),
         el('div', { style: { display: 'grid', gap: 8, marginTop: 10 } },

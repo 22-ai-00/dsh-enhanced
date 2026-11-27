@@ -12,6 +12,8 @@ const ZERO = '0'.repeat(40)
 const MAX_OUTPUT = 65_536
 const LEGACY_MAC_VERSION = '0.1.49'
 const LEGACY_MAC_COMMIT = '172bc31ddf0c00a6f0b3252354f2170a14dd7fc2'
+const INTERRUPTED_LINUX_020_VERSION = '0.2.0'
+const INTERRUPTED_LINUX_020_COMMIT = '17024e2c99d0671ba4076ad4c5b3c231cc92e364'
 const GIT_FLAGS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never',
   '-c', 'protocol.https.allow=always', '-c', 'protocol.file.allow=always',
   '-c', 'credential.helper=', '-c', 'gc.auto=0'] as const
@@ -199,27 +201,30 @@ async function absent(path: string): Promise<boolean> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true; throw error }
 }
 
-async function initialRefs(repository: string, expected: readonly string[], signal: AbortSignal): Promise<boolean> {
+async function initialRefs(repository: string, expected: readonly string[], commit: string, signal: AbortSignal): Promise<boolean> {
   const rows = (await git(repository, ['for-each-ref', '--format=%(refname)%00%(objectname)%00%(symref)'], signal))
     .split('\n').filter(Boolean).sort()
-  return JSON.stringify(rows) === JSON.stringify(expected.map(name => `${name}\0${LEGACY_MAC_COMMIT}\0`).sort())
+  return JSON.stringify(rows) === JSON.stringify(expected.map(name => `${name}\0${commit}\0`).sort())
 }
 
-/** Retire only the verified official 0.1.49 Mac source preparation.
- * No prepared grant, build or coordinator resource or noninitial ref may exist.
- * The old tree is retained byte-for-byte with its original receipt paths. */
-async function archiveUnusedLegacyMacWorkspace(home: string, profile: string,
-  old: RsiSourceWorkspace, signal: AbortSignal): Promise<string> {
-  if (old.version !== LEGACY_MAC_VERSION || old.origin.kind !== 'official-tag'
-    || old.origin.locator !== OFFICIAL || old.origin.ref !== 'refs/tags/v0.1.49'
-    || old.sourceCommit !== LEGACY_MAC_COMMIT || old.baseline.initialCommit !== LEGACY_MAC_COMMIT
-    || !await initialRefs(old.repository, ['refs/dsh-source/repairs', 'refs/heads/repairs'], signal)
-    || !await initialRefs(old.baseline.remote, ['refs/heads/repairs'], signal)) {
-    fail('legacy Mac source has maintenance or unknown Git refs; preserve it and resolve the existing source authority manually')
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+async function assertUnusedSourceArchivePreconditions(input: {
+  home: string; profile: string; old: RsiSourceWorkspace; expectedVersion: string; expectedCommit: string
+  extraAbsentKinds: readonly string[]; stageKinds: readonly string[]; label: string; signal: AbortSignal
+}): Promise<void> {
+  const { home, profile, old, expectedVersion, expectedCommit, extraAbsentKinds, stageKinds, label, signal } = input
+  if (old.version !== expectedVersion || old.origin.kind !== 'official-tag'
+    || old.origin.locator !== OFFICIAL || old.origin.ref !== `refs/tags/v${expectedVersion}`
+    || old.sourceCommit !== expectedCommit || old.baseline.initialCommit !== expectedCommit
+    || !await initialRefs(old.repository, ['refs/dsh-source/repairs', 'refs/heads/repairs'], expectedCommit, signal)
+    || !await initialRefs(old.baseline.remote, ['refs/heads/repairs'], expectedCommit, signal)) {
+    fail(`${label} has maintenance or unknown Git refs; preserve it and resolve the existing source authority manually`)
   }
   const resourcePaths = [
-    ...['rsi-authorities', 'rsi-authority-runtimes', 'rsi-builds', 'rsi-creation-builds',
-      'rsi-release-builds', 'rsi-local-cohorts'].map(kind => join(home, kind, profile)),
+    ...extraAbsentKinds.map(kind => join(home, kind, profile)),
     join(home, 'rsi-service-environments', `${profile}.json`),
     join(home, 'rsi-coordinators'), join(home, '.rsi-setup-journal.json'),
     join(home, '.rsi-systemd-capture-journal.json'),
@@ -228,37 +233,56 @@ async function archiveUnusedLegacyMacWorkspace(home: string, profile: string,
     join(dirname(home), `.dsh-ray-local-updates-${createHash('sha256').update(home).digest('hex').slice(0, 16)}`),
   ]
   for (const path of resourcePaths) if (!await absent(path)) {
-    fail(`legacy Mac source may already have prepared or active RSI resources at ${path}; preserve its authority and resolve manually`)
+    fail(`${label} may already have prepared or active RSI resources at ${path}; preserve its authority and resolve manually`)
   }
-  for (const kind of ['rsi-sources', 'rsi-authority-runtimes', 'rsi-builds', 'rsi-creation-builds',
-    'rsi-release-builds', 'rsi-local-cohorts']) {
+  for (const kind of stageKinds) {
     const parent = join(home, kind)
     if (await absent(parent)) continue
     const names = await readdir(parent)
     if (names.some(name => name.startsWith(`.${profile}-stage-`)
       || name.startsWith(`.${profile}-update-`) || name.startsWith(`.${profile}-previous-`))) {
-      fail(`legacy Mac source has unfinished RSI preparation in ${parent}; preserve it and resolve manually`)
+      fail(`${label} has unfinished RSI preparation in ${parent}; preserve it and resolve manually`)
     }
   }
   if ((await readdir(home)).some(name => name.startsWith('.rsi-coordinator-'))) {
-    fail('legacy Mac source has a coordinator marker; preserve its authority and resolve manually')
+    fail(`${label} has a coordinator marker; preserve its authority and resolve manually`)
   }
+}
+
+async function claimArchiveSlot(home: string, profile: string, label: string): Promise<{ profileArchive: string; destination: string }> {
   // A previous successful migration is not a license to rebase again. An
   // interrupted attempt may have created only the empty private archive slot.
   const archiveParent = join(home, 'rsi-source-archives')
   try { await mkdir(archiveParent, { mode: 0o700 }) }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
   await privateDirectory(archiveParent)
-  if ((await lstat(archiveParent)).uid !== process.getuid?.()) fail('legacy archive parent is not owned by the current user')
+  if (process.getuid && (await lstat(archiveParent)).uid !== process.getuid()) fail('archive parent is not owned by the current user')
   const profileArchive = join(archiveParent, profile)
   try { await mkdir(profileArchive, { mode: 0o700 }) }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
   await privateDirectory(profileArchive)
-  if ((await lstat(profileArchive)).uid !== process.getuid?.()) fail('legacy archive slot is not owned by the current user')
+  if (process.getuid && (await lstat(profileArchive)).uid !== process.getuid()) fail('archive slot is not owned by the current user')
   if ((await readdir(profileArchive)).length !== 0) {
-    fail('legacy Mac source has an existing archive; preserve both histories and resolve manually')
+    fail(`${label} has an existing archive; preserve both histories and resolve manually`)
   }
-  const destination = join(profileArchive, randomUUID())
+  return { profileArchive, destination: join(profileArchive, randomUUID()) }
+}
+
+/** Retire only the verified official 0.1.49 Mac source preparation.
+ * No prepared grant, build or coordinator resource or noninitial ref may exist.
+ * The old tree is retained byte-for-byte with its original receipt paths. */
+async function archiveUnusedLegacyMacWorkspace(home: string, profile: string,
+  old: RsiSourceWorkspace, signal: AbortSignal): Promise<string> {
+  const label = 'legacy Mac source'
+  await assertUnusedSourceArchivePreconditions({
+    home, profile, old, expectedVersion: LEGACY_MAC_VERSION, expectedCommit: LEGACY_MAC_COMMIT,
+    extraAbsentKinds: ['rsi-authorities', 'rsi-authority-runtimes', 'rsi-builds', 'rsi-creation-builds',
+      'rsi-release-builds', 'rsi-local-cohorts'],
+    stageKinds: ['rsi-sources', 'rsi-authority-runtimes', 'rsi-builds', 'rsi-creation-builds',
+      'rsi-release-builds', 'rsi-local-cohorts'],
+    label, signal,
+  })
+  const { profileArchive, destination } = await claimArchiveSlot(home, profile, label)
   signal.throwIfAborted()
   let archived = false
   try {
@@ -266,6 +290,95 @@ async function archiveUnusedLegacyMacWorkspace(home: string, profile: string,
     archived = true
     await syncDirectory(profileArchive)
     await syncDirectory(join(home, 'rsi-sources'))
+  } catch (error) {
+    if (archived) throw new Error(`rsi source: legacy archive was moved to ${destination}; verify it before retrying`, { cause: error })
+    throw error
+  }
+  return destination
+}
+
+/** Retire an interrupted pre-owner 0.2.0 Linux preparation whose authority
+ * identities have not yet produced any owner config, registry, or state entries. */
+async function archiveUnusedLinux020Workspace(home: string, profile: string,
+  old: RsiSourceWorkspace, signal: AbortSignal): Promise<string> {
+  const label = 'interrupted Linux 0.2.0 source'
+  await assertUnusedSourceArchivePreconditions({
+    home, profile, old, expectedVersion: INTERRUPTED_LINUX_020_VERSION, expectedCommit: INTERRUPTED_LINUX_020_COMMIT,
+    extraAbsentKinds: ['rsi-builds', 'rsi-creation-builds', 'rsi-linux-creation-builds', 'rsi-local-cohorts'],
+    stageKinds: ['rsi-sources', 'rsi-authorities', 'rsi-authority-runtimes', 'rsi-builds', 'rsi-creation-builds',
+      'rsi-linux-creation-builds', 'rsi-linux-runtimes', 'rsi-linux-repository-runtimes',
+      'rsi-release-builds', 'rsi-local-cohorts'],
+    label, signal,
+  })
+  const authorityRoot = join(home, 'rsi-authorities', profile)
+  if (!await absent(authorityRoot)) {
+    await privateDirectory(join(home, 'rsi-authorities'))
+    await privateDirectory(authorityRoot)
+    if (JSON.stringify((await readdir(authorityRoot)).sort())
+      !== JSON.stringify(['bootstrap.json', 'catalog.json', 'config', 'identities', 'registry', 'state'])) {
+      fail(`${label} authority directory has unexpected contents; preserve it and resolve manually`)
+    }
+    for (const sub of ['config', 'registry', 'state'] as const) {
+      const subPath = join(authorityRoot, sub)
+      await privateDirectory(subPath)
+      if ((await readdir(subPath)).length !== 0) {
+        fail(`${label} authority ${sub} is not empty; preserve it and resolve manually`)
+      }
+    }
+    const catalog = JSON.parse((await readStable(join(authorityRoot, 'catalog.json'), 16_384, true)).toString('utf8')) as unknown
+    if (!isPlainObject(catalog)
+      || JSON.stringify(Object.keys(catalog).sort()) !== JSON.stringify(['entries', 'schemaVersion'])
+      || catalog.schemaVersion !== 1 || !Array.isArray(catalog.entries) || catalog.entries.length !== 0) {
+      fail(`${label} authority catalog is not empty; preserve it and resolve manually`)
+    }
+    const bootstrap = JSON.parse((await readStable(join(authorityRoot, 'bootstrap.json'), 65_536, true)).toString('utf8')) as unknown
+    if (!isPlainObject(bootstrap) || bootstrap.schemaVersion !== 1
+      || bootstrap.dshHome !== home || bootstrap.profile !== profile) {
+      fail(`${label} authority bootstrap differs; preserve it and resolve manually`)
+    }
+  }
+  const moveKinds: string[] = []
+  const authorityRuntimeRoot = join(home, 'rsi-authority-runtimes', profile)
+  if (!await absent(authorityRuntimeRoot)) {
+    await privateDirectory(join(home, 'rsi-authority-runtimes'))
+    await privateDirectory(authorityRuntimeRoot)
+    const runtimeReceipt = JSON.parse((await readStable(join(authorityRuntimeRoot, 'receipt.json'), 2 * 1024 * 1024, true)).toString('utf8')) as unknown
+    if (!isPlainObject(runtimeReceipt)) fail(`${label} authority runtime receipt is invalid`)
+    const { digest: runtimeDigest, ...runtimeBody } = runtimeReceipt
+    if (digest(runtimeBody) !== runtimeDigest || runtimeReceipt.schemaVersion !== 1
+      || runtimeReceipt.packageVersion !== INTERRUPTED_LINUX_020_VERSION || runtimeReceipt.root !== authorityRuntimeRoot) {
+      fail(`${label} authority runtime receipt differs; preserve it and resolve manually`)
+    }
+    moveKinds.push('rsi-authority-runtimes')
+  }
+  for (const kind of ['rsi-linux-runtimes', 'rsi-linux-repository-runtimes', 'rsi-release-builds'] as const) {
+    const kindRoot = join(home, kind, profile)
+    if (await absent(kindRoot)) continue
+    await privateDirectory(join(home, kind))
+    await privateDirectory(kindRoot)
+    const receipt = JSON.parse((await readStable(join(kindRoot, 'bootstrap.json'), 65_536, true)).toString('utf8')) as unknown
+    if (!isPlainObject(receipt)) fail(`${label} ${kind} receipt is invalid`)
+    const { receiptDigest, ...body } = receipt
+    if (digest(body) !== receiptDigest || receipt.dshHome !== home || receipt.profile !== profile
+      || receipt.sourceCommit !== INTERRUPTED_LINUX_020_COMMIT) {
+      fail(`${label} ${kind} receipt differs; preserve it and resolve manually`)
+    }
+    moveKinds.push(kind)
+  }
+  const { profileArchive, destination } = await claimArchiveSlot(home, profile, label)
+  signal.throwIfAborted()
+  let archived = false
+  try {
+    await mkdir(destination, { mode: 0o700 })
+    await rename(join(home, 'rsi-sources', profile), join(destination, 'rsi-sources'))
+    archived = true
+    await syncDirectory(join(home, 'rsi-sources'))
+    for (const kind of moveKinds) {
+      await rename(join(home, kind, profile), join(destination, kind))
+      await syncDirectory(join(home, kind))
+    }
+    await syncDirectory(destination)
+    await syncDirectory(profileArchive)
   } catch (error) {
     if (archived) throw new Error(`rsi source: legacy archive was moved to ${destination}; verify it before retrying`, { cause: error })
     throw error
@@ -335,11 +448,13 @@ export async function prepareRsiSourceWorkspace(input: { dshHome: string; profil
     throw error
   })
   if (present) {
-    if (process.platform !== 'darwin') return readRsiSourceWorkspace({ ...input, signal })
+    if (process.platform !== 'darwin' && process.platform !== 'linux') return readRsiSourceWorkspace({ ...input, signal })
     const old = await readRsiSourceWorkspace({ dshHome: input.dshHome, profile: input.profile, signal })
     if (old.version === input.version && (input.sourceRepository === undefined
       || JSON.stringify(old.origin) === JSON.stringify(origin))) return old
-    const archive = await archiveUnusedLegacyMacWorkspace(input.dshHome, input.profile, old, signal)
+    const archive = process.platform === 'darwin'
+      ? await archiveUnusedLegacyMacWorkspace(input.dshHome, input.profile, old, signal)
+      : await archiveUnusedLinux020Workspace(input.dshHome, input.profile, old, signal)
     try { return await prepareRsiSourceWorkspace(input) }
     catch (error) {
       throw new Error(`rsi source: replacement preparation failed; untouched legacy source is retained at ${archive}`, { cause: error })

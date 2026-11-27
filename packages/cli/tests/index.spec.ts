@@ -797,6 +797,78 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  test('provider 子命令路由：透传 --json / --profile、复用 DSH 包目录并返回语义退出码', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-ray-cli-provider-dispatch-'))
+    try {
+      const dshHome = join(root, 'dsh-home')
+      const profileDir = join(dshHome, 'profiles', 'web')
+      mkdirSync(profileDir, { recursive: true })
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web' }))
+      writeFileSync(join(profileDir, 'cordis.patch.yml'), '[]\n')
+
+      const dshPkgDir = join(root, 'dsh-pkg')
+      const piAiDir = join(dshPkgDir, 'node_modules', '@deepseek-ai', 'dsh-base', 'node_modules', '@deepseek-ai', 'dsh-llm-pi-ai')
+      mkdirSync(piAiDir, { recursive: true })
+      writeFileSync(join(dshPkgDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-test' }))
+      writeFileSync(
+        join(dshPkgDir, 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json'),
+        JSON.stringify({ name: '@deepseek-ai/dsh-base', version: '0.2.2-test' }),
+      )
+      writeFileSync(join(piAiDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-llm-pi-ai', main: 'index.cjs' }))
+      writeFileSync(join(piAiDir, 'index.cjs'), [
+        'exports.Config = raw => raw;',
+        'exports.supportedProtocols = () => ["openai-completions"];',
+        'exports.apply = ctx => {',
+        '  ctx.llm.registerConfigurableProviders([{ provider: "openrouter", displayName: "OpenRouter", settingsNs: "llm-pi-ai", settingsPath: ["providers", "openrouter"], declared: false }]);',
+        '  ctx.llm.registerModelDiscovery("llm-pi-ai", async () => [{ id: "openai/gpt-5", name: "GPT-5" }]);',
+        '};',
+      ].join('\n'))
+
+      const chunks: string[] = []
+      const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(chunk => {
+        chunks.push(String(chunk))
+        return true
+      })
+      try {
+        const listCode = await main(
+          ['--json', '--dsh-home', dshHome, '--profile', 'web', 'provider', 'list'],
+          { DSH_PACKAGE_ROOT: dshPkgDir },
+          { platform: 'linux', osHome: root },
+        )
+        expect(listCode).toBe(0)
+        const parsed = JSON.parse(chunks.join('')) as {
+          action: string
+          profile: string
+          builtinCatalogProviders: Array<{ provider: string }>
+        }
+        expect(parsed.action).toBe('list')
+        expect(parsed.profile).toBe('web')
+        expect(parsed.builtinCatalogProviders.map(p => p.provider)).toEqual(['openrouter'])
+      } finally {
+        outSpy.mockRestore()
+      }
+
+      const errChunks: string[] = []
+      const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(chunk => {
+        errChunks.push(String(chunk))
+        return true
+      })
+      try {
+        const badCode = await main(
+          ['provider', '--dsh-home', dshHome, '--unknown-option'],
+          { DSH_PACKAGE_ROOT: dshPkgDir },
+          { platform: 'linux', osHome: root },
+        )
+        expect(badCode).toBe(2)
+        expect(errChunks.join('')).toContain('未知 provider 选项')
+      } finally {
+        errSpy.mockRestore()
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('F27: subprocess stderr cleanliness and non-SQLite warning preservation', () => {
@@ -874,6 +946,8 @@ describe('F27: subprocess stderr cleanliness and non-SQLite warning preservation
         },
         { args: ['update', '--help'], check: out => expect(out).toContain('update') },
         { args: ['upgrade', '--help'], check: out => expect(out).toContain('upgrade') },
+        { args: ['provider', '--help'], check: out => expect(out).toContain('dsh-ray provider') },
+        { args: ['--help'], check: out => expect(out).toContain('provider') },
         { args: ['update', '--dry-run', '--version', version], check: out => expect(out.length).toBeGreaterThan(0) },
       ]
 
@@ -901,6 +975,37 @@ describe('F27: subprocess stderr cleanliness and non-SQLite warning preservation
         expect(parsed.dshHome).toBe(seededHome)
         expect(parsed.packages.cliPackageVersion).toBe(version)
       }
+
+      // Real subprocess check for `dsh-ray provider --dsh-home <dir> list --json`
+      const fakeDshPkg = join(root, 'fake-dsh', 'node_modules', '@deepseek-ai', 'dsh')
+      const fakeBasePkg = join(fakeDshPkg, 'node_modules', '@deepseek-ai', 'dsh-base')
+      const fakePiAi = join(fakeBasePkg, 'node_modules', '@deepseek-ai', 'dsh-llm-pi-ai')
+      mkdirSync(fakePiAi, { recursive: true })
+      writeFileSync(join(fakeDshPkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-f27' }))
+      writeFileSync(join(fakeBasePkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-base', version: '0.2.2-f27' }))
+      writeFileSync(join(fakePiAi, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-llm-pi-ai', main: 'index.cjs' }))
+      writeFileSync(join(fakePiAi, 'index.cjs'), `
+        exports.Config = (raw) => raw;
+        exports.supportedProtocols = () => ['openai-completions'];
+        exports.apply = (ctx) => {
+          ctx.llm.registerConfigurableProviders([
+            { provider: 'openrouter', displayName: 'OpenRouter', declared: false, defaultBaseURL: 'https://openrouter.ai/api/v1' }
+          ]);
+        };
+      `)
+      const providerRes = await spawnNodeAsync(
+        [binPath, 'provider', '--dsh-home', seededHome, 'list', '--json'],
+        { ...env, PATH: shimDir, DSH_PACKAGE_ROOT: fakeDshPkg },
+      )
+      expect(providerRes.status, providerRes.stderr).toBe(0)
+      expect(providerRes.stderr).toBe('')
+      expect(JSON.parse(providerRes.stdout)).toMatchObject({
+        ok: true,
+        action: 'list',
+        profile: 'web',
+        dshVersion: '0.2.2-f27',
+        supportedProtocols: ['openai-completions'],
+      })
     } finally {
       server.closeAllConnections()
       await new Promise<void>(resolveClose => server.close(() => resolveClose()))

@@ -51,9 +51,32 @@ import {
   pauseSystemAutomation,
   resolveDeadLetter,
 } from './maintenance.ts'
+import {
+  ProviderCommandError,
+  runProvider,
+} from './provider.ts'
 
 export { runPurge, PurgeError } from './purge.ts'
 export { runInstall } from './install.ts'
+export {
+  ProviderCommandError,
+  deriveKeyRef,
+  inspectProfileProviderState,
+  loadDshProviderRuntime,
+  parseProviderArgs,
+  renderUpdatedCordisPatchYaml,
+  renderUpdatedCredentialsYaml,
+  runProvider,
+  type ConfiguredPiAiProvider,
+  type DshConfigurableProvider,
+  type DshDiscoveredModel,
+  type DshProviderRuntime,
+  type ParsedProviderArgs,
+  type ProfileProviderState,
+  type ProviderCommandOutcome,
+  type ProviderPrompter,
+  type ProviderRuntimeDependencies,
+} from './provider.ts'
 export { collectStatus, runDoctor, formatStatus, formatFindings } from './diagnose.ts'
 export { collectLiveDoctorReport, formatLiveDoctorReport, redactUrlToken } from './doctor-live.ts'
 export {
@@ -661,6 +684,7 @@ const HELP = `dsh-ray — DSH Ray 插件集合的安装 / 控制 / 诊断 / 彻�
   enable      开启 profile 的全套自迭代插件开关（原地安全更新 cordis.patch.yml，保留受保护服务与路由）
   disable     关闭 profile 的自迭代插件开关（保留受保护基础服务与对话控制入口）
   install     安装/修复插件集合（薄委托到官方安装器，参数原样透传）
+  provider    引导配置三方模型 Provider（直接复用 DSH 内置目录、协议与模型探测；支持 list / remove）
   reinstall   purge（默认先备份）后立即重新安装
   purge       彻底卸载：停服 → 备份 → 删除 profile/DSH home → 清理外部凭据
   maintenance 运维结算：列出并结算死信、列出并暂停系统自有 automation（写 receipt）
@@ -672,7 +696,7 @@ const HELP = `dsh-ray — DSH Ray 插件集合的安装 / 控制 / 诊断 / 彻�
   --profile <name>    仅操作单个 profile（purge/reinstall 的 purge 阶段默认全量）
   --dry-run           只打印将执行的动作，不做任何修改
   --yes               purge/reinstall 跳过交互确认（reinstall 时同时透传给安装器）
-  --json              status / doctor / upgrade / growth-report / enable / disable / version 输出结构化 JSON（doctor 报告中隐藏 token 与密钥值）
+  --json              status / doctor / upgrade / growth-report / enable / disable / provider / version 输出结构化 JSON（隐藏 token 与密钥值）
 
 version 选项：
   --short             仅输出简洁版本号（与 --json 互斥）
@@ -792,7 +816,7 @@ interface ParsedArgs {
 
 const KNOWN_COMMANDS = new Set([
   'status', 'doctor', 'growth-report', 'open', 'start', 'stop', 'restart', 'logs', 'web-url', 'update', 'upgrade',
-  'enable', 'disable', 'install', 'reinstall', 'purge', 'version', 'maintenance',
+  'enable', 'disable', 'install', 'provider', 'reinstall', 'purge', 'version', 'maintenance',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
 const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--dsh-version', '--wait', '--registry', '--since', '--now'])
@@ -919,8 +943,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       throw new PurgeError(`无法识别的参数：${token}（用 -h 查看用法）`)
     }
 
-    // maintenance 自行解析子命令与选项，rsi 不再解释其余 token。
-    if (result.command === 'maintenance') {
+    // maintenance 与 provider 自行解析子命令与选项，cli 顶层不再解释其余 token。
+    if (result.command === 'maintenance' || result.command === 'provider') {
       result.passthrough.push(token)
       continue
     }
@@ -1014,9 +1038,10 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     && result.command !== 'growth-report'
     && result.command !== 'enable'
     && result.command !== 'disable'
+    && result.command !== 'provider'
     && result.command !== 'version'
   ) {
-    throw new PurgeError(`--json 仅适用于 status 与 doctor / upgrade / growth-report / enable / disable / version 命令（收到：${result.command}）`)
+    throw new PurgeError(`--json 仅适用于 status 与 doctor / upgrade / growth-report / enable / disable / provider / version 命令（收到：${result.command}）`)
   }
   if ((result.since !== undefined || result.nowMs !== undefined) && result.command !== 'growth-report') {
     throw new PurgeError(`--since 与 --now 仅适用于 growth-report 命令（收到：${result.command}）`)
@@ -1690,6 +1715,20 @@ export async function main(
     switch (args.command) {
       case 'maintenance':
         return runMaintenance(args.dshHome, args.passthrough)
+      case 'provider': {
+        const providerArgs = [
+          ...(args.dshHome ? ['--dsh-home', args.dshHome] : []),
+          ...(args.profile !== undefined ? ['--profile', args.profile] : []),
+          ...(args.json ? ['--json'] : []),
+          ...(args.dryRun ? ['--dry-run'] : []),
+          ...(args.yes ? ['--yes'] : []),
+          ...args.passthrough,
+        ]
+        return await runProvider(args.dshHome, providerArgs, {
+          env,
+          ...(deps.platform !== undefined ? { platform: deps.platform } : {}),
+        })
+      }
       case 'version': {
         if (args.versionFlag || args.short) {
           process.stdout.write(`${VERSION}\n`)
@@ -2084,6 +2123,10 @@ export async function main(
         return 2
     }
   } catch (error) {
+    if (error instanceof ProviderCommandError) {
+      process.stderr.write(`${args.command} 失败：${error.message}\n`)
+      return error.exitCode
+    }
     if (error instanceof PurgeError) {
       process.stderr.write(`${args.command} 失败：${error.message}\n`)
       return 1

@@ -6,7 +6,7 @@ import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { parseDocument } from 'yaml'
 import {
   collectStatus,
-  extractYamlTopLevelKeys,
+  extractCredentialKeyNames,
   formatFindings,
   formatStatus,
   runDoctor,
@@ -695,7 +695,7 @@ export async function collectLiveDoctorReport(options: LiveDoctorOptions): Promi
   } catch {
     // missing .credentials.yaml is valid when using local coding agents or keychain
   }
-  const keyNames = fileExistsCred ? extractYamlTopLevelKeys(credSource) : []
+  const keyNames = fileExistsCred ? extractCredentialKeyNames(credSource) : []
   const envKeySet = new Set([...KNOWN_CREDENTIAL_ENV_VARS, ...keyNames])
   const envVariablesPresent = [...envKeySet].filter(key => Boolean(env[key] && env[key]!.length > 0)).sort()
   const locators = await scanCredentialLocators(dshHome).catch(() => [])

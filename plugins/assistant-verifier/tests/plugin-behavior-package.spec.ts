@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink } from 'node:fs/promises'
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -21,7 +21,7 @@ function command(file: string, args: string[], cwd = repository): string {
 }
 
 test('a packed Verifier resolves its Isolation runner in a cold profile without mounting the Isolation bundle', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-pack-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-verifier-pack-')))
   try {
     const sharedLibraries = await snapshotPackageLibraries(repository, packedPackages)
     const workspace = join(root, 'workspace')
@@ -90,9 +90,61 @@ if(process.platform==='linux') {
 const {loadLinuxBehaviorAssets}=await import(${JSON.stringify(assets)});
 const value=await loadLinuxBehaviorAssets();
 if(!/^[a-f0-9]{64}$/.test(value.sourceSha256)||!value.worker.includes('/runtime/0/dsh-plugin-verifier/candidate-launcher')
- ||value.worker.includes('/opt/dsh-plugin-verifier')||!value.launcher.includes('PR_SET_DUMPABLE')) throw Error('packed observer assets differ'); }`],
+ ||value.worker.includes('/opt/dsh-plugin-verifier')||!value.launcher.includes('PR_SET_DUMPABLE')) throw Error('packed observer assets differ');
+process.stdout.write(value.sourceSha256); }`],
     { cwd: profile, encoding: 'utf8', timeout: 10_000, env: { ...process.env, HOME: home } })
     expect(loaded.status, loaded.stderr).toBe(0)
+    if (process.platform === 'linux') {
+      const store = join(root, 'pnpm-store')
+      await mkdir(store)
+      const packedRunner = join(scope, 'assistant-verifier', 'lib', 'plugin-behavior-runner.js')
+      const packedLauncher = join(scope, 'assistant-verifier', 'runtime', 'plugin-observer-launcher.c')
+      await link(packedRunner, join(store, 'runner.js'))
+      await link(packedLauncher, join(store, 'launcher.c'))
+      await chmod(packedRunner, 0o600)
+      await chmod(packedLauncher, 0o600)
+      expect((await lstat(packedRunner)).nlink).toBe(2)
+      expect((await lstat(packedLauncher)).nlink).toBe(2)
+      const hardlinked = spawnSync(process.execPath, ['--input-type=module', '-e',
+        `const {loadLinuxBehaviorAssets}=await import(${JSON.stringify(assets)});
+const value=await loadLinuxBehaviorAssets();
+process.stdout.write(value.sourceSha256);`],
+      { cwd: profile, encoding: 'utf8', timeout: 10_000, env: { ...process.env, HOME: home } })
+      expect(hardlinked.status, hardlinked.stderr).toBe(0)
+      expect(hardlinked.stdout).toBe(loaded.stdout)
+
+      const isolatedPkgLink = join(root, 'isolated-node_modules', '@dsh-ray', 'assistant-verifier')
+      await mkdir(join(root, 'isolated-node_modules', '@dsh-ray'), { recursive: true })
+      await symlink(join(scope, 'assistant-verifier'), isolatedPkgLink)
+      const isolatedAssets = pathToFileURL(join(isolatedPkgLink, 'lib', 'linux-behavior-assets.js')).href
+      const isolated = spawnSync(process.execPath, ['--preserve-symlinks', '--input-type=module', '-e',
+        `const {loadLinuxBehaviorAssets}=await import(${JSON.stringify(isolatedAssets)});
+const value=await loadLinuxBehaviorAssets();
+process.stdout.write(value.sourceSha256);`],
+      { cwd: profile, encoding: 'utf8', timeout: 10_000, env: { ...process.env, HOME: home } })
+      expect(isolated.status, isolated.stderr).toBe(0)
+      expect(isolated.stdout).toBe(loaded.stdout)
+
+      const savedLauncher = join(root, 'launcher.saved.c')
+      await rename(packedLauncher, savedLauncher)
+      await symlink(savedLauncher, packedLauncher)
+      const symlinkedAsset = spawnSync(process.execPath, ['--input-type=module', '-e',
+        `const {loadLinuxBehaviorAssets}=await import(${JSON.stringify(assets)});
+await loadLinuxBehaviorAssets();`],
+      { cwd: profile, encoding: 'utf8', timeout: 10_000, env: { ...process.env, HOME: home } })
+      expect(symlinkedAsset.status).not.toBe(0)
+      expect(symlinkedAsset.stderr).toContain('unsafe Linux behavior asset')
+      await rm(packedLauncher)
+      await rename(savedLauncher, packedLauncher)
+
+      await chmod(packedLauncher, 0o664)
+      const writable = spawnSync(process.execPath, ['--input-type=module', '-e',
+        `const {loadLinuxBehaviorAssets}=await import(${JSON.stringify(assets)});
+await loadLinuxBehaviorAssets();`],
+      { cwd: profile, encoding: 'utf8', timeout: 10_000, env: { ...process.env, HOME: home } })
+      expect(writable.status).not.toBe(0)
+      expect(writable.stderr).toContain('unsafe Linux behavior asset')
+    }
     expect(existsSync(join(home, '.dsh', 'assistant-isolation'))).toBe(false)
   } finally { await rm(root, { recursive: true, force: true }) }
 }, 120_000)

@@ -25,13 +25,17 @@ import {
 
 export {
   askOwner, AutonomyWizardCard, boundedLine, confirmationNotice, feishuSecretRefs, fiberState, growthDataStatePill,
-  GrowthReportCard, installWithApproval,
+  GrowthReportCard, installAvailableBundles, installWithApproval,
   installWithCompanions, intakeAgreementHistoryView, intakeAgreementView, intakeAvailabilityPill,
   IntakeAgreementCard, larkConnectionLabel, larkConnectionTone, remoteFailureText, SelfUpgradeCard, trendSnapshotsView,
   TrendSnapshotsCard, BundleConfigSlotView, BundlesCard, CodingToolsCard, DoctorRepairCard, DreamingCard, FeishuCard,
   GeneralCodingToolItem, GrowthMemoryCard, ModelsCodingAgentsFooter, ModelsProviderSetupCard, ProactiveWorkItemsCard,
   SettingsCardsDeck, WenyaoSectionIcon, WenyaoSettingsSection,
 } from './settings-cards.js'
+export {
+  CUSTOM_BUNDLE_OPTION, INSTALL_ALL_AVAILABLE_OPTION, OWNER_CONSOLE_PACKAGE, PERSONAL_ASSISTANT_PACKAGE,
+  PERSONAL_ASSISTANT_SPLIT_PACKAGES, PROJECT_BUNDLE_CATALOG, resolveUninstalledBundles,
+} from './bundle-catalog.js'
 export type { ConsoleRemote, OwnerConsoleNavigation, SettingsCategory } from './settings-cards.js'
 export { ModelRouteSelects } from './model-route-ui.js'
 export type { StatusTone } from './ui.js'
