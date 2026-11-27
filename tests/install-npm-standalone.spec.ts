@@ -622,6 +622,7 @@ describe('standalone install-npm.sh remote asset closure & non-TTY pnpm', () => 
 
 interface LifecycleProfileTestExports {
   HOST_PEER_RESOLVER_SNIPPET: string
+  SUPERVISED_PROFILE_RESOLVER_SNIPPET: string
   SUPERVISED_CAPABILITY_PROGRAM: string
   SUPERVISED_OPERATOR_PROGRAM: string
   SCANNER_RETIREMENT_OPERATOR_PROGRAM: string
@@ -656,6 +657,14 @@ interface LifecycleProfileTestExports {
   ) => Promise<void>
 }
 
+interface FakeHostBinaries {
+  hostParent: string
+  symlinkedBinDsh: string
+  wrapperBinDsh: string
+  badManifestDsh: string
+  missingDsh: string
+}
+
 interface HostPeerTestFixture {
   homePath: string
   stubDsh: string
@@ -667,18 +676,7 @@ interface HostPeerTestFixture {
   digestDigest: string
 }
 
-async function createIsolatedHostPeerFixture(): Promise<HostPeerTestFixture> {
-  // Fake DSH_HOME deliberately lives inside /tmp so no ancestor node_modules/@deepseek-ai/cordis exists.
-  const homePath = await trackTempDir('/tmp', 'dsh-host-peer-home-')
-  const profileDir = join(homePath, 'profiles', 'web')
-  const profileNodeModules = join(profileDir, 'node_modules', '@dsh-ray')
-  await Promise.all([
-    mkdir(profileNodeModules, { recursive: true }),
-    mkdir(join(homePath, 'rsi-coordinators', 'web'), { recursive: true }),
-  ])
-  await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true }), 'utf8')
-  await writeFile(join(profileDir, 'cordis.patch.yml'), 'plugins: {}\n', 'utf8')
-
+async function createFakeHostBinaries(): Promise<FakeHostBinaries> {
   const hostParent = await trackTempDir(outsideTmpParent(), 'dsh-host-peer-host-')
   const hostModules = join(hostParent, 'host', 'node_modules')
   const dshDir = join(hostModules, '@deepseek-ai', 'dsh')
@@ -757,81 +755,115 @@ async function createIsolatedHostPeerFixture(): Promise<HostPeerTestFixture> {
   await writeFile(badManifestDsh, '#!/usr/bin/env sh\nexit 0\n', 'utf8')
   await chmod(badManifestDsh, 0o755)
 
+  return {
+    hostParent,
+    symlinkedBinDsh,
+    wrapperBinDsh,
+    badManifestDsh,
+    missingDsh: join(hostParent, 'does-not-exist-dsh'),
+  }
+}
+
+async function writeSupervisedPluginPackage(
+  scopeDir: string,
+  name: string,
+  body: string,
+  extraManifest: Record<string, unknown> = {},
+): Promise<void> {
+  const dir = join(scopeDir, name)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'package.json'), JSON.stringify({
+    name: `@dsh-ray/${name}`,
+    version: '0.2.3',
+    type: 'module',
+    main: './index.js',
+    ...extraManifest,
+  }), 'utf8')
+  await writeFile(join(dir, 'index.js'), body, 'utf8')
+}
+
+function supervisedPluginBodies(digestDigest: string, coordinatorIdDigest: string): Record<string, string> {
+  return {
+    'lark-channel': [
+      "import { cordisMarker } from '@deepseek-ai/cordis'",
+      "import { cordisSubpathMarker } from '@deepseek-ai/cordis/subpath'",
+      "import { parse as parseYaml } from 'yaml'",
+      "if (cordisMarker !== 'host-cordis-resolved' || cordisSubpathMarker !== 'host-cordis-subpath') throw new Error('bad cordis host export')",
+      "if (parseYaml('ok').parsed !== 'ok') throw new Error('bad yaml host export')",
+      'export function captureSupervisedGrowthLifecycleAttestation() {',
+      "  return { protocol: 'dsh-ray/supervised-growth-attestation/v1', cordisMarker, cordisSubpathMarker }",
+      '}',
+      'export function configureSupervisedGrowthProfilePatch() { return "plugins: {}\\n" }',
+      'export function assertEffectiveSupervisedGrowthConfig() {}',
+      'export function expectedSupervisedGrowthRecoveryBootstrap() { return { attestationSetDigest: "' + 'b'.repeat(64) + '" } }',
+      'export function expectedSupervisedGrowthManagedAutomationDigest() { return { digest: "' + 'c'.repeat(64) + '" } }',
+      'export function buildSupervisedGrowthPreviewOverlay() { return "plugins: {}\\n" }',
+      'export function assertSupervisedGrowthPreviewDerivation() {}',
+      'export function supervisedGrowthDatabasePaths(_cfg, home) {',
+      "  return { deliveryDatabasePath: `${home}/delivery.sqlite`, recoveryDatabasePath: `${home}/recovery.sqlite`, automationsDatabasePath: `${home}/automations.sqlite` }",
+      '}',
+      'export function supervisedGrowthBindingQuery() { return { channel: "lark" } }',
+      'export function deriveScannerRetirementConfiguration() { return { effectiveConfigDigest: "' + 'd'.repeat(64) + '" } }',
+      'export function captureScannerRetirementPlan() { return { status: "no-op" } }',
+      'export function applyScannerRetirementPlan() { return {} }',
+      'export function verifyScannerRetirementPersistence({ completion }) { return { records: completion.after.records, cordisMarker } }',
+    ].join('\n'),
+    'assistant-delivery': [
+      "import { cordisMarker } from '@deepseek-ai/cordis'",
+      "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
+      'export function inspectActiveLarkOwnerBindingsLocally() {',
+      "  return { scope: { owner: 'owner-1' }, storageDigest: '" + 'e'.repeat(64) + "', bindings: [{ id: 'bind-1' }] }",
+      '}',
+    ].join('\n'),
+    'assistant-recovery': [
+      "import { cordisMarker } from '@deepseek-ai/cordis'",
+      "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
+      `export const RECOVERY_CATALOG_DIGEST = '${digestDigest}'`,
+      "export function inspectRecoveryOperatorSnapshot() { return { bootstrap: { generation: 1 } } }",
+    ].join('\n'),
+    'assistant-automations': [
+      "import { cordisMarker } from '@deepseek-ai/cordis'",
+      "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
+      "export const automationsSourceMarker = 'pnpm-isolated-valid'",
+      "export function inspectAutomationsOperatorSnapshot() { return { inFlightCount: 0, inventoryDigest: '" + 'f'.repeat(64) + "', records: [] } }",
+      "export function automationDefinitionDigest() { return '" + '0'.repeat(64) + "' }",
+      'export function listActiveAutomationsLocally() {',
+      `  return [{ id: 'adoption-coordinator-${coordinatorIdDigest.slice(0, 40)}', owner: 'plugin-control-plane-adoption-coordinator', updatedAt: Number.MAX_SAFE_INTEGER,`,
+      "    definition: { execution: { kind: 'host', executorId: 'plugin-control-plane-adoption-coordinator-v1', ownerRouteId: 'route-1' },",
+      "      principal: 'p1', workspace: 'ws1', agentPreset: 'default' } }]",
+      '}',
+    ].join('\n'),
+    'plugin-control-plane': [
+      "import { cordisMarker } from '@deepseek-ai/cordis'",
+      "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
+      `export function controlPlaneDigest() { return '${coordinatorIdDigest}' }`,
+    ].join('\n'),
+  }
+}
+
+async function createIsolatedHostPeerFixture(): Promise<HostPeerTestFixture> {
+  // Fake DSH_HOME deliberately lives inside /tmp so no ancestor node_modules/@deepseek-ai/cordis exists.
+  const homePath = await trackTempDir('/tmp', 'dsh-host-peer-home-')
+  const profileDir = join(homePath, 'profiles', 'web')
+  const profileNodeModules = join(profileDir, 'node_modules', '@dsh-ray')
+  await Promise.all([
+    mkdir(profileNodeModules, { recursive: true }),
+    mkdir(join(homePath, 'rsi-coordinators', 'web'), { recursive: true }),
+  ])
+  await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true }), 'utf8')
+  await writeFile(join(profileDir, 'cordis.patch.yml'), 'plugins: {}\n', 'utf8')
+
+  const host = await createFakeHostBinaries()
   const stubDsh = join(homePath, 'dsh')
   await writeFile(stubDsh, '#!/usr/bin/env sh\nprintf "plugins: {}\\n"\n', 'utf8')
   await chmod(stubDsh, 0o755)
 
   const digestDigest = createHash('sha256').update('recovery-catalog').digest('hex')
   const coordinatorIdDigest = 'a'.repeat(64)
-
-  const writeProfilePlugin = async (name: string, body: string): Promise<void> => {
-    const dir = join(profileNodeModules, name)
-    await mkdir(dir, { recursive: true })
-    await writeFile(join(dir, 'package.json'), JSON.stringify({
-      name: `@dsh-ray/${name}`,
-      type: 'module',
-      main: './index.js',
-    }), 'utf8')
-    await writeFile(join(dir, 'index.js'), body, 'utf8')
-  }
-
-  await writeProfilePlugin('lark-channel', [
-    "import { cordisMarker } from '@deepseek-ai/cordis'",
-    "import { cordisSubpathMarker } from '@deepseek-ai/cordis/subpath'",
-    "import { parse as parseYaml } from 'yaml'",
-    "if (cordisMarker !== 'host-cordis-resolved' || cordisSubpathMarker !== 'host-cordis-subpath') throw new Error('bad cordis host export')",
-    "if (parseYaml('ok').parsed !== 'ok') throw new Error('bad yaml host export')",
-    'export function captureSupervisedGrowthLifecycleAttestation() {',
-    "  return { protocol: 'dsh-ray/supervised-growth-attestation/v1', cordisMarker, cordisSubpathMarker }",
-    '}',
-    'export function configureSupervisedGrowthProfilePatch() { return "plugins: {}\\n" }',
-    'export function assertEffectiveSupervisedGrowthConfig() {}',
-    'export function expectedSupervisedGrowthRecoveryBootstrap() { return { attestationSetDigest: "' + 'b'.repeat(64) + '" } }',
-    'export function expectedSupervisedGrowthManagedAutomationDigest() { return { digest: "' + 'c'.repeat(64) + '" } }',
-    'export function buildSupervisedGrowthPreviewOverlay() { return "plugins: {}\\n" }',
-    'export function assertSupervisedGrowthPreviewDerivation() {}',
-    'export function supervisedGrowthDatabasePaths(_cfg, home) {',
-    "  return { deliveryDatabasePath: `${home}/delivery.sqlite`, recoveryDatabasePath: `${home}/recovery.sqlite`, automationsDatabasePath: `${home}/automations.sqlite` }",
-    '}',
-    'export function supervisedGrowthBindingQuery() { return { channel: "lark" } }',
-    'export function deriveScannerRetirementConfiguration() { return { effectiveConfigDigest: "' + 'd'.repeat(64) + '" } }',
-    'export function captureScannerRetirementPlan() { return { status: "no-op" } }',
-    'export function applyScannerRetirementPlan() { return {} }',
-    'export function verifyScannerRetirementPersistence({ completion }) { return { records: completion.after.records, cordisMarker } }',
-  ].join('\n'))
-
-  await writeProfilePlugin('assistant-delivery', [
-    "import { cordisMarker } from '@deepseek-ai/cordis'",
-    "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
-    'export function inspectActiveLarkOwnerBindingsLocally() {',
-    "  return { scope: { owner: 'owner-1' }, storageDigest: '" + 'e'.repeat(64) + "', bindings: [{ id: 'bind-1' }] }",
-    '}',
-  ].join('\n'))
-
-  await writeProfilePlugin('assistant-recovery', [
-    "import { cordisMarker } from '@deepseek-ai/cordis'",
-    "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
-    `export const RECOVERY_CATALOG_DIGEST = '${digestDigest}'`,
-    "export function inspectRecoveryOperatorSnapshot() { return { bootstrap: { generation: 1 } } }",
-  ].join('\n'))
-
-  await writeProfilePlugin('assistant-automations', [
-    "import { cordisMarker } from '@deepseek-ai/cordis'",
-    "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
-    "export function inspectAutomationsOperatorSnapshot() { return { inFlightCount: 0, inventoryDigest: '" + 'f'.repeat(64) + "', records: [] } }",
-    "export function automationDefinitionDigest() { return '" + '0'.repeat(64) + "' }",
-    'export function listActiveAutomationsLocally() {',
-    `  return [{ id: 'adoption-coordinator-${coordinatorIdDigest.slice(0, 40)}', owner: 'plugin-control-plane-adoption-coordinator', updatedAt: Number.MAX_SAFE_INTEGER,`,
-    "    definition: { execution: { kind: 'host', executorId: 'plugin-control-plane-adoption-coordinator-v1', ownerRouteId: 'route-1' },",
-    "      principal: 'p1', workspace: 'ws1', agentPreset: 'default' } }]",
-    '}',
-  ].join('\n'))
-
-  await writeProfilePlugin('plugin-control-plane', [
-    "import { cordisMarker } from '@deepseek-ai/cordis'",
-    "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
-    `export function controlPlaneDigest() { return '${coordinatorIdDigest}' }`,
-  ].join('\n'))
+  const bodies = supervisedPluginBodies(digestDigest, coordinatorIdDigest)
+  await Promise.all(
+    Object.entries(bodies).map(([name, body]) => writeSupervisedPluginPackage(profileNodeModules, name, body)),
+  )
 
   // Isolated consumer attempting to resolve a non-allowlisted host peer (must fail even with resolver installed).
   const evilConsumerDir = join(homePath, 'evil-consumer')
@@ -842,12 +874,80 @@ async function createIsolatedHostPeerFixture(): Promise<HostPeerTestFixture> {
   return {
     homePath,
     stubDsh,
-    symlinkedBinDsh,
-    wrapperBinDsh,
-    badManifestDsh,
-    missingDsh: join(hostParent, 'does-not-exist-dsh'),
+    symlinkedBinDsh: host.symlinkedBinDsh,
+    wrapperBinDsh: host.wrapperBinDsh,
+    badManifestDsh: host.badManifestDsh,
+    missingDsh: host.missingDsh,
     evilConsumerDir,
     digestDigest,
+  }
+}
+
+interface PnpmIsolatedFixture {
+  homePath: string
+  profileDir: string
+  topScopeDir: string
+  symlinkedBinDsh: string
+}
+
+async function createIsolatedPnpmSupervisedFixture(
+  options: { linkUnderPersonalAssistant?: boolean } = {},
+): Promise<PnpmIsolatedFixture> {
+  const linkUnderPersonalAssistant = options.linkUnderPersonalAssistant ?? true
+  const homePath = await trackTempDir('/tmp', 'dsh-pnpm-isolated-home-')
+  const profileDir = join(homePath, 'profiles', 'web')
+  const pnpmDir = join(profileDir, 'node_modules', '.pnpm')
+  const topScopeDir = join(profileDir, 'node_modules', '@dsh-ray')
+  await Promise.all([mkdir(pnpmDir, { recursive: true }), mkdir(topScopeDir, { recursive: true })])
+
+  await writeFile(join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web',
+    private: true,
+    dependencies: {
+      '@dsh-ray/personal-assistant': '0.2.3',
+      '@dsh-ray/lark-channel': '0.2.3',
+      '@dsh-ray/assistant-delivery': '0.2.3',
+      '@dsh-ray/assistant-recovery': '0.2.3',
+    },
+  }, null, 2) + '\n', 'utf8')
+  await writeFile(join(profileDir, 'pnpm-workspace.yaml'), 'packages:\n  - .\n\nnodeLinker: isolated\n', 'utf8')
+  await writeFile(join(profileDir, 'cordis.patch.yml'), 'plugins: {}\n', 'utf8')
+
+  const host = await createFakeHostBinaries()
+  const digestDigest = createHash('sha256').update('recovery-catalog').digest('hex')
+  const bodies = supervisedPluginBodies(digestDigest, 'a'.repeat(64))
+
+  const pnpmSlotScope = (pkg: string) => join(pnpmDir, `@dsh-ray+${pkg}@0.2.3`, 'node_modules', '@dsh-ray')
+  await Promise.all([
+    writeSupervisedPluginPackage(pnpmSlotScope('personal-assistant'), 'personal-assistant', "export const paMarker = 'pa'\n", {
+      dependencies: { '@dsh-ray/assistant-automations': '0.2.3' },
+    }),
+    writeSupervisedPluginPackage(pnpmSlotScope('lark-channel'), 'lark-channel', bodies['lark-channel']!, {
+      peerDependencies: { '@dsh-ray/assistant-automations': '>0.1.7 <0.3.0' },
+    }),
+    writeSupervisedPluginPackage(pnpmSlotScope('assistant-delivery'), 'assistant-delivery', bodies['assistant-delivery']!),
+    writeSupervisedPluginPackage(pnpmSlotScope('assistant-recovery'), 'assistant-recovery', bodies['assistant-recovery']!),
+    writeSupervisedPluginPackage(pnpmSlotScope('assistant-automations'), 'assistant-automations', bodies['assistant-automations']!),
+  ])
+
+  const automationsStoreRel = '../../../@dsh-ray+assistant-automations@0.2.3/node_modules/@dsh-ray/assistant-automations'
+  if (linkUnderPersonalAssistant) {
+    await symlink(automationsStoreRel, join(pnpmSlotScope('personal-assistant'), 'assistant-automations'))
+  }
+  await symlink(automationsStoreRel, join(pnpmSlotScope('lark-channel'), 'assistant-automations'))
+
+  for (const direct of ['personal-assistant', 'lark-channel', 'assistant-delivery', 'assistant-recovery']) {
+    await symlink(
+      `../.pnpm/@dsh-ray+${direct}@0.2.3/node_modules/@dsh-ray/${direct}`,
+      join(topScopeDir, direct),
+    )
+  }
+
+  return {
+    homePath,
+    profileDir,
+    topScopeDir,
+    symlinkedBinDsh: host.symlinkedBinDsh,
   }
 }
 
@@ -857,12 +957,117 @@ describe('host peer resolution outside monorepo', () => {
       lifecycleProfileTest: LifecycleProfileTestExports
     }
     const trimmedSnippet = lifecycleProfileTest.HOST_PEER_RESOLVER_SNIPPET.trim()
+    const trimmedProfileSnippet = lifecycleProfileTest.SUPERVISED_PROFILE_RESOLVER_SNIPPET.trim()
     expect(lifecycleProfileTest.SUPERVISED_OPERATOR_PROGRAM).toContain(trimmedSnippet)
     expect(lifecycleProfileTest.SUPERVISED_CAPABILITY_PROGRAM).toContain(trimmedSnippet)
+    expect(lifecycleProfileTest.SUPERVISED_OPERATOR_PROGRAM).toContain(trimmedProfileSnippet)
+    expect(lifecycleProfileTest.SUPERVISED_CAPABILITY_PROGRAM).toContain(trimmedProfileSnippet)
     expect(lifecycleProfileTest.SCANNER_RETIREMENT_OPERATOR_PROGRAM).toContain('installHostPeerResolver(dsh)')
     expect(lifecycleProfileTest.SCANNER_RETIREMENT_SOURCE_PROGRAM).toContain('installHostPeerResolver(dsh)')
     const source = await readFile(join(installDirectory, 'lifecycle-profile.mjs'), 'utf8')
     expect(source).toContain('` + HOST_PEER_RESOLVER_SNIPPET + String.raw`')
+  })
+
+  test('resolves transitive @dsh-ray/assistant-automations in pnpm isolated layout from /tmp and ignores stale broken top-level orphans', async () => {
+    const { lifecycleProfileTest } = await import(pathToFileURL(join(installDirectory, 'lifecycle-profile.mjs')).href) as {
+      lifecycleProfileTest: LifecycleProfileTestExports
+    }
+    const f = await createIsolatedPnpmSupervisedFixture()
+    const profileManifest = JSON.parse(await readFile(join(f.profileDir, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    expect(profileManifest.dependencies['@dsh-ray/assistant-automations']).toBeUndefined()
+    await expect(realpath(join(f.topScopeDir, 'assistant-automations'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const previousCwd = process.cwd()
+    process.chdir('/tmp')
+    try {
+      await expect(
+        lifecycleProfileTest.assertSupervisedLifecycleCapability(f.homePath, 'web', f.symlinkedBinDsh),
+      ).resolves.toBeUndefined()
+
+      const directSnapshot = await lifecycleProfileTest.runSupervisedOperatorDirect(
+        { homePath: f.homePath, profile: 'web', dshExecutable: f.symlinkedBinDsh },
+        'snapshot',
+      )
+      expect(directSnapshot.databasePaths).toEqual({
+        delivery: 'delivery.sqlite',
+        recovery: 'recovery.sqlite',
+        automations: 'automations.sqlite',
+      })
+
+      if (process.platform === 'linux') {
+        const bwrapPath = '/usr/bin/bwrap'
+        const probe = spawnSync(bwrapPath, ['--version'], { stdio: 'ignore' })
+        if (probe.status === 0) {
+          const sandboxSnapshot = await lifecycleProfileTest.runSupervisedOperator(
+            {
+              stageHome: f.homePath,
+              homePath: f.homePath,
+              profile: 'web',
+              dshExecutable: f.symlinkedBinDsh,
+              bwrapExecutable: bwrapPath,
+            },
+            'snapshot',
+          )
+          expect(sandboxSnapshot.databasePaths).toEqual(directSnapshot.databasePaths)
+        }
+      }
+
+      // Place a stale broken orphan directory at profiles/web/node_modules/@dsh-ray/assistant-automations.
+      // Because package.json declares direct dependencies (declared.size > 0) without assistant-automations,
+      // createSupervisedProfileLoader must resolve via personal-assistant/lark-channel in .pnpm first.
+      const writeStaleOrphan = async (topScopeDir: string) => {
+        const orphanDir = join(topScopeDir, 'assistant-automations')
+        await mkdir(orphanDir, { recursive: true })
+        await writeFile(join(orphanDir, 'package.json'), JSON.stringify({
+          name: '@dsh-ray/assistant-automations',
+          version: '0.2.0',
+          type: 'module',
+          main: './index.js',
+        }), 'utf8')
+        await writeFile(join(orphanDir, 'index.js'), "throw new Error('stale broken orphan must not be loaded')\n", 'utf8')
+      }
+      const probeAutomationsMarker = (homePath: string, dshExecutable: string) => {
+        const result = spawnSync(process.execPath, [
+          '--input-type=module',
+          '--eval',
+          [
+            lifecycleProfileTest.HOST_PEER_RESOLVER_SNIPPET,
+            lifecycleProfileTest.SUPERVISED_PROFILE_RESOLVER_SNIPPET,
+            'const [home, dsh] = process.argv.slice(1)',
+            'installHostPeerResolver(dsh)',
+            'const load = createSupervisedProfileLoader(home, "web")',
+            'const mod = await load("@dsh-ray/assistant-automations")',
+            'process.stdout.write(JSON.stringify({ marker: mod.automationsSourceMarker }))',
+          ].join('\n'),
+          homePath,
+          dshExecutable,
+        ], { cwd: '/tmp', encoding: 'utf8' })
+        expect(result.status, result.stderr).toBe(0)
+        return JSON.parse(result.stdout) as { marker: string }
+      }
+
+      await writeStaleOrphan(f.topScopeDir)
+      expect(probeAutomationsMarker(f.homePath, f.symlinkedBinDsh)).toEqual({ marker: 'pnpm-isolated-valid' })
+
+      await expect(
+        lifecycleProfileTest.assertSupervisedLifecycleCapability(f.homePath, 'web', f.symlinkedBinDsh),
+      ).resolves.toBeUndefined()
+      const orphanBypassSnapshot = await lifecycleProfileTest.runSupervisedOperatorDirect(
+        { homePath: f.homePath, profile: 'web', dshExecutable: f.symlinkedBinDsh },
+        'snapshot',
+      )
+      expect(orphanBypassSnapshot.databasePaths).toEqual(directSnapshot.databasePaths)
+
+      // Verify fallback to @dsh-ray/lark-channel anchor when personal-assistant lacks the .pnpm link,
+      // even with a stale broken top-level orphan present.
+      const larkOnlyFixture = await createIsolatedPnpmSupervisedFixture({ linkUnderPersonalAssistant: false })
+      await writeStaleOrphan(larkOnlyFixture.topScopeDir)
+      expect(probeAutomationsMarker(larkOnlyFixture.homePath, larkOnlyFixture.symlinkedBinDsh)).toEqual({ marker: 'pnpm-isolated-valid' })
+    } finally {
+      process.chdir(previousCwd)
+    }
   })
 
   test('resolves @deepseek-ai/* and yaml from fake Host for all inline lifecycle programs inside /tmp', async () => {

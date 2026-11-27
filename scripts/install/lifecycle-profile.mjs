@@ -180,6 +180,60 @@ function installHostPeerResolver(dshExecutable) {
   return true
 }
 `
+const SUPERVISED_PROFILE_RESOLVER_SNIPPET = String.raw`
+function createSupervisedProfileLoader(home, profile) {
+  const manifestPath = __dshJoin(home, 'profiles', profile, 'package.json')
+  const profileRequire = __dshCreateRequire(manifestPath)
+  const declared = new Set()
+  try {
+    const manifest = JSON.parse(__dshReadFileSync(manifestPath, 'utf8'))
+    for (const field of ['dependencies', 'optionalDependencies', 'devDependencies']) {
+      const section = manifest?.[field]
+      if (section !== null && typeof section === 'object' && !Array.isArray(section)) {
+        for (const name of Object.keys(section)) declared.add(name)
+      }
+    }
+  } catch {}
+  let profileModulesReal
+  try {
+    profileModulesReal = __dshRealpathSync(__dshJoin(home, 'profiles', profile, 'node_modules'))
+  } catch {}
+  const inPnpmStore = value => /(?:^|[\\/])node_modules[\\/]\.pnpm[\\/]/u.test(value)
+  const isProfileTopLevel = value => profileModulesReal !== undefined
+    && (value.startsWith(profileModulesReal + '/') || value.startsWith(profileModulesReal + '\\'))
+    && !inPnpmStore(value)
+  const resolveViaAnchors = name => {
+    for (const anchor of ['@dsh-ray/personal-assistant', '@dsh-ray/lark-channel']) {
+      if (anchor === name) continue
+      try {
+        const anchorEntry = profileRequire.resolve(anchor)
+        const resolved = __dshCreateRequire(anchorEntry).resolve(name)
+        if (inPnpmStore(anchorEntry) && isProfileTopLevel(resolved)) continue
+        return resolved
+      } catch {}
+    }
+    return undefined
+  }
+  const resolveModule = name => {
+    let triedAnchors = false
+    if (declared.size > 0 && !declared.has(name)) {
+      triedAnchors = true
+      const transitive = resolveViaAnchors(name)
+      if (transitive !== undefined) return transitive
+    }
+    try {
+      return profileRequire.resolve(name)
+    } catch (error) {
+      if (!triedAnchors && error?.code === 'MODULE_NOT_FOUND') {
+        const fallback = resolveViaAnchors(name)
+        if (fallback !== undefined) return fallback
+      }
+      throw error
+    }
+  }
+  return async name => import(__dshPathToFileURL(resolveModule(name)).href)
+}
+`
 const SCANNER_RETIREMENT_SOURCE_PROGRAM = String.raw`
 import { pathToFileURL } from 'node:url'
 ${HOST_PEER_RESOLVER_SNIPPET}
@@ -318,7 +372,6 @@ const SUPERVISED_OPERATOR_PROGRAM = String.raw`
 import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { readFile, writeFile, rename } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 
 import { createRequire as __dshCreateRequire, register as __dshRegisterModule } from 'node:module'
@@ -397,6 +450,58 @@ function installHostPeerResolver(dshExecutable) {
   Reflect.set(globalThis, installedKey, true)
   return true
 }
+function createSupervisedProfileLoader(home, profile) {
+  const manifestPath = __dshJoin(home, 'profiles', profile, 'package.json')
+  const profileRequire = __dshCreateRequire(manifestPath)
+  const declared = new Set()
+  try {
+    const manifest = JSON.parse(__dshReadFileSync(manifestPath, 'utf8'))
+    for (const field of ['dependencies', 'optionalDependencies', 'devDependencies']) {
+      const section = manifest?.[field]
+      if (section !== null && typeof section === 'object' && !Array.isArray(section)) {
+        for (const name of Object.keys(section)) declared.add(name)
+      }
+    }
+  } catch {}
+  let profileModulesReal
+  try {
+    profileModulesReal = __dshRealpathSync(__dshJoin(home, 'profiles', profile, 'node_modules'))
+  } catch {}
+  const inPnpmStore = value => /(?:^|[\\/])node_modules[\\/]\.pnpm[\\/]/u.test(value)
+  const isProfileTopLevel = value => profileModulesReal !== undefined
+    && (value.startsWith(profileModulesReal + '/') || value.startsWith(profileModulesReal + '\\'))
+    && !inPnpmStore(value)
+  const resolveViaAnchors = name => {
+    for (const anchor of ['@dsh-ray/personal-assistant', '@dsh-ray/lark-channel']) {
+      if (anchor === name) continue
+      try {
+        const anchorEntry = profileRequire.resolve(anchor)
+        const resolved = __dshCreateRequire(anchorEntry).resolve(name)
+        if (inPnpmStore(anchorEntry) && isProfileTopLevel(resolved)) continue
+        return resolved
+      } catch {}
+    }
+    return undefined
+  }
+  const resolveModule = name => {
+    let triedAnchors = false
+    if (declared.size > 0 && !declared.has(name)) {
+      triedAnchors = true
+      const transitive = resolveViaAnchors(name)
+      if (transitive !== undefined) return transitive
+    }
+    try {
+      return profileRequire.resolve(name)
+    } catch (error) {
+      if (!triedAnchors && error?.code === 'MODULE_NOT_FOUND') {
+        const fallback = resolveViaAnchors(name)
+        if (fallback !== undefined) return fallback
+      }
+      throw error
+    }
+  }
+  return async name => import(__dshPathToFileURL(resolveModule(name)).href)
+}
 
 const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
@@ -429,8 +534,7 @@ const canonical = value => value === null || typeof value !== 'object' ? JSON.st
     : '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}'
 const jsonDigest = value => digest(canonical(value))
 installHostPeerResolver(dsh)
-const require = createRequire(join(home, 'profiles', profile, 'package.json'))
-const load = async name => import(require.resolve(name))
+const load = createSupervisedProfileLoader(home, profile)
 const [lark, delivery, recovery, automations] = await Promise.all([
   load('@dsh-ray/lark-channel'), load('@dsh-ray/assistant-delivery'),
   load('@dsh-ray/assistant-recovery'), load('@dsh-ray/assistant-automations'),
@@ -570,9 +674,6 @@ if (action === 'snapshot' || action === 'attest-active' || action === 'attest-pr
 process.stdout.write(JSON.stringify(output))
 `
 const SUPERVISED_CAPABILITY_PROGRAM = String.raw`
-import { createRequire } from 'node:module'
-import { join } from 'node:path'
-
 import { createRequire as __dshCreateRequire, register as __dshRegisterModule } from 'node:module'
 import { readFileSync as __dshReadFileSync, realpathSync as __dshRealpathSync } from 'node:fs'
 import { basename as __dshBasename, dirname as __dshDirname, join as __dshJoin, resolve as __dshResolve } from 'node:path'
@@ -649,6 +750,58 @@ function installHostPeerResolver(dshExecutable) {
   Reflect.set(globalThis, installedKey, true)
   return true
 }
+function createSupervisedProfileLoader(home, profile) {
+  const manifestPath = __dshJoin(home, 'profiles', profile, 'package.json')
+  const profileRequire = __dshCreateRequire(manifestPath)
+  const declared = new Set()
+  try {
+    const manifest = JSON.parse(__dshReadFileSync(manifestPath, 'utf8'))
+    for (const field of ['dependencies', 'optionalDependencies', 'devDependencies']) {
+      const section = manifest?.[field]
+      if (section !== null && typeof section === 'object' && !Array.isArray(section)) {
+        for (const name of Object.keys(section)) declared.add(name)
+      }
+    }
+  } catch {}
+  let profileModulesReal
+  try {
+    profileModulesReal = __dshRealpathSync(__dshJoin(home, 'profiles', profile, 'node_modules'))
+  } catch {}
+  const inPnpmStore = value => /(?:^|[\\/])node_modules[\\/]\.pnpm[\\/]/u.test(value)
+  const isProfileTopLevel = value => profileModulesReal !== undefined
+    && (value.startsWith(profileModulesReal + '/') || value.startsWith(profileModulesReal + '\\'))
+    && !inPnpmStore(value)
+  const resolveViaAnchors = name => {
+    for (const anchor of ['@dsh-ray/personal-assistant', '@dsh-ray/lark-channel']) {
+      if (anchor === name) continue
+      try {
+        const anchorEntry = profileRequire.resolve(anchor)
+        const resolved = __dshCreateRequire(anchorEntry).resolve(name)
+        if (inPnpmStore(anchorEntry) && isProfileTopLevel(resolved)) continue
+        return resolved
+      } catch {}
+    }
+    return undefined
+  }
+  const resolveModule = name => {
+    let triedAnchors = false
+    if (declared.size > 0 && !declared.has(name)) {
+      triedAnchors = true
+      const transitive = resolveViaAnchors(name)
+      if (transitive !== undefined) return transitive
+    }
+    try {
+      return profileRequire.resolve(name)
+    } catch (error) {
+      if (!triedAnchors && error?.code === 'MODULE_NOT_FOUND') {
+        const fallback = resolveViaAnchors(name)
+        if (fallback !== undefined) return fallback
+      }
+      throw error
+    }
+  }
+  return async name => import(__dshPathToFileURL(resolveModule(name)).href)
+}
 
 const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
@@ -676,8 +829,7 @@ if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
 }
 const [home, profile, dsh = ''] = process.argv.slice(1)
 installHostPeerResolver(dsh)
-const require = createRequire(join(home, 'profiles', profile, 'package.json'))
-const load = async name => import(require.resolve(name))
+const load = createSupervisedProfileLoader(home, profile)
 const [lark, delivery, recovery, automations] = await Promise.all([
   load('@dsh-ray/lark-channel'), load('@dsh-ray/assistant-delivery'),
   load('@dsh-ray/assistant-recovery'), load('@dsh-ray/assistant-automations'),
@@ -9906,7 +10058,7 @@ export const lifecycleProfileTest = Object.freeze({
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
   validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest, loadManifest,
   validSupervisedCapabilityProof, assertHostRsiRuntimeSuccessor, hostSandboxRun, MANIFEST_MAX_BYTES,
-  HOST_PEER_RESOLVER_SNIPPET, SUPERVISED_CAPABILITY_PROGRAM, SUPERVISED_OPERATOR_PROGRAM,
+  HOST_PEER_RESOLVER_SNIPPET, SUPERVISED_PROFILE_RESOLVER_SNIPPET, SUPERVISED_CAPABILITY_PROGRAM, SUPERVISED_OPERATOR_PROGRAM,
   assertSupervisedLifecycleCapability, runSupervisedOperator, runSupervisedOperatorDirect,
   runScannerRetirementOperator, captureScannerRetirementSource, assertRsiCoordinatorActivation,
   validLocalSourceManifest, validLocalSourceSelection, localSourcePhysicalProof, profileTreeDigest,
