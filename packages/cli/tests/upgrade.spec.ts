@@ -1,12 +1,13 @@
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { parseDocument } from 'yaml'
 import { formatUpgradeReport, main, parseArgs, runUpgrade, validateRegistryUrl, type UpgradeDeps } from '../src/index.ts'
-import { defaultUpgradeProfilePackages, KNOWN_ENHANCED_PACKAGES } from '../src/upgrade.ts'
+import { defaultUpgradeProfilePackages, defaultVerifyHealth, KNOWN_ENHANCED_PACKAGES } from '../src/upgrade.ts'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -544,7 +545,7 @@ overrides:
     expect(runnerCalls).toEqual([
       {
         command: fakePnpmPath,
-        args: ['install', '--dir', f.profileDir, '--no-frozen-lockfile', '--ignore-scripts', '--registry', 'https://registry.npmjs.org'],
+        args: ['install', '--dir', f.profileDir, '--no-frozen-lockfile', '--ignore-scripts', '--config.confirmModulesPurge=false', '--registry', 'https://registry.npmjs.org'],
       },
     ])
 
@@ -630,6 +631,7 @@ overrides:
       '--dir', f.profileDir,
       '--no-frozen-lockfile',
       '--ignore-scripts',
+      '--config.confirmModulesPurge=false',
       '--registry', 'https://registry.npmjs.org',
     ])
   })
@@ -1386,5 +1388,492 @@ minimumReleaseAgeExclude:
       expect(dry.report.mode).toBe('standard-local')
     }
     expect(frozenChecked).toBe(0)
+  })
+
+  test('real pnpm@11.7.0 non-TTY ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY regression via defaultUpgradeProfilePackages', async () => {
+    const f = await createHomeFixture({ profile: 'desktop', enhancedVersion: '0.2.0' })
+    const buildPkgTgz = async (ver: string) => {
+      const srcDir = join(f.root, `src-hello-${ver}`)
+      await mkdir(srcDir, { recursive: true })
+      await writeFile(join(srcDir, 'package.json'), JSON.stringify({ name: '@dsh-ray/hello', version: ver, main: 'index.js' }))
+      await writeFile(join(srcDir, 'index.js'), `export const version = ${JSON.stringify(ver)};\n`)
+      const packed = spawnSync('npm', ['pack', '--pack-destination', f.root], { cwd: srcDir, encoding: 'utf8' })
+      expect(packed.status).toBe(0)
+      const tgzName = packed.stdout.trim().split('\n').pop()!
+      const tgzBytes = await readFile(join(f.root, tgzName))
+      return {
+        tgzName,
+        tgzPath: join(f.root, tgzName),
+        shasum: createHash('sha1').update(tgzBytes).digest('hex'),
+        integrity: `sha512-${createHash('sha512').update(tgzBytes).digest('base64')}`,
+      }
+    }
+
+    const tgz21 = await buildPkgTgz('0.2.1')
+    const tgz22 = await buildPkgTgz('0.2.2')
+    // Run the mock npm registry in a separate child process so spawnSync('pnpm', ...) inside
+    // defaultUpgradeProfilePackages does not block the HTTP server's event loop.
+    const serverScriptPath = join(f.root, 'registry-server.mjs')
+    await writeFile(serverScriptPath, [
+      "import { createServer } from 'node:http';",
+      "import { readFileSync } from 'node:fs';",
+      `const tgz21 = { name: ${JSON.stringify(tgz21.tgzName)}, bytes: readFileSync(${JSON.stringify(tgz21.tgzPath)}), shasum: ${JSON.stringify(tgz21.shasum)}, integrity: ${JSON.stringify(tgz21.integrity)} };`,
+      `const tgz22 = { name: ${JSON.stringify(tgz22.tgzName)}, bytes: readFileSync(${JSON.stringify(tgz22.tgzPath)}), shasum: ${JSON.stringify(tgz22.shasum)}, integrity: ${JSON.stringify(tgz22.integrity)} };`,
+      'let port = 0;',
+      'const server = createServer((req, res) => {',
+      "  const reqUrl = (req.url || '/').split('?')[0];",
+      '  if (reqUrl === `/tarballs/${tgz21.name}`) { res.writeHead(200, { "content-type": "application/octet-stream" }); res.end(tgz21.bytes); return; }',
+      '  if (reqUrl === `/tarballs/${tgz22.name}`) { res.writeHead(200, { "content-type": "application/octet-stream" }); res.end(tgz22.bytes); return; }',
+      '  if (reqUrl === "/@dsh-ray%2fhello" || reqUrl === "/@dsh-ray%2Fhello" || reqUrl === "/@dsh-ray/hello") {',
+      '    const mk = (ver, t) => ({ name: "@dsh-ray/hello", version: ver, main: "index.js", dist: { tarball: `http://127.0.0.1:${port}/tarballs/${t.name}`, shasum: t.shasum, integrity: t.integrity } });',
+      '    res.writeHead(200, { "content-type": "application/json" });',
+      '    res.end(JSON.stringify({ name: "@dsh-ray/hello", "dist-tags": { latest: "0.2.2" }, versions: { "0.2.1": mk("0.2.1", tgz21), "0.2.2": mk("0.2.2", tgz22) } }));',
+      '    return;',
+      '  }',
+      '  res.writeHead(404); res.end();',
+      '});',
+      'server.listen(0, "127.0.0.1", () => {',
+      '  port = server.address().port;',
+      '  process.stdout.write(`READY:${port}\\n`);',
+      '});',
+    ].join('\n'))
+    const srvProc = spawn(process.execPath, [serverScriptPath], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const port = await new Promise<number>((resolvePort, rejectPort) => {
+      let buf = ''
+      const timer = setTimeout(() => rejectPort(new Error('registry child server timeout')), 5000)
+      srvProc.stdout.on('data', (chunk: Buffer) => {
+        buf += chunk.toString('utf8')
+        const m = /READY:(\d+)/u.exec(buf)
+        if (m) {
+          clearTimeout(timer)
+          resolvePort(Number(m[1]))
+        }
+      })
+      srvProc.once('error', err => { clearTimeout(timer); rejectPort(err) })
+      srvProc.once('exit', code => { clearTimeout(timer); rejectPort(new Error(`registry child exited early: ${code}`)) })
+    })
+
+    try {
+      const cleanEnv: NodeJS.ProcessEnv = { ...process.env }
+      delete cleanEnv.CI
+      delete cleanEnv.CONTINUOUS_INTEGRATION
+      delete cleanEnv.GITHUB_ACTIONS
+      cleanEnv.HOME = f.osHome
+      cleanEnv.XDG_DATA_HOME = join(f.root, 'xdg-data')
+      cleanEnv.XDG_CACHE_HOME = join(f.root, 'xdg-cache')
+      cleanEnv.XDG_STATE_HOME = join(f.root, 'xdg-state')
+      cleanEnv.npm_config_store_dir = join(f.root, 'pnpm-store')
+
+      await rm(join(f.profileDir, 'node_modules'), { recursive: true, force: true })
+      await writeFile(join(f.profileDir, 'package.json'), JSON.stringify({
+        name: 'dsh-profile-desktop',
+        private: true,
+        dependencies: { '@dsh-ray/hello': '0.2.1' },
+      }, null, 2), { mode: 0o600 })
+      await writeFile(join(f.profileDir, 'pnpm-workspace.yaml'), 'packages:\n  - .\nnodeLinker: isolated\n', { mode: 0o600 })
+
+      const initRes = spawnSync('pnpm', [
+        'install', '--dir', f.profileDir, '--no-frozen-lockfile', '--ignore-scripts', '--registry', `http://127.0.0.1:${port}`,
+      ], { env: { ...cleanEnv, CI: 'true' }, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' })
+      expect(initRes.status, initRes.stdout + initRes.stderr).toBe(0)
+
+      // Force a modules purge condition on next non-TTY pnpm run (stale storeDir in .modules.yaml)
+      await writeFile(join(f.profileDir, 'node_modules', '.modules.yaml'), 'hoistPattern:\n  - "*"\nstoreDir: /nonexistent/store-dir\n')
+      await writeFile(join(f.profileDir, 'package.json'), JSON.stringify({
+        name: 'dsh-profile-desktop',
+        private: true,
+        dependencies: { '@dsh-ray/hello': '0.2.2' },
+      }, null, 2), { mode: 0o600 })
+
+      // Baseline check: bare pnpm WITHOUT CI=true / confirmModulesPurge=false aborts on non-TTY
+      const bareNonTty = spawnSync('pnpm', [
+        'install', '--dir', f.profileDir, '--no-frozen-lockfile', '--ignore-scripts', '--registry', `http://127.0.0.1:${port}`,
+      ], { env: cleanEnv, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' })
+      expect(bareNonTty.status).toBe(1)
+      expect(`${bareNonTty.stdout}\n${bareNonTty.stderr}`).toContain('ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY')
+
+      // Reset package.json back to 0.2.1 and run defaultUpgradeProfilePackages with cleanEnv (NO CI)
+      await writeFile(join(f.profileDir, 'package.json'), JSON.stringify({
+        name: 'dsh-profile-desktop',
+        private: true,
+        dependencies: { '@dsh-ray/hello': '0.2.1' },
+      }, null, 2), { mode: 0o600 })
+      const { defaultRunner } = await import('../src/run.ts')
+      await defaultUpgradeProfilePackages({
+        dshHome: f.dshHome,
+        profile: 'desktop',
+        targetVersion: '0.2.2',
+        registryUrl: `http://127.0.0.1:${port}`,
+        npmPlugins: ['@dsh-ray/hello'],
+        runner: defaultRunner,
+        platform: 'linux',
+        osHome: f.osHome,
+        env: cleanEnv,
+      })
+
+      const installedHello = JSON.parse(await readFile(join(f.profileDir, 'node_modules', '@dsh-ray', 'hello', 'package.json'), 'utf8')) as { version: string }
+      expect(installedHello.version).toBe('0.2.2')
+    } finally {
+      srvProc.kill('SIGKILL')
+    }
+  })
+
+  test('resolves nvm/bundled Electron pnpm.mjs & npm fallbacks with stripped PATH and allows desktop unready autonomy while enforcing explicit readiness', async () => {
+    const f = await createHomeFixture({ profile: 'desktop', enhancedVersion: '0.2.0' })
+
+    // 1. NVM bin discovery picks newest SemVer & bundled DeepSeek Harness.app pnpm.mjs uses Electron node override cleanly
+    const nvmOld = join(f.osHome, '.nvm', 'versions', 'node', 'v20.10.0', 'bin')
+    const nvmNew = join(f.osHome, '.nvm', 'versions', 'node', 'v24.22.3', 'bin')
+    await mkdir(nvmOld, { recursive: true })
+    await mkdir(nvmNew, { recursive: true })
+    await writeFile(join(nvmOld, 'pnpm'), '#!/bin/sh\necho old\nexit 1\n', { mode: 0o755 })
+    const capturedPath = join(f.root, 'nvm-captured.json')
+    await writeFile(join(nvmNew, 'pnpm'), [
+      `#!${process.execPath}`,
+      "const fs = require('node:fs');",
+      `fs.writeFileSync(${JSON.stringify(capturedPath)}, JSON.stringify({ CI: process.env.CI ?? null, isTTY: Boolean(process.stdin.isTTY), PATH: process.env.PATH ?? '' }));`,
+    ].join('\n'), { mode: 0o755 })
+    await chmod(join(nvmNew, 'pnpm'), 0o755)
+    await writeFile(join(f.profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+
+    const { defaultRunner } = await import('../src/run.ts')
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: 'desktop',
+      targetVersion: '0.2.2',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-ray/assistant-web-owner'],
+      runner: defaultRunner,
+      platform: 'darwin',
+      osHome: f.osHome,
+      env: { PATH: '', HOME: f.osHome },
+    })
+    const nvmCaptured = JSON.parse(await readFile(capturedPath, 'utf8')) as { CI: string | null; isTTY: boolean; PATH: string }
+    expect(nvmCaptured.CI).toBe('true')
+    expect(nvmCaptured.isTTY).toBe(false)
+    expect(nvmCaptured.PATH).toContain(nvmNew)
+
+    // 2. Bundled DeepSeek Harness.app pnpm.mjs + non-node DSH_DESKTOP_NODE_EXECUTABLE sets ELECTRON_RUN_AS_NODE=1
+    await rm(join(f.osHome, '.nvm'), { recursive: true, force: true })
+    const appContents = join(f.root, 'Applications', 'DeepSeek Harness.app', 'Contents')
+    const bundledPnpm = join(appContents, 'Resources', 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
+    const electronExec = join(appContents, 'MacOS', 'DeepSeek Harness')
+    await mkdir(join(appContents, 'Resources', 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin'), { recursive: true })
+    await mkdir(join(appContents, 'MacOS'), { recursive: true })
+    await writeFile(bundledPnpm, '// bundled pnpm\n', { mode: 0o644 })
+    await writeFile(electronExec, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    await chmod(electronExec, 0o755)
+    const detailedCalls: Array<{ cmd: string; args: readonly string[]; electronNode: string | undefined; ci: string | undefined }> = []
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: 'desktop',
+      targetVersion: '0.2.2',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-ray/assistant-web-owner'],
+      runner: defaultRunner,
+      detailedRunner: (cmd, args, opts) => {
+        detailedCalls.push({
+          cmd,
+          args,
+          electronNode: opts?.env?.ELECTRON_RUN_AS_NODE,
+          ci: opts?.env?.CI,
+        })
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      platform: 'darwin',
+      osHome: f.osHome,
+      env: { PATH: '', HOME: f.osHome, DSH_DESKTOP_NODE_EXECUTABLE: electronExec },
+    })
+    expect(detailedCalls).toEqual([{
+      cmd: electronExec,
+      args: [bundledPnpm, 'install', '--dir', f.profileDir, '--no-frozen-lockfile', '--ignore-scripts', '--config.confirmModulesPurge=false', '--registry', 'https://registry.npmjs.org'],
+      electronNode: '1',
+      ci: 'true',
+    }])
+
+    // 3. Pure npm profile on stripped GUI PATH resolves ~/.local/bin/npm fallback cleanly
+    await rm(join(f.profileDir, 'pnpm-lock.yaml'), { force: true })
+    const localBin = join(f.osHome, '.local', 'bin')
+    await mkdir(localBin, { recursive: true })
+    const fallbackNpm = join(localBin, 'npm')
+    await writeFile(fallbackNpm, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    await chmod(fallbackNpm, 0o755)
+    const npmDetailedCalls: string[] = []
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: 'desktop',
+      targetVersion: '0.2.2',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-ray/assistant-web-owner'],
+      runner: defaultRunner,
+      detailedRunner: (cmd) => {
+        npmDetailedCalls.push(cmd)
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      platform: 'darwin',
+      osHome: f.osHome,
+      env: { PATH: '', HOME: f.osHome },
+    })
+    expect(npmDetailedCalls).toEqual([fallbackNpm])
+
+    // 4. defaultVerifyHealth on macOS desktop without .dsh-ray-host.json or global `dsh` handles unready autonomy
+    await rm(f.hostPath, { force: true })
+    await mkdir(join(f.profileDir, 'node_modules', '@dsh-ray', 'assistant-web-owner', 'bin'), { recursive: true })
+    await mkdir(join(f.profileDir, 'node_modules', '@dsh-ray', 'assistant-policy'), { recursive: true })
+    await writeFile(join(f.profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop', dependencies: { '@dsh-ray/assistant-web-owner': '0.2.2' } }), { mode: 0o600 })
+    await writeFile(
+      join(f.profileDir, 'node_modules', '@dsh-ray', 'assistant-web-owner', 'bin', 'dsh-autonomy-doctor.js'),
+      `console.log(JSON.stringify({ protocol: 'dsh-ray/autonomy-readiness/v1', ready: false, checks: [{ id: 'owner-route', status: 'not-ready' }] }))\nprocess.exit(1)\n`,
+      { mode: 0o755 },
+    )
+    const { defaultDetailedRunner } = await import('../src/run.ts')
+    const health = await defaultVerifyHealth({
+      dshHome: f.dshHome,
+      profile: 'desktop',
+      profiles: ['desktop'],
+      runner: (cmd, args) => cmd === 'dsh'
+        ? { status: null, stdout: '', stderr: 'spawnSync dsh ENOENT' }
+        : defaultDetailedRunner(cmd, args),
+      platform: 'darwin',
+      osHome: f.osHome,
+      env: { PATH: '' },
+    })
+    expect(health.ok).toBe(true)
+    expect(health.report?.profiles[0]?.autonomyReadiness?.ok).toBe(false)
+
+    const strictHealth = await defaultVerifyHealth({
+      dshHome: f.dshHome,
+      profile: 'desktop',
+      profiles: ['desktop'],
+      runner: (cmd, args) => cmd === 'dsh'
+        ? { status: null, stdout: '', stderr: 'spawnSync dsh ENOENT' }
+        : defaultDetailedRunner(cmd, args),
+      platform: 'darwin',
+      osHome: f.osHome,
+      env: { PATH: '' },
+      requireAutonomyReadinessProfiles: ['desktop'],
+    })
+    expect(strictHealth.ok).toBe(false)
+    expect(strictHealth.error).toContain('autonomy readiness 未就绪')
+  })
+
+  test('rolls back node_modules/.pnpm/@dsh-ray+* virtual store and .modules.yaml so restored symlinks are never dangling', async () => {
+    const f = await createHomeFixture({ profile: 'desktop', hostVersion: '0.2.2-rc.5', enhancedVersion: '0.2.0' })
+    await rm(f.enhancedDir, { recursive: true, force: true })
+    const oldStorePkg = join(f.profileDir, 'node_modules', '.pnpm', '@dsh-ray+assistant-web-owner@0.2.0', 'node_modules', '@dsh-ray', 'assistant-web-owner')
+    await mkdir(oldStorePkg, { recursive: true })
+    await writeFile(join(oldStorePkg, 'package.json'), JSON.stringify({ name: '@dsh-ray/assistant-web-owner', version: '0.2.0' }), { mode: 0o600 })
+    await symlink('../.pnpm/@dsh-ray+assistant-web-owner@0.2.0/node_modules/@dsh-ray/assistant-web-owner', f.enhancedDir)
+    const modulesYamlOriginal = 'storeDir: /old/store\n'
+    await writeFile(join(f.profileDir, 'node_modules', '.modules.yaml'), modulesYamlOriginal, { mode: 0o600 })
+
+    const failed = await runUpgrade(
+      { dshHome: f.dshHome, profile: 'desktop', action: 'apply', confirmDshHomeStopped: true, platform: 'darwin', osHome: f.osHome },
+      {
+        fetch: makeRegistryFetch('0.2.2', '0.2.2-rc.5'),
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+        upgradeProfilePackages: async () => {
+          // Simulate pnpm deleting the old .pnpm store entry and creating a new 0.2.2 store entry
+          await rm(join(f.profileDir, 'node_modules', '.pnpm', '@dsh-ray+assistant-web-owner@0.2.0'), { recursive: true, force: true })
+          const newStorePkg = join(f.profileDir, 'node_modules', '.pnpm', '@dsh-ray+assistant-web-owner@0.2.2', 'node_modules', '@dsh-ray', 'assistant-web-owner')
+          await mkdir(newStorePkg, { recursive: true })
+          await writeFile(join(newStorePkg, 'package.json'), JSON.stringify({ name: '@dsh-ray/assistant-web-owner', version: '0.2.2' }))
+          await rm(f.enhancedDir, { force: true })
+          await symlink('../.pnpm/@dsh-ray+assistant-web-owner@0.2.2/node_modules/@dsh-ray/assistant-web-owner', f.enhancedDir)
+          await writeFile(join(f.profileDir, 'node_modules', '.modules.yaml'), 'storeDir: /new/store\n')
+        },
+        verifyHealth: async () => ({ ok: false, error: 'post-upgrade desktop check failed' }),
+      },
+    )
+
+    expect(failed.exitCode).toBe(1)
+    expect(failed.report.execution?.rolledBack).toBe(true)
+    expect(failed.report.execution?.rollbackSucceeded).toBe(true)
+    expect(await readFile(join(f.profileDir, 'node_modules', '.modules.yaml'), 'utf8')).toBe(modulesYamlOriginal)
+    expect((await lstat(f.enhancedDir)).isSymbolicLink()).toBe(true)
+    expect(JSON.parse(await readFile(join(f.enhancedDir, 'package.json'), 'utf8')).version).toBe('0.2.0')
+    expect(await readdir(join(f.profileDir, 'node_modules', '.pnpm'))).toEqual(['@dsh-ray+assistant-web-owner@0.2.0'])
+  })
+
+  test('migrates source-bound Linux RSI Home (target + coordinator) via --to-npm, supports rollback, preserves rsi-authorities/credentials, and keeps paired upgrades working later', async () => {
+    const f = await createHomeFixture({ profile: 'web', hostVersion: '0.2.2-rc.5', enhancedVersion: '0.2.0' })
+    const coordProfile = 'rsi-web-coord01'
+    const coordDir = join(f.dshHome, 'profiles', coordProfile)
+    await mkdir(join(coordDir, 'node_modules', '.pnpm'), { recursive: true })
+    await mkdir(join(f.dshHome, 'rsi-local-cohorts', 'web', 'artifacts'), { recursive: true, mode: 0o700 })
+    const repoDir = join(f.root, 'repo-src')
+    await mkdir(repoDir, { recursive: true, mode: 0o700 })
+
+    // Seed preserved rsi-authorities & credentials
+    const authorityCfgDir = join(f.dshHome, 'rsi-authorities', 'web', 'config')
+    await mkdir(authorityCfgDir, { recursive: true, mode: 0o700 })
+    const authorityManifestRaw = JSON.stringify({ schemaVersion: 1, targetProfile: 'web', coordinatorProfile: coordProfile }, null, 2)
+    await writeFile(join(authorityCfgDir, 'manifest.json'), authorityManifestRaw, { mode: 0o600 })
+    const credsRaw = 'version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-preserve-me\n'
+    await writeFile(join(f.dshHome, '.credentials.yaml'), credsRaw, { mode: 0o600 })
+
+    const markerHash = createHash('sha256').update('web').digest('hex').slice(0, 16)
+    const markerPath = join(f.dshHome, `.rsi-coordinator-${markerHash}.json`)
+    const initialMarkerRaw = JSON.stringify({
+      schemaVersion: 1, targetProfile: 'web', coordinatorProfile: coordProfile, version: '0.2.0', sourceRepository: repoDir,
+    })
+    await writeFile(markerPath, initialMarkerRaw, { mode: 0o600 })
+    const cohortReceiptRaw = JSON.stringify({
+      schemaVersion: 1,
+      root: join(f.dshHome, 'rsi-local-cohorts', 'web'),
+      sourceRepository: repoDir,
+    })
+    await writeFile(join(f.dshHome, 'rsi-local-cohorts', 'web', 'receipt.json'), cohortReceiptRaw, { mode: 0o600 })
+
+    const targetTgz = join(f.dshHome, 'rsi-local-cohorts', 'web', 'artifacts', 'assistant-web-owner.tgz')
+    const coordTgz = join(f.dshHome, 'rsi-local-cohorts', 'web', 'artifacts', 'assistant-policy.tgz')
+    await writeFile(join(f.profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-web',
+      private: true,
+      dependencies: { '@dsh-ray/assistant-web-owner': `file:${targetTgz}` },
+    }, null, 2), { mode: 0o600 })
+    await writeFile(join(coordDir, 'package.json'), JSON.stringify({
+      name: `dsh-profile-${coordProfile}`,
+      private: true,
+      dependencies: { '@dsh-ray/assistant-policy': `file:${coordTgz}` },
+    }, null, 2), { mode: 0o600 })
+    await writeFile(join(coordDir, 'cordis.patch.yml'), '- id: dsh-ray-assistant-policy\n  name: "@dsh-ray/assistant-policy"\n', { mode: 0o600 })
+
+    const wsTargetRaw = [
+      'nodeLinker: isolated',
+      'allowBuilds:',
+      '  koffi: true',
+      'overrides:',
+      `  "@dsh-ray/assistant-web-owner@0.2.0>@dsh-ray/assistant-policy": file:${coordTgz}`,
+      '',
+    ].join('\n')
+    await writeFile(join(f.profileDir, 'pnpm-workspace.yaml'), wsTargetRaw, { mode: 0o600 })
+    await writeFile(join(coordDir, 'pnpm-workspace.yaml'), `nodeLinker: isolated\noverrides:\n  "@dsh-ray/assistant-policy": file:${coordTgz}\n`, { mode: 0o600 })
+
+    const fakeBinDir = join(f.root, 'fake-pnpm-to-npm')
+    await mkdir(fakeBinDir, { recursive: true })
+    await writeFile(join(fakeBinDir, 'pnpm'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 })
+
+    // 1. Dry-run upgrade --to-npm plans conversion for both web + coordinator + marker sync
+    const dryRes = await runUpgrade(
+      { dshHome: f.dshHome, profile: 'web', action: 'dry-run', toNpm: true, targetVersion: '0.2.2', osHome: f.osHome, platform: 'linux' },
+      {
+        fetch: makeRegistryFetch('0.2.2', '0.2.2-rc.5'),
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+        detectFrozenOwner: async () => ({ home: f.dshHome, profile: 'web', repository: repoDir }),
+      },
+    )
+    expect(dryRes.exitCode).toBe(0)
+    expect(dryRes.report.mode).toBe('standard-local')
+    expect(dryRes.report.plan.steps.some(s => s.includes('web') && s.includes('npm'))).toBe(true)
+    expect(dryRes.report.plan.steps.some(s => s.includes(coordProfile) && s.includes('npm'))).toBe(true)
+    expect(dryRes.report.plan.backupFiles).toContain(markerPath)
+
+    // 2. Failed health check during --to-npm rolls back marker, cohorts, package.json, and workspace overrides cleanly
+    const failedMig = await runUpgrade(
+      { dshHome: f.dshHome, profile: 'web', action: 'apply', toNpm: true, targetVersion: '0.2.2', confirmDshHomeStopped: true, osHome: f.osHome, platform: 'linux', env: { PATH: fakeBinDir } },
+      {
+        fetch: makeRegistryFetch('0.2.2', '0.2.2-rc.5'),
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+        detectFrozenOwner: async () => ({ home: f.dshHome, profile: 'web', repository: repoDir }),
+        detailedRunner: () => ({ status: 0, stdout: '', stderr: '' }),
+        verifyHealth: async () => ({ ok: false, error: 'post-migration health fail' }),
+      },
+    )
+    expect(failedMig.exitCode).toBe(1)
+    expect(failedMig.report.execution?.rolledBack).toBe(true)
+    expect(failedMig.report.execution?.rollbackSucceeded).toBe(true)
+    expect(await readFile(markerPath, 'utf8')).toBe(initialMarkerRaw)
+    expect(await readFile(join(f.dshHome, 'rsi-local-cohorts', 'web', 'receipt.json'), 'utf8')).toBe(cohortReceiptRaw)
+    expect(JSON.parse(await readFile(join(f.profileDir, 'package.json'), 'utf8')).dependencies['@dsh-ray/assistant-web-owner']).toBe(`file:${targetTgz}`)
+
+    const { detectFrozenOwner: realDetectFrozen } = await import('../src/program-update.ts')
+    expect(await realDetectFrozen(f.dshHome)).toEqual({ home: f.dshHome, profile: 'web', repository: repoDir })
+
+    // 3. Apply via main(['update', '--all', '--yes', '--to-npm']) converts BOTH profiles, updates marker, removes cohorts, preserves rsi-authorities & credentials
+    const frozenUpdateSpy = vi.fn(async () => 0)
+    const stdoutChunks: string[] = []
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => { stdoutChunks.push(String(chunk)); return true })
+    try {
+      const code = await main(
+        ['update', '--all', '--yes', '--to-npm', '--profile', 'web', '--dsh-home', f.dshHome],
+        { DSH_HOME: f.dshHome, PATH: fakeBinDir },
+        {
+          platform: 'linux',
+          osHome: f.osHome,
+          selfUpdate: async () => ({
+            fromVersion: '0.2.1', selector: 'latest', installedVersion: '0.2.2', resolvedVersion: '0.2.2', alreadyCurrent: true, actions: [],
+          }),
+          detectFrozenOwner: async () => ({ home: f.dshHome, profile: 'web', repository: repoDir }),
+          frozenUpdate: frozenUpdateSpy,
+          upgradeDeps: {
+            fetch: makeRegistryFetch('0.2.2', '0.2.2-rc.5'),
+            inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+            detectFrozenOwner: async () => ({ home: f.dshHome, profile: 'web', repository: repoDir }),
+            inspectService: async () => ({ managed: false, definitionPath: '', foreign: false }),
+            scanProcesses: async () => ({ processes: [] }),
+            verifyHealth: async () => ({ ok: true }),
+            detailedRunner: () => ({ status: 0, stdout: '', stderr: '' }),
+          },
+        },
+      )
+      expect(code).toBe(0)
+    } finally {
+      writeSpy.mockRestore()
+    }
+    expect(frozenUpdateSpy).not.toHaveBeenCalled()
+
+    const updatedTargetPkg = JSON.parse(await readFile(join(f.profileDir, 'package.json'), 'utf8'))
+    const updatedCoordPkg = JSON.parse(await readFile(join(coordDir, 'package.json'), 'utf8'))
+    expect(updatedTargetPkg.dependencies['@dsh-ray/assistant-web-owner']).toBe('0.2.2')
+    expect(updatedCoordPkg.dependencies['@dsh-ray/assistant-policy']).toBe('0.2.2')
+
+    const updatedTargetWs = parseDocument(await readFile(join(f.profileDir, 'pnpm-workspace.yaml'), 'utf8')).toJS() as Record<string, unknown>
+    expect(updatedTargetWs.overrides).toBeUndefined()
+    expect(updatedTargetWs.allowBuilds).toEqual({ koffi: true })
+    expect(Array.isArray(updatedTargetWs.minimumReleaseAgeExclude)).toBe(true)
+
+    const updatedCoordWs = parseDocument(await readFile(join(coordDir, 'pnpm-workspace.yaml'), 'utf8')).toJS() as Record<string, unknown>
+    expect((updatedCoordWs.overrides as Record<string, string>)['@dsh-ray/assistant-policy']).toBe('0.2.2')
+
+    // .rsi-coordinator-<hash>.json updated cleanly; rsi-local-cohorts cleaned; rsi-authorities & credentials preserved untouched
+    const updatedMarker = JSON.parse(await readFile(markerPath, 'utf8')) as Record<string, unknown>
+    expect(updatedMarker).toEqual({
+      schemaVersion: 1,
+      targetProfile: 'web',
+      coordinatorProfile: coordProfile,
+      version: '0.2.2',
+      sourceRepository: null,
+    })
+    await expect(lstat(join(f.dshHome, 'rsi-local-cohorts'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(join(authorityCfgDir, 'manifest.json'), 'utf8')).toBe(authorityManifestRaw)
+    expect(await readFile(join(f.dshHome, '.credentials.yaml'), 'utf8')).toBe(credsRaw)
+
+    // Real detectFrozenOwner now sees migrated pure-npm profiles and returns undefined
+    expect(await realDetectFrozen(f.dshHome)).toBeUndefined()
+
+    // 4. Subsequent `dsh-ray upgrade --profile web` WITHOUT `--to-npm` STILL pairs target + coordinator and bumps coordinator marker version
+    await mkdir(join(coordDir, 'node_modules', '@dsh-ray', 'assistant-policy'), { recursive: true })
+    await writeFile(join(coordDir, 'node_modules', '@dsh-ray', 'assistant-policy', 'package.json'), JSON.stringify({ name: '@dsh-ray/assistant-policy', version: '0.2.2' }), { mode: 0o600 })
+    await writeFile(join(f.profileDir, 'node_modules', '@dsh-ray', 'assistant-web-owner', 'package.json'), JSON.stringify({ name: '@dsh-ray/assistant-web-owner', version: '0.2.2' }), { mode: 0o600 })
+    const postMigRes = await runUpgrade(
+      { dshHome: f.dshHome, profile: 'web', action: 'apply', targetVersion: '0.2.3', confirmDshHomeStopped: true, osHome: f.osHome, platform: 'linux', env: { PATH: fakeBinDir } },
+      {
+        fetch: makeRegistryFetch('0.2.3', '0.2.2-rc.5'),
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+        verifyHealth: async () => ({ ok: true }),
+        detailedRunner: () => ({ status: 0, stdout: '', stderr: '' }),
+      },
+    )
+    expect(postMigRes.exitCode).toBe(0)
+    expect(JSON.parse(await readFile(join(f.profileDir, 'package.json'), 'utf8')).dependencies['@dsh-ray/assistant-web-owner']).toBe('0.2.3')
+    expect(JSON.parse(await readFile(join(coordDir, 'package.json'), 'utf8')).dependencies['@dsh-ray/assistant-policy']).toBe('0.2.3')
+    expect(JSON.parse(await readFile(markerPath, 'utf8'))).toEqual({
+      schemaVersion: 1,
+      targetProfile: 'web',
+      coordinatorProfile: coordProfile,
+      version: '0.2.3',
+      sourceRepository: null,
+    })
   })
 })

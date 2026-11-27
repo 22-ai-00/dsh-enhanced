@@ -505,4 +505,69 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
     expect(JSON.stringify(snap)).not.toContain('sk-ds-v1-secret-value-999')
     expect(JSON.stringify(report)).not.toContain('sk-oauth-secret-000')
   })
+
+  test('macOS desktop Electron profile 在无 .dsh-ray-host.json 与无全局 dsh (ENOENT) 时直读校验通过，并在 patch/manifest 损坏时 fail-closed', async () => {
+    const root = await makeTempDir('dsh-live-electron-enoent-')
+    const dshHome = join(root, 'dsh')
+    const profileDir = join(dshHome, 'profiles', 'desktop')
+    await mkdir(join(profileDir, 'node_modules', '@dsh-ray', 'owner-console'), { recursive: true })
+    await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop', dependencies: {} }))
+    await writeFile(join(profileDir, 'cordis.patch.yml'), `- id: dsh-ray-owner-console
+  name: "@dsh-ray/owner-console"
+`)
+
+    const runner: DetailedCommandRunner = (command) => {
+      if (command === 'dsh') {
+        return { status: null, stdout: '', stderr: 'spawnSync dsh ENOENT' }
+      }
+      return { status: 0, stdout: '', stderr: '' }
+    }
+
+    const report = await collectLiveDoctorReport({
+      dshHome,
+      home: root,
+      profile: 'desktop',
+      platform: 'darwin',
+      env: { PATH: '' },
+      fileExists: path => path === '/usr/bin/sandbox-exec' || path === '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness',
+      runner,
+    })
+
+    expect(report.ok).toBe(true)
+    expect(report.checks.find(c => c.id === 'host.bound')?.status).toBe('ok')
+    expect(report.profiles[0]?.configDumpOk).toBe(true)
+
+    // Corrupt cordis.patch.yml MUST still fail-closed even without global `dsh`.
+    await writeFile(join(profileDir, 'cordis.patch.yml'), '- id: broken\n  config: [\n')
+    const badReport = await collectLiveDoctorReport({
+      dshHome,
+      home: root,
+      profile: 'desktop',
+      platform: 'darwin',
+      env: { PATH: '' },
+      fileExists: path => path === '/usr/bin/sandbox-exec' || path === '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness',
+      runner,
+    })
+    expect(badReport.ok).toBe(false)
+    expect(badReport.profiles[0]?.configDumpOk).toBe(false)
+    expect(badReport.checks.find(c => c.id === 'profile.desktop.dump')?.status).toBe('fail')
+
+    // Symlinked package.json MUST fail-closed even with valid cordis.patch.yml.
+    await writeFile(join(profileDir, 'cordis.patch.yml'), '[]\n')
+    const outsidePkg = join(root, 'outside-pkg.json')
+    await writeFile(outsidePkg, JSON.stringify({ name: 'dsh-profile-desktop' }))
+    await rm(join(profileDir, 'package.json'))
+    await symlink(outsidePkg, join(profileDir, 'package.json'))
+    const symReport = await collectLiveDoctorReport({
+      dshHome,
+      home: root,
+      profile: 'desktop',
+      platform: 'darwin',
+      env: { PATH: '', DSH_DESKTOP_NODE_EXECUTABLE: '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' },
+      fileExists: path => path === '/usr/bin/sandbox-exec' || path === '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness',
+      runner,
+    })
+    expect(symReport.ok).toBe(false)
+    expect(symReport.checks.some(c => c.status === 'fail' && c.id === 'profile.desktop')).toBe(true)
+  })
 })

@@ -1,7 +1,9 @@
+import { homedir } from 'node:os'
 import { dirname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildPackageManagerEnv, resolveFallbackBinary } from './pm-env.ts'
 import { PurgeError } from './purge.ts'
-import { defaultRunner, type CommandRunner } from './run.ts'
+import { defaultDetailedRunner, defaultRunner, type CommandRunner } from './run.ts'
 import { version as VERSION } from './version.ts'
 import { compareExactVersions } from './program-update.ts'
 
@@ -73,7 +75,17 @@ export async function runSelfUpdate(options: {
   /** 测试注入；生产默认使用当前已加载 npm 包根目录。 */
   packageRoot?: string
 }): Promise<SelfUpdateReport> {
-  const runner = options.runner ?? defaultRunner
+  const hasCustomRunner = options.runner !== undefined && options.runner !== defaultRunner
+  const pmOsHome = process.env.HOME ?? homedir()
+  const npmResolution = hasCustomRunner
+    ? { command: 'npm' as string }
+    : await resolveFallbackBinary('npm', process.env, pmOsHome, process.platform)
+  const pmEnv = hasCustomRunner
+    ? undefined
+    : await buildPackageManagerEnv(process.env, pmOsHome, process.platform, npmResolution.binDir ? [npmResolution.binDir] : [])
+  const runner: CommandRunner = hasCustomRunner
+    ? options.runner!
+    : (command, args) => defaultDetailedRunner(command === 'npm' ? npmResolution.command : command, args, pmEnv ? { env: pmEnv } : {})
   const selector = options.selector ?? 'latest'
   if (!SELECTOR_PATTERN.test(selector)) {
     throw new PurgeError(`非法的版本 selector：${selector}（应为精确版本 x.y.z 或 dist-tag）`)

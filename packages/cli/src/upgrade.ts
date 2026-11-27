@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { constants, existsSync } from 'node:fs'
-import { access, chmod, cp, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, cp, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -11,9 +11,10 @@ import { isSupportedCandidateVersion } from './host-runtime.ts'
 import { inspectBoundHostRuntime, prepareHostUpdatePlan, type BoundHostInspection, type InstallHostPorts } from './install-host.ts'
 import { inspectLaunchdDefinition, inspectLoadedLaunchd } from './launchd-service.ts'
 import { listProfilePlugins, listProfiles, profilesDirectory } from './paths.ts'
+import { buildPackageManagerEnv, checkRegularFileAccess, resolveFallbackBinary, resolveNodeRuntime } from './pm-env.ts'
 import { scanRunningProfiles } from './process-guard.ts'
 import { detectFrozenOwner, runFrozenOwnerUpdate, type FrozenOwner, type ProgramUpdatePorts } from './program-update.ts'
-import { defaultRunner, type CommandRunner } from './run.ts'
+import { defaultDetailedRunner, defaultRunner, type CommandRunner, type DetailedCommandRunner } from './run.ts'
 import {
   controlManagedService,
   inspectManagedServiceForDshHome,
@@ -114,6 +115,7 @@ export interface UpgradeOptions {
   readonly registryUrl?: string
   readonly dshVersion?: string
   readonly targetVersion?: string
+  readonly toNpm?: boolean
   readonly allowNonEmptyHistoryMigration?: boolean
   readonly confirmDshHomeStopped?: boolean
   readonly platform?: NodeJS.Platform
@@ -131,6 +133,7 @@ export interface UpgradeDeps {
   readonly fetch?: typeof globalThis.fetch
   readonly fetchTimeoutMs?: number
   readonly runner?: CommandRunner
+  readonly detailedRunner?: DetailedCommandRunner
   readonly detectFrozenOwner?: (dshHome: string) => Promise<FrozenOwner | undefined>
   readonly runFrozenOwnerUpdate?: (owner: FrozenOwner, options: { dryRun: boolean; dshVersion?: string }, ports?: ProgramUpdatePorts) => Promise<number>
   readonly programUpdatePorts?: ProgramUpdatePorts
@@ -145,6 +148,8 @@ export interface UpgradeDeps {
     registryUrl: string
     npmPlugins: readonly string[]
     runner: CommandRunner
+    detailedRunner?: DetailedCommandRunner
+    toNpm?: boolean
     platform?: NodeJS.Platform
     osHome?: string
     env?: NodeJS.ProcessEnv
@@ -157,6 +162,7 @@ export interface UpgradeDeps {
     platform: NodeJS.Platform
     osHome: string
     env: NodeJS.ProcessEnv
+    requireAutonomyReadinessProfiles?: readonly string[]
   }) => Promise<UpgradeHealthResult>
   readonly doctor?: (input: {
     dshHome: string
@@ -203,6 +209,7 @@ const PROFILE_BACKUP_FILES = [
   'pnpm-lock.yaml',
   'package-lock.json',
 ] as const
+const LOCAL_SOURCE_SPEC_PREFIXES = ['file:', 'link:', 'workspace:'] as const
 const NON_REGISTRY_SPEC_PREFIXES = [
   'file:',
   'link:',
@@ -214,6 +221,7 @@ const NON_REGISTRY_SPEC_PREFIXES = [
   'npm:',
 ] as const
 const DSH_APP_PNPM_SCRIPT = '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs'
+const DSH_APP_PNPM_REL_FROM_CONTENTS = join('Resources', 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
 
 const CREATION_ROW_TABLES = [
   'source_creation_verifications',
@@ -655,6 +663,126 @@ function isNonRegistrySpec(value: unknown): boolean {
   return NON_REGISTRY_SPEC_PREFIXES.some(prefix => lower.startsWith(prefix))
 }
 
+function isLocalSourceSpec(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  const lower = trimmed.toLowerCase()
+  return LOCAL_SOURCE_SPEC_PREFIXES.some(prefix => lower.startsWith(prefix)) || trimmed.includes('rsi-local-cohorts')
+}
+
+interface RsiCoordinatorPair {
+  readonly markerPath: string
+  readonly targetProfile: string
+  readonly coordinatorProfile: string
+  readonly version?: string
+  readonly sourceRepository: string | null
+  readonly mode: number
+}
+
+/**
+ * Read a valid `.rsi-coordinator-<sha256>.json` marker for pairing target & coordinator profiles
+ * during both source->npm migration and subsequent paired npm upgrades.
+ */
+async function readRsiCoordinatorPair(canonicalHome: string): Promise<RsiCoordinatorPair | undefined> {
+  const entries = await readdir(canonicalHome).catch(() => [] as string[])
+  const markers = entries.filter(name => /^\.rsi-coordinator-[a-f0-9]{16}\.json$/u.test(name))
+  if (markers.length !== 1) return undefined
+  const markerPath = join(canonicalHome, markers[0]!)
+  try {
+    const meta = await lstat(markerPath)
+    const raw = await readCheckedRegularBytes(markerPath, 65_536, 'coordinator marker')
+    const parsed = asObject(JSON.parse(raw.toString('utf8')))
+    if (!parsed || parsed.schemaVersion !== 1
+      || typeof parsed.targetProfile !== 'string' || !parsed.targetProfile
+      || typeof parsed.coordinatorProfile !== 'string' || !parsed.coordinatorProfile
+      || parsed.targetProfile === parsed.coordinatorProfile) {
+      return undefined
+    }
+    const expectedName = `.rsi-coordinator-${createHash('sha256').update(parsed.targetProfile).digest('hex').slice(0, 16)}.json`
+    if (markers[0] !== expectedName) return undefined
+    const sourceRepository = parsed.sourceRepository === null
+      ? null
+      : typeof parsed.sourceRepository === 'string'
+        ? parsed.sourceRepository
+        : null
+    return {
+      markerPath,
+      targetProfile: parsed.targetProfile,
+      coordinatorProfile: parsed.coordinatorProfile,
+      ...(typeof parsed.version === 'string' ? { version: parsed.version } : {}),
+      sourceRepository,
+      mode: meta.mode & 0o777,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+async function inspectProfileHasLocalEnhancedSpecs(dshHome: string, profile: string): Promise<boolean> {
+  const profileDir = join(profilesDirectory(dshHome), profile)
+  const pkgPath = join(profileDir, 'package.json')
+  try {
+    const pkgStat = await lstat(pkgPath)
+    if (pkgStat.isFile() && !pkgStat.isSymbolicLink()) {
+      const parsed = asObject(JSON.parse(await readFile(pkgPath, 'utf8')))
+      if (parsed) {
+        for (const sectionName of ['dependencies', 'optionalDependencies', 'devDependencies'] as const) {
+          const section = asObject(parsed[sectionName])
+          if (!section) continue
+          for (const [depName, depSpec] of Object.entries(section)) {
+            if (depName.startsWith('@dsh-ray/') && isLocalSourceSpec(depSpec)) return true
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore unreadable package.json here; ledger/profile checks handle corruption
+  }
+  const wsPath = join(profileDir, 'pnpm-workspace.yaml')
+  try {
+    const wsStat = await lstat(wsPath)
+    if (wsStat.isFile() && !wsStat.isSymbolicLink()) {
+      const doc = parseDocument(await readFile(wsPath, 'utf8'))
+      const overrides = doc.get('overrides', true)
+      if (isMap(overrides)) {
+        for (const pair of overrides.items) {
+          const keyVal = isScalar(pair.key) ? pair.key.value : pair.key
+          const valNode = isScalar(pair.value) ? pair.value.value : pair.value
+          if (typeof keyVal === 'string' && keyVal.includes('@dsh-ray/') && isLocalSourceSpec(valNode)) {
+            return true
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return false
+}
+
+async function collectProfileLocalEnhancedNames(profileDir: string): Promise<string[]> {
+  const pkgPath = join(profileDir, 'package.json')
+  try {
+    const meta = await lstat(pkgPath)
+    if (!meta.isFile() || meta.isSymbolicLink()) return []
+    const parsed = asObject(JSON.parse(await readFile(pkgPath, 'utf8')))
+    if (!parsed) return []
+    const names = new Set<string>()
+    for (const sectionName of ['dependencies', 'optionalDependencies', 'devDependencies'] as const) {
+      const section = asObject(parsed[sectionName])
+      if (!section) continue
+      for (const [depName, depSpec] of Object.entries(section)) {
+        if (depName.startsWith('@dsh-ray/') && isLocalSourceSpec(depSpec)) {
+          names.add(depName)
+        }
+      }
+    }
+    return [...names].sort()
+  } catch {
+    return []
+  }
+}
+
 async function writeTextAtomically(targetPath: string, content: string, mode: number): Promise<void> {
   const tempPath = `${targetPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
   try {
@@ -672,6 +800,7 @@ async function updatePnpmProfilePackageJson(
   profile: string,
   targetVersion: string,
   npmPlugins: readonly string[],
+  toNpm = false,
 ): Promise<void> {
   const pkgPath = join(profileDir, 'package.json')
   const pkgStat = await lstat(pkgPath)
@@ -697,7 +826,8 @@ async function updatePnpmProfilePackageJson(
     for (const [depName, depSpec] of Object.entries(section)) {
       if (!depName.startsWith('@dsh-ray/')) continue
       hasAnyEnhanced = true
-      if (!isNonRegistrySpec(depSpec) && section[depName] !== targetVersion) {
+      const rewritable = !isNonRegistrySpec(depSpec) || (toNpm && isLocalSourceSpec(depSpec))
+      if (rewritable && section[depName] !== targetVersion) {
         section[depName] = targetVersion
         changed = true
       }
@@ -803,6 +933,7 @@ async function updatePnpmWorkspaceOverrides(
   profile: string,
   targetVersion: string,
   npmPlugins: readonly string[] = [],
+  toNpm = false,
 ): Promise<void> {
   const wsPath = join(profileDir, 'pnpm-workspace.yaml')
   let wsStat
@@ -825,15 +956,31 @@ async function updatePnpmWorkspaceOverrides(
   let changed = false
   const overrides = doc.get('overrides', true)
   if (isMap(overrides)) {
-    for (const pair of overrides.items) {
+    for (let idx = overrides.items.length - 1; idx >= 0; idx--) {
+      const pair = overrides.items[idx]!
       const keyVal = isScalar(pair.key) ? pair.key.value : pair.key
-      if (typeof keyVal !== 'string' || !keyVal.startsWith('@dsh-ray/') || keyVal.includes('>')) continue
+      if (typeof keyVal !== 'string' || !keyVal.includes('@dsh-ray/')) continue
       if (!isScalar(pair.value) || typeof pair.value.value !== 'string') continue
+      if (toNpm && isLocalSourceSpec(pair.value.value)) {
+        if (keyVal.includes('>') || !keyVal.startsWith('@dsh-ray/')) {
+          overrides.items.splice(idx, 1)
+          changed = true
+        } else if (pair.value.value !== targetVersion) {
+          pair.value.value = targetVersion
+          changed = true
+        }
+        continue
+      }
+      if (!keyVal.startsWith('@dsh-ray/') || keyVal.includes('>')) continue
       if (isNonRegistrySpec(pair.value.value)) continue
       if (pair.value.value !== targetVersion) {
         pair.value.value = targetVersion
         changed = true
       }
+    }
+    if (toNpm && overrides.items.length === 0) {
+      doc.delete('overrides')
+      changed = true
     }
   }
 
@@ -911,46 +1058,73 @@ async function updatePnpmWorkspaceOverrides(
   }
 }
 
-async function checkRegularFileAccess(filePath: string, modeMask: number): Promise<boolean> {
-  try {
-    await access(filePath, modeMask)
-    return (await stat(filePath)).isFile()
-  } catch {
-    return false
+async function resolveDesktopAppPnpmScript(
+  env: NodeJS.ProcessEnv,
+  osHome: string,
+  platform: NodeJS.Platform,
+): Promise<string | undefined> {
+  if (platform !== 'darwin') return undefined
+  const candidates: string[] = []
+  const desktopExec = env.DSH_DESKTOP_NODE_EXECUTABLE?.trim()
+  if (desktopExec) {
+    const marker = `.app${sep}Contents${sep}`
+    const markerIdx = desktopExec.indexOf(marker)
+    if (markerIdx !== -1) {
+      const contentsDir = desktopExec.slice(0, markerIdx + `.app${sep}Contents`.length)
+      candidates.push(join(contentsDir, DSH_APP_PNPM_REL_FROM_CONTENTS))
+    }
   }
+  candidates.push(
+    DSH_APP_PNPM_SCRIPT,
+    join(osHome, 'Applications', 'DeepSeek Harness.app', 'Contents', DSH_APP_PNPM_REL_FROM_CONTENTS),
+  )
+  for (const candidate of candidates) {
+    if (await checkRegularFileAccess(candidate, constants.R_OK)) {
+      return candidate
+    }
+  }
+  return undefined
 }
 
 async function resolvePnpmCommand(
   env: NodeJS.ProcessEnv,
   osHome: string,
   platform: NodeJS.Platform,
-): Promise<{ command: string; prefixArgs: readonly string[] }> {
-  const searchDirs = [
-    ...(env.PATH ?? '').split(delimiter).filter(Boolean),
-    join(osHome, '.local', 'bin'),
-    join(osHome, '.npm-global', 'bin'),
-    join(osHome, 'Library', 'pnpm'),
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
-  ]
-  const seen = new Set<string>()
-  for (const dir of searchDirs) {
-    if (seen.has(dir)) continue
-    seen.add(dir)
+): Promise<{
+  command: string
+  prefixArgs: readonly string[]
+  envOverrides: NodeJS.ProcessEnv
+  binDirs: readonly string[]
+}> {
+  const pathDirs = (env.PATH ?? '').split(delimiter).filter(Boolean)
+  const extraDirs = platform === 'darwin' ? [join(osHome, 'Library', 'pnpm')] : []
+  const fallbackBin = await resolveFallbackBinary('pnpm', env, osHome, platform, extraDirs)
+  if (fallbackBin.binDir) {
+    return { command: fallbackBin.command, prefixArgs: [], envOverrides: {}, binDirs: [fallbackBin.binDir] }
+  }
+  for (const dir of pathDirs) {
     const candidate = join(dir, 'pnpm')
     if (await checkRegularFileAccess(candidate, constants.X_OK)) {
-      return { command: candidate, prefixArgs: [] }
+      return { command: candidate, prefixArgs: [], envOverrides: {}, binDirs: [dir] }
     }
   }
-  if (platform === 'darwin' && await checkRegularFileAccess(DSH_APP_PNPM_SCRIPT, constants.R_OK)) {
-    return { command: process.execPath, prefixArgs: [DSH_APP_PNPM_SCRIPT] }
+  const bundledScript = await resolveDesktopAppPnpmScript(env, osHome, platform)
+  if (bundledScript !== undefined) {
+    const nodeRt = await resolveNodeRuntime(env, osHome, platform)
+    return {
+      command: nodeRt.command,
+      prefixArgs: [bundledScript],
+      envOverrides: nodeRt.envOverrides,
+      binDirs: nodeRt.binDir ? [nodeRt.binDir] : [],
+    }
   }
-  return { command: 'pnpm', prefixArgs: [] }
+  return { command: 'pnpm', prefixArgs: [], envOverrides: {}, binDirs: [] }
 }
 
 /**
  * Upgrade a profile's `@dsh-ray/*` packages using pnpm (updating `package.json` and
- * `pnpm-workspace.yaml` overrides while preserving local protocol specs) or npm with `--legacy-peer-deps`.
+ * `pnpm-workspace.yaml` overrides while optionally migrating local specs when `toNpm` is true)
+ * or npm with `--legacy-peer-deps`.
  */
 export async function defaultUpgradeProfilePackages(input: {
   dshHome: string
@@ -959,31 +1133,53 @@ export async function defaultUpgradeProfilePackages(input: {
   registryUrl: string
   npmPlugins: readonly string[]
   runner: CommandRunner
+  detailedRunner?: DetailedCommandRunner
+  toNpm?: boolean
   platform?: NodeJS.Platform
   osHome?: string
   env?: NodeJS.ProcessEnv
 }): Promise<void> {
-  if (input.npmPlugins.length === 0) return
+  const toNpm = Boolean(input.toNpm)
+  if (input.npmPlugins.length === 0 && !toNpm) return
   const profileDir = join(profilesDirectory(input.dshHome), input.profile)
   const isPnpmProfile = existsSync(join(profileDir, 'pnpm-lock.yaml'))
     || existsSync(join(profileDir, 'pnpm-workspace.yaml'))
     || existsSync(join(profileDir, 'node_modules', '.pnpm'))
+  const env = input.env ?? process.env
+  const osHome = input.osHome ?? env.HOME ?? homedir()
+  const platform = input.platform ?? process.platform
+
+  const runPmCommand = async (
+    command: string,
+    args: readonly string[],
+    extraBinDirs: readonly string[],
+    envOverrides: NodeJS.ProcessEnv,
+  ) => {
+    const basePmEnv = await buildPackageManagerEnv(env, osHome, platform, extraBinDirs)
+    const pmEnv: NodeJS.ProcessEnv = { ...basePmEnv, ...envOverrides }
+    if (input.detailedRunner) return input.detailedRunner(command, args, { env: pmEnv })
+    if (input.runner === defaultRunner) return defaultDetailedRunner(command, args, { env: pmEnv })
+    return input.runner(command, args)
+  }
 
   if (isPnpmProfile) {
-    await updatePnpmProfilePackageJson(profileDir, input.profile, input.targetVersion, input.npmPlugins)
-    await updatePnpmWorkspaceOverrides(profileDir, input.profile, input.targetVersion, input.npmPlugins)
-    const env = input.env ?? process.env
-    const osHome = input.osHome ?? env.HOME ?? homedir()
-    const platform = input.platform ?? process.platform
+    await updatePnpmProfilePackageJson(profileDir, input.profile, input.targetVersion, input.npmPlugins, toNpm)
+    await updatePnpmWorkspaceOverrides(profileDir, input.profile, input.targetVersion, input.npmPlugins, toNpm)
     const pnpmCmd = await resolvePnpmCommand(env, osHome, platform)
-    const res = input.runner(pnpmCmd.command, [
-      ...pnpmCmd.prefixArgs,
-      'install',
-      '--dir', profileDir,
-      '--no-frozen-lockfile',
-      '--ignore-scripts',
-      '--registry', input.registryUrl,
-    ])
+    const res = await runPmCommand(
+      pnpmCmd.command,
+      [
+        ...pnpmCmd.prefixArgs,
+        'install',
+        '--dir', profileDir,
+        '--no-frozen-lockfile',
+        '--ignore-scripts',
+        '--config.confirmModulesPurge=false',
+        '--registry', input.registryUrl,
+      ],
+      pnpmCmd.binDirs,
+      pnpmCmd.envOverrides,
+    )
     if (res.status !== 0) {
       const detail = res.stderr.trim() || res.stdout.trim()
       throw new Error(`profile ${input.profile} pnpm 升级失败（退出码 ${res.status}）：${detail}`)
@@ -991,17 +1187,28 @@ export async function defaultUpgradeProfilePackages(input: {
     return
   }
 
-  const specs = input.npmPlugins.map(pkg => `${pkg}@${input.targetVersion}`)
-  const res = input.runner('npm', [
-    'install',
-    '--prefix', profileDir,
-    '--legacy-peer-deps',
-    '--no-audit',
-    '--no-fund',
-    '--ignore-scripts',
-    '--registry', input.registryUrl,
-    ...specs,
-  ])
+  const pluginSet = new Set(input.npmPlugins)
+  if (toNpm) {
+    for (const name of await collectProfileLocalEnhancedNames(profileDir)) pluginSet.add(name)
+  }
+  const specs = [...pluginSet].sort().map(pkg => `${pkg}@${input.targetVersion}`)
+  if (specs.length === 0) return
+  const npmCmd = await resolveFallbackBinary('npm', env, osHome, platform)
+  const res = await runPmCommand(
+    npmCmd.command,
+    [
+      'install',
+      '--prefix', profileDir,
+      '--legacy-peer-deps',
+      '--no-audit',
+      '--no-fund',
+      '--ignore-scripts',
+      '--registry', input.registryUrl,
+      ...specs,
+    ],
+    npmCmd.binDir ? [npmCmd.binDir] : [],
+    {},
+  )
   if (res.status !== 0) {
     throw new Error(`profile ${input.profile} npm 升级失败（退出码 ${res.status}）：${res.stderr.trim() || res.stdout.trim()}`)
   }
@@ -1024,6 +1231,7 @@ export async function defaultVerifyHealth(input: {
   platform: NodeJS.Platform
   osHome: string
   env: NodeJS.ProcessEnv
+  requireAutonomyReadinessProfiles?: readonly string[]
 }): Promise<UpgradeHealthResult> {
   const report = await collectLiveDoctorReport({
     dshHome: input.dshHome,
@@ -1037,11 +1245,12 @@ export async function defaultVerifyHealth(input: {
     const fails = report.checks.filter(c => c.status === 'fail').map(c => `${c.id}: ${c.summary}`).join('；')
     return { ok: false, error: fails || 'dsh-ray doctor 检查未通过', report }
   }
+  const enforcedProfiles = new Set(input.requireAutonomyReadinessProfiles ?? [])
   for (const prof of report.profiles) {
     if (!prof.configDumpOk) {
       return { ok: false, error: `profile ${prof.profile} 配置转储失败：${prof.configDumpError ?? 'unknown'}`, report }
     }
-    if (prof.autonomyReadiness?.checked && !prof.autonomyReadiness.ok) {
+    if (enforcedProfiles.has(prof.profile) && prof.autonomyReadiness?.checked && !prof.autonomyReadiness.ok) {
       return { ok: false, error: `profile ${prof.profile} autonomy readiness 未就绪：${prof.autonomyReadiness.summary}`, report }
     }
   }
@@ -1054,6 +1263,23 @@ interface ProfileBackupRecord {
   readonly backupDir: string
   readonly files: readonly string[]
   readonly hasEnhancedModules: boolean
+  readonly hasModulesYaml: boolean
+  readonly pnpmDirExisted: boolean
+  readonly backedPnpmPackages: readonly string[]
+}
+
+interface CoordinatorMarkerBackup {
+  readonly src: string
+  readonly dst: string
+  readonly hadFile: boolean
+}
+
+interface CohortBackupRecord {
+  readonly name: string
+  readonly src: string
+  readonly dst: string
+  readonly dirMode: number
+  readonly receiptMode?: number
 }
 
 interface SupervisorBackupRecord {
@@ -1378,9 +1604,14 @@ async function createUpgradeBackup(
   dshHome: string,
   profiles: readonly string[],
   supervisorTargets: readonly RestartSupervisorTarget[] = [],
+  options: { coordinatorMarkerPath?: string; removeCohortNames?: readonly string[] } = {},
 ): Promise<{
   backupDir: string
   hadHostBinding: boolean
+  coordinatorMarker?: CoordinatorMarkerBackup
+  cohortsRootDir: string
+  cohortsRootMode?: number
+  cohortBackups: CohortBackupRecord[]
   profileBackups: ProfileBackupRecord[]
   ledgerBackups: LedgerBackupRecord[]
   supervisorBackups: SupervisorBackupRecord[]
@@ -1395,6 +1626,43 @@ async function createUpgradeBackup(
   const hostBindingDst = join(backupDir, '.dsh-ray-host.json')
   const hadHostBinding = await copyIfRegularFile(hostBindingSrc, hostBindingDst)
   if (hadHostBinding) backupFiles.push(hostBindingSrc)
+
+  let coordinatorMarker: CoordinatorMarkerBackup | undefined
+  if (options.coordinatorMarkerPath) {
+    const markerDst = join(backupDir, '.rsi-coordinator.json')
+    const hadFile = await copyIfRegularFile(options.coordinatorMarkerPath, markerDst)
+    if (hadFile) backupFiles.push(options.coordinatorMarkerPath)
+    coordinatorMarker = { src: options.coordinatorMarkerPath, dst: markerDst, hadFile }
+  }
+
+  const cohortsRootDir = join(dshHome, 'rsi-local-cohorts')
+  let cohortsRootMode: number | undefined
+  const cohortBackups: CohortBackupRecord[] = []
+  if (options.removeCohortNames && options.removeCohortNames.length > 0) {
+    const rootMeta = await lstat(cohortsRootDir).catch(() => undefined)
+    if (rootMeta && rootMeta.isDirectory() && !rootMeta.isSymbolicLink()) {
+      cohortsRootMode = rootMeta.mode & 0o777
+      await mkdir(join(backupDir, 'rsi-local-cohorts'), { recursive: true, mode: 0o700 })
+      for (const name of options.removeCohortNames) {
+        const src = join(cohortsRootDir, name)
+        const meta = await lstat(src).catch(() => undefined)
+        if (!meta || !meta.isDirectory() || meta.isSymbolicLink()) continue
+        const dst = join(backupDir, 'rsi-local-cohorts', name)
+        await cp(src, dst, { recursive: true, force: true, verbatimSymlinks: true })
+        const receiptMeta = await lstat(join(src, 'receipt.json')).catch(() => undefined)
+        const receiptMode = receiptMeta && receiptMeta.isFile() && !receiptMeta.isSymbolicLink()
+          ? receiptMeta.mode & 0o777
+          : undefined
+        cohortBackups.push({
+          name,
+          src,
+          dst,
+          dirMode: meta.mode & 0o777,
+          ...(receiptMode !== undefined ? { receiptMode } : {}),
+        })
+      }
+    }
+  }
 
   const ledgerBackupDir = join(backupDir, 'ledgers')
   let createdLedgerBackupDir = false
@@ -1431,7 +1699,47 @@ async function createUpgradeBackup(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
-    profileBackups.push({ profile, profileDir, backupDir: profBackupDir, files: backedFiles, hasEnhancedModules })
+
+    const modulesYamlSrc = join(profileDir, 'node_modules', '.modules.yaml')
+    const modulesYamlDst = join(profBackupDir, '.modules.yaml')
+    const hasModulesYaml = await copyIfRegularFile(modulesYamlSrc, modulesYamlDst)
+    if (hasModulesYaml) backupFiles.push(modulesYamlSrc)
+
+    const pnpmDir = join(profileDir, 'node_modules', '.pnpm')
+    let pnpmDirExisted = false
+    const backedPnpmPackages: string[] = []
+    const pnpmMeta = await lstat(pnpmDir).catch(() => undefined)
+    if (pnpmMeta && pnpmMeta.isDirectory() && !pnpmMeta.isSymbolicLink()) {
+      pnpmDirExisted = true
+      const pnpmEntries = await readdir(pnpmDir).catch(() => [] as string[])
+      const enhancedStoreEntries = pnpmEntries.filter(entry => entry.startsWith('@dsh-ray+'))
+      if (enhancedStoreEntries.length > 0) {
+        const storeBackupDir = join(profBackupDir, '.pnpm-enhanced')
+        await mkdir(storeBackupDir, { recursive: true, mode: 0o700 })
+        for (const entry of enhancedStoreEntries) {
+          const entrySrc = join(pnpmDir, entry)
+          const entryMeta = await lstat(entrySrc).catch(() => undefined)
+          if (!entryMeta || !entryMeta.isDirectory() || entryMeta.isSymbolicLink()) continue
+          await cp(entrySrc, join(storeBackupDir, entry), {
+            recursive: true,
+            force: true,
+            verbatimSymlinks: true,
+          })
+          backedPnpmPackages.push(entry)
+        }
+      }
+    }
+
+    profileBackups.push({
+      profile,
+      profileDir,
+      backupDir: profBackupDir,
+      files: backedFiles,
+      hasEnhancedModules,
+      hasModulesYaml,
+      pnpmDirExisted,
+      backedPnpmPackages,
+    })
 
     let configuredDbPaths: string[] = []
     const patch = await readProfilePatchText(dshHome, profile)
@@ -1488,7 +1796,18 @@ async function createUpgradeBackup(
     }
   }
 
-  return { backupDir, hadHostBinding, profileBackups, ledgerBackups, supervisorBackups, backupFiles }
+  return {
+    backupDir,
+    hadHostBinding,
+    ...(coordinatorMarker ? { coordinatorMarker } : {}),
+    cohortsRootDir,
+    ...(cohortsRootMode !== undefined ? { cohortsRootMode } : {}),
+    cohortBackups,
+    profileBackups,
+    ledgerBackups,
+    supervisorBackups,
+    backupFiles,
+  }
 }
 
 async function restoreUpgradeBackup(
@@ -1506,6 +1825,29 @@ async function restoreUpgradeBackup(
       await rm(hostBindingDst, { force: true })
     }
 
+    if (backup.coordinatorMarker) {
+      if (backup.coordinatorMarker.hadFile) {
+        await restoreRegularFileFromBackup(backup.coordinatorMarker.dst, backup.coordinatorMarker.src)
+      } else {
+        await rm(backup.coordinatorMarker.src, { force: true })
+      }
+    }
+
+    if (backup.cohortBackups.length > 0) {
+      const rootMode = backup.cohortsRootMode ?? 0o700
+      await mkdir(backup.cohortsRootDir, { recursive: true, mode: rootMode })
+      await chmod(backup.cohortsRootDir, rootMode)
+      for (const item of backup.cohortBackups) {
+        await rm(item.src, { recursive: true, force: true })
+        await cp(item.dst, item.src, { recursive: true, force: true, verbatimSymlinks: true })
+        await chmod(item.src, item.dirMode)
+        if (item.receiptMode !== undefined) {
+          const receiptPath = join(item.src, 'receipt.json')
+          if (existsSync(receiptPath)) await chmod(receiptPath, item.receiptMode)
+        }
+      }
+    }
+
     for (const item of backup.profileBackups) {
       for (const fileName of PROFILE_BACKUP_FILES) {
         const src = join(item.backupDir, fileName)
@@ -1514,6 +1856,30 @@ async function restoreUpgradeBackup(
           await restoreRegularFileFromBackup(src, dst)
         } else {
           await rm(dst, { force: true })
+        }
+      }
+      const modulesYamlDst = join(item.profileDir, 'node_modules', '.modules.yaml')
+      if (item.hasModulesYaml) {
+        await mkdir(join(item.profileDir, 'node_modules'), { recursive: true })
+        await restoreRegularFileFromBackup(join(item.backupDir, '.modules.yaml'), modulesYamlDst)
+      } else if (item.pnpmDirExisted) {
+        await rm(modulesYamlDst, { force: true })
+      }
+      if (item.pnpmDirExisted) {
+        const pnpmDir = join(item.profileDir, 'node_modules', '.pnpm')
+        await mkdir(pnpmDir, { recursive: true })
+        const currentEntries = await readdir(pnpmDir).catch(() => [] as string[])
+        for (const entry of currentEntries) {
+          if (entry.startsWith('@dsh-ray+')) {
+            await rm(join(pnpmDir, entry), { recursive: true, force: true })
+          }
+        }
+        for (const entry of item.backedPnpmPackages) {
+          await cp(join(item.backupDir, '.pnpm-enhanced', entry), join(pnpmDir, entry), {
+            recursive: true,
+            force: true,
+            verbatimSymlinks: true,
+          })
         }
       }
       const enhancedDst = join(item.profileDir, 'node_modules', '@dsh-ray')
@@ -1608,6 +1974,7 @@ export async function runUpgrade(
   const registryUrl = validateRegistryUrl(options.registryUrl ?? env.npm_config_registry ?? DEFAULT_REGISTRY_URL)
 
   // 1. Detect frozen Linux systemd owner mode cleanly (Linux-only; avoid POSIX uid/mode checks on Windows/macOS).
+  const toNpm = Boolean(options.toNpm)
   let frozenOwner: FrozenOwner | undefined
   let frozenError: string | undefined
   if (platform === 'linux' && homeUsable) {
@@ -1619,22 +1986,34 @@ export async function runUpgrade(
     }
   }
 
+  const coordinatorPair = homeUsable ? await readRsiCoordinatorPair(canonicalHome) : undefined
   const discoveredProfiles = homeUsable ? await listProfiles(canonicalHome) : []
   let targetProfiles = discoveredProfiles
   if (options.profile !== undefined && homeUsable) {
     if (!discoveredProfiles.includes(options.profile)) {
       blockedReasons.push(`指定 profile 不存在：${options.profile}`)
       targetProfiles = []
+    } else if (
+      coordinatorPair
+      && (!frozenOwner || toNpm)
+      && (options.profile === coordinatorPair.targetProfile || options.profile === coordinatorPair.coordinatorProfile)
+      && discoveredProfiles.includes(coordinatorPair.targetProfile)
+      && discoveredProfiles.includes(coordinatorPair.coordinatorProfile)
+    ) {
+      targetProfiles = [coordinatorPair.targetProfile, coordinatorPair.coordinatorProfile]
     } else {
       targetProfiles = [options.profile]
     }
   }
   if (frozenOwner && options.profile !== undefined && options.profile !== frozenOwner.profile) {
-    blockedReasons.push(`frozen systemd profile 固定为 ${frozenOwner.profile}，不可选择 ${options.profile}`)
+    const allowedCoordinator = toNpm && coordinatorPair !== undefined && options.profile === coordinatorPair.coordinatorProfile
+    if (!allowedCoordinator) {
+      blockedReasons.push(`frozen systemd profile 固定为 ${frozenOwner.profile}，不可选择 ${options.profile}`)
+    }
   }
 
   let mode: UpgradeMode = 'standard-local'
-  if (frozenOwner) {
+  if (frozenOwner && !toNpm) {
     mode = 'frozen-linux-systemd'
   } else if (platform === 'darwin' && homeUsable) {
     for (const profile of targetProfiles) {
@@ -1755,6 +2134,37 @@ export async function runUpgrade(
   const hostUpgradeAvailable = boundHostStatus === 'ready'
     ? semverIsNewer(targetDshVersion, boundHostVersion)
     : false
+  const profileLocalSpecs = new Map<string, boolean>()
+  if (toNpm && homeUsable) {
+    for (const profile of targetProfiles) {
+      profileLocalSpecs.set(profile, await inspectProfileHasLocalEnhancedSpecs(canonicalHome, profile))
+    }
+  }
+  const cohortsToClean: string[] = []
+  if (toNpm && homeUsable && mode !== 'frozen-linux-systemd') {
+    const cohortsRoot = join(canonicalHome, 'rsi-local-cohorts')
+    const cohortEntries = await readdir(cohortsRoot).catch(() => [] as string[])
+    const pairTargeted = coordinatorPair !== undefined
+      && (targetProfiles.includes(coordinatorPair.targetProfile) || targetProfiles.includes(coordinatorPair.coordinatorProfile))
+    for (const entry of cohortEntries.sort()) {
+      const matchesTarget = targetProfiles.includes(entry)
+        || (pairTargeted && (entry === coordinatorPair!.targetProfile || /^host-migration-[a-f0-9]{20}$/u.test(entry)))
+      if (!matchesTarget) continue
+      const meta = await lstat(join(cohortsRoot, entry)).catch(() => undefined)
+      if (meta && meta.isDirectory() && !meta.isSymbolicLink()) cohortsToClean.push(entry)
+    }
+  }
+  const coordinatorPairTargeted = Boolean(
+    coordinatorPair
+    && mode !== 'frozen-linux-systemd'
+    && (targetProfiles.includes(coordinatorPair.targetProfile) || targetProfiles.includes(coordinatorPair.coordinatorProfile)),
+  )
+  const coordinatorNeedsSync = Boolean(
+    coordinatorPairTargeted
+    && coordinatorPair
+    && targetEnhancedVersion
+    && ((toNpm && coordinatorPair.sourceRepository !== null) || coordinatorPair.version !== targetEnhancedVersion),
+  )
 
   const readinessOk = blockedReasons.length === 0 && bindingOk && ledgersOk
 
@@ -1769,6 +2179,13 @@ export async function runUpgrade(
 
   const backupFiles: string[] = []
   if (boundHostStatus === 'ready') backupFiles.push(join(canonicalHome, '.dsh-ray-host.json'))
+  if (coordinatorPair && (coordinatorNeedsSync || cohortsToClean.length > 0)) {
+    backupFiles.push(coordinatorPair.markerPath)
+  }
+  for (const cohortName of cohortsToClean) {
+    const receiptCandidate = join(canonicalHome, 'rsi-local-cohorts', cohortName, 'receipt.json')
+    if (existsSync(receiptCandidate)) backupFiles.push(receiptCandidate)
+  }
   for (const profile of targetProfiles) {
     for (const fileName of PROFILE_BACKUP_FILES) {
       const candidate = join(profilesDirectory(canonicalHome), profile, fileName)
@@ -1790,9 +2207,17 @@ export async function runUpgrade(
     }
     for (const prof of profileSummaries) {
       const npmCount = Object.keys(prof.installedVersions).length
-      if (npmCount > 0 && targetEnhancedVersion && (enhancedUpgradeAvailable || options.targetVersion)) {
+      const hasLocalSpecs = profileLocalSpecs.get(prof.profile) === true
+      if (hasLocalSpecs && targetEnhancedVersion) {
+        steps.push(`切换并升级 profile ${prof.profile} @dsh-ray/* 为 npm（${prof.minVersion ?? installedEnhancedVersion} -> ${targetEnhancedVersion}）`)
+      } else if (npmCount > 0 && targetEnhancedVersion && (enhancedUpgradeAvailable || options.targetVersion)) {
         steps.push(`升级 profile ${prof.profile} @dsh-ray/*（${prof.minVersion ?? installedEnhancedVersion} -> ${targetEnhancedVersion}）`)
       }
+    }
+    if (coordinatorNeedsSync || cohortsToClean.length > 0) {
+      steps.push(toNpm
+        ? `同步 .rsi-coordinator-*.json 为 npm 模式并清理 rsi-local-cohorts（保留 rsi-authorities 与凭据）`
+        : `同步更新 .rsi-coordinator-*.json 版本为 ${targetEnhancedVersion}`)
     }
     if (supervisorTargets.length > 0) {
       steps.push(`同步刷新 ${supervisorTargets.map(s => s.serviceName).join(', ')} 配置与 ExecStart`)
@@ -1821,7 +2246,7 @@ export async function runUpgrade(
       cliPackageVersion: CLI_VERSION,
       installedEnhancedVersion,
       ...(targetEnhancedVersion ? { targetEnhancedVersion } : {}),
-      upgradeAvailable: enhancedUpgradeAvailable || hostUpgradeAvailable,
+      upgradeAvailable: enhancedUpgradeAvailable || hostUpgradeAvailable || [...profileLocalSpecs.values()].some(Boolean),
       boundHost: {
         status: boundHostStatus,
         ...(boundHostVersion ? { installedVersion: boundHostVersion } : {}),
@@ -1964,12 +2389,15 @@ export async function runUpgrade(
     && Boolean(targetDshVersion && (hostUpgradeAvailable || options.dshVersion))
     && targetDshVersion !== boundHostVersion
   const profilesNeedingWork = profileSummaries.filter((summary) => {
-    const hasNpm = Object.keys(summary.installedVersions).length > 0 && summary.installKinds.includes('npm')
+    const hasLocalSpecs = profileLocalSpecs.get(summary.profile) === true
+    const hasNpm = (Object.keys(summary.installedVersions).length > 0 && summary.installKinds.includes('npm')) || hasLocalSpecs
     if (!hasNpm || !targetEnhancedVersion) return false
-    return semverIsNewer(targetEnhancedVersion, summary.minVersion) || (options.targetVersion !== undefined && targetEnhancedVersion !== summary.minVersion)
+    return hasLocalSpecs
+      || semverIsNewer(targetEnhancedVersion, summary.minVersion)
+      || (options.targetVersion !== undefined && targetEnhancedVersion !== summary.minVersion)
   })
 
-  if (!hostNeedsWork && profilesNeedingWork.length === 0) {
+  if (!hostNeedsWork && profilesNeedingWork.length === 0 && !coordinatorNeedsSync && cohortsToClean.length === 0) {
     const health = await verifyHealthFn({
       dshHome: canonicalHome,
       ...(options.profile ? { profile: options.profile } : {}),
@@ -2091,7 +2519,12 @@ export async function runUpgrade(
     }
 
     // 2. Create transactional backup before any mutation.
-    const backup = await createUpgradeBackup(canonicalHome, targetProfiles, supervisorTargets)
+    const backup = await createUpgradeBackup(canonicalHome, targetProfiles, supervisorTargets, {
+      ...(coordinatorPair && (coordinatorNeedsSync || cohortsToClean.length > 0 || profilesNeedingWork.some(p => p.profile === coordinatorPair.targetProfile || p.profile === coordinatorPair.coordinatorProfile))
+        ? { coordinatorMarkerPath: coordinatorPair.markerPath }
+        : {}),
+      ...(cohortsToClean.length > 0 ? { removeCohortNames: cohortsToClean } : {}),
+    })
     let servicesRestarted = false
 
     try {
@@ -2100,8 +2533,14 @@ export async function runUpgrade(
       }
       for (const prof of profilesNeedingWork) {
         const plugins = await listProfilePlugins(canonicalHome, prof.profile)
-        const npmPlugins = plugins.filter(p => p.kind === 'npm').map(p => p.name)
-        if (npmPlugins.length > 0 && targetEnhancedVersion) {
+        const hasLocalSpecs = profileLocalSpecs.get(prof.profile) === true
+        const npmPlugins = toNpm
+          ? [...new Set([
+              ...plugins.map(p => p.name),
+              ...(await collectProfileLocalEnhancedNames(join(profilesDirectory(canonicalHome), prof.profile))),
+            ])].sort()
+          : plugins.filter(p => p.kind === 'npm').map(p => p.name)
+        if ((npmPlugins.length > 0 || hasLocalSpecs) && targetEnhancedVersion) {
           await upgradeProfileFn({
             dshHome: canonicalHome,
             profile: prof.profile,
@@ -2109,10 +2548,42 @@ export async function runUpgrade(
             registryUrl,
             npmPlugins,
             runner,
+            ...(deps.detailedRunner ? { detailedRunner: deps.detailedRunner } : {}),
+            ...(toNpm ? { toNpm: true } : {}),
             platform,
             osHome,
             env,
           })
+        }
+      }
+
+      if (coordinatorPair && targetEnhancedVersion && (
+        coordinatorNeedsSync
+        || profilesNeedingWork.some(p => p.profile === coordinatorPair.targetProfile || p.profile === coordinatorPair.coordinatorProfile)
+      )) {
+        const nextSourceRepository = toNpm ? null : coordinatorPair.sourceRepository
+        const updatedReceipt = {
+          schemaVersion: 1,
+          targetProfile: coordinatorPair.targetProfile,
+          coordinatorProfile: coordinatorPair.coordinatorProfile,
+          version: targetEnhancedVersion,
+          sourceRepository: nextSourceRepository,
+        }
+        await writeTextAtomically(
+          coordinatorPair.markerPath,
+          `${JSON.stringify(updatedReceipt, null, 2)}\n`,
+          coordinatorPair.mode || 0o600,
+        )
+      }
+
+      if (toNpm && cohortsToClean.length > 0) {
+        const cohortsRoot = join(canonicalHome, 'rsi-local-cohorts')
+        for (const cohortName of cohortsToClean) {
+          await rm(join(cohortsRoot, cohortName), { recursive: true, force: true })
+        }
+        const remaining = await readdir(cohortsRoot).catch(() => ['__keep__'])
+        if (remaining.length === 0) {
+          await rm(cohortsRoot, { recursive: true, force: true })
         }
       }
 

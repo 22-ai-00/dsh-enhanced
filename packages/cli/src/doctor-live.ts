@@ -15,6 +15,7 @@ import {
 } from './diagnose.ts'
 import { inspectBoundHostRuntime, type BoundHostInspection } from './install-host.ts'
 import { listProfilePlugins, profileLogPaths, profilesDirectory } from './paths.ts'
+import { isNodeExecutablePath, resolveNodeRuntime } from './pm-env.ts'
 import { defaultDetailedRunner, type DetailedCommandRunner } from './run.ts'
 import { scanCredentialLocators } from './secrets.ts'
 import { tailLogFile } from './services.ts'
@@ -362,17 +363,27 @@ function extractPort(url: string | undefined, rows: readonly DumpConfigRow[]): n
   return undefined
 }
 
-async function resolveAutonomyDoctorPath(dshHome: string, profile: string): Promise<{ command: string; prefixArgs: string[] } | undefined> {
+async function resolveAutonomyDoctorPath(
+  dshHome: string,
+  profile: string,
+  env: NodeJS.ProcessEnv,
+  osHome: string,
+  platform: NodeJS.Platform,
+): Promise<{ command: string; prefixArgs: string[]; envOverrides: NodeJS.ProcessEnv } | undefined> {
   const profileDir = join(profilesDirectory(dshHome), profile)
   const binScript = join(profileDir, 'node_modules', '@dsh-ray', 'assistant-web-owner', 'bin', 'dsh-autonomy-doctor.js')
   try {
     await access(binScript, constants.R_OK)
-    return { command: process.execPath, prefixArgs: [binScript] }
+    if (isNodeExecutablePath(process.execPath)) {
+      return { command: process.execPath, prefixArgs: [binScript], envOverrides: {} }
+    }
+    const nodeRt = await resolveNodeRuntime(env, osHome, platform)
+    return { command: nodeRt.command, prefixArgs: [binScript], envOverrides: nodeRt.envOverrides }
   } catch {
     const symlinkBin = join(profileDir, 'node_modules', '.bin', 'dsh-autonomy-doctor')
     try {
       await access(symlinkBin, constants.X_OK)
-      return { command: symlinkBin, prefixArgs: [] }
+      return { command: symlinkBin, prefixArgs: [], envOverrides: {} }
     } catch {
       return undefined
     }
@@ -624,6 +635,45 @@ async function inspectElectronManagedProfileConfig(
 }
 
 /**
+ * Detect whether a macOS host has the bundled Electron desktop application (`DeepSeek Harness.app`)
+ * or a `desktop` profile manifest, so read-only doctor checks can inspect `desktop` even when
+ * neither `.dsh-ray-host.json` nor a global `dsh` CLI exists.
+ */
+async function hasElectronDesktopRuntime(
+  dshHome: string,
+  targetProfile: string | undefined,
+  statusProfiles: readonly { readonly name: string }[],
+  home: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  fileExists: (path: string) => boolean,
+): Promise<boolean> {
+  if (platform !== 'darwin') return false
+  const desktopNodeExec = env.DSH_DESKTOP_NODE_EXECUTABLE?.trim()
+  if (desktopNodeExec && desktopNodeExec.includes('.app/Contents/') && fileExists(desktopNodeExec)) {
+    return true
+  }
+  const appCandidates = [
+    '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness',
+    '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs',
+    join(home, 'Applications', 'DeepSeek Harness.app', 'Contents', 'MacOS', 'DeepSeek Harness'),
+    join(home, 'Applications', 'DeepSeek Harness.app', 'Contents', 'Resources', 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs'),
+  ]
+  if (appCandidates.some(candidate => fileExists(candidate))) return true
+  const checksDesktop = targetProfile === 'desktop'
+    || (targetProfile === undefined && statusProfiles.some(p => p.name === 'desktop'))
+  if (!checksDesktop) return false
+  const pkg = await readRegularFileText(join(profilesDirectory(dshHome), 'desktop', 'package.json'), 'package.json')
+  if (pkg.status !== 'ok') return false
+  try {
+    const parsed = JSON.parse(pkg.text) as Record<string, unknown>
+    return Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.name === 'dsh-profile-desktop')
+  } catch {
+    return false
+  }
+}
+
+/**
  * Run a comprehensive, strictly read-only live diagnostic pass over bound Host, credentials,
  * `traex`/`agy` CLI availability & auth, profile config dumps, autonomy readiness, ports,
  * OS prerequisites, and recent crash logs.
@@ -645,6 +695,9 @@ export async function collectLiveDoctorReport(options: LiveDoctorOptions): Promi
 
   let dshExecutable = 'dsh'
   let dshEnv: NodeJS.ProcessEnv = { ...env, DSH_HOME: dshHome }
+  const electronDesktopRuntime = boundHost.status === 'missing' && !status.hostVersion
+    ? await hasElectronDesktopRuntime(dshHome, options.profile, status.profiles, options.home, options.platform, env, fileExists)
+    : false
   if (boundHost.status === 'ready' && boundHost.dshPath) {
     dshExecutable = boundHost.dshPath
     dshEnv = {
@@ -659,14 +712,17 @@ export async function collectLiveDoctorReport(options: LiveDoctorOptions): Promi
       summary: `私有 Host 已绑定 ${boundHost.version}：${boundHost.dshPath}`,
     })
   } else if (boundHost.status === 'missing') {
+    const hostOk = Boolean(status.hostVersion) || electronDesktopRuntime
     checks.push({
       id: 'host.bound',
       category: 'host',
-      status: status.hostVersion ? 'ok' : 'fail',
+      status: hostOk ? 'ok' : 'fail',
       summary: status.hostVersion
         ? `未绑定私有 .dsh-ray-host.json；使用全局 dsh (${status.hostVersion})`
-        : '未找到私有 .dsh-ray-host.json，且全局 PATH 中无 dsh 命令',
-      ...(!status.hostVersion ? { advice: '运行 dsh-ray install 或 install-npm.sh 准备受管 Host。' } : {}),
+        : electronDesktopRuntime
+          ? '未绑定私有 .dsh-ray-host.json；检测到桌面端 DeepSeek Harness Electron 运行时'
+          : '未找到私有 .dsh-ray-host.json，且全局 PATH 中无 dsh 命令',
+      ...(!hostOk ? { advice: '运行 dsh-ray install 或 install-npm.sh 准备受管 Host。' } : {}),
     })
   } else {
     checks.push({
@@ -745,7 +801,11 @@ export async function collectLiveDoctorReport(options: LiveDoctorOptions): Promi
     let configDumpOk = dump.status === 0 && dump.stdout.trim().length > 0
     let configDumpError: string | undefined = !configDumpOk ? (dump.stderr.trim() || `退出码 ${dump.status}`) : undefined
     let rows: DumpConfigRow[] = configDumpOk ? parseDumpConfigRows(dump.stdout) : []
-    if (dump.status !== 0 && ELECTRON_MANAGED_PROFILE_RE.test(`${dump.stderr}\n${dump.stdout}`)) {
+    const electronDesktopFallback = dump.status !== 0 && (
+      ELECTRON_MANAGED_PROFILE_RE.test(`${dump.stderr}\n${dump.stdout}`)
+      || (options.platform === 'darwin' && profile === 'desktop' && electronDesktopRuntime)
+    )
+    if (electronDesktopFallback) {
       const fallback = await inspectElectronManagedProfileConfig(dshHome, profile)
       if (fallback.ok) {
         configDumpOk = true
@@ -822,12 +882,12 @@ export async function collectLiveDoctorReport(options: LiveDoctorOptions): Promi
 
     let autonomyReadiness: ProfileDoctorDiagnosis['autonomyReadiness']
     if (hasPlugin('assistant-web-owner') && (hasPlugin('assistant-isolation') || hasPlugin('assistant-policy'))) {
-      const doctorBin = await resolveAutonomyDoctorPath(dshHome, profile)
+      const doctorBin = await resolveAutonomyDoctorPath(dshHome, profile, env, options.home, options.platform)
       if (doctorBin) {
         const autonomy = runner(
           doctorBin.command,
           [...doctorBin.prefixArgs, '--profile', profile, '--dsh-home', dshHome, '--readiness'],
-          { timeoutMs: 20_000, env: dshEnv },
+          { timeoutMs: 20_000, env: { ...dshEnv, ...doctorBin.envOverrides } },
         )
         const lines = autonomy.stdout.trim().split(/\r?\n/u)
         const lastLine = lines[lines.length - 1] ?? ''

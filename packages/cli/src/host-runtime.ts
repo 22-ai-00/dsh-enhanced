@@ -2,7 +2,9 @@ import { randomUUID, createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import { chmod, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { buildPackageManagerEnv, resolveFallbackBinary } from './pm-env.ts'
 
 const PACKAGE = '@deepseek-ai/dsh'
 const REGISTRY = 'https://registry.npmjs.org/'
@@ -91,11 +93,17 @@ async function canonicalRoot(root: string, create: boolean): Promise<string> {
   return root
 }
 
-async function runBounded(command: string, args: readonly string[], options: { cwd: string; signal: AbortSignal; timeoutMs: number; maxOutput?: number }): Promise<ManagedHostCommandResult> {
+async function runBounded(command: string, args: readonly string[], options: { cwd: string; signal: AbortSignal; timeoutMs: number; maxOutput?: number; env?: NodeJS.ProcessEnv }): Promise<ManagedHostCommandResult> {
   const maxOutput = options.maxOutput ?? MAX_OUTPUT
   if (options.signal.aborted) fail('operation cancelled')
   return await new Promise<ManagedHostCommandResult>((resolvePromise, reject) => {
-    const child = spawn(command, [...args], { cwd: options.cwd, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(command, [...args], {
+      cwd: options.cwd,
+      shell: false,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(options.env !== undefined ? { env: options.env } : {}),
+    })
     let stdout = ''
     let stderr = ''
     let ended = false
@@ -136,7 +144,19 @@ async function runBounded(command: string, args: readonly string[], options: { c
 }
 
 async function npmCommand(args: readonly string[], cwd: string, signal: AbortSignal, ports: ManagedHostRuntimePorts): Promise<ManagedHostCommandResult> {
-  const result = await (ports.runNpm ?? ((cmdArgs, opts) => runBounded('npm', cmdArgs, opts)))(args, { cwd, signal, timeoutMs: NPM_TIMEOUT })
+  const result = ports.runNpm
+    ? await ports.runNpm(args, { cwd, signal, timeoutMs: NPM_TIMEOUT })
+    : await (async () => {
+        const osHome = process.env.HOME ?? homedir()
+        const npmCmd = await resolveFallbackBinary('npm', process.env, osHome, process.platform)
+        const pmEnv = await buildPackageManagerEnv(
+          process.env,
+          osHome,
+          process.platform,
+          npmCmd.binDir ? [npmCmd.binDir] : [],
+        )
+        return await runBounded(npmCmd.command, args, { cwd, signal, timeoutMs: NPM_TIMEOUT, env: pmEnv })
+      })()
   if (result.exitCode !== 0) {
     // npm diagnostics can echo auth configuration. Report a stable error code, never raw output.
     const code = /(?:^|\n)npm (?:ERR!|error) code ([A-Z][A-Z0-9_]*)/u.exec(result.stderr)?.[1]

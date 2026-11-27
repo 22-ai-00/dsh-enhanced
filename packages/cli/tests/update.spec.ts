@@ -354,6 +354,58 @@ describe('main：update 命令派发', () => {
     } finally { write.mockRestore(); error.mockRestore(); await rm(root, { recursive: true, force: true }) }
   })
 
+  test('--to-npm 参数校验与 freshExec 保留参数路径', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-ray-update-tonpm-'))
+    const dshHome = join(root, '.dsh')
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const selfUpdate = makeSelfUpdate()
+    const install = makeInstall()
+    try {
+      // Missing --all -> exit 1 before selfUpdate
+      expect(await main(['update', '--to-npm'], { HOME: root, DSH_HOME: dshHome }, {
+        platform: 'linux', selfUpdate, install,
+      })).toBe(1)
+      expect(selfUpdate).not.toHaveBeenCalled()
+
+      // Combined with --local -> exit 1 before selfUpdate
+      expect(await main(['update', '--all', '--local', '/tmp/checkout', '--to-npm'], { HOME: root, DSH_HOME: dshHome }, {
+        platform: 'linux', selfUpdate, install,
+      })).toBe(1)
+      expect(selfUpdate).not.toHaveBeenCalled()
+
+      // selfUpdate upgrading to newer version re-execs fresh bin with `--to-npm` intact
+      const prefix = join(root, 'npm-prefix')
+      const pkgDir = join(prefix, 'lib', 'node_modules', '@dsh-ray', 'cli')
+      await mkdir(join(pkgDir, 'bin'), { recursive: true })
+      const freshBin = join(pkgDir, 'bin', 'dsh-ray.js')
+      await writeFile(freshBin, '#!/usr/bin/env node\n', { mode: 0o755 })
+      await writeFile(join(pkgDir, 'package.json'), JSON.stringify({ name: '@dsh-ray/cli', version: '99.0.0' }))
+      const freshExec = vi.fn(() => 0)
+      const argv = ['update', '--all', '--yes', '--to-npm', '--dsh-home', dshHome]
+      expect(await main(argv, { HOME: root, DSH_HOME: dshHome }, {
+        platform: 'linux',
+        detectFrozenOwner: async () => ({ home: dshHome, profile: 'web', repository: '/repo' }),
+        selfUpdate: async () => ({
+          fromVersion: VERSION,
+          selector: 'latest',
+          installedVersion: '99.0.0',
+          globalPrefix: prefix,
+          alreadyCurrent: false,
+          actions: [],
+        }),
+        freshExec,
+        install,
+      })).toBe(0)
+      expect(freshExec).toHaveBeenCalledWith(freshBin, argv, expect.objectContaining({ DSH_RAY_UPDATE_FRESH_EXEC: '1' }))
+      expect(install).not.toHaveBeenCalled()
+    } finally {
+      write.mockRestore()
+      error.mockRestore()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test('--all 时安装器退出码原样透传', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-ray-update-all-'))
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)

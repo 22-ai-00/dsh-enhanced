@@ -748,3 +748,43 @@ test('update --all --yes and --dry-run on migrated npm Linux RSI Home route to t
     error.mockRestore()
   }
 })
+
+test('detectFrozenOwner detects nested third-party>@dsh-ray/* file: workspace overrides as mixed/frozen and runFrozenOwnerUpdate prints --to-npm hint', async () => {
+  const f = await fixture()
+  await mkdir(join(f.home, 'profiles', f.profile), { recursive: true, mode: 0o700 })
+  await mkdir(join(f.home, 'profiles', 'coordinator'), { recursive: true, mode: 0o700 })
+  await writeFile(join(f.home, 'profiles', f.profile, 'package.json'), JSON.stringify({
+    dependencies: { '@dsh-ray/assistant-delivery': '0.1.82' },
+  }), { mode: 0o600 })
+  await writeFile(join(f.home, 'profiles', f.profile, 'pnpm-workspace.yaml'), 'overrides:\n  "some-pkg>@dsh-ray/assistant-delivery": "file:./local.tgz"\n', { mode: 0o600 })
+  await writeFile(join(f.home, 'profiles', 'coordinator', 'package.json'), JSON.stringify({
+    dependencies: { '@dsh-ray/plugin-control-plane': '0.1.82' },
+  }), { mode: 0o644 })
+  await expect(detectFrozenOwner(f.home)).rejects.toThrow(/混合/)
+
+  // Valid frozen owner prints --to-npm migration tip
+  await writeFile(join(f.home, 'profiles', f.profile, 'package.json'), JSON.stringify({
+    dependencies: { '@dsh-ray/assistant-delivery': `file:${join(f.home, 'rsi-local-cohorts', f.profile, 'artifacts', 'assistant-delivery.tgz')}` },
+  }), { mode: 0o600 })
+  await rm(join(f.home, 'profiles', f.profile, 'pnpm-workspace.yaml'), { force: true })
+  await writeFile(join(f.home, 'profiles', 'coordinator', 'package.json'), JSON.stringify({
+    dependencies: { '@dsh-ray/plugin-control-plane': `file:${join(f.home, 'rsi-local-cohorts', f.profile, 'artifacts', 'plugin-control-plane.tgz')}` },
+  }), { mode: 0o644 })
+  const owner = (await detectFrozenOwner(f.home))!
+  const chunks: string[] = []
+  const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => { chunks.push(String(chunk)); return true })
+  try {
+    expect(await runFrozenOwnerUpdate(owner, { dryRun: true }, {
+      run: (command, args) => {
+        const key = [command, ...args].join(' ')
+        if (key === 'git remote get-url origin') return { status: 0, stdout: 'https://github.com/22-ai-00/dsh-ray.git' }
+        if (key === 'git symbolic-ref --quiet --short HEAD') return { status: 0, stdout: 'dev' }
+        if (key === 'git rev-parse --show-toplevel') return { status: 0, stdout: f.repository }
+        return { status: 0, stdout: '' }
+      },
+    })).toBe(0)
+  } finally {
+    writeSpy.mockRestore()
+  }
+  expect(chunks.join('')).toContain('--to-npm')
+})

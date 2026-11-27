@@ -720,6 +720,7 @@ update：
   不带参数            只升级全局 dsh-ray 自身（npm install --global @dsh-ray/cli@latest）
   --all               自身升级成功后，先升级插件集合，再将已绑定的私有 Host 更新到最新兼容版本；
                       保留 patch、凭据、Session、Goal 等状态
+  --to-npm            将本地冻结/开发绑定（file:/rsi-local-cohorts/link:）的 profile 事务化切换并升级为官方 npm 包
   --dsh-version <v>   --all 时指定兼容的私有 Host 版本；默认 latest（现有未绑定 Home 保持原 Host）
                       Host 事务覆盖同一 DSH_HOME 下全部已登记受管 unit，即使 --profile 只升级一个 cohort
   --version <v|tag>   指定 dsh-ray 目标版本或 dist-tag（默认 latest）
@@ -728,7 +729,8 @@ update：
   安全                已注册的 Linux 受管服务由升级事务自行停服/恢复；额外手工或测试 Host 会阻止升级。
                       Linux 冻结本地 owner 沿已绑定官方 GitHub 源码的 dev/main 分支快进，再执行专用原地升级；
                       源码分支提交可能尚未发布到 npm。macOS 须先停止整个 Home 并显式传
-                      --confirm-dsh-home-stopped；冻结的原生 owner/source Home 暂无迁移路径。
+                      --confirm-dsh-home-stopped；冻结的原生 owner/source Home 可显式传入
+                      --to-npm 事务化切换至官方 npm 包（保留 rsi-authorities 与凭据）。
 
 start / stop / restart：
   不带 --profile 时作用于 DSH home 下的全部 profile；配合 --dry-run 可先看将执行的命令。
@@ -806,6 +808,8 @@ interface ParsedArgs {
   confirmDshHomeStopped: boolean
   /** upgrade：允许迁移非空 creation / revision 历史账本。 */
   allowNonEmptyHistoryMigration: boolean
+  /** upgrade / update --all：将本地/冻结 source cohort 迁移为官方 npm 包。 */
+  toNpm: boolean
   /** growth-report：窗口规格（如 7d、14d）。 */
   since?: string
   /** growth-report：显式参考时钟毫秒时间戳。 */
@@ -823,7 +827,7 @@ const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--dsh-vers
 const VERSION_FLAGS = new Set(['--short'])
 const LOGS_FLAGS = new Set(['--errors-only'])
 const UPDATE_FLAGS = new Set(['--all'])
-const UPGRADE_FLAGS = new Set(['--check', '--confirm-dsh-home-stopped', '--allow-non-empty-history-migration'])
+const UPGRADE_FLAGS = new Set(['--check', '--confirm-dsh-home-stopped', '--allow-non-empty-history-migration', '--to-npm'])
 const DIAGNOSE_FLAGS = new Set(['--json'])
 const OPEN_FLAGS = new Set(['--no-browser'])
 /** logs --lines 上限，避免一次把超大日志全量打到终端。 */
@@ -881,6 +885,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     check: false,
     confirmDshHomeStopped: false,
     allowNonEmptyHistoryMigration: false,
+    toNpm: false,
     passthrough: [],
   }
   let commandSeen = false
@@ -918,6 +923,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       if (UPGRADE_FLAGS.has(token)) {
         if (token === '--check') result.check = true
         else if (token === '--allow-non-empty-history-migration') result.allowNonEmptyHistoryMigration = true
+        else if (token === '--to-npm') result.toNpm = true
         else result.confirmDshHomeStopped = true
         continue
       }
@@ -993,6 +999,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     if (UPGRADE_FLAGS.has(token)) {
       if (token === '--check') result.check = true
       else if (token === '--allow-non-empty-history-migration') result.allowNonEmptyHistoryMigration = true
+      else if (token === '--to-npm') result.toNpm = true
       else result.confirmDshHomeStopped = true
       continue
     }
@@ -1052,11 +1059,14 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   if (result.registry !== undefined && result.command !== 'upgrade') {
     throw new PurgeError(`--registry 仅适用于 upgrade 命令（收到：${result.command}）`)
   }
-  if (result.confirmDshHomeStopped && result.command !== 'upgrade') {
-    throw new PurgeError(`--confirm-dsh-home-stopped 仅适用于 upgrade 命令（收到：${result.command}）`)
+  if (result.confirmDshHomeStopped && result.command !== 'upgrade' && result.command !== 'update') {
+    throw new PurgeError(`--confirm-dsh-home-stopped 仅适用于 upgrade 与 update 命令（收到：${result.command}）`)
   }
-  if (result.allowNonEmptyHistoryMigration && result.command !== 'upgrade') {
-    throw new PurgeError(`--allow-non-empty-history-migration 仅适用于 upgrade 命令（收到：${result.command}）`)
+  if (result.allowNonEmptyHistoryMigration && result.command !== 'upgrade' && result.command !== 'update') {
+    throw new PurgeError(`--allow-non-empty-history-migration 仅适用于 upgrade 与 update 命令（收到：${result.command}）`)
+  }
+  if (result.toNpm && result.command !== 'upgrade' && result.command !== 'update') {
+    throw new PurgeError(`--to-npm 仅适用于 upgrade 与 update 命令（收到：${result.command}）`)
   }
   if (result.check && result.yes) {
     throw new PurgeError('--check 与 --yes 不能同时使用')
@@ -1110,6 +1120,17 @@ function consumeInstallToken(result: ParsedArgs, argv: readonly string[], index:
     if (token === '--help' || token === '-h') { result.help = true; return index }
     if (token === '--dry-run') { result.dryRun = true; result.passthrough.push(token); return index }
     if (token === '--yes') { result.yes = true; result.passthrough.push(token); return index }
+    if (token === '--to-npm') { result.toNpm = true; return index }
+    if (token === '--confirm-dsh-home-stopped') {
+      result.confirmDshHomeStopped = true
+      result.passthrough.push(token)
+      return index
+    }
+    if (token === '--allow-non-empty-history-migration') {
+      result.allowNonEmptyHistoryMigration = true
+      result.passthrough.push(token)
+      return index
+    }
     if (token === '--profile') {
       const value = argv[index + 1]
       if (value === undefined || value.startsWith('--')) throw new PurgeError(`${token} 需要一个值`)
@@ -1557,12 +1578,13 @@ async function executeTransactionalUpgrade(
   args: ParsedArgs,
   env: NodeJS.ProcessEnv,
   deps: ExtendedMainDeps,
-  overrides: { action?: UpgradeAction; targetVersion?: string } = {},
+  overrides: { action?: UpgradeAction; targetVersion?: string; toNpm?: boolean } = {},
 ): Promise<number> {
   const platform = deps.platform ?? process.platform
   const osHome = deps.osHome ?? homedir()
   const action: UpgradeAction = overrides.action ?? (args.dryRun ? 'dry-run' : args.check ? 'check' : args.yes ? 'apply' : 'check')
   const targetVersion = overrides.targetVersion ?? args.targetVersion
+  const toNpm = overrides.toNpm ?? args.toNpm
   const { report, exitCode } = await (deps.upgrade ?? runUpgrade)(
     {
       dshHome: args.dshHome,
@@ -1571,6 +1593,7 @@ async function executeTransactionalUpgrade(
       ...(args.registry !== undefined ? { registryUrl: args.registry } : {}),
       ...(args.dshVersion !== undefined ? { dshVersion: args.dshVersion } : {}),
       ...(targetVersion !== undefined ? { targetVersion } : {}),
+      ...(toNpm ? { toNpm: true } : {}),
       allowNonEmptyHistoryMigration: args.allowNonEmptyHistoryMigration,
       confirmDshHomeStopped: args.confirmDshHomeStopped,
       platform,
@@ -1590,10 +1613,10 @@ async function executeTransactionalUpgrade(
     const isRunningFn = deps.upgradeDeps?.isServiceRunning
       ?? ((plat, homeDir, homePath, prof, cmdRunner) => isManagedProfileRunning(plat, homeDir, homePath, prof, cmdRunner))
     try {
-      const targetProfiles = args.profile !== undefined
-        ? [args.profile]
-        : finalReport.packages.profiles.length > 0
-          ? finalReport.packages.profiles.map(p => p.profile)
+      const targetProfiles = finalReport.packages.profiles.length > 0
+        ? finalReport.packages.profiles.map(p => p.profile)
+        : args.profile !== undefined
+          ? [args.profile]
           : await resolveTargetProfiles(canonicalHome, args.profile)
 
       const managedProfiles: string[] = []
@@ -1914,9 +1937,15 @@ export async function main(
       }
       case 'update': {
         const platform = deps.platform ?? process.platform
+        if (args.toNpm && !args.all) {
+          throw new PurgeError('--to-npm 需配合 update --all 使用（例如：dsh-ray update --all --yes --to-npm）')
+        }
+        if (args.toNpm && args.local !== undefined) {
+          throw new PurgeError('--to-npm 不能与 --local 同时使用')
+        }
         const frozen = args.all && platform === 'linux'
           ? await (deps.detectFrozenOwner ?? detectFrozenOwner)(args.dshHome) : undefined
-        if (frozen !== undefined) {
+        if (frozen !== undefined && !args.toNpm) {
           const frozenExtra: string[] = []
           for (let i = 0; i < args.passthrough.length; i++) {
             const token = args.passthrough[i]!
@@ -1956,7 +1985,7 @@ export async function main(
         })
         process.stdout.write(`${formatSelfUpdateReport(report, args.dryRun)}\n`)
         if (!args.all) return 0
-        if (frozen !== undefined && !args.dryRun) {
+        if (frozen !== undefined && !args.toNpm && !args.dryRun) {
           assertFrozenCliUpdateVersion(report.installedVersion, VERSION, report.alreadyCurrent)
         }
         if (env.DSH_RAY_UPDATE_FRESH_EXEC === '1' && report.installedVersion !== VERSION) {
@@ -1974,27 +2003,30 @@ export async function main(
           })
           return execute(bin, argv, { ...env, DSH_RAY_UPDATE_FRESH_EXEC: '1' })
         }
-        if (frozen !== undefined) {
+        if (frozen !== undefined && !args.toNpm) {
           return (deps.frozenUpdate ?? runFrozenOwnerUpdate)(frozen,
             { dryRun: args.dryRun, ...(args.dshVersion === undefined ? {} : { dshVersion: args.dshVersion }) })
         }
         const releaseVersion = report.installedVersion
           ?? report.resolvedVersion
           ?? (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(report.selector) ? report.selector : undefined)
-        if (args.all && platform === 'linux' && args.local === undefined && await hasMigratedFrozenResidue(args.dshHome)) {
+        const shouldRouteTransactional = args.all && args.local === undefined && (
+          args.toNpm || (platform === 'linux' && await hasMigratedFrozenResidue(args.dshHome))
+        )
+        if (shouldRouteTransactional) {
           const extraPassthrough: string[] = []
           let allowNonEmptyHistoryMigration = args.allowNonEmptyHistoryMigration
           let confirmDshHomeStopped = args.confirmDshHomeStopped
           for (let i = 0; i < args.passthrough.length; i++) {
             const token = args.passthrough[i]!
-            if (token === '--yes' || token === '--dry-run') continue
+            if (token === '--yes' || token === '--dry-run' || token === '--to-npm') continue
             if (token === '--dsh-version' && args.passthrough[i + 1] === args.dshVersion) { i++; continue }
             if (token === '--confirm-dsh-home-stopped') { confirmDshHomeStopped = true; continue }
             if (token === '--allow-non-empty-history-migration') { allowNonEmptyHistoryMigration = true; continue }
             extraPassthrough.push(token)
           }
           if (extraPassthrough.length > 0) {
-            throw new PurgeError(`已迁移 npm RSI Home 的 update --all 不支持附加安装器参数：${extraPassthrough.join(' ')}`)
+            throw new PurgeError(`${args.toNpm ? '--to-npm ' : '已迁移 npm RSI Home '}update --all 不支持附加安装器参数：${extraPassthrough.join(' ')}`)
           }
           if (!args.dryRun && await hasPendingHostRecovery(args.dshHome)) {
             const recoveryPassthrough = [...args.passthrough]
@@ -2025,6 +2057,7 @@ export async function main(
           return await executeTransactionalUpgrade(upgradeArgs, env, deps, {
             action: upgradeAction,
             ...(explicitTargetVersion !== undefined ? { targetVersion: explicitTargetVersion } : {}),
+            ...(args.toNpm ? { toNpm: true } : {}),
           })
         }
         const passthrough = [...args.passthrough]

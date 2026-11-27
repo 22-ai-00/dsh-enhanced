@@ -308,7 +308,7 @@ describe('standalone installation smoke test', () => {
 })
 
 describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
-  test('parseArgs 解析 enable / disable 与 --allow-non-empty-history-migration 并拒绝误用', () => {
+  test('parseArgs 解析 enable / disable 与 --allow-non-empty-history-migration / --to-npm 并拒绝误用', () => {
     expect(parseArgs(['enable', '--profile', 'web', '--json'], { HOME: '/h' })).toMatchObject({
       command: 'enable', profile: 'web', json: true,
     })
@@ -318,7 +318,14 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
     expect(parseArgs(['upgrade', '--yes', '--allow-non-empty-history-migration'], { HOME: '/h' })).toMatchObject({
       command: 'upgrade', yes: true, allowNonEmptyHistoryMigration: true,
     })
+    expect(parseArgs(['upgrade', '--yes', '--to-npm'], { HOME: '/h' })).toMatchObject({
+      command: 'upgrade', yes: true, toNpm: true,
+    })
+    expect(parseArgs(['update', '--all', '--yes', '--to-npm', '--confirm-dsh-home-stopped'], { HOME: '/h' })).toMatchObject({
+      command: 'update', all: true, yes: true, toNpm: true, confirmDshHomeStopped: true,
+    })
     expect(() => parseArgs(['status', '--allow-non-empty-history-migration'], { HOME: '/h' })).toThrow(/仅适用于 upgrade/)
+    expect(() => parseArgs(['status', '--to-npm'], { HOME: '/h' })).toThrow(/仅适用于 upgrade 与 update/)
   })
 
   test('enable / disable 原地 AST 切换自迭代开关，保留 !js、注释、ownerRoutes 与受保护行，并在非法输入时 fail-closed', async () => {

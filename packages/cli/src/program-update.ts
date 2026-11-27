@@ -18,7 +18,12 @@ export interface ProgramUpdatePorts {
 
 const defaultPorts: ProgramUpdatePorts = {
   run(command, args, cwd, capture = true) {
-    const result = spawnSync(command, [...args], { cwd, encoding: 'utf8', stdio: capture ? ['inherit', 'pipe', 'inherit'] : 'inherit' })
+    const result = spawnSync(command, [...args], {
+      cwd,
+      env: { ...process.env, CI: 'true' },
+      encoding: 'utf8',
+      stdio: capture ? ['inherit', 'pipe', 'inherit'] : 'inherit',
+    })
     return { status: result.status, stdout: result.stdout ?? '' }
   },
 }
@@ -289,7 +294,7 @@ async function classifyProfileEnhancedSpecs(canonicalHome: string, profile: stri
     if (isMap(overrides)) {
       for (const pair of overrides.items) {
         const keyVal = isScalar(pair.key) ? pair.key.value : pair.key
-        if (typeof keyVal !== 'string' || !keyVal.startsWith('@dsh-ray/')) continue
+        if (typeof keyVal !== 'string' || !keyVal.includes('@dsh-ray/')) continue
         if (!isScalar(pair.value) || typeof pair.value.value !== 'string') continue
         if (isLocalFrozenSpec(pair.value.value)) {
           hasLocalWorkspaceOverride = true
@@ -517,6 +522,7 @@ export async function runFrozenOwnerUpdate(owner: FrozenOwner, options: { dryRun
     process.stdout.write(`冻结 owner：源码仓库位于 detached HEAD（${detachedHead.slice(0, 12)}），按 ${branch} 上游继续；更新后 HEAD 仍为 detached。\n`)
   }
   process.stdout.write(`冻结 owner：沿已绑定源码仓库 ${repo} 的 ${branch} 分支升级；该源码提交可能尚未发布到 npm。\n`)
+  process.stdout.write('提示：若需从源码通道迁移为官方 npm 包升级，可运行 dsh-ray update --all --yes --to-npm 或 dsh-ray upgrade --yes --to-npm。\n')
   if (options.dryRun) {
     process.stdout.write(`【dry-run】计划：git fetch origin ${branch}；git merge --ff-only FETCH_HEAD；pnpm install --frozen-lockfile；pnpm build；upgrade-program.mjs --dsh-home ${owner.home} --profile ${owner.profile} --dsh-version ${options.dshVersion ?? 'latest'} --dry-run。未更新源码或 Home。\n`)
     return 0
