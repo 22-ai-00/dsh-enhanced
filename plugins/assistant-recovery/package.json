@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-recovery",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Deterministic Host recovery and supervised self-evolution runbook for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",

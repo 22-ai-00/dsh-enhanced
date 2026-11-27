@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/personal-wiki",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "A safe, searchable, approval-gated Markdown knowledge vault for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",

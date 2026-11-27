@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/lark-channel",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "A thin Feishu/Lark WebSocket adapter for the durable DSH assistant-delivery core.",
   "license": "MIT",
   "type": "module",

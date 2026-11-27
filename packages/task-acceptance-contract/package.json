@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/task-acceptance-contract",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Strict immutable acceptance and verification wire contracts for DSH assistant plugins.",
   "license": "MIT",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/hello",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "A minimal installable DeepSeek Harness plugin bundle.",
   "license": "MIT",
   "type": "module",

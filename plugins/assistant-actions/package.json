@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-actions",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Owner-authorized GitHub action facade with embedded compatibility and an external Unix broker.",
   "license": "MIT",
   "type": "module",

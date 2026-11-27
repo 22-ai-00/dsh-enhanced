@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/event-triggers",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Durable bounded file, HTTP/JSON, and HMAC webhook triggers for DSH automations.",
   "license": "MIT",
   "type": "module",

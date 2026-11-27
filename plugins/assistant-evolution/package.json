@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-evolution",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Approval-gated behavioural self-evolution for the DSH personal assistant.",
   "license": "MIT",
   "type": "module",
