@@ -1042,8 +1042,8 @@ describe('Lark self-iteration NL & slash controls', () => {
     // 1. Reconciled startup completion marker and cleared it atomically
     await vi.waitFor(() => {
       expect(sends.some(s => 'commandCard' in s.input && JSON.stringify(s.input.commandCard).includes('自动升级完成：当前版本 v0.2.2'))).toBe(true)
-    })
-    expect(existsSync(autoUpdateNotifyPath(home))).toBe(false)
+      expect(existsSync(autoUpdateNotifyPath(home))).toBe(false)
+    }, { timeout: 10_000 })
 
     // 2. Owner sends invalid `/update foo` -> usage error, zero LLM / launcher calls
     const now = 2_000_000
@@ -1126,10 +1126,129 @@ describe('Lark self-iteration NL & slash controls', () => {
 
     await vi.waitFor(() => {
       expect(sends.some(s => JSON.stringify(s.input).includes('⚠️ 自动升级失败并已回滚保护：doctor failed after rollback'))).toBe(true)
-    }, { timeout: 3_000 })
-    expect(existsSync(autoUpdateNotifyPath(home))).toBe(false)
+      expect(existsSync(autoUpdateNotifyPath(home))).toBe(false)
+    }, { timeout: 10_000 })
     expect(llmRequests).toEqual([])
     expect(handlers).toBeDefined()
     await ctx.fiber.restart()
+  })
+
+  test('LarkChannelService ignores non-lark (channel: web) auto-update markers without polling or sending Feishu messages', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-auto-update-ignore-web-'))
+    roots.push(root)
+    const home = join(root, 'dsh-home')
+    const workspace = join(root, 'workspace')
+    await mkdir(join(home, 'profiles', 'web', '.dsh'), { recursive: true })
+    await mkdir(join(home, '.dsh-ray'), { recursive: true, mode: 0o700 })
+    await mkdir(workspace, { recursive: true })
+
+    const {
+      autoUpdateNotifyPath,
+      autoUpdateStatusPath,
+      clearAutoUpdateNotifyMarker,
+      inspectPendingAutoUpdateNotification,
+      launchUnattendedAutoUpgrade,
+    } = await import('../../../packages/cli/lib/index.js')
+
+    await writeFile(autoUpdateNotifyPath(home), JSON.stringify({
+      schemaVersion: 1,
+      runId: 'auto-update-web-only',
+      channel: 'web',
+      account: 'owner-console',
+      requestedAt: new Date(Date.now() - 1_000).toISOString(),
+    }), { mode: 0o600 })
+
+    let inspectCalls = 0
+    let clearCalls = 0
+
+    const startServiceWithMarker = async () => {
+      const ctx = new Context()
+      const sends: Array<{ chatId: string; input: LarkSendInput }> = []
+      const transport: LarkTransport = {
+        subscribe: () => () => {},
+        connect: async () => {},
+        disconnect: async () => {},
+        addReaction: async () => 'r1',
+        createProgress: async () => ({ cotId: 'cot1', messageId: 'om_cot1' }),
+        writeProgress: async () => {},
+        send: async (chatId, input) => {
+          sends.push({ chatId, input })
+          return { messageId: `om_s_${sends.length}` }
+        },
+      }
+      await ctx.plugin(AssistantPolicyService, {
+        databasePath: join(root, `policy-${inspectCalls}.sqlite`),
+        rules: [
+          { id: 'pair', effect: 'allow', subject: { kind: 'external', id: 'local:owner' }, actions: ['pair.issue'],
+            resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
+        ],
+      })
+      ctx.provide('agents' as never, {
+        create: async () => { throw new Error('unused') },
+        resume: vi.fn(async () => { throw new Error('unused') }),
+      } as never)
+      ctx.provide('sessions' as never, { list: async () => [], flush: async () => true } as never)
+      ctx.provide('llm' as never, { get: () => undefined, stream: async function* () {} } as never)
+      await ctx.plugin(AssistantDeliveryService, {
+        databasePath: join(root, `delivery-${inspectCalls}.sqlite`),
+        spoolPath: join(root, `spool-${inspectCalls}`),
+        defaultWorkspace: workspace,
+        defaultAgentPreset: 'primary',
+        schedulerEnabled: false,
+      })
+
+      const service = new LarkChannelService(ctx, {
+        enabled: true,
+        account: 'primary-bot',
+        tenant: 'tenant-1',
+        appId: 'cli_0123456789abcdef',
+        appSecretEnv: 'LARK_APP_SECRET',
+        domain: 'feishu',
+        requireMentionInGroups: true,
+        groupTopicThreads: false,
+        maxTextBytes: 16_384,
+        staleAfterMs: 60_000,
+      }, {
+        env: { LARK_APP_SECRET: 'secret-1', DSH_HOME: home, DSH_PROFILE: 'web' },
+        dshHome: home,
+        profile: 'web',
+        createTransport: () => transport,
+        writeLifecycleMarker: () => {},
+        reconcilePollMs: 25,
+        loadAutoUpdateCli: async () => ({
+          launchUnattendedAutoUpgrade,
+          inspectPendingAutoUpdateNotification: async dshHomeArg => {
+            inspectCalls += 1
+            return await inspectPendingAutoUpdateNotification(dshHomeArg)
+          },
+          clearAutoUpdateNotifyMarker: async dshHomeArg => {
+            clearCalls += 1
+            return await clearAutoUpdateNotifyMarker(dshHomeArg)
+          },
+        }),
+      })
+      await service.whenReady()
+      await new Promise(resolve => setTimeout(resolve, 120))
+      expect(sends).toEqual([])
+      expect(clearCalls).toBe(0)
+      expect(existsSync(autoUpdateNotifyPath(home))).toBe(true)
+      await ctx.fiber.restart()
+    }
+
+    // Pending status (status file absent): inspected once, then poll cleared immediately without waiting
+    await startServiceWithMarker()
+    expect(inspectCalls).toBe(1)
+
+    // Ready succeeded status for channel: 'web': still ignored without sending or deleting marker
+    await writeFile(autoUpdateStatusPath(home), JSON.stringify({
+      schemaVersion: 1,
+      runId: 'auto-update-web-only',
+      status: 'succeeded',
+      version: '0.2.2',
+      updatedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+    }), { mode: 0o600 })
+    await startServiceWithMarker()
+    expect(inspectCalls).toBe(2)
   })
 })

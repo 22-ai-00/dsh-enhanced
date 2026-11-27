@@ -2060,7 +2060,7 @@ export async function main(
             throw new PurgeError(`${args.toNpm ? '--to-npm ' : '已迁移 npm RSI Home '}update --all 不支持附加安装器参数：${extraPassthrough.join(' ')}`)
           }
           if (!args.dryRun && await hasPendingHostRecovery(args.dshHome)) {
-            const recoveryPassthrough = [...args.passthrough]
+            const recoveryPassthrough = args.passthrough.filter(token => token !== '--allow-non-empty-history-migration')
             if (!recoveryPassthrough.includes('--operation')) recoveryPassthrough.push('--operation', 'upgrade')
             if (!recoveryPassthrough.includes('--confirm-dsh-home-stopped')) {
               recoveryPassthrough.push('--confirm-dsh-home-stopped')
@@ -2102,8 +2102,9 @@ export async function main(
           )
         }
         if (!args.dryRun && await hasPendingHostRecovery(args.dshHome)) {
+          const recoveryPassthrough = passthrough.filter(token => token !== '--allow-non-empty-history-migration')
           const recovery = await install({
-            ...buildInstallOptions(args), releaseRef: `v${releaseVersion}`, passthrough,
+            ...buildInstallOptions(args), releaseRef: `v${releaseVersion}`, passthrough: recoveryPassthrough,
             recoveryOnly: true,
           })
           if (recovery !== 0) return recovery

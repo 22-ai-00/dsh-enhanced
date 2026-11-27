@@ -607,4 +607,132 @@ describe('main：install / reinstall 分发', () => {
     })
     expect(code).toBe(1)
   })
+
+  test('runInstall and recovery update strip --allow-non-empty-history-migration before calling bash installer while preserving transactional upgrade', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ray-strip-migration-flag-')))
+    try {
+      const home = join(root, 'home')
+      await mkdir(home, { recursive: true })
+      const { TRANSACTION_SUFFIX } = await import('../src/paths.ts')
+      const bashInvocations: Array<readonly string[]> = []
+
+      // 1. Standard non-transactional upgrade via runInstall strips --allow-non-empty-history-migration
+      const stdCode = await runInstall({
+        mode: 'npm',
+        releaseRef: 'v0.2.2',
+        dshHome: home,
+        passthrough: ['--operation', 'upgrade', '--yes', '--allow-non-empty-history-migration'],
+        executor: {
+          download: async () => '#!/usr/bin/env bash\n',
+          prepareHost: async () => ({ binDirectory: '/hosts/cur' }) as never,
+          prepareHostUpdate: async () => ({
+            schemaVersion: 1,
+            status: 'noop',
+            originalRuntime: { version: '0.2.2' },
+            candidateRuntime: { version: '0.2.2' },
+          }) as never,
+          runInherited: async (_command, args) => {
+            bashInvocations.push(args.slice(1))
+            return 0
+          },
+        },
+      })
+      expect(stdCode).toBe(0)
+      expect(bashInvocations[0]).toEqual(['--operation', 'upgrade', '--yes'])
+
+      // 2. Transactional upgrade still receives allowNonEmptyHistoryMigration: true
+      const transactionalCalls: Array<{ allowNonEmptyHistoryMigration?: boolean }> = []
+      const plan = {
+        schemaVersion: 1 as const, status: 'update' as const, canonicalHome: home,
+        bindingPath: join(home, '.dsh-ray-host.json'), originalBindingSource: '{}', originalBindingDigest: 'a'.repeat(64),
+        originalRuntime: { version: '0.1.5-rc.3', root: '/hosts/old', dshPath: '/hosts/old/dsh',
+          binDirectory: '/hosts/old', integrity: 'sha512-old', receiptDigest: 'a'.repeat(64) },
+        candidateRuntime: { version: '0.2.2', root: '/hosts/new', dshPath: '/hosts/new/dsh',
+          binDirectory: '/hosts/new', integrity: 'sha512-new', receiptDigest: 'b'.repeat(64) },
+        candidateBindingSource: '{}',
+      }
+      await writeFile(join(home, '.dsh-ray-host.json'), '{}', { mode: 0o600 })
+      const txCode = await runInstall({
+        mode: 'npm',
+        releaseRef: 'v0.2.2',
+        dshHome: home,
+        passthrough: ['--operation', 'upgrade', '--yes', '--allow-non-empty-history-migration'],
+        executor: {
+          download: async () => '#!/usr/bin/env bash\n',
+          prepareHost: async () => ({ binDirectory: '/hosts/old' }) as never,
+          prepareHostUpdate: async () => plan as never,
+          runTransactionalUpgrade: (async (opts: { allowNonEmptyHistoryMigration?: boolean }) => {
+            transactionalCalls.push(opts)
+            return {
+              exitCode: 0,
+              report: {
+                schemaVersion: 1 as const, command: 'upgrade' as const, action: 'apply' as const,
+                ok: true, ready: true, dshHome: home, mode: 'standard-local' as const,
+                frozenSystemd: { detected: false, profiles: [] },
+                packages: {
+                  cliPackageVersion: '0.2.2', upgradeAvailable: true,
+                  boundHost: { status: 'ready' as const, upgradeAvailable: false }, profiles: [],
+                },
+                registry: { url: 'https://registry.npmjs.org', checked: false, status: 'skipped' as const },
+                readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+                plan: { canExecute: true, steps: [], rollbackSupported: true, backupFiles: [] },
+              },
+            }
+          }) as unknown as NonNullable<NonNullable<Parameters<typeof runInstall>[0]['executor']>['runTransactionalUpgrade']>,
+          runInherited: async () => 0,
+        },
+      })
+      expect(txCode).toBe(0)
+      expect(transactionalCalls[0]?.allowNonEmptyHistoryMigration).toBe(true)
+
+      // 3. Pending host recovery both in runInstall and via main('update') strips --allow-non-empty-history-migration
+      const txDir = `${home}${TRANSACTION_SUFFIX}`
+      await mkdir(txDir, { recursive: true, mode: 0o700 })
+      await writeFile(join(txDir, 'manifest.json'), JSON.stringify({ version: 4, profile: 'web' }), { mode: 0o600 })
+
+      const recCode = await runInstall({
+        mode: 'npm',
+        releaseRef: 'v0.2.2',
+        dshHome: home,
+        recoveryOnly: true,
+        passthrough: ['--operation', 'upgrade', '--yes', '--allow-non-empty-history-migration'],
+        executor: {
+          download: async () => '#!/usr/bin/env bash\n',
+          runInherited: async (_command, args) => {
+            bashInvocations.push(args.slice(1))
+            return 0
+          },
+        },
+      })
+      expect(recCode).toBe(0)
+      expect(bashInvocations[1]).toEqual(['--operation', 'upgrade', '--yes'])
+
+      const mainInstallCalls: unknown[] = []
+      const baseDeps = makeDeps(mainInstallCalls)
+      const updateRecCode = await main(
+        ['update', '--all', '--yes', '--allow-non-empty-history-migration'],
+        { HOME: root, DSH_HOME: home },
+        {
+          ...baseDeps,
+          platform: 'linux',
+          detectFrozenOwner: async () => undefined,
+          selfUpdate: (async () => ({
+            fromVersion: '0.2.2',
+            selector: 'latest',
+            resolvedVersion: '0.2.2',
+            installedVersion: '0.2.2',
+            alreadyCurrent: true,
+            actions: [],
+          })) as SelfUpdateFn,
+        },
+      )
+      expect(updateRecCode).toBe(0)
+      expect(mainInstallCalls.length).toBeGreaterThanOrEqual(1)
+      const firstInstall = mainInstallCalls[0] as { recoveryOnly?: boolean; passthrough: readonly string[] }
+      expect(firstInstall.recoveryOnly).toBe(true)
+      expect(firstInstall.passthrough).not.toContain('--allow-non-empty-history-migration')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })

@@ -21,7 +21,7 @@ import { inspectLaunchdDefinition, inspectLoadedLaunchd } from './launchd-servic
 import { profilesDirectory, systemdUnitName } from './paths.ts'
 import { buildPackageManagerEnv, resolveFallbackBinary, resolveNodeRuntime } from './pm-env.ts'
 import { detectFrozenOwner } from './program-update.ts'
-import { defaultDetailedRunner, defaultRunner, type CommandResult, type CommandRunner, type DetailedCommandRunner } from './run.ts'
+import { defaultDetailedRunner, type CommandResult, type CommandRunner, type DetailedCommandRunner } from './run.ts'
 import {
   controlManagedService,
   inspectManagedServiceForDshHome,
@@ -151,6 +151,7 @@ export interface LaunchAutoUpdateDeps {
   readonly spawnDetached?: (command: string, args: readonly string[], env: NodeJS.ProcessEnv) => number | undefined
   readonly runnerScriptPath?: string
   readonly nodeExecutable?: string
+  readonly checkPathExists?: (path: string) => boolean
 }
 
 export interface AutoUpdateWorkerOptions {
@@ -537,18 +538,22 @@ function resolveDshRayFromEnvPath(env: NodeJS.ProcessEnv, osHome: string, platfo
   return undefined
 }
 
-function ensureLinuxUserSessionEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): NodeJS.ProcessEnv {
+function ensureLinuxUserSessionEnv(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  pathExists: (path: string) => boolean = existsSync,
+): NodeJS.ProcessEnv {
   if (platform !== 'linux') return env
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   if (uid === undefined) return env
   const nextEnv: NodeJS.ProcessEnv = { ...env }
   if (!nextEnv.XDG_RUNTIME_DIR) {
     const runtimeDir = `/run/user/${uid}`
-    if (existsSync(runtimeDir)) nextEnv.XDG_RUNTIME_DIR = runtimeDir
+    if (pathExists(runtimeDir)) nextEnv.XDG_RUNTIME_DIR = runtimeDir
   }
   if (!nextEnv.DBUS_SESSION_BUS_ADDRESS && nextEnv.XDG_RUNTIME_DIR) {
     const busPath = join(nextEnv.XDG_RUNTIME_DIR, 'bus')
-    if (existsSync(busPath)) nextEnv.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath}`
+    if (pathExists(busPath)) nextEnv.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath}`
   }
   return nextEnv
 }
@@ -735,11 +740,11 @@ export async function launchUnattendedAutoUpgrade(
 
   const canonicalHome = await resolveSafeHome(options.dshHome)
   const nowMs = (deps.now ?? Date.now)()
-  const runner = deps.runner ?? defaultRunner
-  const detailedRunner = deps.detailedRunner ?? defaultDetailedRunner
   const platform = options.platform ?? process.platform
   const osHome = options.osHome ?? homedir()
-  const baseEnv = ensureLinuxUserSessionEnv(options.env ?? process.env, platform)
+  const baseEnv = ensureLinuxUserSessionEnv(options.env ?? process.env, platform, deps.checkPathExists)
+  const detailedRunner: DetailedCommandRunner = deps.detailedRunner ?? defaultDetailedRunner
+  const runner: CommandRunner = deps.runner ?? ((cmd, args) => detailedRunner(cmd, args, { env: baseEnv }))
 
   // Deduplicate if an active background upgrade is already running for this DSH_HOME.
   const existingStatus = await readAutoUpdateStatus(canonicalHome)
@@ -796,8 +801,16 @@ export async function launchUnattendedAutoUpgrade(
     updatedAt: new Date(nowMs).toISOString(),
   }
 
+  const shouldWriteNotifyMarker = options.notify !== undefined && (
+    options.notify.channel !== 'web'
+    || options.notify.chatId !== undefined
+    || options.notify.conversation?.chat !== undefined
+  )
+
   // Write the 0600 one-shot notification marker BEFORE spawning the background updater.
-  await writePrivateAtomic(autoUpdateNotifyPath(canonicalHome), `${JSON.stringify(notifyMarker, null, 2)}\n`)
+  if (shouldWriteNotifyMarker) {
+    await writePrivateAtomic(autoUpdateNotifyPath(canonicalHome), `${JSON.stringify(notifyMarker, null, 2)}\n`)
+  }
   await writePrivateAtomic(autoUpdateStatusPath(canonicalHome), `${JSON.stringify(initialStatus, null, 2)}\n`)
 
   const extraDirs = await discoverExtraBinDirs(baseEnv, osHome, platform, detailedRunner)
@@ -1183,6 +1196,9 @@ export async function runAutoUpdateWorker(
       return [fallback]
     })()
 
+    const shouldPassHistoryMigrationFlag = effectiveToNpm
+      || sourceState.coordinatorMarkers.length > 0
+      || sourceState.hasCohortDir
     const updateArgs = [
       ...cliPrefix,
       'update',
@@ -1191,7 +1207,7 @@ export async function runAutoUpdateWorker(
       '--dsh-home',
       canonicalHome,
       ...(effectiveToNpm ? ['--to-npm'] : []),
-      '--allow-non-empty-history-migration',
+      ...(shouldPassHistoryMigrationFlag ? ['--allow-non-empty-history-migration'] : []),
       ...(platform === 'darwin' ? ['--confirm-dsh-home-stopped'] : []),
     ]
     await appendPrivateLog(logFile, `running ${cliCmd} ${updateArgs.join(' ')}`)
@@ -1350,7 +1366,9 @@ export async function inspectPendingAutoUpdateNotification(
     const stale = Number.isFinite(requestedMs) && (nowMs - requestedMs) > STALE_PENDING_MS
     let workerVanished = false
     if (statusRecord.launcher === 'systemd-run' && statusRecord.unitName && statusRecord.status === 'running') {
-      const active = isSystemdUnitActive(statusRecord.unitName, deps.runner ?? defaultRunner)
+      const unitRunner: CommandRunner = deps.runner ?? ((cmd, args) =>
+        defaultDetailedRunner(cmd, args, { env: ensureLinuxUserSessionEnv(process.env, process.platform) }))
+      const active = isSystemdUnitActive(statusRecord.unitName, unitRunner)
       const ageMs = Number.isFinite(requestedMs) ? nowMs - requestedMs : 0
       if (!active && ageMs > 10_000) workerVanished = true
     } else if (statusRecord.launcher === 'detached' && statusRecord.pid !== undefined && statusRecord.status === 'running') {

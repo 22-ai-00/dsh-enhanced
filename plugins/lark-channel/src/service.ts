@@ -483,14 +483,20 @@ export class LarkChannelService extends Service {
       this.clearAutoUpdatePoll()
       return
     }
+    if (pending.notify.channel !== undefined && pending.notify.channel !== 'lark') {
+      this.clearAutoUpdatePoll()
+      return
+    }
+    if (pending.notify.account !== undefined && this.activeAccount !== undefined
+      && pending.notify.account !== this.activeAccount) {
+      this.clearAutoUpdatePoll()
+      return
+    }
     if (!pending.ready || pending.message === undefined) {
       this.scheduleAutoUpdatePoll(ctx)
       return
     }
     this.clearAutoUpdatePoll()
-    if (pending.notify.channel !== undefined && pending.notify.channel !== 'lark') return
-    if (pending.notify.account !== undefined && this.activeAccount !== undefined
-      && pending.notify.account !== this.activeAccount) return
 
     const chatId = pending.notify.chatId ?? pending.notify.conversation?.chat
     if (!chatId) return

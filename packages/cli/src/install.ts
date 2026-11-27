@@ -214,11 +214,12 @@ export async function runInstall(options: RunInstallOptions): Promise<number> {
       await writeFile(script, source, { mode: 0o700 })
       await chmod(script, 0o700)
     }
+    const bashPassthrough = passthrough.filter(token => token !== '--allow-non-empty-history-migration')
     if (operation === 'upgrade' && !inactive) {
       const canonicalHome = await canonicalMissingAllowed(resolveDshHome(env))
       const recoveryProfile = await pendingHostRecovery(canonicalHome)
       if (recoveryProfile !== undefined) {
-        const recovered = await executor.runInherited('bash', [script, ...passthrough], {
+        const recovered = await executor.runInherited('bash', [script, ...bashPassthrough], {
           env: { ...env, DSH_HOME: canonicalHome, DSH_RAY_HOST_RECOVERY_ONLY: '1',
             DSH_RAY_HOST_RECOVERY_PROFILE: recoveryProfile },
         })
@@ -276,7 +277,7 @@ export async function runInstall(options: RunInstallOptions): Promise<number> {
         } else process.stdout.write(`私有 Host 已是当前版本：${plan.originalRuntime.version}\n`)
       }
     }
-    return await executor.runInherited('bash', [script, ...passthrough], { env })
+    return await executor.runInherited('bash', [script, ...bashPassthrough], { env })
   } finally {
     if (planStaging !== undefined) await rm(planStaging, { recursive: true, force: true })
     if (installerStaging !== undefined) await rm(installerStaging, { recursive: true, force: true })

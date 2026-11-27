@@ -516,4 +516,174 @@ describe('packages/cli auto-update shared runtime', () => {
     symlinkSync(symlinkTarget, autoUpdateNotifyPath(dshHome))
     expect(await inspectPendingAutoUpdateNotification(dshHome)).toBeUndefined()
   })
+
+  test('pure-npm runAutoUpdateWorker omits --allow-non-empty-history-migration when updating', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const os = await import('node:os')
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-auto-update-pure-npm-'))
+    try {
+      const dshHome = path.join(root, 'dsh-home')
+      const osHome = path.join(root, 'os-home')
+      const binDir = path.join(root, 'bin')
+      fs.mkdirSync(path.join(dshHome, 'profiles', 'web', '.dsh'), { recursive: true })
+      fs.mkdirSync(osHome, { recursive: true })
+      fs.mkdirSync(binDir, { recursive: true })
+      const fakeBin = path.join(binDir, 'dsh-ray')
+      fs.writeFileSync(fakeBin, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+      const invocations: Array<{ cmd: string; args: readonly string[] }> = []
+      const code = await runAutoUpdateWorker({
+        dshHome,
+        profile: 'web',
+        runId: 'pure-npm-run',
+        toNpm: false,
+        delayMs: 0,
+        platform: 'linux',
+        osHome,
+        env: { PATH: `${binDir}:/usr/bin:/bin` },
+      }, {
+        sleep: async () => {},
+        detailedRunner: (cmd, args) => {
+          invocations.push({ cmd, args })
+          if (args.includes('--version')) return { status: 0, stdout: '0.2.2\n', stderr: '', signal: null }
+          if (args.includes('doctor')) return { status: 0, stdout: JSON.stringify({ ok: true, checks: [] }), stderr: '', signal: null }
+          return { status: 0, stdout: 'updated\n', stderr: '', signal: null }
+        },
+        inspectService: async () => ({ managed: false, definitionPath: '/tmp/none.service', foreign: false }),
+        controlService: async () => ({ ok: true, skipped: [] }) as never,
+        resolveTargets: async () => ['web'],
+      })
+
+      expect(code).toBe(0)
+      const updateCall = invocations.find(call => call.args.includes('update'))
+      expect(updateCall).toBeDefined()
+      expect(updateCall?.args).toContain('--all')
+      expect(updateCall?.args).toContain('--yes')
+      expect(updateCall?.args).not.toContain('--to-npm')
+      expect(updateCall?.args).not.toContain('--allow-non-empty-history-migration')
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('launchUnattendedAutoUpgrade repairs Linux session env for runner/inspectService and skips non-chat notify markers', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const os = await import('node:os')
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-auto-update-linux-env-'))
+    try {
+      const dshHome = path.join(root, 'dsh-home')
+      const osHome = path.join(root, 'os-home')
+      fs.mkdirSync(path.join(dshHome, 'profiles', 'web', '.dsh'), { recursive: true })
+      fs.mkdirSync(osHome, { recursive: true })
+      const uid = process.getuid?.() ?? 1000
+      const expectedRuntimeDir = `/run/user/${uid}`
+      const expectedDbusAddr = `unix:path=${expectedRuntimeDir}/bus`
+
+      const detailedEnvs: Array<{ cmd: string; args: readonly string[]; env: NodeJS.ProcessEnv | undefined }> = []
+      const inspectEnvs: Array<string | undefined> = []
+      const spawnEnvs: Array<NodeJS.ProcessEnv | undefined> = []
+
+      const makeCheckResult = () => ({
+        exitCode: 0,
+        report: {
+          schemaVersion: 1 as const,
+          command: 'upgrade' as const,
+          action: 'check' as const,
+          ok: true,
+          ready: true,
+          dshHome,
+          mode: 'standard-local' as const,
+          frozenSystemd: { detected: false, profiles: [] },
+          packages: {
+            cliPackageVersion: '0.2.2',
+            installedEnhancedVersion: '0.2.0',
+            targetEnhancedVersion: '0.2.2',
+            upgradeAvailable: true,
+            boundHost: { status: 'ready' as const, upgradeAvailable: false },
+            profiles: [],
+          },
+          registry: { url: 'https://registry.npmjs.org', checked: true, status: 'ok' as const, latestEnhancedVersion: '0.2.2' },
+          readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+          plan: { canExecute: true, steps: [], rollbackSupported: true, backupFiles: [] },
+        },
+      })
+
+      // 1. Omitted notify + omitted XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS
+      const resNoNotify = await launchUnattendedAutoUpgrade({
+        dshHome,
+        profile: 'web',
+        platform: 'linux',
+        osHome,
+        env: { PATH: '/usr/bin:/bin' },
+      }, {
+        runUpgrade: async () => makeCheckResult(),
+        collectDoctor: async () => ({ ok: true, profiles: [] }) as never,
+        checkPathExists: target => target === expectedRuntimeDir || target === `${expectedRuntimeDir}/bus`,
+        detailedRunner: (cmd, args, opts) => {
+          detailedEnvs.push({ cmd, args, env: opts?.env })
+          return { status: 0, stdout: 'active\n', stderr: '', signal: null }
+        },
+        inspectService: async (_platform, _home, _profile, _dsh, svcRunner) => {
+          inspectEnvs.push(svcRunner?.('systemctl', ['--user', 'show-environment']).stdout)
+          return {
+            managed: true,
+            definitionPath: path.join(osHome, '.config/systemd/user/dsh-profile-web.service'),
+            foreign: false,
+          }
+        },
+        spawnDetached: (_cmd, _args, spawnEnv) => {
+          spawnEnvs.push(spawnEnv)
+          return 43210
+        },
+        runnerScriptPath: '/opt/dsh-ray/lib/auto-update-runner.js',
+        nodeExecutable: '/usr/bin/node',
+      })
+
+      expect(resNoNotify.ok).toBe(true)
+      expect(resNoNotify.started).toBe(true)
+      expect(resNoNotify.launcher).toBe('systemd-run')
+      expect(fs.existsSync(autoUpdateNotifyPath(dshHome))).toBe(false)
+      expect(inspectEnvs).toHaveLength(1)
+      expect(detailedEnvs.length).toBeGreaterThanOrEqual(3)
+      for (const call of detailedEnvs) {
+        expect(call.env?.XDG_RUNTIME_DIR).toBe(expectedRuntimeDir)
+        expect(call.env?.DBUS_SESSION_BUS_ADDRESS).toBe(expectedDbusAddr)
+      }
+      const systemdRunCall = detailedEnvs.find(call => call.cmd.endsWith('systemd-run'))
+      expect(systemdRunCall?.args).toContain(`--setenv=XDG_RUNTIME_DIR=${expectedRuntimeDir}`)
+      expect(systemdRunCall?.args).toContain(`--setenv=DBUS_SESSION_BUS_ADDRESS=${expectedDbusAddr}`)
+
+      // 2. Web notify without chat target also skips writing auto-update-notify.json
+      const dshHomeWebOnly = path.join(root, 'dsh-home-web-only')
+      fs.mkdirSync(path.join(dshHomeWebOnly, 'profiles', 'web', '.dsh'), { recursive: true })
+      const resWebOnly = await launchUnattendedAutoUpgrade({
+        dshHome: dshHomeWebOnly,
+        profile: 'web',
+        platform: 'linux',
+        osHome,
+        env: { PATH: '/usr/bin:/bin' },
+        notify: { channel: 'web', account: 'owner-console' },
+      }, {
+        runUpgrade: async () => makeCheckResult(),
+        collectDoctor: async () => ({ ok: true, profiles: [] }) as never,
+        checkPathExists: () => false,
+        detailedRunner: () => ({ status: 1, stdout: '', stderr: '', signal: null }),
+        inspectService: async () => ({ managed: false, definitionPath: '/tmp/none.service', foreign: false }),
+        spawnDetached: (_cmd, _args, spawnEnv) => {
+          spawnEnvs.push(spawnEnv)
+          return 43211
+        },
+        runnerScriptPath: '/opt/dsh-ray/lib/auto-update-runner.js',
+        nodeExecutable: '/usr/bin/node',
+      })
+      expect(resWebOnly.ok).toBe(true)
+      expect(resWebOnly.started).toBe(true)
+      expect(resWebOnly.launcher).toBe('detached')
+      expect(fs.existsSync(autoUpdateNotifyPath(dshHomeWebOnly))).toBe(false)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
 })

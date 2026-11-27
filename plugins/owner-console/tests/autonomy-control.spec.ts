@@ -577,6 +577,7 @@ describe('handleOwnerConsoleControlAction', () => {
     expect(frozen.note).toContain('🔄 已启动后台自动升级与服务恢复')
     expect(frozenCalls).toHaveLength(1)
     expect(frozenCalls[0]).toMatchObject({ dshHome, profile: 'web', platform: 'linux' })
+    expect(frozenCalls[0]).not.toHaveProperty('notify')
 
     const frozenFail = await handleOwnerConsoleControlAction(ctx, {
       dshHome,

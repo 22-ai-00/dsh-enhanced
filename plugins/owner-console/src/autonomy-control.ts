@@ -629,11 +629,7 @@ export async function handleOwnerConsoleControlAction(
         platform,
         osHome: env.HOME || homedir(),
         env,
-        notify: request.notify ?? {
-          channel: 'web',
-          account: 'owner-console',
-          ownerPrincipal: 'owner',
-        },
+        ...(request.notify !== undefined ? { notify: request.notify } : {}),
       })
       if (!outcome.ok) {
         return failControl(outcome.error ?? outcome.message, action)
