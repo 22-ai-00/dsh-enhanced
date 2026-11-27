@@ -21,8 +21,9 @@ import {
   ensureConfigMap, ensurePatchRow, ensureVerifierDefaults, externalPrincipalId, findPatchRow,
   formatGrantIdWithGeneration, getPatchRowConfig, getPatchRowConfigNode, getPersonalAndPolicyConfigs,
   inspectMemoryLearningGrantConflicts, inspectOwnerRoute, jsDshHomeScalar, mergeDescriptorConfig,
-  normalizeLearningConfigForDigest, normalizeMemoryGrantForDigest, normalizeProfileSlug, readConfigMap, readPatchDocument, resolveProfilePaths,
-  resolveScopedDbTarget, strOrNull, upsertById, yamlNodeToJs, type AutonomyHostContext, type ProfilePaths,
+  normalizeLearningConfigForDigest, normalizeMemoryGrantForDigest, normalizeProfileSlug, pruneStaleOwnerRouteRules,
+  readConfigMap, readPatchDocument, resolveProfilePaths, resolveScopedDbTarget, strOrNull,
+  syncPrimaryOwnerRoutes, upsertById, yamlNodeToJs, type AutonomyHostContext, type ProfilePaths,
 } from './autonomy-setup.js'
 
 interface JsDshHomeRef {
@@ -493,7 +494,7 @@ function readDeliverySqliteSnapshot(dbPath: string | null): SqliteOwnerSnapshot 
     const totalPrincipals = typeof countRow?.count === 'number' ? countRow.count : 0
 
     const owners = db.prepare(
-      `SELECT id, version, principal_json FROM delivery_principals WHERE role = 'owner' AND status = 'active' ORDER BY version DESC LIMIT 8`,
+      `SELECT id, version, principal_json FROM delivery_principals WHERE role = 'owner' AND status = 'active' ORDER BY version DESC LIMIT 32`,
     ).all() as ReadonlyArray<{ id?: unknown; version?: unknown; principal_json?: unknown }>
     let chosen: { id: string; version: number; principal: Record<string, unknown>; key: string } | null = null
     for (const row of owners) {
@@ -665,6 +666,64 @@ function resolveDeliveryDbPathForProfile(
   )
   const scopedDb = checkScopedDbPath(deliveryNode?.get('databasePath', true) ?? deliveryCfg['databasePath'], canonicalHome)
   return scopedDb.resolved ?? join(canonicalHome, 'assistant-delivery', 'state.sqlite')
+}
+
+function ensurePolicyConfigTarget(
+  doc: Document,
+  seq: YAMLSeq,
+  descriptors: readonly SettingsDescriptor[],
+  manifestBundles?: Readonly<Record<string, boolean>>,
+  statusBundles: OwnerConsoleStatus['bundles'] = [],
+): Readonly<{
+  useSplitPolicy: boolean
+  effectivePolicyCfg: Record<string, unknown>
+  policyConfigNode: YAMLMap
+  existingRulesBeforeDefaults: unknown
+}> {
+  const layoutInfo = getPersonalAndPolicyConfigs(seq, descriptors)
+  const hasPaRowOrDesc = findPatchRow(seq, 'dsh-ray-personal-assistant') !== undefined
+    || findEntry(descriptors, ns => ns === 'dsh-ray-personal-assistant') !== undefined
+    || (manifestBundles !== undefined && isBundleInstalled('@dsh-ray/personal-assistant', 'dsh-ray-personal-assistant', manifestBundles, statusBundles, seq))
+  const splitPolicyDesc = findEntry(descriptors, ns => ns === 'dsh-ray-assistant-policy')
+  const splitInstalled = splitPolicyDesc !== undefined
+    || (manifestBundles !== undefined && isBundleInstalled('@dsh-ray/assistant-policy', 'dsh-ray-assistant-policy', manifestBundles, statusBundles, seq))
+  const useSplitPolicy = layoutInfo.layout === 'split' || (!hasPaRowOrDesc && splitInstalled)
+  const effectivePolicyCfg = useSplitPolicy
+    ? { ...asPlainRecord(splitPolicyDesc?.value), ...getPatchRowConfig(seq, 'dsh-ray-assistant-policy', doc) }
+    : layoutInfo.policyCfg
+
+  let policyConfigNode: YAMLMap
+  let existingRulesBeforeDefaults: unknown
+  if (useSplitPolicy) {
+    const policyRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-policy', '@dsh-ray/assistant-policy')
+    if (policyRow.get('disabled') === true) policyRow.delete('disabled')
+    policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
+    existingRulesBeforeDefaults = isSeq(policyConfigNode.get('rules', true))
+      ? yamlNodeToJs(policyConfigNode.get('rules', true), doc)
+      : effectivePolicyCfg['rules']
+    // Cordis patch config is a whole-value replacement: restate required databasePath and surviving split-policy keys.
+    const splitPolicyDefaults: Record<string, unknown> = {
+      databasePath: jsRef('assistant-policy/policy.sqlite'),
+      budgets: Array.isArray(effectivePolicyCfg['budgets']) ? effectivePolicyCfg['budgets'] : [],
+    }
+    for (const key of ['proposalMaintenanceIntervalMs', 'toolDefaultEffect', 'autoReview'] as const) {
+      if (effectivePolicyCfg[key] !== undefined) splitPolicyDefaults[key] = effectivePolicyCfg[key]
+    }
+    setMissingMapDefaults(doc, policyConfigNode, splitPolicyDefaults)
+  } else {
+    const paRow = ensurePatchRow(doc, seq, 'dsh-ray-personal-assistant', '@dsh-ray/personal-assistant')
+    if (paRow.get('disabled') === true) paRow.delete('disabled')
+    const paCfg = ensureConfigMap(doc, paRow, 'config')
+    const existingPolicyNode = readConfigMap(paCfg, 'assistantPolicy')
+    existingRulesBeforeDefaults = isSeq(existingPolicyNode?.get('rules', true))
+      ? yamlNodeToJs(existingPolicyNode!.get('rules', true), doc)
+      : (Array.isArray(effectivePolicyCfg['rules']) && effectivePolicyCfg['rules'].length > 0
+          ? effectivePolicyCfg['rules']
+          : undefined)
+    setMissingMapDefaults(doc, paCfg, PERSONAL_ASSISTANT_DEFAULTS)
+    policyConfigNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
+  }
+  return { useSplitPolicy, effectivePolicyCfg, policyConfigNode, existingRulesBeforeDefaults }
 }
 
 function severityRank(severity: SetupDoctorIssue['severity']): number {
@@ -1315,21 +1374,16 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
       continue
     }
     if (issue.id === 'corrupted-policy-alias-rules') {
-      const layoutInfo = getPersonalAndPolicyConfigs(seq, input.descriptors)
-      let policyConfigNode: YAMLMap
-      if (layoutInfo.layout === 'split') {
-        const policyRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-policy', '@dsh-ray/assistant-policy')
-        policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
-        if (!policyConfigNode.has('databasePath')) policyConfigNode.set('databasePath', jsDshHomeScalar('assistant-policy/policy.sqlite'))
-      } else {
-        const paRow = ensurePatchRow(doc, seq, 'dsh-ray-personal-assistant', '@dsh-ray/personal-assistant')
-        const paCfg = ensureConfigMap(doc, paRow, 'config')
-        setMissingMapDefaults(doc, paCfg, PERSONAL_ASSISTANT_DEFAULTS)
-        policyConfigNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
-      }
-      const rawRules = isSeq(policyConfigNode.get('rules', true))
-        ? yamlNodeToJs(policyConfigNode.get('rules', true), doc)
-        : layoutInfo.policyCfg['rules']
+      const manifestBundles = readProfileManifestBundles(paths.profileDir)
+      const { effectivePolicyCfg, policyConfigNode, existingRulesBeforeDefaults } = ensurePolicyConfigTarget(
+        doc,
+        seq,
+        input.descriptors,
+        manifestBundles,
+        input.status.bundles,
+      )
+      const rawRules = existingRulesBeforeDefaults
+        ?? (isSeq(policyConfigNode.get('rules', true)) ? yamlNodeToJs(policyConfigNode.get('rules', true), doc) : effectivePolicyCfg['rules'])
       const repaired = repairAliasMangledPolicyRules(rawRules)
       policyConfigNode.set('rules', createPlainNode(doc, repaired.rules))
       patchDirty = true
@@ -1560,6 +1614,7 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
     }
     if (issue.id === 'missing-local-owner-route' && paths.canonicalHome !== null) {
       const deliveryRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-delivery', '@dsh-ray/assistant-delivery')
+      if (deliveryRow.get('disabled') === true) deliveryRow.delete('disabled')
       const deliveryCfgMap = ensureConfigMap(doc, deliveryRow, 'config')
       setMissingMapDefaults(doc, deliveryCfgMap, ASSISTANT_DELIVERY_DEFAULTS)
 
@@ -1576,7 +1631,7 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
 
       let sqliteSnapshot = readDeliverySqliteSnapshot(deliveryDbPath)
       let ownerPrincipal: Record<string, unknown> = { channel: 'web', account: paths.profileName, tenant: 'local', user: 'operator' }
-      let ownerConversation: Record<string, unknown> = { channel: 'web', account: paths.profileName, tenant: 'local', kind: 'dm', chat: 'owner-primary' }
+      let ownerConversation: Record<string, unknown> | null = { channel: 'web', account: paths.profileName, tenant: 'local', kind: 'dm', chat: 'owner-primary' }
       let routeWorkspace = defaultWorkspace
       let routePreset = defaultPreset
       let routePolicyRef = 'owner-dm'
@@ -1606,6 +1661,8 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
           ownerConversation = active.conversation
         } else if (ch === 'web') {
           ownerConversation = { channel: 'web', account: acc, tenant: ten, kind: 'dm', chat: 'owner-primary' }
+        } else {
+          ownerConversation = null
         }
         routeWorkspace = active.workspace !== null && isAbsolute(active.workspace) ? active.workspace : defaultWorkspace
         routePreset = active.preset ?? defaultPreset
@@ -1615,6 +1672,10 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
 
       const routeChannel = strOrNull(ownerPrincipal['channel']) ?? 'web'
       const routeAccount = strOrNull(ownerPrincipal['account']) ?? paths.profileName
+      if (ownerConversation === null) {
+        notes.push(`检测到 ${routeChannel} 主主人尚未在对应通道建立私聊会话，请先给机器人发一条消息后再同步 ownerRoutes`)
+        continue
+      }
       const routeId = `owner-${routeChannel}-${routeAccount}`
       const ownerRoute = {
         id: routeId,
@@ -1626,23 +1687,22 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
         minimumGeneration: routeGeneration,
       }
       const existingRoutes = isSeq(deliveryCfgMap.get('ownerRoutes', true)) ? yamlNodeToJs(deliveryCfgMap.get('ownerRoutes', true), doc) : []
-      deliveryCfgMap.set('ownerRoutes', createPlainNode(doc, upsertById(existingRoutes, [ownerRoute])))
+      deliveryCfgMap.set('ownerRoutes', createPlainNode(doc, syncPrimaryOwnerRoutes(existingRoutes, ownerRoute)))
       deliveryCfgMap.set('defaultWorkspace', createPlainNode(doc, routeWorkspace))
       deliveryCfgMap.set('defaultAgentPreset', createPlainNode(doc, routePreset))
 
-      const layoutInfo = getPersonalAndPolicyConfigs(seq, input.descriptors)
-      let policyConfigNode: YAMLMap
-      if (layoutInfo.layout === 'split') {
-        const policyRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-policy', '@dsh-ray/assistant-policy')
-        policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
-        if (!policyConfigNode.has('databasePath')) policyConfigNode.set('databasePath', jsDshHomeScalar('assistant-policy/policy.sqlite'))
-      } else {
-        const paRow = ensurePatchRow(doc, seq, 'dsh-ray-personal-assistant', '@dsh-ray/personal-assistant')
-        const paCfg = ensureConfigMap(doc, paRow, 'config')
-        setMissingMapDefaults(doc, paCfg, PERSONAL_ASSISTANT_DEFAULTS)
-        policyConfigNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
-      }
+      const manifestBundles = readProfileManifestBundles(paths.profileDir)
+      const { effectivePolicyCfg, policyConfigNode, existingRulesBeforeDefaults } = ensurePolicyConfigTarget(
+        doc,
+        seq,
+        input.descriptors,
+        manifestBundles,
+        input.status.bundles,
+      )
       const principalKey = externalPrincipalId(ownerPrincipal) ?? `${routeChannel}/${routeAccount}/local/operator`
+      const existingRulesRaw = existingRulesBeforeDefaults
+        ?? (isSeq(policyConfigNode.get('rules', true)) ? yamlNodeToJs(policyConfigNode.get('rules', true), doc) : effectivePolicyCfg['rules'])
+      const cleanedRules = pruneStaleOwnerRouteRules(existingRulesRaw, routeId, principalKey)
       const requiredRules: Record<string, unknown>[] = [
         {
           id: `dsh-ray-owner-route-${routeId}`,
@@ -1672,11 +1732,19 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
             context: { initiators: ['external'] },
           },
         )
+      } else if (routeChannel === 'lark') {
+        requiredRules.push(
+          ...buildLarkOwnerPolicyRules({
+            account: routeAccount,
+            principalId: principalKey,
+            workspace: routeWorkspace,
+            preset: routePreset,
+            existingRules: cleanedRules,
+          }),
+        )
       }
-      const existingRules = isSeq(policyConfigNode.get('rules', true)) ? yamlNodeToJs(policyConfigNode.get('rules', true), doc) : layoutInfo.policyCfg['rules']
-      policyConfigNode.set('rules', createPlainNode(doc, upsertById(existingRules, requiredRules)))
+      policyConfigNode.set('rules', createPlainNode(doc, upsertById(cleanedRules, requiredRules)))
 
-      const manifestBundles = readProfileManifestBundles(paths.profileDir)
       if (routeChannel === 'web' && isBundleInstalled('@dsh-ray/assistant-web-owner', 'dsh-ray-assistant-web-owner', manifestBundles, input.status.bundles, seq)) {
         const webRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-web-owner', '@dsh-ray/assistant-web-owner')
         const webCfg = ensureConfigMap(doc, webRow, 'config')
@@ -2407,46 +2475,13 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
     setMissingMapDefaults(doc, kcCfg, CREDENTIALS_KEYCHAIN_DEFAULTS)
     kcCfg.set('handles', createPlainNode(doc, upsertById(existingHandles, [handleEntry])))
 
-    const layoutInfo = getPersonalAndPolicyConfigs(seq, input.descriptors)
-    const hasPaRowOrDesc = findPatchRow(seq, 'dsh-ray-personal-assistant') !== undefined
-      || findEntry(input.descriptors, ns => ns === 'dsh-ray-personal-assistant') !== undefined
-    const splitPolicyDesc = findEntry(input.descriptors, ns => ns === 'dsh-ray-assistant-policy')
-    const useSplitPolicy = layoutInfo.layout === 'split' || (!hasPaRowOrDesc && splitPolicyDesc !== undefined)
-    const effectivePolicyCfg = useSplitPolicy
-      ? { ...asPlainRecord(splitPolicyDesc?.value), ...getPatchRowConfig(seq, 'dsh-ray-assistant-policy', doc) }
-      : layoutInfo.policyCfg
-
-    let policyConfigNode: YAMLMap
-    let existingRulesBeforeDefaults: unknown
-    if (useSplitPolicy) {
-      const policyRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-policy', '@dsh-ray/assistant-policy')
-      if (policyRow.get('disabled') === true) policyRow.delete('disabled')
-      policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
-      existingRulesBeforeDefaults = isSeq(policyConfigNode.get('rules', true))
-        ? yamlNodeToJs(policyConfigNode.get('rules', true), doc)
-        : effectivePolicyCfg['rules']
-      // Cordis patch config is a whole-value replacement: restate required databasePath and surviving split-policy keys.
-      const splitPolicyDefaults: Record<string, unknown> = {
-        databasePath: jsRef('assistant-policy/policy.sqlite'),
-        budgets: Array.isArray(effectivePolicyCfg['budgets']) ? effectivePolicyCfg['budgets'] : [],
-      }
-      for (const key of ['proposalMaintenanceIntervalMs', 'toolDefaultEffect', 'autoReview'] as const) {
-        if (effectivePolicyCfg[key] !== undefined) splitPolicyDefaults[key] = effectivePolicyCfg[key]
-      }
-      setMissingMapDefaults(doc, policyConfigNode, splitPolicyDefaults)
-    } else {
-      const paRow = ensurePatchRow(doc, seq, 'dsh-ray-personal-assistant', '@dsh-ray/personal-assistant')
-      if (paRow.get('disabled') === true) paRow.delete('disabled')
-      const paCfg = ensureConfigMap(doc, paRow, 'config')
-      const existingPolicyNode = readConfigMap(paCfg, 'assistantPolicy')
-      existingRulesBeforeDefaults = isSeq(existingPolicyNode?.get('rules', true))
-        ? yamlNodeToJs(existingPolicyNode!.get('rules', true), doc)
-        : (Array.isArray(effectivePolicyCfg['rules']) && effectivePolicyCfg['rules'].length > 0
-            ? effectivePolicyCfg['rules']
-            : undefined)
-      setMissingMapDefaults(doc, paCfg, PERSONAL_ASSISTANT_DEFAULTS)
-      policyConfigNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
-    }
+    const manifestBundles = readProfileManifestBundles(paths.profileDir)
+    const { effectivePolicyCfg, policyConfigNode, existingRulesBeforeDefaults } = ensurePolicyConfigTarget(
+      doc,
+      seq,
+      input.descriptors,
+      manifestBundles,
+    )
     const existingDeliveryRow = findPatchRow(seq, 'dsh-ray-assistant-delivery')
     if (existingDeliveryRow?.get('disabled') === true) existingDeliveryRow.delete('disabled')
 
@@ -2983,7 +3018,7 @@ export async function promoteLarkOwnerInProfile(input: PromoteLarkOwnerInput): P
       const existingRoutes = isSeq(deliveryCfgMap.get('ownerRoutes', true))
         ? yamlNodeToJs(deliveryCfgMap.get('ownerRoutes', true), doc)
         : existingRoutesRaw
-      deliveryCfgMap.set('ownerRoutes', createPlainNode(doc, upsertById(existingRoutes, [ownerRoute])))
+      deliveryCfgMap.set('ownerRoutes', createPlainNode(doc, syncPrimaryOwnerRoutes(existingRoutes, ownerRoute)))
       extraPolicyRules.push({
         id: `dsh-ray-owner-route-${routeId}`,
         effect: 'allow',
@@ -2996,48 +3031,19 @@ export async function promoteLarkOwnerInProfile(input: PromoteLarkOwnerInput): P
       hasStaleOwnerRoute = false
     }
 
-    const layoutInfo = getPersonalAndPolicyConfigs(seq, input.descriptors)
-    const hasPaRowOrDesc = findPatchRow(seq, 'dsh-ray-personal-assistant') !== undefined
-      || findEntry(input.descriptors, ns => ns === 'dsh-ray-personal-assistant') !== undefined
-    const splitPolicyDesc = findEntry(input.descriptors, ns => ns === 'dsh-ray-assistant-policy')
-    const useSplitPolicy = layoutInfo.layout === 'split' || (!hasPaRowOrDesc && splitPolicyDesc !== undefined)
-    const effectivePolicyCfg = useSplitPolicy
-      ? { ...asPlainRecord(splitPolicyDesc?.value), ...getPatchRowConfig(seq, 'dsh-ray-assistant-policy', doc) }
-      : layoutInfo.policyCfg
+    const manifestBundles = readProfileManifestBundles(paths.profileDir)
+    const { effectivePolicyCfg, policyConfigNode, existingRulesBeforeDefaults } = ensurePolicyConfigTarget(
+      doc,
+      seq,
+      input.descriptors,
+      manifestBundles,
+    )
 
-    let policyConfigNode: YAMLMap
-    let existingRulesBeforeDefaults: unknown
-    if (useSplitPolicy) {
-      const policyRow = ensurePatchRow(doc, seq, 'dsh-ray-assistant-policy', '@dsh-ray/assistant-policy')
-      if (policyRow.get('disabled') === true) policyRow.delete('disabled')
-      policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
-      existingRulesBeforeDefaults = isSeq(policyConfigNode.get('rules', true))
-        ? yamlNodeToJs(policyConfigNode.get('rules', true), doc)
-        : effectivePolicyCfg['rules']
-      const splitPolicyDefaults: Record<string, unknown> = {
-        databasePath: jsRef('assistant-policy/policy.sqlite'),
-        budgets: Array.isArray(effectivePolicyCfg['budgets']) ? effectivePolicyCfg['budgets'] : [],
-      }
-      for (const key of ['proposalMaintenanceIntervalMs', 'toolDefaultEffect', 'autoReview'] as const) {
-        if (effectivePolicyCfg[key] !== undefined) splitPolicyDefaults[key] = effectivePolicyCfg[key]
-      }
-      setMissingMapDefaults(doc, policyConfigNode, splitPolicyDefaults)
-    } else {
-      const paRow = ensurePatchRow(doc, seq, 'dsh-ray-personal-assistant', '@dsh-ray/personal-assistant')
-      if (paRow.get('disabled') === true) paRow.delete('disabled')
-      const paCfg = ensureConfigMap(doc, paRow, 'config')
-      const existingPolicyNode = readConfigMap(paCfg, 'assistantPolicy')
-      existingRulesBeforeDefaults = isSeq(existingPolicyNode?.get('rules', true))
-        ? yamlNodeToJs(existingPolicyNode!.get('rules', true), doc)
-        : (Array.isArray(effectivePolicyCfg['rules']) && effectivePolicyCfg['rules'].length > 0
-            ? effectivePolicyCfg['rules']
-            : undefined)
-      setMissingMapDefaults(doc, paCfg, PERSONAL_ASSISTANT_DEFAULTS)
-      policyConfigNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
-    }
-
-    const existingRules = existingRulesBeforeDefaults
+    const rawExistingRules = existingRulesBeforeDefaults
       ?? (isSeq(policyConfigNode.get('rules', true)) ? yamlNodeToJs(policyConfigNode.get('rules', true), doc) : effectivePolicyCfg['rules'])
+    const existingRules = ownerRouteSynced
+      ? pruneStaleOwnerRouteRules(rawExistingRules, routeId, principalKey)
+      : rawExistingRules
     const ownerRules = [
       ...buildLarkOwnerPolicyRules({
         account: cleanAccount,

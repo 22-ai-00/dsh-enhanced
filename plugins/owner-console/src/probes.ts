@@ -1,5 +1,5 @@
 import { execFile as nodeExecFile } from 'node:child_process'
-import { statSync } from 'node:fs'
+import { readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -133,7 +133,48 @@ export interface DiscoverBinaryOptions {
   readonly isExecutable?: (candidatePath: string) => boolean
 }
 
-function defaultIsExecutable(candidatePath: string, platform: NodeJS.Platform): boolean {
+export interface CollectUserBinDirsOptions {
+  readonly env?: NodeJS.ProcessEnv | undefined
+  readonly homeDir?: string | undefined
+  readonly dshHome?: string | null | undefined
+  readonly platform?: NodeJS.Platform | undefined
+  readonly execPath?: string | undefined
+  readonly extraBinDirs?: readonly string[] | undefined
+  readonly includePath?: boolean | undefined
+}
+
+const MAX_VERSION_MANAGER_DIRS = 16
+
+function compareVersionTagDesc(a: string, b: string): number {
+  const parseTag = (s: string) => {
+    const match = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/u.exec(s)
+    if (match === null) return null
+    return [Number(match[1]), Number(match[2] ?? '0'), Number(match[3] ?? '0')] as const
+  }
+  const pa = parseTag(a)
+  const pb = parseTag(b)
+  if (pa !== null && pb !== null) {
+    for (let i = 0; i < 3; i++) {
+      if (pa[i]! !== pb[i]!) return pb[i]! - pa[i]!
+    }
+    return 0
+  }
+  return b.localeCompare(a)
+}
+
+function readSortedSubdirs(baseDir: string): readonly string[] {
+  try {
+    return readdirSync(baseDir, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && entry.name !== '.' && entry.name !== '..' && !hasControlChars(entry.name))
+      .map(entry => entry.name)
+      .sort(compareVersionTagDesc)
+      .slice(0, MAX_VERSION_MANAGER_DIRS)
+  } catch {
+    return []
+  }
+}
+
+export function defaultIsExecutable(candidatePath: string, platform: NodeJS.Platform = process.platform): boolean {
   try {
     const st = statSync(candidatePath)
     if (!st.isFile()) return false
@@ -141,6 +182,108 @@ function defaultIsExecutable(candidatePath: string, platform: NodeJS.Platform): 
   } catch {
     return false
   }
+}
+
+/** Collect user, Node/pnpm version-manager (nvm/fnm/volta/asdf/mise), desktop runtime, and system bin dirs. */
+export function collectUserBinDirs(options: CollectUserBinDirsOptions = {}): readonly string[] {
+  const env = options.env ?? process.env
+  const platform = options.platform ?? process.platform
+  const homeRaw = options.homeDir ?? env['HOME']?.trim()
+  const home = homeRaw && !hasControlChars(homeRaw) ? homeRaw : homedir()
+  const dirs: string[] = []
+
+  const pushDir = (dir: string | undefined) => {
+    if (typeof dir !== 'string' || hasControlChars(dir)) return
+    const trimmed = dir.trim()
+    if (trimmed === '' || !isAbsolute(trimmed)) return
+    const normalized = resolve(trimmed)
+    if (!dirs.includes(normalized)) dirs.push(normalized)
+  }
+
+  for (const extra of options.extraBinDirs ?? []) pushDir(extra)
+
+  const desktopNode = env['DSH_DESKTOP_NODE_EXECUTABLE']
+  if (typeof desktopNode === 'string' && !hasControlChars(desktopNode) && isAbsolute(desktopNode.trim())) {
+    pushDir(dirname(resolve(desktopNode.trim())))
+  }
+
+  if (options.includePath === true) {
+    for (const entry of (env['PATH'] ?? '').split(platform === 'win32' ? ';' : delimiter)) pushDir(entry)
+  }
+
+  const execPath = options.execPath ?? process.execPath
+  if (typeof execPath === 'string' && execPath.trim() !== '' && !hasControlChars(execPath) && isAbsolute(execPath.trim())) {
+    const execDir = dirname(resolve(execPath.trim()))
+    pushDir(execDir)
+    if (platform === 'darwin') {
+      pushDir(join(execDir, '..', 'Resources', 'bin'))
+    }
+  }
+
+  if (typeof options.dshHome === 'string' && options.dshHome.trim() !== '' && !hasControlChars(options.dshHome) && isAbsolute(options.dshHome.trim())) {
+    pushDir(join(dirname(resolve(options.dshHome.trim())), '.local', 'bin'))
+  }
+
+  if (platform === 'win32') {
+    if (env['APPDATA']) pushDir(join(env['APPDATA'], 'npm'))
+    if (env['LOCALAPPDATA']) {
+      pushDir(join(env['LOCALAPPDATA'], 'pnpm'))
+      pushDir(join(env['LOCALAPPDATA'], 'Programs', 'nodejs'))
+      pushDir(join(env['LOCALAPPDATA'], 'Programs', 'Antigravity', 'bin'))
+      pushDir(join(env['LOCALAPPDATA'], 'Programs', 'Trae', 'bin'))
+    }
+    if (env['ProgramFiles']) pushDir(join(env['ProgramFiles'], 'nodejs'))
+    pushDir(join(home, '.volta', 'bin'))
+    if (env['FNM_MULTISHELL_PATH']) pushDir(env['FNM_MULTISHELL_PATH'])
+    return dirs
+  }
+
+  pushDir(join(home, '.local', 'bin'))
+  pushDir(join(home, '.npm-global', 'bin'))
+  pushDir(env['PNPM_HOME'])
+  pushDir(join(home, 'Library', 'pnpm'))
+  pushDir(join(home, '.local', 'share', 'pnpm'))
+  pushDir(join(home, '.volta', 'bin'))
+  pushDir(join(home, '.asdf', 'shims'))
+  pushDir(join(home, '.local', 'share', 'mise', 'shims'))
+
+  pushDir(env['NVM_BIN'])
+  const nvmDir = env['NVM_DIR'] && !hasControlChars(env['NVM_DIR']) && isAbsolute(env['NVM_DIR'].trim())
+    ? env['NVM_DIR'].trim()
+    : join(home, '.nvm')
+  const nvmVersionsDir = join(nvmDir, 'versions', 'node')
+  for (const versionName of readSortedSubdirs(nvmVersionsDir)) {
+    pushDir(join(nvmVersionsDir, versionName, 'bin'))
+  }
+
+  const fnmMultishell = env['FNM_MULTISHELL_PATH']
+  if (typeof fnmMultishell === 'string' && !hasControlChars(fnmMultishell) && isAbsolute(fnmMultishell.trim())) {
+    pushDir(join(fnmMultishell.trim(), 'bin'))
+    pushDir(fnmMultishell.trim())
+  }
+  const xdgDataHome = env['XDG_DATA_HOME'] && !hasControlChars(env['XDG_DATA_HOME']) && isAbsolute(env['XDG_DATA_HOME'].trim())
+    ? env['XDG_DATA_HOME'].trim()
+    : undefined
+  const fnmRoots = [
+    ...(xdgDataHome ? [join(xdgDataHome, 'fnm')] : []),
+    join(home, 'Library', 'Application Support', 'fnm'),
+    join(home, '.local', 'share', 'fnm'),
+    join(home, '.fnm'),
+  ]
+  for (const fnmRoot of fnmRoots) {
+    pushDir(join(fnmRoot, 'aliases', 'default', 'bin'))
+    const nodeVersionsDir = join(fnmRoot, 'node-versions')
+    for (const versionName of readSortedSubdirs(nodeVersionsDir)) {
+      pushDir(join(nodeVersionsDir, versionName, 'installation', 'bin'))
+    }
+  }
+
+  pushDir('/opt/homebrew/bin')
+  pushDir('/opt/homebrew/sbin')
+  pushDir('/usr/local/bin')
+  pushDir('/usr/bin')
+  pushDir('/bin')
+  return dirs
 }
 
 /** Auto-discover `traex` / `agy` on standard PATH and user bin locations (for GUI apps lacking shell PATH). */
@@ -155,31 +298,15 @@ export function discoverCodingToolBinary(
     ? (platform === 'win32' ? ['traex.cmd', 'traex.exe', 'traex', 'trae-cli.cmd', 'trae-cli.exe', 'trae-cli'] : ['traex', 'trae-cli'])
     : (platform === 'win32' ? ['agy.cmd', 'agy.exe', 'agy'] : ['agy'])
 
-  const dirs: string[] = []
-  const pushDir = (dir: string | undefined) => {
-    if (typeof dir !== 'string' || dir.trim() === '' || !isAbsolute(dir.trim())) return
-    const normalized = resolve(dir.trim())
-    if (!dirs.includes(normalized)) dirs.push(normalized)
-  }
-
-  for (const entry of (env['PATH'] ?? '').split(delimiter)) pushDir(entry)
-  if (typeof options.dshHome === 'string' && options.dshHome.trim() !== '' && isAbsolute(options.dshHome.trim())) {
-    pushDir(join(dirname(resolve(options.dshHome.trim())), '.local', 'bin'))
-  }
-  if (platform === 'win32') {
-    if (env['APPDATA']) pushDir(join(env['APPDATA'], 'npm'))
-    if (env['LOCALAPPDATA']) {
-      pushDir(join(env['LOCALAPPDATA'], 'Programs', 'Antigravity', 'bin'))
-      pushDir(join(env['LOCALAPPDATA'], 'Programs', 'Trae', 'bin'))
-    }
-  } else {
-    pushDir(join(home, '.local', 'bin'))
-    if (tool === 'agy') pushDir(join(home, '.antigravity', 'antigravity', 'bin'))
-    pushDir(join(home, '.npm-global', 'bin'))
-    pushDir('/opt/homebrew/bin')
-    pushDir('/usr/local/bin')
-    pushDir('/usr/bin')
-  }
+  const extraBinDirs = platform !== 'win32' && tool === 'agy' ? [join(home, '.antigravity', 'antigravity', 'bin')] : []
+  const dirs = collectUserBinDirs({
+    env,
+    homeDir: home,
+    dshHome: options.dshHome,
+    platform,
+    includePath: true,
+    extraBinDirs,
+  })
 
   const check = options.isExecutable ?? (candidate => defaultIsExecutable(candidate, platform))
   for (const dir of dirs) {

@@ -7,7 +7,7 @@
  */
 import { readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { isMap, parseDocument } from 'yaml'
+import { Document, isMap, parseDocument } from 'yaml'
 
 const MAX_NAMES = 64
 const MAX_NAME_LENGTH = 200
@@ -24,18 +24,7 @@ export function assertBuildName(name: string): void {
   }
 }
 
-/** Add `allowBuilds: <name>: true` entries to a profile's `pnpm-workspace.yaml`.
- *
- * Existing decisions are kept; only the listed names are set. The write replaces the file
- * atomically with mode 0600 so an interrupted retry cannot leave a half-written policy.
- * @param dir Absolute profile directory supplied by the Host.
- * @param names Exact package keys the owner confirmed; all must pass {@link assertBuildName}.
- */
-export async function persistAllowedBuilds(dir: string, names: readonly string[]): Promise<void> {
-  const unique = [...new Set(names)]
-  if (unique.length === 0) return
-  if (unique.length > MAX_NAMES) throw new Error(`构建脚本名称过多（上限 ${String(MAX_NAMES)}）`)
-  for (const name of unique) assertBuildName(name)
+async function mutateWorkspaceYaml(dir: string, mutate: (document: Document) => boolean): Promise<boolean> {
   const filename = join(dir, 'pnpm-workspace.yaml')
   let text: string
   try {
@@ -49,10 +38,38 @@ export async function persistAllowedBuilds(dir: string, names: readonly string[]
   if (document.contents !== null && !isMap(document.contents)) {
     throw new Error('pnpm-workspace.yaml 必须是 YAML 映射')
   }
-  const builds = document.get('allowBuilds')
-  if (builds !== undefined && !isMap(builds)) throw new Error('allowBuilds 必须是 YAML 映射')
-  for (const name of unique) document.setIn(['allowBuilds', name], true)
+  if (!mutate(document)) return false
   const temporary = `${filename}.owner-console-${process.pid.toString()}`
   await writeFile(temporary, String(document), { mode: 0o600 })
   await rename(temporary, filename)
+  return true
+}
+
+/** Ensure `confirmModulesPurge: false` in a profile's `pnpm-workspace.yaml` so non-TTY bundle installs never abort with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY. */
+export async function persistConfirmModulesPurgeDisabled(dir: string): Promise<boolean> {
+  return mutateWorkspaceYaml(dir, (document) => {
+    if (document.get('confirmModulesPurge') === false) return false
+    document.set('confirmModulesPurge', false)
+    return true
+  })
+}
+
+/** Add `allowBuilds: <name>: true` entries to a profile's `pnpm-workspace.yaml`.
+ *
+ * Existing decisions are kept; only the listed names are set. The write replaces the file
+ * atomically with mode 0600 so an interrupted retry cannot leave a half-written policy.
+ * @param dir Absolute profile directory supplied by the Host.
+ * @param names Exact package keys the owner confirmed; all must pass {@link assertBuildName}.
+ */
+export async function persistAllowedBuilds(dir: string, names: readonly string[]): Promise<void> {
+  const unique = [...new Set(names)]
+  if (unique.length === 0) return
+  if (unique.length > MAX_NAMES) throw new Error(`构建脚本名称过多（上限 ${String(MAX_NAMES)}）`)
+  for (const name of unique) assertBuildName(name)
+  await mutateWorkspaceYaml(dir, (document) => {
+    const builds = document.get('allowBuilds')
+    if (builds !== undefined && !isMap(builds)) throw new Error('allowBuilds 必须是 YAML 映射')
+    for (const name of unique) document.setIn(['allowBuilds', name], true)
+    return true
+  })
 }

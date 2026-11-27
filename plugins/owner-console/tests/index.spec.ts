@@ -1097,4 +1097,41 @@ describe('owner console intake agreement availability (scope-free)', () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('guards bundle installs against ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY via confirmModulesPurge: false and maps unrecovered NO_TTY errors', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'owner-console-no-tty-purge-'))
+    const workspaceFile = join(dir, 'pnpm-workspace.yaml')
+    const manager = fakeManager(async () => {
+      const yaml = await readFile(workspaceFile, 'utf8').catch(() => '')
+      if (!yaml.includes('confirmModulesPurge: false')) {
+        return {
+          changed: false,
+          application: 'failed',
+          target: '@dsh-ray/lark-channel',
+          error: { code: 'operation-error', diagnostic: '[ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY] Aborted removal of modules directory due to no TTY' },
+        }
+      }
+      return { changed: true, application: 'restart-required', target: '@dsh-ray/lark-channel' }
+    })
+    const { ctx, console } = await mount(undefined, undefined, manager)
+    ctx.provide('profileContext' as never, { dir } as never)
+    try {
+      const installed = await console.installProjectBundle('@dsh-ray/lark-channel')
+      expect(installed.applied).toBe(true)
+      expect(await readFile(workspaceFile, 'utf8')).toContain('confirmModulesPurge: false')
+
+      const unrecovered = applyInstall({
+        changed: false,
+        application: 'failed',
+        target: '@dsh-ray/lark-channel',
+        error: { code: 'operation-error', diagnostic: 'ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY' },
+      })
+      expect(unrecovered.applied).toBe(false)
+      expect(unrecovered.note).toContain('confirmModulesPurge: false')
+      expect(unrecovered.note).toContain('CI=true')
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -5,7 +6,10 @@ import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OwnerConsoleService } from '../src/service.js'
-import { buildUpgradeProbeEnv, compareSemver, readBoundHostMetadata, SelfUpgradeProber } from '../src/upgrade-probe.js'
+import {
+  buildUpgradeProbeEnv, compareSemver, discoverDshRayBinary, discoverToolRuntimeBinary,
+  readBoundHostMetadata, SelfUpgradeProber,
+} from '../src/upgrade-probe.js'
 
 function makeHost(dshHome: string, profileName = 'web') {
   const profileDir = join(dshHome, 'profiles', profileName)
@@ -549,5 +553,158 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
     expect((await launchd.prober.trigger(host, true)).applied).toBe(true)
     const launchdArgs = (launchd.spawnSpy.mock.calls[0]! as unknown as [string, string[]])[1]
     expect(launchdArgs).toEqual(['upgrade', '--yes', '--json', '--dsh-home', dshHome, '--profile', 'web'])
+  })
+
+  it('sets CI=true and discovers dsh-ray, node, and pnpm across nvm, fnm, volta, and execPath for macOS desktop GUI', () => {
+    const root = mkdtempSync(join(tmpdir(), 'owner-console-upg-nvm-fnm-'))
+    dirs.push(root)
+    const home = join(root, 'home')
+    const dshHome = join(root, 'dsh-home')
+    const nvmBin = join(home, '.nvm', 'versions', 'node', 'v22.15.0', 'bin')
+    const fnmNodeBin = join(home, 'Library', 'Application Support', 'fnm', 'node-versions', 'v24.1.0', 'installation', 'bin')
+    const voltaBin = join(home, '.volta', 'bin')
+    const appExecDir = join(root, 'app', 'bin')
+    mkdirSync(nvmBin, { recursive: true })
+    mkdirSync(fnmNodeBin, { recursive: true })
+    mkdirSync(voltaBin, { recursive: true })
+    mkdirSync(appExecDir, { recursive: true })
+
+    const dshRayBin = join(nvmBin, 'dsh-ray')
+    const fnmPnpmBin = join(fnmNodeBin, 'pnpm')
+    const appNodeBin = join(appExecDir, 'node')
+    writeFileSync(dshRayBin, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    writeFileSync(fnmPnpmBin, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    writeFileSync(appNodeBin, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+    const emptySysBin = join(root, 'empty-sys-bin')
+    mkdirSync(emptySysBin, { recursive: true })
+    const guiEnv = { HOME: home, PATH: emptySysBin }
+    const env = buildUpgradeProbeEnv(guiEnv, 'darwin', dshHome, { execPath: appNodeBin })
+    expect(env['CI']).toBe('true')
+    const parts = (env['PATH'] ?? '').split(':')
+    expect(parts).toContain(appExecDir)
+    expect(parts).toContain(voltaBin)
+    expect(parts).toContain(nvmBin)
+    expect(parts).toContain(fnmNodeBin)
+
+    expect(discoverDshRayBinary(guiEnv, 'darwin', [], appNodeBin)).toBe(dshRayBin)
+    expect(discoverToolRuntimeBinary('node', guiEnv, 'darwin', [], appNodeBin)).toBe(appNodeBin)
+    expect(discoverToolRuntimeBinary('node', { HOME: home, PATH: '/usr/bin:/bin', DSH_DESKTOP_NODE_EXECUTABLE: appNodeBin }, 'darwin')).toBe(appNodeBin)
+    expect(discoverToolRuntimeBinary('pnpm', guiEnv, 'darwin', [], appNodeBin)).toBe(fnmPnpmBin)
+  })
+
+  it('tracks detached upgrade progress, immediate spawn/no-TTY failures, and redacted log tails in check()', async () => {
+    const dshHome = mkdtempSync(join(tmpdir(), 'owner-console-upg-logs-'))
+    dirs.push(dshHome)
+    const host = makeHost(dshHome, 'desktop')
+    const checkJson = (action: 'check' | 'dry-run') => JSON.stringify({
+      schemaVersion: 1,
+      command: 'upgrade',
+      action,
+      ok: true,
+      ready: true,
+      mode: 'standard-local',
+      frozenSystemd: { detected: false, profiles: [] },
+      packages: {
+        cliPackageVersion: '0.2.1',
+        installedEnhancedVersion: '0.2.0',
+        targetEnhancedVersion: '0.2.1',
+        upgradeAvailable: true,
+        boundHost: { status: 'missing', installedVersion: null, targetVersion: null, upgradeAvailable: false },
+        profiles: [],
+      },
+      registry: { url: 'https://registry.npmjs.org', checked: true, status: 'ok', latestEnhancedVersion: '0.2.1' },
+      readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+      plan: { canExecute: true, steps: ['backup', 'upgrade'], rollbackSupported: true, backupFiles: [] },
+    })
+
+    // Case 1: immediate non-zero exit (e.g. ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY) fails trigger() & surfaces failure tail
+    {
+      let seqTs = 1_760_000_900_000
+      const proberFail = new SelfUpgradeProber({
+        currentVersion: '0.2.0',
+        platform: 'darwin',
+        now: () => seqTs,
+        env: { HOME: '/Users/test', PATH: '/usr/bin:/bin' },
+        execFn: async (_cmd, args) => ({ stdout: checkJson(args.includes('--dry-run') ? 'dry-run' : 'check'), stderr: '', exitCode: 0 }),
+        spawnFn: (_cmd, _args, opts) => {
+          const emitter = new EventEmitter() as EventEmitter & { pid?: number; unref: () => void }
+          emitter.pid = 91919
+          emitter.unref = vi.fn()
+          expect(opts.env['CI']).toBe('true')
+          const fd = Array.isArray(opts.stdio) ? opts.stdio[1] : undefined
+          if (typeof fd === 'number') {
+            writeFileSync(join(dshHome, 'logs', `owner-console-upgrade-${seqTs}.log`), 'step 1 ok\ntoken: secret-val ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY\n')
+          }
+          queueMicrotask(() => emitter.emit('exit', 1))
+          return emitter
+        },
+      })
+      const triggered = await proberFail.trigger(host, true)
+      expect(triggered.applied).toBe(false)
+      expect(triggered.note).toContain('ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY')
+      expect(triggered.note).not.toContain('secret-val')
+
+      const afterFail = await proberFail.check(host, true)
+      expect(afterFail.latestRun?.state).toBe('failed')
+      expect(afterFail.latestRun?.logTail).toContain('ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY')
+      expect(afterFail.latestRun?.logTail).not.toContain('secret-val')
+    }
+
+    // Case 2: running process shows running progress then succeeded once exited cleanly
+    {
+      const dshHome2 = mkdtempSync(join(tmpdir(), 'owner-console-upg-live-'))
+      dirs.push(dshHome2)
+      const host2 = makeHost(dshHome2, 'desktop')
+      let alive = true
+      let upgradedVersion = '0.2.0'
+      const child = new EventEmitter() as EventEmitter & { pid?: number; unref: () => void }
+      child.pid = 92929
+      child.unref = vi.fn()
+      const logTs = 1_760_000_950_000
+
+      const proberLive = new SelfUpgradeProber({
+        currentVersion: '0.2.0',
+        platform: 'darwin',
+        now: () => logTs,
+        env: { HOME: '/Users/test', PATH: '/usr/bin:/bin' },
+        isPidAlive: pid => pid === 92929 && alive,
+        execFn: async (_cmd, args) => ({
+          stdout: JSON.stringify({
+            ...JSON.parse(checkJson(args.includes('--dry-run') ? 'dry-run' : 'check')),
+            packages: {
+              cliPackageVersion: '0.2.1',
+              installedEnhancedVersion: upgradedVersion,
+              targetEnhancedVersion: '0.2.1',
+              upgradeAvailable: upgradedVersion !== '0.2.1',
+              boundHost: { status: 'missing', installedVersion: null, targetVersion: null, upgradeAvailable: false },
+              profiles: [],
+            },
+          }),
+          stderr: '',
+          exitCode: 0,
+        }),
+        spawnFn: () => child,
+      })
+
+      const started = await proberLive.trigger(host2, true)
+      expect(started.applied).toBe(true)
+      const logPath = join(dshHome2, 'logs', `owner-console-upgrade-${logTs}.log`)
+      writeFileSync(logPath, 'installing @dsh-ray/owner-console@0.2.1...\n', 'utf8')
+
+      const runningCheck = await proberLive.check(host2, false)
+      expect(runningCheck.latestRun?.state).toBe('running')
+      expect(runningCheck.latestRun?.pid).toBe(92929)
+      expect(runningCheck.latestRun?.logTail).toContain('installing @dsh-ray/owner-console@0.2.1')
+
+      alive = false
+      upgradedVersion = '0.2.1'
+      writeFileSync(logPath, 'installing @dsh-ray/owner-console@0.2.1...\n{"ok":true,"version":"0.2.1"}\n', 'utf8')
+      child.emit('exit', 0)
+
+      const doneCheck = await proberLive.check(host2, false)
+      expect(doneCheck.latestRun?.state).toBe('succeeded')
+      expect(doneCheck.latestRun?.summary).toContain('重启 Host')
+    }
   })
 })

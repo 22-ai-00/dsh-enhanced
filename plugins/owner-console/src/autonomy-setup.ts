@@ -550,7 +550,6 @@ export function inspectOwnerRoute(
     .map(r => asPlainRecord(r))
     .filter(r => typeof r['id'] === 'string' && r['id'].trim() !== '' && typeof r['workspace'] === 'string' && typeof r['agentPreset'] === 'string')
 
-  const preferredRoute = validRoutes.find(r => asPlainRecord(r['principal'])['channel'] === 'web') ?? validRoutes[0]
   const deliveryNode = seq ? getPatchRowConfigNode(seq, 'dsh-ray-assistant-delivery') : undefined
   const fallbackWorkspace = paths.canonicalHome !== null ? join(paths.canonicalHome, 'assistant-workspace') : ''
   const defaultWorkspace = resolveScopedWorkspacePath(
@@ -567,9 +566,6 @@ export function inspectOwnerRoute(
   )
   const defaultDeliveryDb = paths.canonicalHome !== null ? join(paths.canonicalHome, 'assistant-delivery', 'state.sqlite') : null
   const deliveryDbPath = scopedDeliveryDb.resolved ?? defaultDeliveryDb
-
-  const expectedPrincipal = preferredRoute ? asPlainRecord(preferredRoute['principal']) : undefined
-  const sqliteOwner = deliveryDbPath !== null ? queryActiveOwnerFromSqlite(deliveryDbPath, expectedPrincipal) : null
 
   const deliveryService = host.get('assistantDelivery') as Readonly<{
     inspectOwnerRouteState?: (input: {
@@ -588,18 +584,19 @@ export function inspectOwnerRoute(
     }
   }> | undefined
 
-  let principalRecordId = sqliteOwner?.principalRecordId ?? null
-  let principalVersion = sqliteOwner?.principalVersion ?? null
-  let routeActiveFromService = false
-  let serviceAuthorityHash: string | null = null
+  const evaluateCandidate = (candidate: Record<string, unknown>): ResolvedOwnerRouteInfo => {
+    const principalObj = asPlainRecord(candidate['principal'])
+    const sqliteOwner = deliveryDbPath !== null ? queryActiveOwnerFromSqlite(deliveryDbPath, principalObj) : null
+    let principalRecordId = sqliteOwner?.principalRecordId ?? null
+    let principalVersion = sqliteOwner?.principalVersion ?? null
+    let routeActiveFromService = false
+    let serviceAuthorityHash: string | null = null
 
-  if (preferredRoute !== undefined) {
-    const principalObj = asPlainRecord(preferredRoute['principal'])
     const rawChannel = strOrNull(principalObj['channel'])
     const channel: 'web' | 'lark' | 'other' = rawChannel === 'web' ? 'web' : rawChannel === 'lark' ? 'lark' : 'other'
-    const authorityId = strOrNull(preferredRoute['id'])
-    const workspace = resolveScopedWorkspacePath(preferredRoute['workspace'], undefined, paths.canonicalHome) || defaultWorkspace
-    const preset = strOrNull(preferredRoute['agentPreset']) ?? defaultPreset
+    const authorityId = strOrNull(candidate['id'])
+    const workspace = resolveScopedWorkspacePath(candidate['workspace'], undefined, paths.canonicalHome) || defaultWorkspace
+    const preset = strOrNull(candidate['agentPreset']) ?? defaultPreset
     const principalId = externalPrincipalId(principalObj)
 
     if (authorityId !== null && principalId !== null && typeof deliveryService?.inspectOwnerRouteState === 'function') {
@@ -625,7 +622,7 @@ export function inspectOwnerRoute(
       }
     }
 
-    const authorityHash = serviceAuthorityHash ?? ownerRouteAuthorityHashLocal(preferredRoute, { workspace, agentPreset: preset })
+    const authorityHash = serviceAuthorityHash ?? ownerRouteAuthorityHashLocal(candidate, { workspace, agentPreset: preset })
     const active = (routeActiveFromService || (principalRecordId !== null && principalVersion !== null)) && authorityHash !== null && principalId !== null
     let missingReason: string | null = null
     if (!active) {
@@ -653,20 +650,36 @@ export function inspectOwnerRoute(
       preset,
       webGrantReady: channel === 'web' && active,
       missingReason,
-      routeObject: preferredRoute,
+      routeObject: candidate,
     }
   }
 
-  if (sqliteOwner !== null && sqliteOwner.principal['channel'] === 'web') {
+  if (validRoutes.length > 0) {
+    const evaluated = validRoutes.map(evaluateCandidate)
+    return evaluated.find(candidate => candidate.active && candidate.channel === 'web')
+      ?? evaluated.find(candidate => candidate.active)
+      ?? evaluated.find(candidate => candidate.channel === 'web')
+      ?? evaluated[0]!
+  }
+
+  const sqliteOwner = deliveryDbPath !== null ? queryActiveOwnerFromSqlite(deliveryDbPath, undefined) : null
+  if (sqliteOwner !== null) {
+    const rawChannel = strOrNull(sqliteOwner.principal['channel'])
+    const channel: 'web' | 'lark' | 'other' = rawChannel === 'web' ? 'web' : rawChannel === 'lark' ? 'lark' : 'other'
     const principalId = externalPrincipalId(sqliteOwner.principal)
     const workspace = sqliteOwner.workspace !== undefined && isAbsolute(sqliteOwner.workspace)
       ? sqliteOwner.workspace
       : defaultWorkspace
     const preset = sqliteOwner.preset ?? defaultPreset
+    const missingReason = channel === 'web'
+      ? '已检测到 Web owner 主体，但 assistant-delivery.ownerRoutes 尚未配置主路由（请先完成 Web owner 初始化或 dsh-web-owner-setup）'
+      : sqliteOwner.hasConversation
+        ? `已检测到激活的 ${channel} owner（${principalId ?? 'owner'}），但 assistant-delivery.ownerRoutes 尚未同步主路由；请点击「一键初始化/修复前置项」同步主主人路由后即可继续`
+        : `已检测到激活的 ${channel} owner（${principalId ?? 'owner'}），请先重启 profile 并在飞书给机器人发送一条私聊消息建立会话，再点击「一键初始化/修复前置项」同步主主人路由`
     return {
       configured: false,
       active: false,
-      channel: 'web',
+      channel,
       authorityId: null,
       principalId,
       principalRecordId: sqliteOwner.principalRecordId,
@@ -675,7 +688,7 @@ export function inspectOwnerRoute(
       workspace,
       preset,
       webGrantReady: false,
-      missingReason: '已检测到 Web owner 主体，但 assistant-delivery.ownerRoutes 尚未配置主路由（请先完成 Web owner 初始化或 dsh-web-owner-setup）',
+      missingReason,
     }
   }
 
@@ -775,23 +788,26 @@ export function getPersonalAndPolicyConfigs(
   personalMemoryCfg: Record<string, unknown>
   policyRow?: YAMLMap | undefined
 }> {
+  const hasPaRow = seq !== undefined && findPatchRow(seq, 'dsh-ray-personal-assistant') !== undefined
   const hasSplitRow = seq !== undefined
     && (findPatchRow(seq, 'dsh-ray-assistant-policy') !== undefined
       || findPatchRow(seq, 'dsh-ray-personal-memory') !== undefined)
   const paPatch = seq ? getPatchRowConfig(seq, 'dsh-ray-personal-assistant') : {}
   const descPa = findEntry(descriptors, candidate => candidate === 'dsh-ray-personal-assistant')
   const runtimePaCfg = descPa ? boundedConfig(descPa.value) : {}
+  const hasSplitDesc = findEntry(descriptors, candidate => candidate === 'dsh-ray-assistant-policy') !== undefined
+    || findEntry(descriptors, candidate => candidate === 'dsh-ray-personal-memory') !== undefined
 
-  if (hasSplitRow && findPatchRow(seq!, 'dsh-ray-personal-assistant') === undefined) {
-    const policyCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-policy', getPatchRowConfig(seq!, 'dsh-ray-assistant-policy'))
-    const automationsCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-automations', getPatchRowConfig(seq!, 'dsh-ray-assistant-automations'))
-    const personalMemoryCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-personal-memory', getPatchRowConfig(seq!, 'dsh-ray-personal-memory'))
+  if (!hasPaRow && (hasSplitRow || (descPa === undefined && hasSplitDesc))) {
+    const policyCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-policy', seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-policy') : {})
+    const automationsCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-assistant-automations', seq ? getPatchRowConfig(seq, 'dsh-ray-assistant-automations') : {})
+    const personalMemoryCfg = mergeDescriptorConfig(descriptors, 'dsh-ray-personal-memory', seq ? getPatchRowConfig(seq, 'dsh-ray-personal-memory') : {})
     return {
       layout: 'split',
       policyCfg,
       automationsCfg,
       personalMemoryCfg,
-      policyRow: findPatchRow(seq!, 'dsh-ray-assistant-policy'),
+      policyRow: seq ? findPatchRow(seq, 'dsh-ray-assistant-policy') : undefined,
     }
   }
 
@@ -1069,6 +1085,39 @@ export function upsertById(existing: unknown, items: readonly Record<string, unk
     }
   }
   return list
+}
+
+/** Replace any stale ownerRoutes entries pointing to other principals while upserting the target ownerRoute. */
+export function syncPrimaryOwnerRoutes(
+  existing: unknown,
+  ownerRoute: Record<string, unknown>,
+): Record<string, unknown>[] {
+  const targetPrincipalKey = externalPrincipalId(asPlainRecord(ownerRoute['principal']))
+  const list = Array.isArray(existing) ? existing.map(asPlainRecord) : []
+  const retained = targetPrincipalKey === null
+    ? list
+    : list.filter((route) => {
+        const routePrincipalKey = externalPrincipalId(asPlainRecord(route['principal']))
+        return routePrincipalKey === targetPrincipalKey
+      })
+  return upsertById(retained, [ownerRoute])
+}
+
+/** Remove stale `dsh-ray-owner-route-*` policy rules belonging to replaced owners while preserving current/custom rules. */
+export function pruneStaleOwnerRouteRules(
+  existing: unknown,
+  activeRouteId: string,
+  activePrincipalKey: string,
+): Record<string, unknown>[] {
+  const list = Array.isArray(existing) ? existing.map(asPlainRecord) : []
+  const activeRuleId = `dsh-ray-owner-route-${activeRouteId}`
+  return list.filter((rule) => {
+    const ruleId = typeof rule['id'] === 'string' ? rule['id'] : ''
+    if (!ruleId.startsWith('dsh-ray-owner-route-')) return true
+    if (ruleId === activeRuleId) return true
+    const subjPrincipal = strOrNull(asPlainRecord(rule['subject'])['principal'])
+    return subjPrincipal === activePrincipalKey
+  })
 }
 
 function findReusableWorkspaceOrGlobalBudgetId(

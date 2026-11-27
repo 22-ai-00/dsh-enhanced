@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
 import { afterEach, describe, expect, it } from 'vitest'
-import { assertBuildName, persistAllowedBuilds } from '../src/build-approvals.ts'
+import { assertBuildName, persistAllowedBuilds, persistConfirmModulesPurgeDisabled } from '../src/build-approvals.ts'
 
 const directories: string[] = []
 async function profile(workspace?: string) {
@@ -45,5 +45,16 @@ describe('owner console profile build approvals', () => {
     const scalar = await profile('allowBuilds: true\n')
     await expect(persistAllowedBuilds(scalar, ['esbuild'])).rejects.toThrow('allowBuilds 必须是 YAML 映射')
     expect(() => { assertBuildName('esbuild') }).not.toThrow()
+  })
+
+  it('persists confirmModulesPurge: false idempotently without disturbing allowBuilds', async () => {
+    const dir = await profile('packages:\n  - .\nallowBuilds:\n  esbuild: true\n')
+    expect(await persistConfirmModulesPurgeDisabled(dir)).toBe(true)
+    expect(parse(await readFile(join(dir, 'pnpm-workspace.yaml'), 'utf8'))).toEqual({
+      packages: ['.'],
+      allowBuilds: { esbuild: true },
+      confirmModulesPurge: false,
+    })
+    expect(await persistConfirmModulesPurgeDisabled(dir)).toBe(false)
   })
 })

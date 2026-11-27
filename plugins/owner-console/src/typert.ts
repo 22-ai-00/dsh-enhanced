@@ -626,6 +626,18 @@ export const AutonomySetupStatusSchema = z.object({
 }).readonly()
 export type AutonomySetupStatus = Readonly<z.infer<typeof AutonomySetupStatusSchema>>
 
+export const SelfUpgradeRunStateSchema = z.object({
+  state: z.enum(['running', 'succeeded', 'failed']),
+  pid: z.number().int().positive().optional(),
+  startedAt: z.number().int().nonnegative(),
+  finishedAt: z.number().int().nonnegative().optional(),
+  logPath: z.string().max(4_096).optional(),
+  summary: z.string().max(500),
+  error: z.string().max(500).optional(),
+  logTail: z.string().max(2_000).optional(),
+}).readonly()
+export type SelfUpgradeRunState = Readonly<z.infer<typeof SelfUpgradeRunStateSchema>>
+
 export const SelfUpgradeStatusSchema = z.object({
   currentEnhancedVersion: z.string().max(128),
   latestEnhancedVersion: z.string().max(128).nullable(),
@@ -644,6 +656,7 @@ export const SelfUpgradeStatusSchema = z.object({
   offline: z.boolean(),
   checkSource: z.enum(['dsh-ray', 'npm-registry', 'offline']),
   note: z.string().max(500),
+  latestRun: SelfUpgradeRunStateSchema.optional(),
 }).readonly()
 export type SelfUpgradeStatus = Readonly<z.infer<typeof SelfUpgradeStatusSchema>>
 

@@ -292,4 +292,129 @@ describe('AutonomyWizardCard & SelfUpgradeCard UI surfaces', () => {
     await flushUi()
     expect(runSelfUpgrade).toHaveBeenCalledWith(true)
   })
+
+  it('repairs stale owner route blocker from AutonomyWizardCard and refreshes wizard state cleanly', async () => {
+    let repaired = false
+    const applyDoctorRepair = vi.fn(async () => {
+      repaired = true
+      return { ok: true as const, value: { applied: true, entry: 'setup-doctor', note: '已绑定 Owner 主路由（lark/primary/personal/ou_123）。请重启 profile' } }
+    })
+    const remote = makeBaseRemote({
+      applyDoctorRepair,
+      autonomySetupStatus: async () => ({
+        ok: true,
+        value: repaired
+          ? {
+              ...baseAutonomyStatus(),
+              ownerRoute: {
+                configured: true,
+                active: true,
+                channel: 'lark',
+                authorityId: 'owner-lark-primary',
+                principalId: 'lark/primary/personal/ou_123',
+                workspace: '/tmp/dsh-home/assistant-workspace',
+                preset: 'standard',
+                webGrantReady: false,
+                missingReason: null,
+              },
+              blockingReasons: [],
+            }
+          : {
+              ...baseAutonomyStatus(),
+              ownerRoute: {
+                configured: true,
+                active: false,
+                channel: 'web',
+                authorityId: 'owner-web-desktop',
+                principalId: 'web/desktop/local/operator',
+                workspace: '/tmp/dsh-home/assistant-workspace',
+                preset: 'standard',
+                webGrantReady: false,
+                missingReason: '主主人已切换为 lark/primary/personal/ou_123，但 ownerRoutes 仍指向旧主主人（web/desktop/local/operator）；请点击「一键初始化/修复前置项」同步主主人路由后即可继续',
+              },
+              blockingReasons: ['主主人已切换为 lark/primary/personal/ou_123，但 ownerRoutes 仍指向旧主主人（web/desktop/local/operator）；请点击「一键初始化/修复前置项」同步主主人路由后即可继续'],
+            },
+      }),
+      checkSelfUpgrade: async () => ({ ok: true, value: baseUpgradeStatus(false) }),
+    })
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push({ root, el: container })
+
+    await act(async () => {
+      root.render(jsx(WenyaoSettingsSection, { remote, navigation: { openConversation: vi.fn(), openPlugins: vi.fn() } }))
+    })
+    await flushUi()
+
+    const wizardCard = container.querySelector('[data-owner-console-card="autonomy-wizard"]')!
+    expect(wizardCard.textContent).toContain('主主人已切换为 lark/primary/personal/ou_123')
+    expect(wizardCard.textContent).toContain('一键初始化/修复前置项')
+
+    await act(async () => { clickButtonByText(wizardCard, '一键初始化/修复前置项') })
+    await flushUi()
+
+    expect(applyDoctorRepair).toHaveBeenCalledWith([])
+    expect(wizardCard.textContent).toContain('Owner 路由已激活 (lark)')
+    expect(wizardCard.textContent).toContain('已绑定 Owner 主路由（lark/primary/personal/ou_123）')
+    expect(wizardCard.textContent).not.toContain('前置阻塞：')
+  })
+
+  it('surfaces detached upgrade running progress and redacted failure logs in SelfUpgradeCard', async () => {
+    let phase: 'running' | 'failed' = 'running'
+    const checkSelfUpgrade = vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        ...baseUpgradeStatus(false),
+        latestRun: phase === 'running'
+          ? {
+              state: 'running' as const,
+              pid: 88888,
+              startedAt: 1_760_000_000_000,
+              logPath: '/Users/test/.dsh/logs/owner-console-upgrade-1.log',
+              summary: '后台升级进程运行中（PID 88888）',
+              logTail: 'running pnpm add @dsh-ray/owner-console@0.2.1...',
+            }
+          : {
+              state: 'failed' as const,
+              pid: 88888,
+              startedAt: 1_760_000_000_000,
+              finishedAt: 1_760_000_005_000,
+              logPath: '/Users/test/.dsh/logs/owner-console-upgrade-1.log',
+              summary: '后台升级失败：ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY',
+              error: 'ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY',
+              logTail: 'token: [redacted]\nERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY',
+            },
+      },
+    }))
+    const remote = makeBaseRemote({
+      autonomySetupStatus: async () => ({ ok: true, value: baseAutonomyStatus() }),
+      checkSelfUpgrade,
+    })
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push({ root, el: container })
+
+    await act(async () => {
+      root.render(jsx(WenyaoSettingsSection, { remote, navigation: { openConversation: vi.fn(), openPlugins: vi.fn() } }))
+    })
+    await flushUi()
+
+    const upgradeCard = container.querySelector('[data-owner-console-card="self-upgrade"]')!
+    expect(upgradeCard.querySelector('[data-self-upgrade-run-state="running"]')).not.toBeNull()
+    expect(upgradeCard.textContent).toContain('后台升级进行中')
+    expect(upgradeCard.textContent).toContain('running pnpm add @dsh-ray/owner-console@0.2.1')
+
+    phase = 'failed'
+    await act(async () => { clickButtonByText(upgradeCard, '刷新升级进度') })
+    await flushUi()
+
+    expect(upgradeCard.querySelector('[data-self-upgrade-run-state="failed"]')).not.toBeNull()
+    expect(upgradeCard.textContent).toContain('后台升级失败')
+    expect(upgradeCard.textContent).toContain('ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY')
+    expect(upgradeCard.textContent).toContain('/Users/test/.dsh/logs/owner-console-upgrade-1.log')
+  })
 })

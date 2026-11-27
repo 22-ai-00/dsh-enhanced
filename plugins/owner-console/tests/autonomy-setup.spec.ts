@@ -17,7 +17,9 @@ import {
   applyAutonomyWizardSetup,
   canonicalObjectDigest,
   ensureVerifierDefaults,
+  getPersonalAndPolicyConfigs,
   inspectAutonomyWizardStatus,
+  inspectOwnerRoute,
   normalizeLearningConfigForDigest,
   ownerRouteAuthorityHashLocal,
 } from '../src/autonomy-setup.js'
@@ -1248,5 +1250,139 @@ describe('autonomy-setup wizard', () => {
     const learnCfgSecond = rowsAfterSecond.find(r => r.id === 'dsh-ray-assistant-memory-learning')!.config
     expect(learnCfgSecond['authorityId']).toBe('web-memory-extract-web')
     expect(learnCfgSecond['workItemExperiences']).toBe(true)
+  })
+
+  it('prefers active Lark owner route over stale web route and surfaces empty ownerRoutes with active Lark SQLite owner', () => {
+    const { root, dshHome, profileDir, workspace } = createTempProfile()
+    dirs.push(root)
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    const deliveryDb = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    const larkPrincipal = { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_bd27fe48ff506f7d7ca5e86853049947' }
+    const seedDb = new DatabaseSync(deliveryDb)
+    try {
+      seedDb.exec(`
+        CREATE TABLE delivery_principals (
+          id TEXT PRIMARY KEY,
+          key_hash TEXT NOT NULL UNIQUE,
+          principal_json TEXT NOT NULL,
+          role TEXT NOT NULL,
+          status TEXT NOT NULL,
+          linked_to_id TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          version INTEGER NOT NULL
+        ) STRICT;
+        CREATE TABLE conversation_bindings (
+          id TEXT PRIMARY KEY,
+          conversation_hash TEXT NOT NULL,
+          conversation_json TEXT NOT NULL,
+          principal_id TEXT NOT NULL,
+          principal_json TEXT NOT NULL,
+          workspace TEXT NOT NULL,
+          agent_preset TEXT NOT NULL,
+          session_id TEXT NOT NULL UNIQUE,
+          generation INTEGER NOT NULL,
+          policy_ref TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        ) STRICT;
+      `)
+      seedDb.prepare(
+        `INSERT INTO delivery_principals (id, key_hash, principal_json, role, status, linked_to_id, created_at, updated_at, version)
+         VALUES (?, ?, ?, 'owner', 'active', NULL, 1, 1, 2)`,
+      ).run('principal_lark_active', 'hash-lark-owner', JSON.stringify(larkPrincipal))
+    } finally {
+      seedDb.close()
+    }
+
+    // Case 1: dual routes where owner-web-desktop is stale and owner-lark-primary is active
+    writeFileSync(patchPath, [
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      '    ownerRoutes:',
+      '      - id: owner-web-desktop',
+      '        conversation: { channel: web, account: desktop, tenant: local, kind: dm, chat: owner-primary }',
+      '        principal: { channel: web, account: desktop, tenant: local, user: operator }',
+      `        workspace: ${workspace}`,
+      '        agentPreset: standard',
+      '      - id: owner-lark-primary',
+      '        conversation: { channel: lark, account: primary, tenant: personal, kind: dm, chat: oc_dm_1 }',
+      '        principal: { channel: lark, account: primary, tenant: personal, user: ou_bd27fe48ff506f7d7ca5e86853049947 }',
+      `        workspace: ${workspace}`,
+      '        agentPreset: standard',
+      '        policyRef: owner-dm',
+      '        minimumGeneration: 1',
+      '',
+    ].join('\n'), 'utf8')
+    const { host } = createHostContext({ profileDir, dshHome, profileName: 'desktop' })
+    const docDual = parseDocument(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] })
+    const routeDual = inspectOwnerRoute(host, {
+      dshHome,
+      canonicalHome: dshHome,
+      profileName: 'desktop',
+      profileDir,
+      patchPath,
+      patchExists: true,
+      writable: true,
+    }, docDual.contents as import('yaml').YAMLSeq, [])
+    expect(routeDual.active).toBe(true)
+    expect(routeDual.channel).toBe('lark')
+    expect(routeDual.authorityId).toBe('owner-lark-primary')
+    expect(routeDual.principalId).toBe('lark/primary/personal/ou_bd27fe48ff506f7d7ca5e86853049947')
+
+    // Case 2: empty ownerRoutes with active Lark owner + conversation reports actionable repair guidance
+    writeFileSync(patchPath, [
+      '- id: dsh-ray-assistant-delivery',
+      '  name: "@dsh-ray/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      '    ownerRoutes: []',
+      '',
+    ].join('\n'), 'utf8')
+    const db = new DatabaseSync(deliveryDb)
+    try {
+      db.prepare(`INSERT INTO conversation_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'owner-dm', 'active', 100, 100)`).run(
+        'bind_lark',
+        'hash_bind',
+        JSON.stringify({ channel: 'lark', account: 'primary', tenant: 'personal', kind: 'dm', chat: 'oc_dm_1' }),
+        'principal_lark_active',
+        JSON.stringify({ channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_bd27fe48ff506f7d7ca5e86853049947' }),
+        workspace,
+        'standard',
+        'sess_1',
+      )
+    } finally {
+      db.close()
+    }
+    const docEmpty = parseDocument(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] })
+    const routeEmpty = inspectOwnerRoute(host, {
+      dshHome,
+      canonicalHome: dshHome,
+      profileName: 'desktop',
+      profileDir,
+      patchPath,
+      patchExists: true,
+      writable: true,
+    }, docEmpty.contents as import('yaml').YAMLSeq, [])
+    expect(routeEmpty.configured).toBe(false)
+    expect(routeEmpty.active).toBe(false)
+    expect(routeEmpty.channel).toBe('lark')
+    expect(routeEmpty.principalId).toBe('lark/primary/personal/ou_bd27fe48ff506f7d7ca5e86853049947')
+    expect(routeEmpty.missingReason).toContain('一键初始化/修复前置项')
+
+    // Case 3: split layout inferred cleanly from descriptor when patch row does not exist yet
+    const ppSplit = getPersonalAndPolicyConfigs(docEmpty.contents as import('yaml').YAMLSeq, [{
+      ns: 'dsh-ray-assistant-policy',
+      schema: {},
+      value: { rules: [{ id: 'split-rule-1' }], budgets: [{ id: 'b1' }] },
+      revision: 1,
+      applies: 'live',
+    }])
+    expect(ppSplit.layout).toBe('split')
+    expect(Array.isArray(ppSplit.policyCfg['rules'])).toBe(true)
+    expect((ppSplit.policyCfg['rules'] as Array<{ id: string }>)[0]?.id).toBe('split-rule-1')
   })
 })

@@ -2558,4 +2558,248 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       expect(report.issues.some(i => i.id === 'verifier-require-acceptance-without-profiles')).toBe(false)
     }
   })
+
+  it('replaces stale owner-web-desktop route and prunes stale route rules when active owner switched to Lark', async () => {
+    const testProber = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    const workspace = join(dshHome, 'assistant-workspace')
+    mkdirSync(workspace, { recursive: true })
+    const deliveryDb = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    makeDeliveryDb(deliveryDb, true)
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+      name: '@dsh-profile/desktop',
+      bundles: {
+        '@dsh-ray/assistant-delivery': true,
+        '@dsh-ray/assistant-policy': true,
+        '@dsh-ray/lark-channel': true,
+      },
+    }, null, 2))
+    writeFileSync(patchPath, [
+      '- id: dsh-ray-assistant-delivery',
+      "  name: '@dsh-ray/assistant-delivery'",
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      `    defaultWorkspace: ${workspace}`,
+      '    defaultAgentPreset: standard',
+      '    ownerRoutes:',
+      '      - id: owner-web-desktop',
+      '        conversation:',
+      '          channel: web',
+      '          account: desktop',
+      '          tenant: local',
+      '          kind: dm',
+      '          chat: owner-primary',
+      '        principal:',
+      '          channel: web',
+      '          account: desktop',
+      '          tenant: local',
+      '          user: operator',
+      `        workspace: ${workspace}`,
+      '        agentPreset: standard',
+      '        policyRef: owner-dm',
+      '        minimumGeneration: 1',
+      '- id: dsh-ray-assistant-policy',
+      "  name: '@dsh-ray/assistant-policy'",
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '    budgets: []',
+      '    rules:',
+      '      - id: dsh-ray-owner-route-owner-web-desktop',
+      '        effect: allow',
+      '        subject:',
+      '          kind: background',
+      "          id: '*'",
+      `          workspace: ${workspace}`,
+      '          principal: web/desktop/local/operator',
+      '        actions: [send]',
+      '        resource:',
+      '          kind: message',
+      '          id: route:owner-web-desktop',
+      '        context:',
+      '          initiators: [background]',
+      '      - id: custom-owner-rule',
+      '        effect: allow',
+      '        actions: [read]',
+      '',
+    ].join('\n'), 'utf8')
+
+    const status = baseStatus({
+      bundles: [
+        { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] },
+        { name: '@dsh-ray/assistant-policy', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-policy', moduleName: '@dsh-ray/assistant-policy' }] },
+      ],
+    })
+    const descriptors: SettingsDescriptor[] = [
+      {
+        ns: 'dsh-ray-assistant-policy',
+        schema: {},
+        value: { databasePath: join(dshHome, 'assistant-policy', 'policy.sqlite'), budgets: [], rules: [] },
+        revision: 1,
+        applies: 'live',
+      },
+      {
+        ns: 'agent-default-model',
+        schema: {},
+        value: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+        revision: 1,
+        applies: 'live',
+      },
+    ]
+    const host: AutonomyHostContext = {
+      get: (name: string) => {
+        if (name === 'profileContext') return { dir: profileDir, home: dshHome, name: 'desktop' }
+        if (name === 'settings') return { describe: () => descriptors }
+        if (name === 'pluginManager') return { listBundles: async () => status.bundles }
+        return undefined
+      },
+    }
+
+    const beforeWizard = await inspectAutonomyWizardStatus(host, { env: { DSH_HOME: dshHome } })
+    expect(beforeWizard.ownerRoute.active).toBe(false)
+    expect(beforeWizard.ownerRoute.missingReason).toContain('主主人已切换为 lark/primary/personal/ou_owner123')
+    expect(beforeWizard.blockingReasons.some(r => r.includes('一键初始化/修复前置项'))).toBe(true)
+
+    const beforeDoctor = await inspectSetupDoctor({ host, status, descriptors, prober: testProber, platform: 'darwin', env: {}, now: 500 })
+    const routeIssue = beforeDoctor.issues.find(i => i.id === 'missing-local-owner-route')
+    expect(routeIssue?.autoFixable).toBe(true)
+
+    const repaired = await applyDoctorRepair({
+      host,
+      status,
+      descriptors,
+      settings: undefined,
+      manager: undefined,
+      prober: testProber,
+      issueIds: [],
+      platform: 'darwin',
+      env: {},
+      now: 501,
+    })
+    expect(repaired.applied).toBe(true)
+
+    const docAfter = readPatchDocument(patchPath)
+    const rows = parseDocument(docAfter.toString({ lineWidth: 0 }), JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, any> }>
+    // Split bundle layout must NOT create a conflicting dsh-ray-personal-assistant row
+    expect(rows.some(r => r.id === 'dsh-ray-personal-assistant')).toBe(false)
+
+    const deliveryCfg = rows.find(r => r.id === 'dsh-ray-assistant-delivery')!.config!
+    const syncedRoutes = deliveryCfg['ownerRoutes'] as Array<{ id: string; principal: Record<string, string> }>
+    expect(syncedRoutes.map(r => r.id)).toEqual(['owner-lark-primary'])
+    expect(syncedRoutes[0]!.principal['user']).toBe('ou_owner123')
+
+    const policyCfg = rows.find(r => r.id === 'dsh-ray-assistant-policy')!.config!
+    const ruleIds = (policyCfg['rules'] as Array<{ id: string }>).map(r => r.id)
+    expect(ruleIds).not.toContain('dsh-ray-owner-route-owner-web-desktop')
+    expect(ruleIds).toContain('dsh-ray-owner-route-owner-lark-primary')
+    expect(ruleIds).toContain('lark-owner-ingress-primary')
+    expect(ruleIds).toContain('lark-owner-reply-primary')
+    expect(ruleIds).toContain('custom-owner-rule')
+
+    const afterWizard = await inspectAutonomyWizardStatus(host, { env: { DSH_HOME: dshHome } })
+    expect(afterWizard.ownerRoute.active).toBe(true)
+    expect(afterWizard.ownerRoute.channel).toBe('lark')
+    expect(afterWizard.ownerRoute.authorityId).toBe('owner-lark-primary')
+    expect(afterWizard.blockingReasons).toEqual([])
+  })
+
+  it('syncs empty ownerRoutes and prunes stale web route during promoteLarkOwnerInProfile', async () => {
+    const testProber = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+    // Part A: empty ownerRoutes in cordis.patch.yml repaired cleanly when SQLite active owner is Lark
+    {
+      const { dshHome, profileDir, patchPath } = makeTempHome()
+      const deliveryDb = join(dshHome, 'assistant-delivery', 'state.sqlite')
+      makeDeliveryDb(deliveryDb, true)
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+        name: '@dsh-profile/desktop',
+        bundles: { '@dsh-ray/assistant-delivery': true, '@dsh-ray/personal-assistant': true },
+      }, null, 2))
+      writeFileSync(patchPath, '[]\n', 'utf8')
+      const host = makeHost(dshHome, profileDir, 'desktop')
+      const status = baseStatus({
+        bundles: [
+          { name: '@dsh-ray/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-assistant-delivery', moduleName: '@dsh-ray/assistant-delivery' }] },
+          { name: '@dsh-ray/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-ray-personal-assistant', moduleName: '@dsh-ray/personal-assistant' }] },
+        ],
+      })
+      const repaired = await applyDoctorRepair({
+        host, status, descriptors: [], settings: undefined, manager: undefined, prober: testProber,
+        issueIds: [], platform: 'darwin', env: {}, now: 600,
+      })
+      expect(repaired.applied).toBe(true)
+      const afterWizard = await inspectAutonomyWizardStatus(host, { env: { DSH_HOME: dshHome } })
+      expect(afterWizard.ownerRoute.active).toBe(true)
+      expect(afterWizard.ownerRoute.channel).toBe('lark')
+    }
+
+    // Part B: promoteLarkOwnerInProfile removes stale owner-web-desktop when active Lark DM binding exists
+    {
+      const { dshHome, profileDir, patchPath } = makeTempHome()
+      const workspace = join(dshHome, 'assistant-workspace')
+      mkdirSync(workspace, { recursive: true })
+      const deliveryDb = join(dshHome, 'assistant-delivery', 'state.sqlite')
+      makeDeliveryDb(deliveryDb, false)
+      const db = new DatabaseSync(deliveryDb)
+      try {
+        const larkPrincipal = { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_promoted_99' }
+        const larkConv = { channel: 'lark', account: 'primary', tenant: 'personal', kind: 'dm', chat: 'oc_chat_99' }
+        const webPrincipal = { channel: 'web', account: 'desktop', tenant: 'local', user: 'operator' }
+        const webHash = createHash('sha256').update(JSON.stringify(webPrincipal), 'utf8').digest('hex')
+        const larkHash = createHash('sha256').update(JSON.stringify(larkPrincipal), 'utf8').digest('hex')
+        db.prepare(`INSERT INTO delivery_principals VALUES (?, ?, ?, 'owner', 'active', NULL, 100, 100, 1)`).run(
+          'principal_web_1', webHash, JSON.stringify(webPrincipal),
+        )
+        db.prepare(`INSERT INTO delivery_principals VALUES (?, ?, ?, 'linked', 'active', 'principal_web_1', 110, 110, 1)`).run(
+          'principal_lark_99', larkHash, JSON.stringify(larkPrincipal),
+        )
+        db.prepare(`INSERT INTO conversation_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, 2, 'owner-dm', 'active', 120, 120, 1)`).run(
+          'bind_99', 'ch_99', JSON.stringify(larkConv), 'principal_lark_99', JSON.stringify(larkPrincipal), workspace, 'standard', 'sess_99',
+        )
+      } finally {
+        db.close()
+      }
+      writeFileSync(patchPath, [
+        '- id: dsh-ray-assistant-delivery',
+        "  name: '@dsh-ray/assistant-delivery'",
+        '  config:',
+        "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+        '    ownerRoutes:',
+        '      - id: owner-web-desktop',
+        '        conversation: { channel: web, account: desktop, tenant: local, kind: dm, chat: owner-primary }',
+        '        principal: { channel: web, account: desktop, tenant: local, user: operator }',
+        `        workspace: ${workspace}`,
+        '        agentPreset: standard',
+        '- id: dsh-ray-personal-assistant',
+        "  name: '@dsh-ray/personal-assistant'",
+        '  config:',
+        '    assistantPolicy:',
+        '      rules:',
+        '        - id: dsh-ray-owner-route-owner-web-desktop',
+        '          effect: allow',
+        '          subject: { kind: background, id: "*", principal: web/desktop/local/operator }',
+        '          actions: [send]',
+        '',
+      ].join('\n'), 'utf8')
+
+      const host = makeHost(dshHome, profileDir, 'desktop')
+      const res = await promoteLarkOwnerInProfile({
+        host,
+        descriptors: [],
+        openId: 'ou_promoted_99',
+        account: 'primary',
+        tenant: 'personal',
+        confirmed: true,
+        platform: 'darwin',
+        env: {},
+        now: 700,
+      })
+      expect(res.applied).toBe(true)
+      const rows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, any> }>
+      const routes = rows.find(r => r.id === 'dsh-ray-assistant-delivery')!.config!['ownerRoutes'] as Array<{ id: string }>
+      expect(routes.map(r => r.id)).toEqual(['owner-lark-primary'])
+      const paPolicy = rows.find(r => r.id === 'dsh-ray-personal-assistant')!.config!['assistantPolicy'] as Record<string, any>
+      const paRuleIds = (paPolicy['rules'] as Array<{ id: string }>).map(r => r.id)
+      expect(paRuleIds).not.toContain('dsh-ray-owner-route-owner-web-desktop')
+      expect(paRuleIds).toContain('dsh-ray-owner-route-owner-lark-primary')
+    }
+  })
 })

@@ -354,6 +354,7 @@ export interface ConsoleController {
   checkDoctor(): Promise<void>
   probeTool(tool: 'traex' | 'agy', command: string, force?: boolean, announce?: boolean): Promise<void>
   checkUpgrade(force?: boolean): Promise<void>
+  syncUpgradeStatus?(): Promise<void>
   previewUpgrade(): Promise<void>
   run(action: () => Promise<RemoteResult<OwnerConsoleWriteResult>>): Promise<void>
   runInstall(spec: string): Promise<void>
@@ -514,6 +515,16 @@ export function useConsoleActions(
     }
   }
 
+  const syncUpgradeStatus = async () => {
+    if (typeof remote.checkSelfUpgrade !== 'function') return
+    try {
+      const result = await remote.checkSelfUpgrade(true)
+      if (mounted.current && result.ok) setUpgradeStatus(result.value)
+    } catch {
+      // Quiet background poll keeps previous UI feedback intact.
+    }
+  }
+
   const previewUpgrade = async () => {
     if (typeof remote.dryRunSelfUpgrade !== 'function') {
       setError('当前 Host 版本暂未暴露升级预演接口')
@@ -644,7 +655,7 @@ export function useConsoleActions(
     remote, navigation, status, overview, autonomySetup, modelCatalog, loadingModelCatalog, upgradeStatus, upgradePreview,
     doctorReport, checkingDoctor,
     traexProbe, agyProbe, probingTool, checkingUpgrade, previewingUpgrade, batchInstall,
-    busy, error, notice, setError, setNotice, refresh, refreshModelCatalog, checkDoctor, probeTool, checkUpgrade, previewUpgrade,
+    busy, error, notice, setError, setNotice, refresh, refreshModelCatalog, checkDoctor, probeTool, checkUpgrade, syncUpgradeStatus, previewUpgrade,
     run, runInstall, runBatchInstall, cancelBatchInstall, confirmOwner,
   }
 }
@@ -3121,6 +3132,13 @@ export function AutonomyWizardCard({ ctrl }: Readonly<{ ctrl: ConsoleController 
   )
   const syncedRef = useRef(false)
   const userEditedRouteRef = useRef(false)
+  const mountedRef = useRef(true)
+  const [repairing, setRepairing] = useState(false)
+  const [repairFeedback, setRepairFeedback] = useState<Readonly<{ ok: boolean; text: string }> | null>(null)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   useEffect(() => {
     if (autonomySetup === undefined || syncedRef.current) return
@@ -3201,6 +3219,30 @@ export function AutonomyWizardCard({ ctrl }: Readonly<{ ctrl: ConsoleController 
   el('span', { style: { fontWeight: 500 } }, label),
   el('span', { style: { fontSize: 11, color: muted } }, note))
 
+  const runPrerequisiteRepair = () => {
+    if (typeof remote.applyDoctorRepair !== 'function' || repairing) return
+    setRepairing(true)
+    setRepairFeedback(null)
+    void ctrl.run(async () => {
+      try {
+        const res = await remote.applyDoctorRepair!([])
+        if (mountedRef.current) {
+          setRepairFeedback(res.ok
+            ? { ok: res.value.applied, text: res.value.note }
+            : { ok: false, text: `修复失败（${remoteFailureText(res.error)}）` })
+        }
+        return res
+      } catch (cause) {
+        if (mountedRef.current) {
+          setRepairFeedback({ ok: false, text: cause instanceof Error ? cause.message : '修复前置项失败' })
+        }
+        throw cause
+      } finally {
+        if (mountedRef.current) setRepairing(false)
+      }
+    })
+  }
+
   const hasSetupBlockers = autonomySetup !== undefined && (!autonomySetup.ownerRoute.active || !autonomySetup.profile.dbPathsScoped)
 
   return card(
@@ -3231,11 +3273,17 @@ export function AutonomyWizardCard({ ctrl }: Readonly<{ ctrl: ConsoleController 
                   ? el('div', { style: actionsStyle },
                     el('button', {
                       type: 'button',
-                      style: idle(primaryButtonStyle, busy),
-                      disabled: busy,
-                      onClick: () => void ctrl.run(() => remote.applyDoctorRepair!([])),
-                    }, '一键初始化/修复前置项'))
+                      style: idle(primaryButtonStyle, busy || repairing),
+                      disabled: busy || repairing,
+                      onClick: runPrerequisiteRepair,
+                    }, repairing ? '正在初始化/修复前置项…' : '一键初始化/修复前置项'))
                   : null))
+            : null,
+          repairFeedback !== null
+            ? el('div', {
+              role: repairFeedback.ok ? 'status' : 'alert',
+              style: bannerStyle(repairFeedback.ok ? accent : danger),
+            }, repairFeedback.text)
             : null,
           el('div', { style: gridStyle },
             grantLine('记忆自学习（三权分立）',
@@ -3321,6 +3369,25 @@ export function AutonomyWizardCard({ ctrl }: Readonly<{ ctrl: ConsoleController 
 export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const { remote, upgradeStatus, upgradePreview, checkingUpgrade, previewingUpgrade, busy } = ctrl
   const [upgradeArmed, setUpgradeArmed] = useState(false)
+  const [triggeringUpgrade, setTriggeringUpgrade] = useState(false)
+  const [upgradeFeedback, setUpgradeFeedback] = useState<Readonly<{ ok: boolean; text: string }> | null>(null)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  const latestRun = upgradeStatus?.latestRun
+  useEffect(() => {
+    if (latestRun?.state !== 'running') return undefined
+    const poll = typeof ctrl.syncUpgradeStatus === 'function'
+      ? ctrl.syncUpgradeStatus
+      : (typeof remote.checkSelfUpgrade === 'function' ? () => ctrl.checkUpgrade(true) : undefined)
+    if (poll === undefined) return undefined
+    const timer = setInterval(() => { void poll() }, 2_000)
+    return () => { clearInterval(timer) }
+  }, [latestRun?.state, ctrl, remote])
+
   const canCheck = typeof remote.checkSelfUpgrade === 'function'
   const canDryRun = typeof remote.dryRunSelfUpgrade === 'function'
   const canTrigger = typeof remote.runSelfUpgrade === 'function'
@@ -3330,10 +3397,40 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
   )
 
   const triggerConfirmedUpgrade = () => {
-    if (!canTrigger || !canArmUpgrade) return
+    if (!canTrigger || !canArmUpgrade || triggeringUpgrade) return
     setUpgradeArmed(false)
-    void ctrl.run(() => remote.runSelfUpgrade!(true))
+    setTriggeringUpgrade(true)
+    setUpgradeFeedback(null)
+    void ctrl.run(async () => {
+      try {
+        const res = await remote.runSelfUpgrade!(true)
+        if (mountedRef.current) {
+          setUpgradeFeedback(res.ok
+            ? { ok: res.value.applied, text: res.value.note }
+            : { ok: false, text: `启动后台升级失败（${remoteFailureText(res.error)}）` })
+        }
+        return res
+      } catch (cause) {
+        if (mountedRef.current) {
+          setUpgradeFeedback({ ok: false, text: cause instanceof Error ? cause.message : '启动后台升级失败' })
+        }
+        throw cause
+      } finally {
+        if (mountedRef.current) setTriggeringUpgrade(false)
+      }
+    })
   }
+
+  const runTone: StatusTone = latestRun?.state === 'failed'
+    ? 'error'
+    : latestRun?.state === 'succeeded'
+      ? 'ok'
+      : 'warn'
+  const runLabel = latestRun?.state === 'failed'
+    ? '后台升级失败'
+    : latestRun?.state === 'succeeded'
+      ? '后台升级已完成'
+      : '后台升级进行中'
 
   return card(
     '版本检查与自助升级',
@@ -3357,6 +3454,54 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
           upgradeStatus.frozenSystemdProfile
             ? el('div', { style: bannerStyle(muted) }, `受控 Linux systemd profile 引导：${upgradeStatus.upgradeCommand}`)
             : null),
+      upgradeFeedback !== null
+        ? el('div', {
+          role: upgradeFeedback.ok ? 'status' : 'alert',
+          style: bannerStyle(upgradeFeedback.ok ? accent : danger),
+        }, upgradeFeedback.text)
+        : null,
+      latestRun !== undefined
+        ? el('div', {
+          'data-self-upgrade-run-state': latestRun.state,
+          role: latestRun.state === 'failed' ? 'alert' : 'status',
+          style: { padding: '8px 10px', borderRadius: 8, border: `1px solid ${latestRun.state === 'failed' ? danger : hairline}`, display: 'grid', gap: 6 },
+        },
+        el('div', { style: actionsStyle },
+          pill(runLabel, runTone),
+          latestRun.pid !== undefined ? el('span', { style: monoMuted }, `PID ${latestRun.pid}`) : null,
+          latestRun.state === 'running' && canCheck
+            ? el('button', {
+              type: 'button',
+              style: idle(buttonStyle, checkingUpgrade),
+              disabled: checkingUpgrade,
+              onClick: () => void ctrl.checkUpgrade(true),
+            }, checkingUpgrade ? '刷新中…' : '刷新升级进度')
+            : null),
+        el('div', { style: { fontWeight: 500, color: latestRun.state === 'failed' ? danger : ink } }, latestRun.summary),
+        latestRun.error !== undefined
+          ? el('div', { style: { fontSize: 12, color: danger } }, `错误详情：${latestRun.error}`)
+          : null,
+        latestRun.logPath !== undefined
+          ? el('div', { style: monoMuted }, `升级日志：${latestRun.logPath}`)
+          : null,
+        latestRun.logTail !== undefined
+          ? el('pre', {
+            style: {
+              margin: 0,
+              padding: '6px 8px',
+              borderRadius: 6,
+              background: sunken,
+              fontFamily: monoFont,
+              fontSize: 11,
+              lineHeight: 1.4,
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
+              maxHeight: 160,
+              overflowY: 'auto',
+            },
+          }, latestRun.logTail)
+          : null)
+        : null,
       upgradePreview === undefined
         ? null
         : el('div', { style: { padding: '8px 10px', borderRadius: 8, border: `1px solid ${hairline}`, display: 'grid', gap: 4 } },
@@ -3370,8 +3515,8 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
           el('div', { style: { display: 'grid', gap: 8 } },
             el('span', {}, `即将启动独立后台进程执行：${upgradePreview?.command ?? upgradeStatus?.upgradeCommand ?? 'dsh-ray upgrade --yes'}（升级期间将先备份并校验账本，完成后需按日志重启 Host）。`),
             el('div', { style: actionsStyle },
-              el('button', { type: 'button', style: idle(dangerButtonStyle, busy || !canTrigger || !canArmUpgrade), disabled: busy || !canTrigger || !canArmUpgrade, onClick: triggerConfirmedUpgrade }, '确认并启动后台升级'),
-              el('button', { type: 'button', style: buttonStyle, disabled: busy, onClick: () => setUpgradeArmed(false) }, '取消'))))
+              el('button', { type: 'button', style: idle(dangerButtonStyle, busy || triggeringUpgrade || !canTrigger || !canArmUpgrade), disabled: busy || triggeringUpgrade || !canTrigger || !canArmUpgrade, onClick: triggerConfirmedUpgrade }, triggeringUpgrade ? '正在启动后台升级…' : '确认并启动后台升级'),
+              el('button', { type: 'button', style: buttonStyle, disabled: busy || triggeringUpgrade, onClick: () => setUpgradeArmed(false) }, '取消'))))
         : null,
       el('div', { style: actionsStyle },
         el('button', {
@@ -3390,8 +3535,8 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
           ? null
           : el('button', {
             type: 'button',
-            style: idle(primaryButtonStyle, busy || !canTrigger || !canArmUpgrade),
-            disabled: busy || !canTrigger || !canArmUpgrade,
+            style: idle(primaryButtonStyle, busy || triggeringUpgrade || !canTrigger || !canArmUpgrade),
+            disabled: busy || triggeringUpgrade || !canTrigger || !canArmUpgrade,
             onClick: () => setUpgradeArmed(true),
           }, '准备自助升级'))))
 }

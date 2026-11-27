@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -19,7 +20,7 @@ import {
   type OwnerConsoleIntakeAgreement, type OwnerConsoleStatus, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
 } from './typert.js'
 import { componentState, missingRemedy, repairPatch } from './state.js'
-import { persistAllowedBuilds } from './build-approvals.js'
+import { persistAllowedBuilds, persistConfirmModulesPurgeDisabled } from './build-approvals.js'
 import { CodingToolProber, discoverCodingToolBinary, type CodingToolId } from './probes.js'
 import {
   applyAutonomyWizardSetup, atomicWritePatchWithBackup, findPatchRow, getPatchRowConfig,
@@ -787,19 +788,29 @@ export class OwnerConsoleService extends TypertRemoteService {
       return refuse(trimmed, '批准的构建脚本名称无效')
     }
     const manager = this.manager()
-    if (approvals.length === 0) {
-      const result = applyInstall(await manager.installBundle(trimmed, { enabled: true, saveExact: true }))
-      if (result.applied) this.catalogReader.invalidate()
-      return result
-    }
     const dir = this.profileDirectory()
-    if (dir === undefined) return rejectStaleApproval(trimmed, approvals)
-    try {
-      await persistAllowedBuilds(dir, approvals)
-    } catch (cause) {
-      return refuse(trimmed, `写入 allowBuilds 失败：${cause instanceof Error ? cause.message : String(cause)}`)
+    if (approvals.length > 0 && dir === undefined) {
+      return rejectStaleApproval(trimmed, approvals)
     }
-    const result = applyInstall(await manager.installBundle(trimmed, { enabled: true, saveExact: true }))
+    if (approvals.length > 0 && dir !== undefined) {
+      try {
+        await persistAllowedBuilds(dir, approvals)
+      } catch (cause) {
+        return refuse(trimmed, `写入 allowBuilds 失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+    }
+    if (dir !== undefined && existsSync(dir)) {
+      // Non-TTY Electron/daemon bundle installs invoke pnpm without stdin TTY; disable interactive modules-purge prompt safely.
+      await persistConfirmModulesPurgeDisabled(dir).catch(() => false)
+    }
+    let raw = await manager.installBundle(trimmed, { enabled: true, saveExact: true })
+    if (isNoTtyModulesPurgeError(raw) && dir !== undefined) {
+      const updated = await persistConfirmModulesPurgeDisabled(dir).catch(() => false)
+      if (updated) {
+        raw = await manager.installBundle(trimmed, { enabled: true, saveExact: true })
+      }
+    }
+    const result = applyInstall(raw)
     if (result.applied) this.catalogReader.invalidate()
     return result
   }
@@ -1363,6 +1374,11 @@ function normalizeBuildNames(names: readonly string[] | undefined): readonly str
     .slice(0, MAX_BUILD_NAMES))
 }
 
+function isNoTtyModulesPurgeError(result: ChangeResultLike): boolean {
+  const text = `${result.error?.diagnostic ?? ''}\n${result.packageResult?.output ?? ''}`
+  return /ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY/u.test(text)
+}
+
 /** Install-specific refusal mapping: surface every build name pnpm reported (the Host's own record
  * may be empty when its parser misses pnpm's coloured line), and turn a raw error box or a
  * compatibility denial into the concrete owner-facing next step. */
@@ -1381,6 +1397,14 @@ export function applyInstall(result: ChangeResultLike): OwnerConsoleWriteResult 
       entry: result.target,
       ...(pending.length === 0 ? {} : { pendingBuilds: pending }),
       note: `Host 拒绝了不兼容的插件版本：${packages.join('；')}。请安装兼容版本，或由主人为这个精确版本授予兼容豁免后重试。${log}`,
+    })
+  }
+  if (isNoTtyModulesPurgeError(result)) {
+    return Object.freeze({
+      applied: false,
+      entry: result.target,
+      ...(pending.length === 0 ? {} : { pendingBuilds: pending }),
+      note: `安装被 pnpm 非交互终端安全确认拦截（ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY）；请在 profile 目录 pnpm-workspace.yaml 写入 confirmModulesPurge: false 或在环境设置 CI=true 后重试。${log}`,
     })
   }
   const buildBlocked = result.packageResult?.kind === 'build-blocked'

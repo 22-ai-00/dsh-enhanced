@@ -1,6 +1,5 @@
 import { execFile as nodeExecFile } from 'node:child_process'
-import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { isMap, isScalar, isSeq, type YAMLMap, type YAMLSeq } from 'yaml'
 import {
@@ -18,7 +17,7 @@ import {
 } from './settings.js'
 import type { OwnerConsoleStatus, OwnerConsoleWriteResult, SetupDoctorReport } from './typert.js'
 import {
-  buildUpgradeProbeEnv, detectFrozenSystemdProfile, readBoundHostMetadata,
+  buildUpgradeProbeEnv, detectFrozenSystemdProfile, discoverDshRayBinary, readBoundHostMetadata,
 } from './upgrade-probe.js'
 
 const PROFILE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u
@@ -410,25 +409,7 @@ async function readStatusForControl(host: AutonomyHostContext): Promise<OwnerCon
 }
 
 function discoverDshRayExecutable(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
-  const home = env['HOME']?.trim() || homedir()
-  const dirs = platform === 'win32'
-    ? (env['APPDATA'] ? [join(env['APPDATA'], 'npm')] : [])
-    : [join(home, '.local', 'bin'), join(home, '.npm-global', 'bin'), join(home, 'Library', 'pnpm'), '/opt/homebrew/bin', '/usr/local/bin']
-  const names = platform === 'win32' ? ['dsh-ray.cmd', 'dsh-ray.exe'] : ['dsh-ray']
-  for (const dir of dirs) {
-    for (const name of names) {
-      const candidate = join(dir, name)
-      try {
-        const st = statSync(candidate)
-        if (st.isFile() && (platform === 'win32' || (st.mode & 0o111) !== 0)) {
-          return candidate
-        }
-      } catch {
-        // Continue probing candidate paths.
-      }
-    }
-  }
-  return 'dsh-ray'
+  return discoverDshRayBinary(env, platform) ?? 'dsh-ray'
 }
 
 async function execDshRayUpgrade(

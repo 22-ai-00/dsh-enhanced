@@ -1,19 +1,30 @@
 import { createRequire } from 'node:module'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import {
+  closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync,
+  readdirSync, readFileSync, readSync, realpathSync, statSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { defaultExecProbe, redactProbeDetail, sanitizedProbeEnv, type ProbeExecFn, type ProbeExecResult } from './probes.js'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
+import {
+  collectUserBinDirs, defaultExecProbe, defaultIsExecutable, redactProbeDetail, sanitizedProbeEnv,
+  type ProbeExecFn, type ProbeExecResult,
+} from './probes.js'
 import { boundedConfig, hasControlChars, isSingleLineCommand, type SettingsService } from './settings.js'
-import type { SelfUpgradePreview, SelfUpgradeStatus, OwnerConsoleWriteResult } from './typert.js'
+import type { SelfUpgradePreview, SelfUpgradeRunState, SelfUpgradeStatus, OwnerConsoleWriteResult } from './typert.js'
 import { version as PACKAGE_VERSION } from './version.js'
 
 const CACHE_TTL_MS = 60_000
 const CLI_CHECK_TIMEOUT_MS = 25_000
 const CLI_DRY_RUN_TIMEOUT_MS = 30_000
 const REGISTRY_TIMEOUT_MS = 6_000
+const EARLY_SPAWN_SETTLE_MS = 60
 const MAX_HOST_METADATA_BYTES = 16_384
 const MAX_REGISTRY_BYTES = 32_768
+const MAX_LOG_TAIL_READ_BYTES = 16_384
+const MAX_LOG_TAIL_CHARS = 1_800
+const UPGRADE_LOG_PATTERN = /^owner-console-upgrade-(\d+)\.log$/u
+const CSI_ANSI_PATTERN = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[ -/]*[@-~]`, 'gu')
 const ENHANCED_NPM_LATEST_URL = 'https://registry.npmjs.org/@dsh-ray%2Fowner-console/latest'
 const SEMVER_PATTERN = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u
 
@@ -29,6 +40,11 @@ export interface UpgradeHostContext {
   get(name: string): unknown
 }
 
+export type SpawnDetachedProcessLike = Pick<ChildProcess, 'pid' | 'unref'> & {
+  once?: (event: string, listener: (...args: unknown[]) => void) => unknown
+  on?: (event: string, listener: (...args: unknown[]) => void) => unknown
+}
+
 export type SpawnDetachedFn = (
   command: string,
   args: readonly string[],
@@ -39,7 +55,7 @@ export type SpawnDetachedFn = (
     stdio: 'ignore' | readonly ['ignore', number, number]
     shell: boolean
   }>,
-) => Pick<ChildProcess, 'pid' | 'unref'>
+) => SpawnDetachedProcessLike
 
 export interface SelfUpgradeProberOptions {
   readonly execFn?: ProbeExecFn
@@ -51,6 +67,8 @@ export interface SelfUpgradeProberOptions {
   readonly platform?: NodeJS.Platform
   readonly env?: NodeJS.ProcessEnv
   readonly cliBin?: string
+  readonly execPath?: string
+  readonly isPidAlive?: (pid: number) => boolean
 }
 
 interface ResolvedUpgradeContext {
@@ -85,8 +103,8 @@ function defaultSpawnDetached(
     stdio: 'ignore' | readonly ['ignore', number, number]
     shell: boolean
   }>,
-): Pick<ChildProcess, 'pid' | 'unref'> {
-  return spawn(command, [...args], {
+): SpawnDetachedProcessLike {
+  const child = spawn(command, [...args], {
     cwd: options.cwd,
     env: options.env,
     detached: options.detached,
@@ -94,6 +112,19 @@ function defaultSpawnDetached(
     shell: options.shell,
     windowsHide: true,
   })
+  // Prevent async spawn ENOENT/EACCES from raising an unhandled EventEmitter error inside GUI hosts.
+  child.on('error', () => {})
+  return child
+}
+
+function defaultIsPidAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error: unknown) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
 }
 
 function textOrNull(value: unknown): string | null {
@@ -280,19 +311,19 @@ function buildCliUpgradeCommand(dshHome: string | null, profileName: string, fro
 function candidateUpgradeBinDirs(
   envSource: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
+  execPath: string = process.execPath,
+  extraBinDirs: readonly string[] = [],
+  includePath = false,
 ): readonly string[] {
-  if (platform === 'win32') {
-    const appData = envSource['APPDATA']?.trim()
-    return appData !== undefined && appData !== '' ? [join(appData, 'npm')] : []
-  }
   const home = envSource['HOME']?.trim() || homedir()
-  return [
-    join(home, '.local', 'bin'),
-    join(home, '.npm-global', 'bin'),
-    join(home, 'Library', 'pnpm'),
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
-  ]
+  return collectUserBinDirs({
+    env: envSource,
+    homeDir: home,
+    platform,
+    execPath,
+    extraBinDirs,
+    includePath,
+  })
 }
 
 function normalizePathKey(entry: string, platform: NodeJS.Platform): string {
@@ -300,13 +331,20 @@ function normalizePathKey(entry: string, platform: NodeJS.Platform): string {
   return platform === 'win32' ? trimmed.toLowerCase() : trimmed
 }
 
-/** Build sanitized upgrade child environment with `DSH_HOME` and existing user executable directories on `PATH`. */
+export interface BuildUpgradeProbeEnvOptions {
+  readonly extraBinDirs?: readonly string[]
+  readonly execPath?: string
+}
+
+/** Build non-TTY safe (`CI=true`) upgrade child environment with `DSH_HOME` and resolved Node/pnpm/CLI `PATH`. */
 export function buildUpgradeProbeEnv(
   envSource: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
   dshHome: string | null = null,
+  options: BuildUpgradeProbeEnvOptions = {},
 ): NodeJS.ProcessEnv {
   const env = sanitizedProbeEnv(envSource)
+  env['CI'] = 'true'
   if (dshHome !== null && dshHome.trim() !== '') {
     env['DSH_HOME'] = dshHome
   }
@@ -316,7 +354,7 @@ export function buildUpgradeProbeEnv(
     .map(entry => entry.trim())
     .filter(entry => entry !== '')
   const seen = new Set(pathEntries.map(entry => normalizePathKey(entry, platform)))
-  for (const dir of candidateUpgradeBinDirs(envSource, platform)) {
+  for (const dir of candidateUpgradeBinDirs(envSource, platform, options.execPath ?? process.execPath, options.extraBinDirs)) {
     const key = normalizePathKey(dir, platform)
     if (seen.has(key) || !existsSync(dir)) continue
     seen.add(key)
@@ -328,28 +366,34 @@ export function buildUpgradeProbeEnv(
   return env
 }
 
-function isExecutableBinary(candidatePath: string, platform: NodeJS.Platform): boolean {
-  try {
-    const st = statSync(candidatePath)
-    if (!st.isFile()) return false
-    return platform === 'win32' || (st.mode & 0o111) !== 0
-  } catch {
-    return false
-  }
-}
-
-function discoverDshRayBinary(
-  envSource: NodeJS.ProcessEnv,
-  platform: NodeJS.Platform,
+/** Discover `dsh-ray`, `node`, or `pnpm` across explicit PATH and GUI/version-manager bin directories. */
+export function discoverToolRuntimeBinary(
+  binary: 'dsh-ray' | 'node' | 'pnpm',
+  envSource: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  extraBinDirs: readonly string[] = [],
+  execPath: string = process.execPath,
 ): string | undefined {
-  const names = platform === 'win32' ? ['dsh-ray.cmd', 'dsh-ray.exe'] : ['dsh-ray']
-  for (const dir of candidateUpgradeBinDirs(envSource, platform)) {
+  const names = platform === 'win32'
+    ? [`${binary}.cmd`, `${binary}.exe`, binary]
+    : [binary]
+  for (const dir of candidateUpgradeBinDirs(envSource, platform, execPath, extraBinDirs, true)) {
     for (const name of names) {
       const candidate = join(dir, name)
-      if (isExecutableBinary(candidate, platform)) return candidate
+      if (defaultIsExecutable(candidate, platform)) return candidate
     }
   }
   return undefined
+}
+
+/** Discover `dsh-ray` CLI executable across PATH, npm-global, local bin, Homebrew, nvm, fnm, volta, and execPath dirs. */
+export function discoverDshRayBinary(
+  envSource: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  extraBinDirs: readonly string[] = [],
+  execPath: string = process.execPath,
+): string | undefined {
+  return discoverToolRuntimeBinary('dsh-ray', envSource, platform, extraBinDirs, execPath)
 }
 
 function isMissingBinaryError(result: ProbeExecResult): boolean {
@@ -468,6 +512,118 @@ function resolveLogFile(dshHome: string | null, timestamp: number): Readonly<{ f
   }
 }
 
+interface TrackedUpgradeRun {
+  readonly pid?: number
+  readonly startedAt: number
+  readonly finishedAt?: number
+  readonly logPath?: string
+  readonly targetVersion?: string | null
+  readonly exitCode?: number | null
+  readonly spawnError?: string
+}
+
+function readUpgradeLogTail(logPath: string | undefined): string | undefined {
+  if (logPath === undefined || logPath.trim() === '') return undefined
+  let fd: number | undefined
+  try {
+    const lst = lstatSync(logPath)
+    if (lst.isSymbolicLink() || !lst.isFile()) return undefined
+    const flags = constants.O_RDONLY | (typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0)
+    fd = openSync(logPath, flags)
+    const st = fstatSync(fd)
+    if (!st.isFile() || st.size <= 0) return undefined
+    const readBytes = Math.min(st.size, MAX_LOG_TAIL_READ_BYTES)
+    const offset = Math.max(0, st.size - readBytes)
+    const buf = Buffer.allocUnsafe(readBytes)
+    let totalRead = 0
+    while (totalRead < readBytes) {
+      const n = readSync(fd, buf, totalRead, readBytes - totalRead, offset + totalRead)
+      if (n <= 0) break
+      totalRead += n
+    }
+    const rawText = buf.subarray(0, totalRead).toString('utf8').replace(CSI_ANSI_PATTERN, '')
+    const redactedLines = rawText
+      .split(/\r?\n/u)
+      .map(line => redactProbeDetail(line))
+      .filter(line => line !== '')
+    if (redactedLines.length === 0) return undefined
+    const joined = redactedLines.join('\n')
+    return joined.length > MAX_LOG_TAIL_CHARS ? joined.slice(-MAX_LOG_TAIL_CHARS) : joined
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd) } catch { /* noop */ }
+    }
+  }
+}
+
+function findLatestUpgradeLogPath(dshHome: string | null): Readonly<{ path: string; startedAt: number }> | undefined {
+  if (dshHome === null || dshHome.trim() === '') return undefined
+  const logsDir = join(dshHome, 'logs')
+  try {
+    const entries = readdirSync(logsDir, { withFileTypes: true })
+    let best: { path: string; startedAt: number } | undefined
+    for (const entry of entries) {
+      if (!entry.isFile()) continue
+      const match = UPGRADE_LOG_PATTERN.exec(entry.name)
+      if (match === null) continue
+      const startedAt = Number(match[1])
+      if (!Number.isSafeInteger(startedAt) || startedAt < 0) continue
+      const candidatePath = join(logsDir, entry.name)
+      try {
+        const st = lstatSync(candidatePath)
+        if (st.isSymbolicLink() || !st.isFile()) continue
+      } catch {
+        continue
+      }
+      if (best === undefined || startedAt > best.startedAt) {
+        best = { path: candidatePath, startedAt }
+      }
+    }
+    return best
+  } catch {
+    return undefined
+  }
+}
+
+function parseUpgradeLogOutcome(logTail: string | undefined): Readonly<{
+  jsonOk?: boolean
+  error?: string
+  lastLine?: string
+}> {
+  if (logTail === undefined || logTail.trim() === '') return {}
+  const lines = logTail.split(/\r?\n/u).map(l => l.trim()).filter(l => l !== '')
+  if (lines.length === 0) return {}
+  let jsonOk: boolean | undefined
+  let parsedError: string | undefined
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!
+    const jsonStart = line.indexOf('{')
+    if (jsonStart >= 0) {
+      try {
+        const raw = JSON.parse(line.slice(jsonStart)) as unknown
+        if (isPlainObject(raw)) {
+          if (typeof raw['ok'] === 'boolean') jsonOk = raw['ok']
+          const execObj = isPlainObject(raw['execution']) ? raw['execution'] : undefined
+          const errStr = textOrNull(raw['error']) ?? textOrNull(execObj?.['error'])
+          if (errStr !== null) parsedError = redactProbeDetail(errStr)
+          if (jsonOk !== undefined || parsedError !== undefined) break
+        }
+      } catch {
+        // Non-JSON log line.
+      }
+    }
+  }
+  const errorLine = [...lines].reverse().find(line =>
+    /ERR_PNPM_|ENOENT|EACCES|npm ERR!|ETIMEDOUT|\bError:\b|升级失败|失败：|退出码\s*[1-9]/u.test(line))
+  return {
+    ...(jsonOk === undefined ? {} : { jsonOk }),
+    ...(parsedError !== undefined ? { error: parsedError } : errorLine !== undefined ? { error: errorLine } : {}),
+    lastLine: lines[lines.length - 1]!,
+  }
+}
+
 /** Bounded self-upgrade prober and safe detached upgrade launcher for owner-console. */
 export class SelfUpgradeProber {
   private readonly execFn: ProbeExecFn
@@ -479,10 +635,13 @@ export class SelfUpgradeProber {
   private readonly platform: NodeJS.Platform
   private readonly envSource: NodeJS.ProcessEnv
   private readonly cliBin: string
+  private readonly execPath: string
+  private readonly isPidAlive: (pid: number) => boolean
   private resolvedCliBin: string | undefined
   private readonly cache = new Map<string, Readonly<{ expiresAt: number; status: SelfUpgradeStatus }>>()
   private readonly inflight = new Map<string, Promise<SelfUpgradeStatus>>()
   private readonly resolvedModes = new Map<string, string | null>()
+  private readonly latestRuns = new Map<string, TrackedUpgradeRun>()
 
   constructor(options: SelfUpgradeProberOptions = {}) {
     this.execFn = options.execFn ?? defaultExecProbe
@@ -494,22 +653,129 @@ export class SelfUpgradeProber {
     this.platform = options.platform ?? process.platform
     this.envSource = options.env ?? process.env
     this.cliBin = options.cliBin ?? 'dsh-ray'
+    this.execPath = options.execPath ?? process.execPath
+    this.isPidAlive = options.isPidAlive ?? defaultIsPidAlive
   }
 
   invalidate(): void {
     this.cache.clear()
   }
 
+  private buildSafeEnv(dshHome: string | null, cliCommand?: string): NodeJS.ProcessEnv {
+    const extraBinDirs: string[] = []
+    if (cliCommand !== undefined && isAbsolute(cliCommand)) {
+      extraBinDirs.push(dirname(cliCommand))
+    }
+    const discoveredNode = discoverToolRuntimeBinary('node', this.envSource, this.platform, extraBinDirs, this.execPath)
+    if (discoveredNode !== undefined) extraBinDirs.push(dirname(discoveredNode))
+    const discoveredPnpm = discoverToolRuntimeBinary('pnpm', this.envSource, this.platform, extraBinDirs, this.execPath)
+    if (discoveredPnpm !== undefined) extraBinDirs.push(dirname(discoveredPnpm))
+    return buildUpgradeProbeEnv(this.envSource, this.platform, dshHome, {
+      extraBinDirs,
+      execPath: this.execPath,
+    })
+  }
+
+  private inspectLatestRun(ctx: ResolvedUpgradeContext, currentEnhancedVersion: string): SelfUpgradeRunState | undefined {
+    const cacheKey = upgradeCacheKey(ctx)
+    const tracked = this.latestRuns.get(cacheKey)
+    const diskLog = tracked?.logPath === undefined ? findLatestUpgradeLogPath(ctx.dshHome) : undefined
+    if (tracked === undefined && diskLog === undefined) return undefined
+
+    const logPath = tracked?.logPath ?? diskLog?.path
+    const startedAt = tracked?.startedAt ?? diskLog?.startedAt ?? this.now()
+    const logTail = readUpgradeLogTail(logPath)
+    if (tracked === undefined && logTail === undefined) return undefined
+
+    const outcome = parseUpgradeLogOutcome(logTail)
+    if (tracked?.spawnError !== undefined) {
+      const error = redactProbeDetail(tracked.spawnError).slice(0, 500)
+      return Object.freeze({
+        state: 'failed',
+        ...(tracked.pid !== undefined && tracked.pid > 0 ? { pid: tracked.pid } : {}),
+        startedAt,
+        ...(tracked.finishedAt !== undefined ? { finishedAt: tracked.finishedAt } : {}),
+        ...(logPath !== undefined ? { logPath } : {}),
+        summary: `后台升级启动失败：${error}`.slice(0, 500),
+        error,
+        ...(logTail !== undefined ? { logTail } : {}),
+      })
+    }
+
+    const stillRunning = tracked !== undefined
+      && tracked.exitCode === undefined
+      && tracked.finishedAt === undefined
+      && tracked.pid !== undefined
+      && tracked.pid > 0
+      && this.isPidAlive(tracked.pid)
+
+    if (stillRunning) {
+      const progressLine = outcome.lastLine !== undefined ? `（最新输出：${outcome.lastLine}）` : ''
+      return Object.freeze({
+        state: 'running',
+        pid: tracked.pid!,
+        startedAt,
+        ...(logPath !== undefined ? { logPath } : {}),
+        summary: `后台升级进程运行中（PID ${tracked.pid}）${progressLine}`.slice(0, 500),
+        ...(logTail !== undefined ? { logTail } : {}),
+      })
+    }
+
+    const finishedAt = tracked?.finishedAt
+    const versionMatched = tracked?.targetVersion !== undefined
+      && tracked.targetVersion !== null
+      && currentEnhancedVersion === tracked.targetVersion
+    const failed = (tracked?.exitCode !== undefined && tracked.exitCode !== null && tracked.exitCode !== 0)
+      || outcome.jsonOk === false
+      || (outcome.error !== undefined && outcome.jsonOk !== true && !versionMatched)
+      || (tracked !== undefined
+        && tracked.targetVersion !== undefined
+        && tracked.targetVersion !== null
+        && !versionMatched
+        && outcome.jsonOk !== true
+        && tracked.exitCode !== 0)
+
+    if (failed) {
+      const detail = outcome.error
+        ?? (tracked?.exitCode !== undefined && tracked.exitCode !== null ? `退出码 ${tracked.exitCode}` : '进程已退出且未完成版本升级')
+      const summary = `后台升级失败：${detail}`.slice(0, 500)
+      return Object.freeze({
+        state: 'failed',
+        ...(tracked?.pid !== undefined && tracked.pid > 0 ? { pid: tracked.pid } : {}),
+        startedAt,
+        ...(finishedAt !== undefined ? { finishedAt } : {}),
+        ...(logPath !== undefined ? { logPath } : {}),
+        summary,
+        error: detail.slice(0, 500),
+        ...(logTail !== undefined ? { logTail } : {}),
+      })
+    }
+
+    const summary = (outcome.jsonOk === true || versionMatched
+      ? '后台升级已完成，请重启 Host / 桌面应用以加载新版本。'
+      : (outcome.lastLine !== undefined ? `后台升级进程已结束：${outcome.lastLine}` : '后台升级进程已结束。')).slice(0, 500)
+    return Object.freeze({
+      state: 'succeeded',
+      ...(tracked?.pid !== undefined && tracked.pid > 0 ? { pid: tracked.pid } : {}),
+      startedAt,
+      ...(finishedAt !== undefined ? { finishedAt } : {}),
+      ...(logPath !== undefined ? { logPath } : {}),
+      summary,
+      ...(logTail !== undefined ? { logTail } : {}),
+    })
+  }
+
   private async execUpgradeCli(
     args: readonly string[],
     timeoutMs: number,
-    env: NodeJS.ProcessEnv,
+    dshHome: string | null,
   ): Promise<ProbeExecResult> {
     const initialBin = this.resolvedCliBin ?? this.cliBin
     if (!isSingleLineCommand(initialBin)) {
       return { stdout: '', stderr: 'invalid dsh-ray binary', exitCode: 1, errorCode: 'EINVAL' }
     }
-    const firstResult = await this.execFn(initialBin, args, { timeoutMs, env })
+    const initialEnv = this.buildSafeEnv(dshHome, initialBin)
+    const firstResult = await this.execFn(initialBin, args, { timeoutMs, env: initialEnv })
     if (!isMissingBinaryError(firstResult)) {
       return firstResult
     }
@@ -519,11 +785,12 @@ export class SelfUpgradeProber {
     if (this.cliBin !== 'dsh-ray') {
       return firstResult
     }
-    const discovered = discoverDshRayBinary(this.envSource, this.platform)
+    const discovered = discoverDshRayBinary(this.envSource, this.platform, [], this.execPath)
     if (discovered === undefined || discovered === initialBin || !isSingleLineCommand(discovered)) {
       return firstResult
     }
-    const retryResult = await this.execFn(discovered, args, { timeoutMs, env })
+    const retryEnv = this.buildSafeEnv(dshHome, discovered)
+    const retryResult = await this.execFn(discovered, args, { timeoutMs, env: retryEnv })
     if (!isMissingBinaryError(retryResult)) {
       this.resolvedCliBin = discovered
     }
@@ -564,7 +831,7 @@ export class SelfUpgradeProber {
     const cacheKey = upgradeCacheKey(resolved)
     if (!force) {
       const hit = this.cache.get(cacheKey)
-      if (hit !== undefined && this.now() < hit.expiresAt) {
+      if (hit !== undefined && this.now() < hit.expiresAt && hit.status.latestRun?.state !== 'running') {
         return Object.freeze({ ...hit.status, cached: true })
       }
       const pending = this.inflight.get(cacheKey)
@@ -586,9 +853,8 @@ export class SelfUpgradeProber {
     const hostMeta = readBoundHostMetadata(ctx.dshHome)
     const installedHostVersion = readInstalledHostVersion()
     const baseFrozen = detectFrozenSystemdProfile(ctx.dshHome, ctx.profileName, this.platform, this.envSource)
-    const safeEnv = buildUpgradeProbeEnv(this.envSource, this.platform, ctx.dshHome)
 
-    const cliResult = await this.execUpgradeCli(buildDshRayArgs('--check', ctx), CLI_CHECK_TIMEOUT_MS, safeEnv)
+    const cliResult = await this.execUpgradeCli(buildDshRayArgs('--check', ctx), CLI_CHECK_TIMEOUT_MS, ctx.dshHome)
     const cliPayload = cliResult.errorCode !== 'ENOENT' ? parseDshRayUpgradeJson(cliResult.stdout, this.currentVersion) : null
 
     if (cliPayload !== null) {
@@ -607,6 +873,7 @@ export class SelfUpgradeProber {
               : cliPayload.enhancedUpdateAvailable || cliPayload.hostUpdateAvailable
                 ? `发现可升级版本（@dsh-ray ${cliPayload.latestEnhancedVersion ?? this.currentVersion}）`
                 : '当前已是最新已检查版本').slice(0, 500)
+      const latestRun = this.inspectLatestRun(ctx, cliPayload.currentEnhancedVersion)
       return Object.freeze({
         currentEnhancedVersion: cliPayload.currentEnhancedVersion,
         latestEnhancedVersion: cliPayload.latestEnhancedVersion,
@@ -625,6 +892,7 @@ export class SelfUpgradeProber {
         offline: cliPayload.offline,
         checkSource: 'dsh-ray',
         note,
+        ...(latestRun === undefined ? {} : { latestRun }),
       })
     }
 
@@ -651,6 +919,7 @@ export class SelfUpgradeProber {
         : enhancedUpdateAvailable
           ? `${cliUnavailableNote}检测到 npm 新版本 ${latestEnhancedVersion}（当前 ${this.currentVersion}）。`
           : `${cliUnavailableNote}当前版本 ${this.currentVersion} 已为 npm 最新版本。`).slice(0, 500)
+    const latestRun = this.inspectLatestRun(ctx, this.currentVersion)
 
     return Object.freeze({
       currentEnhancedVersion: this.currentVersion,
@@ -670,6 +939,7 @@ export class SelfUpgradeProber {
       offline: npmResult.offline,
       checkSource: npmResult.offline ? 'offline' : 'npm-registry',
       note,
+      ...(latestRun === undefined ? {} : { latestRun }),
     })
   }
 
@@ -684,9 +954,8 @@ export class SelfUpgradeProber {
     const resolved = resolveUpgradeContext(host, this.envSource)
     const cacheKey = upgradeCacheKey(resolved)
     const status = await this.check(host, false)
-    const safeEnv = buildUpgradeProbeEnv(this.envSource, this.platform, resolved.dshHome)
 
-    const cliResult = await this.execUpgradeCli(buildDshRayArgs('--dry-run', resolved), CLI_DRY_RUN_TIMEOUT_MS, safeEnv)
+    const cliResult = await this.execUpgradeCli(buildDshRayArgs('--dry-run', resolved), CLI_DRY_RUN_TIMEOUT_MS, resolved.dshHome)
     const cliPayload = cliResult.errorCode !== 'ENOENT' ? parseDshRayUpgradeJson(cliResult.stdout, this.currentVersion) : null
 
     if (cliPayload !== null) {
@@ -819,9 +1088,10 @@ export class SelfUpgradeProber {
       })
     }
 
-    const safeEnv = buildUpgradeProbeEnv(this.envSource, this.platform, resolved.dshHome)
+    const safeEnv = this.buildSafeEnv(resolved.dshHome, cliCommand)
     const args = buildDshRayArgs('--yes', resolved, confirmDshHomeStopped)
-    const log = resolveLogFile(resolved.dshHome, this.now())
+    const startedAt = this.now()
+    const log = resolveLogFile(resolved.dshHome, startedAt)
 
     let pid: number | undefined
     try {
@@ -833,32 +1103,144 @@ export class SelfUpgradeProber {
         stdio: log.fd !== undefined ? ['ignore', log.fd, log.fd] : 'ignore',
         shell: false,
       })
+      if (log.fd !== undefined) {
+        try { closeSync(log.fd) } catch { /* noop */ }
+      }
       pid = child.pid
+      let settledError: string | undefined
+      let settledExitCode: number | null | undefined
+      let resolveEarly: (() => void) | undefined
+      const hasEmitter = typeof child.once === 'function'
+      const earlyPromise = hasEmitter ? new Promise<void>(resolveFn => { resolveEarly = resolveFn }) : undefined
+
+      if (hasEmitter) {
+        child.once!('error', (err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err)
+          settledError = msg
+          const existing = this.latestRuns.get(cacheKey)
+          if (existing !== undefined) {
+            this.latestRuns.set(cacheKey, { ...existing, finishedAt: this.now(), spawnError: msg })
+            this.invalidate()
+          }
+          resolveEarly?.()
+        })
+        child.once!('exit', (code: unknown) => {
+          const numeric = typeof code === 'number' ? code : 1
+          settledExitCode = numeric
+          const existing = this.latestRuns.get(cacheKey)
+          if (existing !== undefined) {
+            this.latestRuns.set(cacheKey, { ...existing, finishedAt: this.now(), exitCode: numeric })
+            this.invalidate()
+          }
+          resolveEarly?.()
+        })
+      }
+
+      if (pid !== undefined && pid > 0) {
+        this.latestRuns.set(cacheKey, {
+          pid,
+          startedAt,
+          ...(log.path !== undefined ? { logPath: log.path } : {}),
+          targetVersion: preview.targetEnhancedVersion,
+        })
+      }
       child.unref()
-      if (pid === undefined || pid <= 0) {
+
+      if (earlyPromise !== undefined) {
+        await new Promise<void>((resolveWait) => {
+          const timer = setTimeout(resolveWait, EARLY_SPAWN_SETTLE_MS)
+          timer.unref?.()
+          void earlyPromise.then(() => {
+            clearTimeout(timer)
+            resolveWait()
+          })
+        })
+      }
+
+      const logHint = log.path !== undefined ? `；日志：${log.path}` : ''
+      if (settledError !== undefined) {
+        const redactedErr = redactProbeDetail(settledError)
+        this.latestRuns.set(cacheKey, {
+          ...(pid !== undefined && pid > 0 ? { pid } : {}),
+          startedAt,
+          finishedAt: this.now(),
+          ...(log.path !== undefined ? { logPath: log.path } : {}),
+          targetVersion: preview.targetEnhancedVersion,
+          spawnError: redactedErr,
+        })
+        this.invalidate()
         return Object.freeze({
           applied: false,
           entry: 'dsh-ray-upgrade',
-          note: `未能启动独立升级进程；请在终端执行：${preview.command}`,
+          note: `启动独立升级进程失败：${redactedErr}${logHint}。可改用终端执行：${preview.command}`,
         })
       }
+
+      if (pid === undefined || pid <= 0) {
+        const logTail = readUpgradeLogTail(log.path)
+        const outcome = parseUpgradeLogOutcome(logTail)
+        const reason = outcome.error ?? '未能创建独立升级进程'
+        this.latestRuns.set(cacheKey, {
+          startedAt,
+          finishedAt: this.now(),
+          ...(log.path !== undefined ? { logPath: log.path } : {}),
+          targetVersion: preview.targetEnhancedVersion,
+          spawnError: reason,
+        })
+        this.invalidate()
+        return Object.freeze({
+          applied: false,
+          entry: 'dsh-ray-upgrade',
+          note: `未能启动独立升级进程（${reason}）${logHint}；请在终端执行：${preview.command}`,
+        })
+      }
+
+      if (settledExitCode !== undefined && settledExitCode !== null) {
+        const logTail = readUpgradeLogTail(log.path)
+        const outcome = parseUpgradeLogOutcome(logTail)
+        if (settledExitCode !== 0 || outcome.jsonOk === false) {
+          const detail = outcome.error ?? `退出码 ${settledExitCode}`
+          this.latestRuns.set(cacheKey, {
+            pid,
+            startedAt,
+            finishedAt: this.now(),
+            ...(log.path !== undefined ? { logPath: log.path } : {}),
+            targetVersion: preview.targetEnhancedVersion,
+            exitCode: settledExitCode,
+          })
+          this.invalidate()
+          return Object.freeze({
+            applied: false,
+            entry: 'dsh-ray-upgrade',
+            note: `后台升级启动后立即失败（${detail}）${logHint}；可改用终端执行：${preview.command}`,
+          })
+        }
+      }
+
       this.invalidate()
-      const logHint = log.path !== undefined ? `；日志：${log.path}` : ''
       return Object.freeze({
         applied: true,
         entry: 'dsh-ray-upgrade',
         note: `已启动独立后台升级（PID ${pid}）${logHint}。升级完成后请按日志提示重启 Host 以加载新代码`,
       })
     } catch (error: unknown) {
-      return Object.freeze({
-        applied: false,
-        entry: 'dsh-ray-upgrade',
-        note: `启动独立升级进程失败：${error instanceof Error ? error.message : String(error)}`,
-      })
-    } finally {
       if (log.fd !== undefined) {
         try { closeSync(log.fd) } catch { /* noop */ }
       }
+      const message = redactProbeDetail(error instanceof Error ? error.message : String(error))
+      this.latestRuns.set(cacheKey, {
+        startedAt,
+        finishedAt: this.now(),
+        ...(log.path !== undefined ? { logPath: log.path } : {}),
+        targetVersion: preview.targetEnhancedVersion,
+        spawnError: message,
+      })
+      this.invalidate()
+      return Object.freeze({
+        applied: false,
+        entry: 'dsh-ray-upgrade',
+        note: `启动独立升级进程失败：${message}`,
+      })
     }
   }
 }
