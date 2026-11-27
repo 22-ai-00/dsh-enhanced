@@ -13,7 +13,7 @@ export { NativeCommandVerifierRunner, type NativeCommandVerifierRunnerConfig } f
 export { buildMacosSeatbeltCommandProfile, buildScrubbedMacosEnv, verifyMacosSandboxExec, runMacosSeatbeltCommand,
   DEFAULT_MACOS_SANDBOX_EXEC, type MacosSeatbeltCommandProfileInput, type MacosSeatbeltCommandInput,
   type MacosSeatbeltCommandResult, type MacosSeatbeltAdapter } from './macos-command.js'
-export { buildWindowsCommandLine, buildScrubbedWindowsEnv, buildWindowsJobRunnerInvocation, buildWindowsJobSpec,
+export { buildWindowsCommandLine, buildScrubbedWindowsEnv, buildWindowsHostRunnerEnv, buildWindowsJobRunnerInvocation, buildWindowsJobSpec,
   computeWindowsJobLimits, quoteWindowsArg, runWindowsJobProcess, verifyWindowsJobRunner,
   DEFAULT_WINDOWS_POWERSHELL, DEFAULT_WINDOWS_CMD, WINDOWS_JOB_RUNNER_SCRIPT, WINDOWS_JOB_LIMIT_FLAGS, WINDOWS_JOB_UI_RESTRICTIONS_FLAGS,
   type WindowsJobObjectLimits, type WindowsJobSpec, type WindowsJobProcessInput, type WindowsJobProcessResult, type WindowsJobAdapter } from './windows-job.js'

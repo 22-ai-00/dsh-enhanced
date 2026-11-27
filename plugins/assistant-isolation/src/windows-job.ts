@@ -64,6 +64,49 @@ const PROXY_ENV_KEYS = new Set([
   'FTP_PROXY',
 ])
 
+const WINDOWS_HOST_RUNNER_ENV_KEYS = [
+  'ProgramData',
+  'ALLUSERSPROFILE',
+  'ProgramFiles',
+  'ProgramFiles(x86)',
+  'ProgramW6432',
+  'CommonProgramFiles',
+  'CommonProgramFiles(x86)',
+  'CommonProgramW6432',
+  'USERPROFILE',
+  'LOCALAPPDATA',
+  'APPDATA',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'COMPUTERNAME',
+  'USERNAME',
+  'OS',
+  'PROCESSOR_ARCHITECTURE',
+  'NUMBER_OF_PROCESSORS',
+] as const
+
+const WINDOWS_HOST_RUNNER_ENV_KEYS_BY_UPPER = new Map(
+  WINDOWS_HOST_RUNNER_ENV_KEYS.map(key => [key.toUpperCase(), key]),
+)
+
+function readValidEnvValueCaseInsensitive(
+  env: Readonly<Record<string, string | undefined>>,
+  targetKey: string,
+): string | undefined {
+  const direct = env[targetKey]
+  if (typeof direct === 'string' && direct.length > 0 && !direct.includes('\0')) {
+    return direct
+  }
+  const upperTarget = targetKey.toUpperCase()
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toUpperCase() !== upperTarget) continue
+    if (typeof value === 'string' && value.length > 0 && !value.includes('\0')) {
+      return value
+    }
+  }
+  return undefined
+}
+
 export interface WindowsJobObjectLimits {
   readonly killOnJobClose: true
   readonly dieOnUnhandledException: true
@@ -225,6 +268,57 @@ export function buildScrubbedWindowsEnv(input: {
       seenKeys.set(upper, key)
     }
   }
+  return result
+}
+
+/**
+ * Builds a scrubbed host environment for the outer PowerShell Job runner.
+ * Preserves host OS directory/runtime variables for CLR/AMSI cold-start while
+ * pointing TEMP/TMP at the host-owned spec directory and stripping secrets,
+ * proxies, and runtime injection variables.
+ */
+export function buildWindowsHostRunnerEnv(
+  specEnv: Readonly<Record<string, string>>,
+  specDir: string,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const systemRoot = readValidEnvValueCaseInsensitive(specEnv, 'SystemRoot')
+  const windir = readValidEnvValueCaseInsensitive(specEnv, 'WINDIR')
+  const systemDrive =
+    readValidEnvValueCaseInsensitive(specEnv, 'SystemDrive') ??
+    (win32.parse(systemRoot ?? 'C:\\Windows').root.replace(/\\$/u, '') || 'C:')
+  const comspec = readValidEnvValueCaseInsensitive(specEnv, 'COMSPEC')
+  const pathext = readValidEnvValueCaseInsensitive(specEnv, 'PATHEXT')
+  const path = readValidEnvValueCaseInsensitive(specEnv, 'PATH')
+
+  const result: Record<string, string> = {
+    ...(systemRoot !== undefined ? { SystemRoot: systemRoot } : {}),
+    ...(windir !== undefined ? { WINDIR: windir } : {}),
+    SystemDrive: systemDrive,
+    ...(comspec !== undefined ? { COMSPEC: comspec } : {}),
+    ...(pathext !== undefined ? { PATHEXT: pathext } : {}),
+    ...(path !== undefined ? { PATH: path } : {}),
+    TEMP: specDir,
+    TMP: specDir,
+  }
+
+  const hostValues = new Map<string, string>()
+  for (const [key, value] of Object.entries(hostEnv)) {
+    if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) continue
+    const upper = key.toUpperCase()
+    const canonical = WINDOWS_HOST_RUNNER_ENV_KEYS_BY_UPPER.get(upper)
+    if (canonical === undefined) continue
+    if (!hostValues.has(upper) || key === canonical) {
+      hostValues.set(upper, value)
+    }
+  }
+  for (const canonical of WINDOWS_HOST_RUNNER_ENV_KEYS) {
+    const value = hostValues.get(canonical.toUpperCase())
+    if (value !== undefined) {
+      result[canonical] = value
+    }
+  }
+
   return result
 }
 
@@ -446,21 +540,11 @@ export async function runWindowsJobProcess(
         let abortRequested = false
         let grace: NodeJS.Timeout | undefined
 
-        const systemDrive = win32.parse(spec.env.SystemRoot ?? 'C:\\Windows').root.replace(/\\$/u, '') || 'C:'
         let child: ReturnType<typeof spawn>
         try {
           child = spawnImpl(invocation.command, [...invocation.args], {
             cwd: input.workspacePath,
-            env: {
-              SystemRoot: spec.env.SystemRoot,
-              WINDIR: spec.env.WINDIR,
-              SystemDrive: systemDrive,
-              COMSPEC: spec.env.COMSPEC,
-              PATHEXT: spec.env.PATHEXT,
-              PATH: spec.env.PATH,
-              TEMP: input.tmpPath,
-              TMP: input.tmpPath,
-            },
+            env: buildWindowsHostRunnerEnv(spec.env, specDir),
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: false,
             windowsHide: true,

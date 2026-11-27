@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, readFileSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -21,6 +21,7 @@ import {
   archiveIsolationAudit,
   AssistantIsolationService,
   buildScrubbedWindowsEnv,
+  buildWindowsHostRunnerEnv,
   buildWindowsJobSpec,
   computeWindowsJobLimits,
   inspectIsolationGrant,
@@ -72,6 +73,152 @@ describe('windows-job isolation policy, PowerShell P/Invoke runner, schema-10 le
     expect(ps1).toContain('MaxJsonLength = [int]::MaxValue')
     expect(ps1.indexOf('Task readOut')).toBeLessThan(ps1.indexOf('Task writeStdin'))
     expect(ps1.indexOf('Task readErr')).toBeLessThan(ps1.indexOf('Task writeStdin'))
+    expect(ps1).toContain('ThreadPool.GetMinThreads')
+    expect(ps1).toContain('ThreadPool.SetMinThreads(Math.Max(minWorkerThreads, 8), Math.Max(minCompletionPortThreads, 8))')
+    expect(ps1.indexOf('ThreadPool.SetMinThreads')).toBeLessThan(ps1.indexOf('Task readOut'))
+    expect(ps1).toContain("$csharp + '|' + $PSVersionTable.CLRVersion + '|' + [IntPtr]::Size")
+    expect(ps1).toContain("GetFolderPath('LocalApplicationData')")
+    expect(ps1).toContain('dsh-ray\\winjob-cache')
+    expect(ps1).toContain('[System.IO.Path]::GetTempPath()')
+    expect(ps1).toContain('dsh-ray-winjob-cache')
+    expect(ps1).toContain('JobRunner-$cacheKey24.dll')
+    expect(ps1).toContain('System.Threading.Mutex')
+    expect(ps1).toContain('Local\\DshRayWinJob_$cacheKey16')
+    expect(ps1).toContain('AbandonedMutexException')
+    expect(ps1).toContain('-OutputAssembly $tempDll -IgnoreWarnings')
+    expect(ps1).toContain('[System.IO.File]::Move($tempDll, $dllPath)')
+    expect(ps1).toContain('Add-Type -Path $dllPath')
+    expect(ps1).toContain('Add-Type -TypeDefinition $csharp -Language CSharp -IgnoreWarnings')
+    expect(ps1).toContain('($outcome.StdoutBase64.Length + $outcome.StderrBase64.Length) -gt 524288')
+  })
+
+  test('buildWindowsHostRunnerEnv preserves host OS directories, overrides TEMP/TMP to specDir, and strips secrets/proxies/NODE_OPTIONS', () => {
+    const spec = buildWindowsJobSpec({
+      workspacePath: 'C:\\Users\\runner\\ws',
+      tmpPath: 'C:\\Users\\runner\\untrusted-tmp',
+      command: 'echo ok',
+      shell: 'cmd',
+      networkMode: 'outbound-https',
+      env: {
+        HTTPS_PROXY: 'https://child-proxy.local:8443',
+        SECRET_FROM_SPEC: 'child-secret',
+      },
+      deadline: Date.now() + 10_000,
+      timeoutMs: 10_000,
+      maxOutputBytes: 4096,
+    })
+
+    const specDir = 'C:\\Users\\runner\\AppData\\Local\\Temp\\dsh-winjob-host123'
+    const hostEnv: NodeJS.ProcessEnv = {
+      programdata: 'C:\\ProgramData',
+      ALLUSERSPROFILE: 'C:\\ProgramData',
+      programfiles: 'C:\\Program Files',
+      'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+      ProgramW6432: 'C:\\Program Files',
+      CommonProgramFiles: 'C:\\Program Files\\Common Files',
+      'CommonProgramFiles(x86)': 'C:\\Program Files (x86)\\Common Files',
+      CommonProgramW6432: 'C:\\Program Files\\Common Files',
+      userprofile: 'C:\\Users\\runner',
+      localappdata: 'C:\\Users\\runner\\AppData\\Local',
+      APPDATA: 'C:\\Users\\runner\\AppData\\Roaming',
+      HOMEDRIVE: 'C:',
+      HOMEPATH: '\\Users\\runner',
+      COMPUTERNAME: 'WIN-CI-HOST',
+      USERNAME: 'runneradmin',
+      OS: 'Windows_NT',
+      PROCESSOR_ARCHITECTURE: 'AMD64',
+      NUMBER_OF_PROCESSORS: '4',
+      // Must be overridden or stripped
+      SystemRoot: 'C:\\HostWindows',
+      WINDIR: 'C:\\HostWindows',
+      SystemDrive: 'Z:',
+      COMSPEC: 'C:\\host-cmd.exe',
+      PATHEXT: '.JS',
+      PATH: 'C:\\host-evil-path',
+      TEMP: 'C:\\host-temp',
+      TMP: 'C:\\host-tmp',
+      NODE_OPTIONS: '--require evil.js',
+      node_options: '--inspect',
+      PSModulePath: 'C:\\evil-modules',
+      HTTP_PROXY: 'http://127.0.0.1:8080',
+      HTTPS_PROXY: 'https://127.0.0.1:8443',
+      ALL_PROXY: 'socks5://127.0.0.1:1080',
+      NO_PROXY: '*',
+      FTP_PROXY: 'ftp://127.0.0.1:21',
+      OPENAI_API_KEY: 'sk-host-secret',
+      GITHUB_TOKEN: 'ghp_host_secret',
+      AWS_SECRET_ACCESS_KEY: 'aws-secret',
+    }
+
+    const runnerEnv = buildWindowsHostRunnerEnv(spec.env, specDir, hostEnv)
+    expect(runnerEnv).toMatchObject({
+      SystemRoot: spec.env.SystemRoot,
+      WINDIR: spec.env.WINDIR,
+      SystemDrive: 'C:',
+      COMSPEC: spec.env.COMSPEC,
+      PATHEXT: spec.env.PATHEXT,
+      PATH: spec.env.PATH,
+      TEMP: specDir,
+      TMP: specDir,
+      ProgramData: 'C:\\ProgramData',
+      ALLUSERSPROFILE: 'C:\\ProgramData',
+      ProgramFiles: 'C:\\Program Files',
+      'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+      ProgramW6432: 'C:\\Program Files',
+      CommonProgramFiles: 'C:\\Program Files\\Common Files',
+      'CommonProgramFiles(x86)': 'C:\\Program Files (x86)\\Common Files',
+      CommonProgramW6432: 'C:\\Program Files\\Common Files',
+      USERPROFILE: 'C:\\Users\\runner',
+      LOCALAPPDATA: 'C:\\Users\\runner\\AppData\\Local',
+      APPDATA: 'C:\\Users\\runner\\AppData\\Roaming',
+      HOMEDRIVE: 'C:',
+      HOMEPATH: '\\Users\\runner',
+      COMPUTERNAME: 'WIN-CI-HOST',
+      USERNAME: 'runneradmin',
+      OS: 'Windows_NT',
+      PROCESSOR_ARCHITECTURE: 'AMD64',
+      NUMBER_OF_PROCESSORS: '4',
+    })
+    expect(runnerEnv.TEMP).not.toBe(spec.env.TEMP)
+    expect(runnerEnv.TMP).not.toBe(spec.env.TMP)
+    expect(runnerEnv.programdata).toBeUndefined()
+    expect(runnerEnv.localappdata).toBeUndefined()
+    expect(runnerEnv.userprofile).toBeUndefined()
+    expect(runnerEnv.programfiles).toBeUndefined()
+    expect(runnerEnv.NODE_OPTIONS).toBeUndefined()
+    expect(runnerEnv.node_options).toBeUndefined()
+    expect(runnerEnv.PSModulePath).toBeUndefined()
+    expect(runnerEnv.PSMODULEPATH).toBeUndefined()
+    expect(runnerEnv.HTTP_PROXY).toBeUndefined()
+    expect(runnerEnv.HTTPS_PROXY).toBeUndefined()
+    expect(runnerEnv.ALL_PROXY).toBeUndefined()
+    expect(runnerEnv.NO_PROXY).toBeUndefined()
+    expect(runnerEnv.FTP_PROXY).toBeUndefined()
+    expect(runnerEnv.OPENAI_API_KEY).toBeUndefined()
+    expect(runnerEnv.GITHUB_TOKEN).toBeUndefined()
+    expect(runnerEnv.AWS_SECRET_ACCESS_KEY).toBeUndefined()
+    expect(runnerEnv.SECRET_FROM_SPEC).toBeUndefined()
+
+    const customSpecEnv = buildWindowsHostRunnerEnv(
+      {
+        SystemRoot: 'D:\\Win',
+        WINDIR: 'D:\\Win',
+        SystemDrive: 'E:',
+        COMSPEC: 'D:\\Win\\System32\\cmd.exe',
+        PATHEXT: '.EXE;.CMD',
+        PATH: 'D:\\Win\\System32',
+      },
+      specDir,
+      {
+        ProgramData: '',
+        LOCALAPPDATA: 'C:\\bad\0path',
+        USERPROFILE: 'D:\\Users\\alice',
+      },
+    )
+    expect(customSpecEnv.SystemDrive).toBe('E:')
+    expect(customSpecEnv.ProgramData).toBeUndefined()
+    expect(customSpecEnv.LOCALAPPDATA).toBeUndefined()
+    expect(customSpecEnv.USERPROFILE).toBe('D:\\Users\\alice')
   })
 
   test('builds Win32 Job limits, command quoting, and scrubbed offline/online environments', () => {
@@ -201,9 +348,13 @@ describe('windows-job isolation policy, PowerShell P/Invoke runner, schema-10 le
     // Mocked PowerShell spawn returning JSON envelope and verifying cancel signal forwarding
     await writeFile(join(ws, 'result.txt'), 'win-artifact', { mode: 0o600 })
     let sawSpecFile = false
-    const okSpawn = ((_cmd: string, args: readonly string[]) => {
+    let capturedSpecPath = ''
+    let capturedRunnerEnv: NodeJS.ProcessEnv | undefined
+    const okSpawn = ((_cmd: string, args: readonly string[], options?: { env?: NodeJS.ProcessEnv }) => {
       const specIndex = args.indexOf('-SpecPath')
       sawSpecFile = specIndex >= 0 && typeof args[specIndex + 1] === 'string'
+      capturedSpecPath = specIndex >= 0 ? String(args[specIndex + 1]) : ''
+      capturedRunnerEnv = options?.env
       const proc = new EventEmitter() as EventEmitter & {
         stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill: () => boolean
       }
@@ -244,6 +395,11 @@ describe('windows-job isolation policy, PowerShell P/Invoke runner, schema-10 le
       spawn: okSpawn,
     })
     expect(sawSpecFile).toBe(true)
+    expect(capturedRunnerEnv?.TEMP).toBe(dirname(capturedSpecPath))
+    expect(capturedRunnerEnv?.TMP).toBe(dirname(capturedSpecPath))
+    expect(capturedRunnerEnv?.TEMP).not.toBe(tmp)
+    expect(capturedRunnerEnv?.SystemRoot).toBe('C:\\Windows')
+    expect(capturedRunnerEnv?.SystemDrive).toBe('C:')
     expect(ok).toMatchObject({
       status: 'succeeded',
       quiescent: true,

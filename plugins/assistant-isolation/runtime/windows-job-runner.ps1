@@ -404,6 +404,11 @@ namespace DshIsolation {
         var stdinSafeHandle = new SafeFileHandle(stdinWrite, true);
         stdinWrite = IntPtr.Zero;
 
+        int minWorkerThreads;
+        int minCompletionPortThreads;
+        ThreadPool.GetMinThreads(out minWorkerThreads, out minCompletionPortThreads);
+        ThreadPool.SetMinThreads(Math.Max(minWorkerThreads, 8), Math.Max(minCompletionPortThreads, 8));
+
         Task readOut = Task.Run(() => {
           using (stdoutSafeHandle)
           using (var fs = new FileStream(stdoutSafeHandle, FileAccess.Read)) {
@@ -591,7 +596,89 @@ namespace DshIsolation {
 }
 '@
 
-Add-Type -TypeDefinition $csharp -Language CSharp -IgnoreWarnings
+$loadedJobRunner = $false
+try {
+  $cacheVersionInput = $csharp + '|' + $PSVersionTable.CLRVersion + '|' + [IntPtr]::Size
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($cacheVersionInput))
+  } finally {
+    $sha256.Dispose()
+  }
+  $cacheHash = ([System.BitConverter]::ToString($hashBytes) -replace '-', '').ToLowerInvariant()
+  $cacheKey24 = $cacheHash.Substring(0, 24)
+  $cacheKey16 = $cacheHash.Substring(0, 16)
+
+  $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+  if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+    $cacheDir = Join-Path $localAppData 'dsh-ray\winjob-cache'
+  } else {
+    $cacheDir = Join-Path ([System.IO.Path]::GetTempPath()) 'dsh-ray-winjob-cache'
+  }
+  $dllPath = Join-Path $cacheDir "JobRunner-$cacheKey24.dll"
+
+  if (Test-Path -LiteralPath $dllPath -PathType Leaf) {
+    try {
+      Add-Type -Path $dllPath
+      $loadedJobRunner = $true
+    } catch {
+      $loadedJobRunner = $false
+    }
+  }
+
+  if (-not $loadedJobRunner) {
+    if (-not (Test-Path -LiteralPath $cacheDir -PathType Container)) {
+      New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+    }
+    $mutex = New-Object System.Threading.Mutex($false, "Local\DshRayWinJob_$cacheKey16")
+    $mutexAcquired = $false
+    try {
+      try {
+        $mutexAcquired = $mutex.WaitOne(15000)
+      } catch [System.Threading.AbandonedMutexException] {
+        $mutexAcquired = $true
+      }
+      if ($mutexAcquired) {
+        if (Test-Path -LiteralPath $dllPath -PathType Leaf) {
+          try {
+            Add-Type -Path $dllPath
+            $loadedJobRunner = $true
+          } catch {
+            Remove-Item -LiteralPath $dllPath -Force -ErrorAction SilentlyContinue
+          }
+        }
+        if (-not $loadedJobRunner) {
+          $tempDll = Join-Path $cacheDir ("JobRunner-$cacheKey24-" + [Guid]::NewGuid().ToString('N') + '.tmp.dll')
+          try {
+            Add-Type -TypeDefinition $csharp -Language CSharp -OutputAssembly $tempDll -IgnoreWarnings
+            if (-not (Test-Path -LiteralPath $dllPath -PathType Leaf)) {
+              [System.IO.File]::Move($tempDll, $dllPath)
+            }
+          } finally {
+            if (Test-Path -LiteralPath $tempDll -PathType Leaf) {
+              Remove-Item -LiteralPath $tempDll -Force -ErrorAction SilentlyContinue
+            }
+          }
+          if (-not ('DshIsolation.JobRunner' -as [type])) {
+            Add-Type -Path $dllPath
+          }
+          $loadedJobRunner = $true
+        }
+      }
+    } finally {
+      if ($mutexAcquired) {
+        try { $mutex.ReleaseMutex() } catch {}
+      }
+      $mutex.Dispose()
+    }
+  }
+} catch {
+  $loadedJobRunner = $false
+}
+
+if (-not $loadedJobRunner -and -not ('DshIsolation.JobRunner' -as [type])) {
+  Add-Type -TypeDefinition $csharp -Language CSharp -IgnoreWarnings
+}
 
 $specRaw = Get-Content -LiteralPath $SpecPath -Raw -Encoding UTF8
 $spec = ConvertFrom-Json -InputObject $specRaw
@@ -649,12 +736,17 @@ $payload = @{
 }
 
 $json = $null
-try {
-  Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
-  $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-  $serializer.MaxJsonLength = [int]::MaxValue
-  $json = $serializer.Serialize($payload)
-} catch {
+if (($outcome.StdoutBase64.Length + $outcome.StderrBase64.Length) -gt 524288) {
+  try {
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $serializer.MaxJsonLength = [int]::MaxValue
+    $json = $serializer.Serialize($payload)
+  } catch {
+    $json = $null
+  }
+}
+if ($null -eq $json) {
   $json = ConvertTo-Json -InputObject $payload -Compress
 }
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding ($false)
