@@ -760,27 +760,34 @@ async function inspectProfileHasLocalEnhancedSpecs(dshHome: string, profile: str
   return false
 }
 
-async function collectProfileLocalEnhancedNames(profileDir: string): Promise<string[]> {
+async function collectManifestEnhancedDeps(
+  profileDir: string,
+  predicate: (depSpec: unknown) => boolean,
+): Promise<Set<string>> {
+  const names = new Set<string>()
   const pkgPath = join(profileDir, 'package.json')
   try {
     const meta = await lstat(pkgPath)
-    if (!meta.isFile() || meta.isSymbolicLink()) return []
+    if (!meta.isFile() || meta.isSymbolicLink()) return names
     const parsed = asObject(JSON.parse(await readFile(pkgPath, 'utf8')))
-    if (!parsed) return []
-    const names = new Set<string>()
+    if (!parsed) return names
     for (const sectionName of ['dependencies', 'optionalDependencies', 'devDependencies'] as const) {
       const section = asObject(parsed[sectionName])
       if (!section) continue
       for (const [depName, depSpec] of Object.entries(section)) {
-        if (depName.startsWith('@dsh-ray/') && isLocalSourceSpec(depSpec)) {
+        if (depName.startsWith('@dsh-ray/') && predicate(depSpec)) {
           names.add(depName)
         }
       }
     }
-    return [...names].sort()
   } catch {
-    return []
+    // Ignore unreadable manifests; profile corruption is surfaced by manifest/ledger checks.
   }
+  return names
+}
+
+async function collectProfileLocalEnhancedNames(profileDir: string): Promise<string[]> {
+  return [...(await collectManifestEnhancedDeps(profileDir, isLocalSourceSpec))].sort()
 }
 
 async function writeTextAtomically(targetPath: string, content: string, mode: number): Promise<void> {
@@ -906,25 +913,44 @@ function parseEnhancedExcludeRule(
 }
 
 async function readRegistryEnhancedDepsFromManifest(profileDir: string): Promise<string[]> {
-  const pkgPath = join(profileDir, 'package.json')
-  try {
-    const meta = await lstat(pkgPath)
-    if (!meta.isFile() || meta.isSymbolicLink()) return []
-    const parsed = asObject(JSON.parse(await readFile(pkgPath, 'utf8')))
-    if (!parsed) return []
-    const names: string[] = []
-    for (const sectionName of ['dependencies', 'optionalDependencies', 'devDependencies'] as const) {
-      const section = asObject(parsed[sectionName])
-      if (!section) continue
-      for (const [depName, depSpec] of Object.entries(section)) {
-        if (depName.startsWith('@dsh-ray/') && typeof depSpec === 'string' && !isNonRegistrySpec(depSpec)) {
-          names.push(depName)
-        }
-      }
+  return [...(await collectManifestEnhancedDeps(profileDir, depSpec => typeof depSpec === 'string' && !isNonRegistrySpec(depSpec)))]
+}
+
+/**
+ * Remove stale non-symlink `@dsh-ray/*` directories left behind in a pnpm profile's
+ * `node_modules/@dsh-ray` when upgrading with `--config.confirmModulesPurge=false`,
+ * while preserving `.pnpm`/local-checkout symlinks, non-registry specs (when `!toNpm`),
+ * and non-`KNOWN_ENHANCED_PACKAGES` evolved plugins.
+ */
+export async function pruneStalePnpmEnhancedRealDirs(profileDir: string, toNpm: boolean): Promise<void> {
+  const preservedSpecs = toNpm
+    ? new Set<string>()
+    : await collectManifestEnhancedDeps(profileDir, isNonRegistrySpec)
+
+  const scopeDir = join(profileDir, 'node_modules', '@dsh-ray')
+  const scopeMeta = await lstat(scopeDir).catch(() => undefined)
+  if (!scopeMeta || !scopeMeta.isDirectory() || scopeMeta.isSymbolicLink()) return
+
+  const slugs = await readdir(scopeDir).catch(() => [] as string[])
+  for (const slug of slugs) {
+    const pkgName = `@dsh-ray/${slug}`
+    if (!KNOWN_ENHANCED_PACKAGES.includes(pkgName) || preservedSpecs.has(pkgName)) continue
+    const entryPath = join(scopeDir, slug)
+    const meta = await lstat(entryPath).catch(() => undefined)
+    if (!meta || !meta.isDirectory() || meta.isSymbolicLink()) continue
+
+    const entryPkgPath = join(entryPath, 'package.json')
+    const entryPkgMeta = await lstat(entryPkgPath).catch(() => undefined)
+    if (!entryPkgMeta || !entryPkgMeta.isFile() || entryPkgMeta.isSymbolicLink()) continue
+
+    let entryPkg: Record<string, unknown> | undefined
+    try {
+      entryPkg = asObject(JSON.parse(await readFile(entryPkgPath, 'utf8')))
+    } catch {
+      continue
     }
-    return names
-  } catch {
-    return []
+    if (entryPkg?.name !== pkgName) continue
+    await rm(entryPath, { recursive: true, force: true })
   }
 }
 
@@ -1181,6 +1207,7 @@ export async function defaultUpgradeProfilePackages(input: {
   if (isPnpmProfile) {
     await updatePnpmProfilePackageJson(profileDir, input.profile, input.targetVersion, input.npmPlugins, toNpm)
     await updatePnpmWorkspaceOverrides(profileDir, input.profile, input.targetVersion, input.npmPlugins, toNpm)
+    await pruneStalePnpmEnhancedRealDirs(profileDir, toNpm)
     const pnpmCmd = await resolvePnpmCommand(env, osHome, platform, input.profile)
     const res = await runPmCommand(
       pnpmCmd.command,

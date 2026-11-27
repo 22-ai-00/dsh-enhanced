@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { lstatSync, mkdirSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { chmod, lstat, mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1948,6 +1949,7 @@ minimumReleaseAgeExclude:
     // 4. Subsequent `dsh-ray upgrade --profile web` WITHOUT `--to-npm` STILL pairs target + coordinator and bumps coordinator marker version
     await mkdir(join(coordDir, 'node_modules', '@dsh-ray', 'assistant-policy'), { recursive: true })
     await writeFile(join(coordDir, 'node_modules', '@dsh-ray', 'assistant-policy', 'package.json'), JSON.stringify({ name: '@dsh-ray/assistant-policy', version: '0.2.2' }), { mode: 0o600 })
+    await mkdir(join(f.profileDir, 'node_modules', '@dsh-ray', 'assistant-web-owner'), { recursive: true })
     await writeFile(join(f.profileDir, 'node_modules', '@dsh-ray', 'assistant-web-owner', 'package.json'), JSON.stringify({ name: '@dsh-ray/assistant-web-owner', version: '0.2.2' }), { mode: 0o600 })
     const postMigRes = await runUpgrade(
       { dshHome: f.dshHome, profile: 'web', action: 'apply', targetVersion: '0.2.3', confirmDshHomeStopped: true, osHome: f.osHome, platform: 'linux', env: { PATH: fakeBinDir } },
@@ -1968,5 +1970,226 @@ minimumReleaseAgeExclude:
       version: '0.2.3',
       sourceRepository: null,
     })
+  })
+
+  test('defaultUpgradeProfilePackages prunes stale KNOWN_ENHANCED_PACKAGES real directories before pnpm install while preserving symlinks, non-registry specs, and evolved plugins', async () => {
+    const f = await createHomeFixture({ profile: 'web', enhancedVersion: '0.2.3' })
+    const scopeDir = join(f.profileDir, 'node_modules', '@dsh-ray')
+    await rm(scopeDir, { recursive: true, force: true })
+    await mkdir(scopeDir, { recursive: true })
+
+    await writeFile(join(f.profileDir, 'pnpm-workspace.yaml'), 'nodeLinker: isolated\n', { mode: 0o600 })
+    await writeFile(join(f.profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-web',
+      private: true,
+      dependencies: {
+        '@dsh-ray/personal-assistant': '0.2.3',
+        '@dsh-ray/assistant-delivery': 'file:./vendor/assistant-delivery',
+      },
+      optionalDependencies: {
+        '@dsh-ray/assistant-actions': 'file:./vendor/assistant-actions',
+      },
+      devDependencies: {
+        '@dsh-ray/assistant-skills': 'link:../local-skills',
+      },
+    }, null, 2), { mode: 0o600 })
+
+    // 1. Standard .pnpm virtual-store symlink.
+    const storePersonal = join(f.profileDir, 'node_modules', '.pnpm', '@dsh-ray+personal-assistant@0.2.3', 'node_modules', '@dsh-ray', 'personal-assistant')
+    await mkdir(storePersonal, { recursive: true })
+    await writeFile(join(storePersonal, 'package.json'), JSON.stringify({ name: '@dsh-ray/personal-assistant', version: '0.2.3' }))
+    await symlink('../.pnpm/@dsh-ray+personal-assistant@0.2.3/node_modules/@dsh-ray/personal-assistant', join(scopeDir, 'personal-assistant'))
+
+    // 2. Local-checkout symlink for a known enhanced package.
+    const localHello = join(f.root, 'local-checkouts', 'hello')
+    await mkdir(localHello, { recursive: true })
+    await writeFile(join(localHello, 'package.json'), JSON.stringify({ name: '@dsh-ray/hello', version: '0.2.0' }))
+    await symlink(localHello, join(scopeDir, 'hello'))
+
+    // 3. Stale KNOWN_ENHANCED_PACKAGES real directories (no non-registry spec in package.json).
+    for (const slug of ['assistant-policy', 'assistant-automations']) {
+      const dir = join(scopeDir, slug)
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ name: `@dsh-ray/${slug}`, version: '0.2.0' }))
+    }
+
+    // 4. Real directories backed by non-registry specs across dependencies/optionalDependencies/devDependencies.
+    for (const slug of ['assistant-delivery', 'assistant-actions', 'assistant-skills']) {
+      const dir = join(scopeDir, slug)
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ name: `@dsh-ray/${slug}`, version: '0.2.0' }))
+    }
+
+    // 5. Custom evolved real directory not in KNOWN_ENHANCED_PACKAGES.
+    const evolvedDir = join(scopeDir, 'evolved-custom-tool')
+    await mkdir(evolvedDir, { recursive: true })
+    await writeFile(join(evolvedDir, 'package.json'), JSON.stringify({ name: '@dsh-ray/evolved-custom-tool', version: '0.1.0' }))
+
+    // 6. Real directory with mismatched package.json name should not be touched.
+    const mismatchedDir = join(scopeDir, 'assistant-goals')
+    await mkdir(mismatchedDir, { recursive: true })
+    await writeFile(join(mismatchedDir, 'package.json'), JSON.stringify({ name: 'other-package', version: '0.2.0' }))
+
+    const fakeBinDir = join(f.root, 'fake-pnpm-prune')
+    await mkdir(fakeBinDir, { recursive: true })
+    const fakePnpm = join(fakeBinDir, 'pnpm')
+    await writeFile(fakePnpm, '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 })
+    await chmod(fakePnpm, 0o755)
+
+    let preInstallEntries: string[] = []
+    let preInstallPersonalIsSymlink = false
+    let preInstallHelloIsSymlink = false
+
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: 'web',
+      targetVersion: '0.2.4',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-ray/personal-assistant', '@dsh-ray/assistant-policy', '@dsh-ray/assistant-automations'],
+      platform: 'linux',
+      osHome: f.osHome,
+      env: { PATH: fakeBinDir },
+      runner: () => {
+        preInstallEntries = readdirSync(scopeDir).sort()
+        preInstallPersonalIsSymlink = lstatSync(join(scopeDir, 'personal-assistant')).isSymbolicLink()
+        preInstallHelloIsSymlink = lstatSync(join(scopeDir, 'hello')).isSymbolicLink()
+        return { status: 0, stdout: '', stderr: '' }
+      },
+    })
+
+    const expectedAfterKeepSpecs = [
+      'assistant-actions',
+      'assistant-delivery',
+      'assistant-goals',
+      'assistant-skills',
+      'evolved-custom-tool',
+      'hello',
+      'personal-assistant',
+    ]
+    expect(preInstallEntries).toEqual(expectedAfterKeepSpecs)
+    expect(preInstallPersonalIsSymlink).toBe(true)
+    expect(preInstallHelloIsSymlink).toBe(true)
+    expect(await readdir(scopeDir).then(entries => entries.sort())).toEqual(expectedAfterKeepSpecs)
+
+    // When toNpm=true, migrated file:/link: specs are no longer preserved, while symlinks & evolved tools remain untouched.
+    let preInstallToNpmEntries: string[] = []
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: 'web',
+      targetVersion: '0.2.4',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-ray/personal-assistant'],
+      toNpm: true,
+      platform: 'linux',
+      osHome: f.osHome,
+      env: { PATH: fakeBinDir },
+      runner: () => {
+        preInstallToNpmEntries = readdirSync(scopeDir).sort()
+        return { status: 0, stdout: '', stderr: '' }
+      },
+    })
+    expect(preInstallToNpmEntries).toEqual([
+      'assistant-goals',
+      'evolved-custom-tool',
+      'hello',
+      'personal-assistant',
+    ])
+    expect((await lstat(join(scopeDir, 'personal-assistant'))).isSymbolicLink()).toBe(true)
+    expect((await lstat(join(scopeDir, 'hello'))).isSymbolicLink()).toBe(true)
+  })
+
+  test('runUpgrade removes orphaned KNOWN_ENHANCED_PACKAGES real directories on pnpm profile so subsequent upgrade to same version is an idempotent no-op', async () => {
+    const f = await createHomeFixture({ profile: 'web', hostVersion: '0.2.2-rc.5', enhancedVersion: '0.2.3' })
+    const scopeDir = join(f.profileDir, 'node_modules', '@dsh-ray')
+    await rm(scopeDir, { recursive: true, force: true })
+    await mkdir(scopeDir, { recursive: true })
+
+    await writeFile(join(f.profileDir, 'pnpm-workspace.yaml'), 'nodeLinker: isolated\n', { mode: 0o600 })
+    await writeFile(join(f.profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-web',
+      private: true,
+      dependencies: {
+        '@dsh-ray/personal-assistant': '0.2.3',
+      },
+    }, null, 2), { mode: 0o600 })
+
+    // Seed personal-assistant@0.2.3 .pnpm symlink + orphaned assistant-policy@0.2.0 real directory.
+    const store023 = join(f.profileDir, 'node_modules', '.pnpm', '@dsh-ray+personal-assistant@0.2.3', 'node_modules', '@dsh-ray', 'personal-assistant')
+    await mkdir(store023, { recursive: true })
+    await writeFile(join(store023, 'package.json'), JSON.stringify({ name: '@dsh-ray/personal-assistant', version: '0.2.3' }))
+    await symlink('../.pnpm/@dsh-ray+personal-assistant@0.2.3/node_modules/@dsh-ray/personal-assistant', join(scopeDir, 'personal-assistant'))
+
+    const orphanedPolicyDir = join(scopeDir, 'assistant-policy')
+    await mkdir(orphanedPolicyDir, { recursive: true })
+    await writeFile(join(orphanedPolicyDir, 'package.json'), JSON.stringify({ name: '@dsh-ray/assistant-policy', version: '0.2.0' }))
+
+    const fakeBinDir = join(f.root, 'fake-pnpm-e2e')
+    await mkdir(fakeBinDir, { recursive: true })
+    const fakePnpm = join(fakeBinDir, 'pnpm')
+    await writeFile(fakePnpm, '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 })
+    await chmod(fakePnpm, 0o755)
+
+    let pnpmInstallCalls = 0
+    const deps: UpgradeDeps = {
+      fetch: makeRegistryFetch('0.2.4', '0.2.2-rc.5'),
+      inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+      inspectService: async () => ({ managed: false, definitionPath: '', foreign: false }),
+      scanProcesses: async () => ({ processes: [] }),
+      verifyHealth: async () => ({ ok: true }),
+      runner: (_command, args) => {
+        if (args.includes('install')) {
+          pnpmInstallCalls++
+          // Orphaned 0.2.0 real directory must already be removed before pnpm install runs.
+          expect(() => lstatSync(orphanedPolicyDir)).toThrow()
+          // Simulate pnpm install updating the declared personal-assistant symlink to 0.2.4 without purging unmanaged entries.
+          const store024 = join(f.profileDir, 'node_modules', '.pnpm', '@dsh-ray+personal-assistant@0.2.4', 'node_modules', '@dsh-ray', 'personal-assistant')
+          mkdirSync(store024, { recursive: true })
+          writeFileSync(join(store024, 'package.json'), JSON.stringify({ name: '@dsh-ray/personal-assistant', version: '0.2.4' }))
+          unlinkSync(join(scopeDir, 'personal-assistant'))
+          symlinkSync('../.pnpm/@dsh-ray+personal-assistant@0.2.4/node_modules/@dsh-ray/personal-assistant', join(scopeDir, 'personal-assistant'))
+        }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+    }
+
+    const first = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: 'web',
+        action: 'apply',
+        targetVersion: '0.2.4',
+        confirmDshHomeStopped: true,
+        platform: 'linux',
+        osHome: f.osHome,
+        env: { PATH: fakeBinDir },
+      },
+      deps,
+    )
+    expect(first.exitCode).toBe(0)
+    expect(first.report.ok).toBe(true)
+    expect(first.report.execution?.executed).toBe(true)
+    expect(pnpmInstallCalls).toBe(1)
+    await expect(lstat(orphanedPolicyDir)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(join(scopeDir, 'personal-assistant', 'package.json'), 'utf8')).version).toBe('0.2.4')
+
+    const second = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: 'web',
+        action: 'apply',
+        targetVersion: '0.2.4',
+        confirmDshHomeStopped: true,
+        platform: 'linux',
+        osHome: f.osHome,
+        env: { PATH: fakeBinDir },
+      },
+      deps,
+    )
+    expect(second.exitCode).toBe(0)
+    expect(second.report.ok).toBe(true)
+    expect(second.report.packages.profiles[0]?.installedVersions).toEqual({ '@dsh-ray/personal-assistant': '0.2.4' })
+    expect(second.report.packages.profiles[0]?.minVersion).toBe('0.2.4')
+    expect(second.report.execution?.executed).toBe(false)
+    expect(pnpmInstallCalls).toBe(1)
   })
 })
