@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/credentials-keychain",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "An audited OS-keychain credential-handle service for trusted DeepSeek Harness plugins.",
   "license": "MIT",
   "type": "module",
@@ -60,7 +60,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
-    "@dsh-ray/assistant-policy": ">=0.1.0 <0.2.0"
+    "@dsh-ray/assistant-policy": ">=0.1.0 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

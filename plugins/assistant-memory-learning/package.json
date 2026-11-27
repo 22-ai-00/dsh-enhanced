@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-memory-learning",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "Durable ordinary-task memory learning through native Automations, independent review and bounded adoption.",
   "license": "MIT",
   "type": "module",
@@ -55,12 +55,12 @@
     "@deepseek-ai/dsh-session": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-ray/assistant-automations": ">=0.1.48 <0.2.0",
-    "@dsh-ray/assistant-delivery": ">=0.1.48 <0.2.0",
-    "@dsh-ray/assistant-evaluation": ">=0.1.48 <0.2.0",
-    "@dsh-ray/assistant-policy": ">=0.1.48 <0.2.0",
-    "@dsh-ray/assistant-verifier": ">=0.1.48 <0.2.0",
-    "@dsh-ray/personal-memory": ">=0.1.48 <0.2.0"
+    "@dsh-ray/assistant-automations": ">=0.1.48 <0.3.0",
+    "@dsh-ray/assistant-delivery": ">=0.1.48 <0.3.0",
+    "@dsh-ray/assistant-evaluation": ">=0.1.48 <0.3.0",
+    "@dsh-ray/assistant-policy": ">=0.1.48 <0.3.0",
+    "@dsh-ray/assistant-verifier": ">=0.1.48 <0.3.0",
+    "@dsh-ray/personal-memory": ">=0.1.48 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

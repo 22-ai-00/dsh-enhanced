@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-growth-driver",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "Bounded growth agent with durable reviews driven by owner-verified task feedback and frozen source models.",
   "license": "MIT",
   "type": "module",
@@ -63,14 +63,14 @@
     "@deepseek-ai/dsh-session": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tool-executor-ptc": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-ray/assistant-automations": ">=0.1.33 <0.2.0",
-    "@dsh-ray/assistant-delivery": ">=0.1.33 <0.2.0",
-    "@dsh-ray/assistant-dreaming": ">=0.1.33 <0.2.0",
-    "@dsh-ray/assistant-evaluation": ">=0.1.33 <0.2.0",
-    "@dsh-ray/assistant-goals": ">=0.1.25 <0.2.0",
-    "@dsh-ray/assistant-policy": ">=0.1.0 <0.2.0",
-    "@dsh-ray/assistant-skills": ">=0.1.33 <0.2.0",
-    "@dsh-ray/plugin-control-plane": ">=0.1.33 <0.2.0"
+    "@dsh-ray/assistant-automations": ">=0.1.33 <0.3.0",
+    "@dsh-ray/assistant-delivery": ">=0.1.33 <0.3.0",
+    "@dsh-ray/assistant-dreaming": ">=0.1.33 <0.3.0",
+    "@dsh-ray/assistant-evaluation": ">=0.1.33 <0.3.0",
+    "@dsh-ray/assistant-goals": ">=0.1.25 <0.3.0",
+    "@dsh-ray/assistant-policy": ">=0.1.0 <0.3.0",
+    "@dsh-ray/assistant-skills": ">=0.1.33 <0.3.0",
+    "@dsh-ray/plugin-control-plane": ">=0.1.33 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

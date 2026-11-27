@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-health",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "Policy-gated, content-free health and readiness aggregation for DSH assistant services.",
   "license": "MIT",
   "type": "module",
@@ -55,7 +55,7 @@
     "@deepseek-ai/cordis": "^4.1.0",
     "@deepseek-ai/dsh-agent": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-ray/assistant-policy": ">=0.1.0 <0.2.0"
+    "@dsh-ray/assistant-policy": ">=0.1.0 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

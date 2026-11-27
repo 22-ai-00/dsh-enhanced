@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-web-owner",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "A DeepSeek Harness plugin for Assistant Web Owner.",
   "license": "MIT",
   "type": "module",
@@ -85,14 +85,14 @@
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-typert-registry": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-workspace": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-ray/assistant-actions": ">=0.1.24 <0.2.0",
-    "@dsh-ray/assistant-deepseek-budget": ">=0.1.0 <0.2.0",
-    "@dsh-ray/assistant-delivery": ">0.1.24 <0.2.0",
-    "@dsh-ray/assistant-goals": ">=0.1.0 <0.2.0",
-    "@dsh-ray/assistant-isolation": ">=0.1.0 <0.2.0",
-    "@dsh-ray/assistant-skills": ">=0.1.0 <0.2.0",
-    "@dsh-ray/assistant-verifier": ">=0.1.0 <0.2.0",
-    "@dsh-ray/event-triggers": ">=0.1.24 <0.2.0"
+    "@dsh-ray/assistant-actions": ">=0.1.24 <0.3.0",
+    "@dsh-ray/assistant-deepseek-budget": ">=0.1.0 <0.3.0",
+    "@dsh-ray/assistant-delivery": ">0.1.24 <0.3.0",
+    "@dsh-ray/assistant-goals": ">=0.1.0 <0.3.0",
+    "@dsh-ray/assistant-isolation": ">=0.1.0 <0.3.0",
+    "@dsh-ray/assistant-skills": ">=0.1.0 <0.3.0",
+    "@dsh-ray/assistant-verifier": ">=0.1.0 <0.3.0",
+    "@dsh-ray/event-triggers": ">=0.1.24 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@dsh-ray/event-triggers": {

@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-delivery",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "A durable, policy-gated inbound/outbound message core for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",
@@ -78,11 +78,11 @@
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-user-approval": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-user-questions": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-ray/assistant-automations": ">0.1.7 <0.2.0",
-    "@dsh-ray/assistant-evaluation": ">0.1.24 <0.2.0",
-    "@dsh-ray/assistant-evolution": ">0.1.7 <0.2.0",
-    "@dsh-ray/assistant-goals": ">0.1.24 <0.2.0",
-    "@dsh-ray/assistant-policy": ">=0.1.43 <0.2.0",
+    "@dsh-ray/assistant-automations": ">0.1.7 <0.3.0",
+    "@dsh-ray/assistant-evaluation": ">0.1.24 <0.3.0",
+    "@dsh-ray/assistant-evolution": ">0.1.7 <0.3.0",
+    "@dsh-ray/assistant-goals": ">0.1.24 <0.3.0",
+    "@dsh-ray/assistant-policy": ">=0.1.43 <0.3.0",
     "@deepseek-ai/dsh-session-persistence": ">=0.2.2-rc.5 <0.3.0"
   },
   "peerDependenciesMeta": {

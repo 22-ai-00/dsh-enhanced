@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-recovery",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "Deterministic Host recovery and supervised self-evolution runbook for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",
@@ -50,13 +50,13 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
-    "@dsh-ray/assistant-automations": ">0.1.7 <0.2.0",
-    "@dsh-ray/assistant-delivery": ">0.1.7 <0.2.0",
-    "@dsh-ray/assistant-evaluation": ">0.1.7 <0.2.0",
-    "@dsh-ray/assistant-evolution": ">0.1.7 <0.2.0",
-    "@dsh-ray/assistant-goals": ">0.1.7 <0.2.0",
-    "@dsh-ray/assistant-health": ">0.1.7 <0.2.0",
-    "@dsh-ray/preference-learning": ">0.1.7 <0.2.0"
+    "@dsh-ray/assistant-automations": ">0.1.7 <0.3.0",
+    "@dsh-ray/assistant-delivery": ">0.1.7 <0.3.0",
+    "@dsh-ray/assistant-evaluation": ">0.1.7 <0.3.0",
+    "@dsh-ray/assistant-evolution": ">0.1.7 <0.3.0",
+    "@dsh-ray/assistant-goals": ">0.1.7 <0.3.0",
+    "@dsh-ray/assistant-health": ">0.1.7 <0.3.0",
+    "@dsh-ray/preference-learning": ">0.1.7 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

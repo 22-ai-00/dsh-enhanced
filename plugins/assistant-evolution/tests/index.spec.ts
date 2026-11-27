@@ -36,9 +36,9 @@ describe('dsh-ray-assistant-evolution entrypoint', () => {
     expect(bundle).toContain('autonomousRollback: true')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
     expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.2.2-rc.5 <0.3.0')
-    expect(manifest.peerDependencies['@dsh-ray/assistant-policy']).toBe('>=0.1.0 <0.2.0')
-    expect(manifest.peerDependencies['@dsh-ray/assistant-evaluation']).toBe('>0.1.7 <0.2.0')
-    expect(manifest.peerDependencies['@dsh-ray/assistant-automations']).toBe('>0.1.7 <0.2.0')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-policy']).toBe('>=0.1.0 <0.3.0')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-evaluation']).toBe('>0.1.7 <0.3.0')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-automations']).toBe('>0.1.7 <0.3.0')
   })
 
   test('loads through apply when assistant-policy is already composed', async () => {

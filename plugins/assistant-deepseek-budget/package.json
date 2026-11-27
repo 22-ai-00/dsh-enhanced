@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-deepseek-budget",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "A DeepSeek Harness plugin for Assistant Deepseek Budget.",
   "license": "MIT",
   "type": "module",
@@ -58,7 +58,7 @@
     "@deepseek-ai/cordis": "^4.1.0",
     "@deepseek-ai/dsh-credentials": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-llm": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-ray/assistant-goals": ">=0.1.0 <0.2.0"
+    "@dsh-ray/assistant-goals": ">=0.1.0 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

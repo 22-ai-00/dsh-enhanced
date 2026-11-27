@@ -30,7 +30,7 @@ describe('dsh-ray-assistant-automations', () => {
     expect(bundle).toContain('schedulerEnabled: false')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
     expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.2.2-rc.5 <0.3.0')
-    expect(manifest.peerDependencies['@dsh-ray/assistant-policy']).toBe('>=0.1.0 <0.2.0')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-policy']).toBe('>=0.1.0 <0.3.0')
   })
 
   test('loads through apply when assistant-policy is already composed', async () => {

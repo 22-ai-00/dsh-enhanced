@@ -33,7 +33,7 @@ describe('dsh-ray-personal-memory entrypoint', () => {
     expect(bundle).toContain('- assistantPolicy')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
     expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.2.2-rc.5 <0.3.0')
-    expect(manifest.peerDependencies['@dsh-ray/assistant-policy']).toBe('>=0.1.0 <0.2.0')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-policy']).toBe('>=0.1.0 <0.3.0')
     expect(manifest.dependencies['@dsh-ray/assistant-growth-contract']).toBe('workspace:*')
     expect(manifest.peerDependencies).not.toHaveProperty('@dsh-ray/preference-learning')
     expect(manifest.peerDependenciesMeta).not.toHaveProperty('@dsh-ray/preference-learning')

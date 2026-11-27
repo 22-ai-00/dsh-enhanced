@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/event-triggers",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "Durable bounded file, HTTP/JSON, and HMAC webhook triggers for DSH automations.",
   "license": "MIT",
   "type": "module",
@@ -53,12 +53,12 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
-    "@dsh-ray/assistant-automations": ">=0.1.24 <0.2.0",
-    "@dsh-ray/assistant-policy": ">=0.1.0 <0.2.0",
-    "@dsh-ray/assistant-actions": ">=0.1.0 <0.2.0",
-    "@dsh-ray/credentials-keychain": ">=0.1.0 <0.2.0",
-    "@dsh-ray/assistant-delivery": ">=0.1.24 <0.2.0",
-    "@dsh-ray/lark-channel": ">=0.1.24 <0.2.0"
+    "@dsh-ray/assistant-automations": ">=0.1.24 <0.3.0",
+    "@dsh-ray/assistant-policy": ">=0.1.0 <0.3.0",
+    "@dsh-ray/assistant-actions": ">=0.1.0 <0.3.0",
+    "@dsh-ray/credentials-keychain": ">=0.1.0 <0.3.0",
+    "@dsh-ray/assistant-delivery": ">=0.1.24 <0.3.0",
+    "@dsh-ray/lark-channel": ">=0.1.24 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-actions",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "Owner-authorized GitHub action facade with embedded compatibility and an external Unix broker.",
   "license": "MIT",
   "type": "module",
@@ -53,12 +53,12 @@
     "@deepseek-ai/dsh-agent": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-goal": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-ray/assistant-automations": ">=0.1.0 <0.2.0",
-    "@dsh-ray/assistant-delivery": ">0.1.7 <0.2.0",
-    "@dsh-ray/assistant-goals": ">=0.1.0 <0.2.0",
-    "@dsh-ray/assistant-policy": ">0.1.7 <0.2.0",
-    "@dsh-ray/assistant-verifier": ">=0.1.0 <0.2.0",
-    "@dsh-ray/credentials-keychain": ">=0.1.0 <0.2.0"
+    "@dsh-ray/assistant-automations": ">=0.1.0 <0.3.0",
+    "@dsh-ray/assistant-delivery": ">0.1.7 <0.3.0",
+    "@dsh-ray/assistant-goals": ">=0.1.0 <0.3.0",
+    "@dsh-ray/assistant-policy": ">0.1.7 <0.3.0",
+    "@dsh-ray/assistant-verifier": ">=0.1.0 <0.3.0",
+    "@dsh-ray/credentials-keychain": ">=0.1.0 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

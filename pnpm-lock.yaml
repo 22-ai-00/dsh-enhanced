@@ -1893,7 +1893,7 @@ importers:
         specifier: 'catalog:'
         version: 3.19.0
       '@dsh-ray/assistant-actions':
-        specifier: '>=0.1.0 <0.2.0'
+        specifier: '>=0.1.0 <0.3.0'
         version: link:../assistant-actions
       '@dsh-ray/assistant-growth-contract':
         specifier: workspace:*
@@ -1902,7 +1902,7 @@ importers:
         specifier: workspace:*
         version: link:../assistant-isolation
       '@dsh-ray/plugin-control-plane':
-        specifier: '>=0.1.0 <0.2.0'
+        specifier: '>=0.1.0 <0.3.0'
         version: link:../plugin-control-plane
       '@dsh-ray/task-acceptance-contract':
         specifier: workspace:*

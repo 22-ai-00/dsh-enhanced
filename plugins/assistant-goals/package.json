@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-goals",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "Persistent owner-scoped business goals over the native DSH goal domain.",
   "license": "MIT",
   "type": "module",
@@ -59,11 +59,11 @@
     "@deepseek-ai/dsh-subagent": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-ray/assistant-automations": ">=0.1.24 <0.2.0",
-    "@dsh-ray/assistant-delivery": ">0.1.24 <0.2.0",
-    "@dsh-ray/assistant-policy": ">0.1.7 <0.2.0",
-    "@dsh-ray/assistant-verifier": ">=0.1.0 <0.2.0",
-    "@dsh-ray/event-triggers": ">=0.1.24 <0.2.0"
+    "@dsh-ray/assistant-automations": ">=0.1.24 <0.3.0",
+    "@dsh-ray/assistant-delivery": ">0.1.24 <0.3.0",
+    "@dsh-ray/assistant-policy": ">0.1.7 <0.3.0",
+    "@dsh-ray/assistant-verifier": ">=0.1.0 <0.3.0",
+    "@dsh-ray/event-triggers": ">=0.1.24 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@dsh-ray/assistant-automations": {

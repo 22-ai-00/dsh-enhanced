@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/owner-console",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "A DeepSeek Harness plugin for Owner Console.",
   "license": "MIT",
   "type": "module",

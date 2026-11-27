@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/memory-wiki-bridge",
-  "version": "0.1.89",
+  "version": "0.2.0",
   "description": "Proposal-only, provenance-stable promotion between DSH personal Memory and Wiki.",
   "license": "MIT",
   "type": "module",
@@ -55,8 +55,8 @@
     "@deepseek-ai/cordis": "^4.1.0",
     "@deepseek-ai/dsh-agent": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
-    "@dsh-ray/personal-memory": ">=0.1.0 <0.2.0",
-    "@dsh-ray/personal-wiki": ">=0.1.0 <0.2.0"
+    "@dsh-ray/personal-memory": ">=0.1.0 <0.3.0",
+    "@dsh-ray/personal-wiki": ">=0.1.0 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

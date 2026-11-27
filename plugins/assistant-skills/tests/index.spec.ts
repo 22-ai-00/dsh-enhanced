@@ -34,7 +34,7 @@ describe('dsh-ray-assistant-skills', () => {
       expect(manifest.peerDependenciesMeta[dependency]?.optional).toBe(true)
     }
     expect(manifest.dependencies['@dsh-ray/assistant-recovery']).toBeUndefined()
-    expect(manifest.peerDependencies['@dsh-ray/assistant-recovery']).toBe('>=0.1.0 <0.2.0')
+    expect(manifest.peerDependencies['@dsh-ray/assistant-recovery']).toBe('>=0.1.0 <0.3.0')
     expect(manifest.peerDependenciesMeta['@dsh-ray/assistant-recovery']?.optional).toBe(true)
   })
 })

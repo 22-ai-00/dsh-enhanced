@@ -58,7 +58,7 @@ dsh --profile web --dump-config
 
 同一 Host 安装 `assistant-goals` 时，Memory 还会在每步读取可选 `taskContext()`，按当前步骤 → 最近用户输入 → 目标 objective 的顺序召回并去重，再补确认的偏好和约定。Goals 每次检查 live owner 与 `snapshot` 授权；Memory 再核对 principal record/version/digest、workspace 和 preset，不能由模型选择别人的 namespace。同 owner 的显式 focus 可提供跨会话检索上下文，但不转移原生 Goal 执行权。checkpoint 的 nextStep 仅是规划文本，用作检索关键词，不成为可信事实或新权限。
 
-该组合的可选 peer 为 `@dsh-ray/assistant-goals >=0.1.0 <0.2.0`；它不会自动启用 Goals。旧版本未提供 `goal-task-context/v1`、服务缺失/卸载、读取失败或身份不匹配时继续按原用户 query 召回。每个 query 字段最多 2048 字符，合并结果仍共用原有 top-K、字节和 token 预算。原生 AgentLoop 回归覆盖步骤改变和记忆撤回后的下一次模型请求；这证明动态检索接线，不代表已经测得真实模型决策收益。
+该组合的可选 peer 为 `@dsh-ray/assistant-goals >=0.1.0 <0.3.0`；它不会自动启用 Goals。旧版本未提供 `goal-task-context/v1`、服务缺失/卸载、读取失败或身份不匹配时继续按原用户 query 召回。每个 query 字段最多 2048 字符，合并结果仍共用原有 top-K、字节和 token 预算。原生 AgentLoop 回归覆盖步骤改变和记忆撤回后的下一次模型请求；这证明动态检索接线，不代表已经测得真实模型决策收益。
 
 当宿主挂载了 `@dsh-ray/assistant-association`（服务名 `assistantAssociation`）且 `shouldSuppressMemoryKeywordHits(agent)` 返回 `true` 时，`personal-memory:task-context` 会抑制动态关键词 `hits`（由 `<association>` 统一承接），同时保留并在首步（含空 `deriveMessages()`）继续注入已确认的 `preference`/`instruction` standing 记录；关联服务缺失、尚未就绪或返回 `false`/抛错时自动回退为完整关键词召回。面向 Host 的只读回填接口 `listActiveRecordsForAssociationSync` 与事务提交后回调 `onRecordChange` 不注册为模型工具。
 
