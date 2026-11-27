@@ -1401,13 +1401,27 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-ray/personal-assistant'" '  co
     expect(result.stdout).not.toContain('dsh-ray-setup --install-owner')
   })
 
+  async function allocateUnusedTcpPort(): Promise<number> {
+    return new Promise<number>((resolvePort, rejectPort) => {
+      const server = createServer()
+      server.once('error', rejectPort)
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address()
+        if (address === null || typeof address === 'string') return rejectPort(new Error('missing test port'))
+        server.close(error => error === undefined ? resolvePort(address.port) : rejectPort(error))
+      })
+    })
+  }
+
   test.skipIf(process.platform !== 'linux')('Linux fresh noninteractive install fails before mutation when owner pairing is unavailable', async () => {
     const dshHome = await temporaryDshHome()
     const fakeBin = join(dshHome, 'bin')
     await mkdir(fakeBin)
     await writeExecutable(join(fakeBin, 'dsh'), '#!/bin/bash\nprintf "0.2.2-rc.5\\n"\n')
+    const webPort = await allocateUnusedTcpPort()
     const result = runInstaller(localInstaller, ['--yes'], dshHome, 'Linux', {
       PATH: `${fakeBin}:${pathWithoutAgents}`,
+      DSH_RAY_WEB_PORT: String(webPort),
     })
 
     expect(result.status).toBe(1)
@@ -2834,15 +2848,7 @@ printf 'npm %s\n' "$*" >> "$INSTALL_LOG"
       '',
     ].join('\n'))
     await symlink(canonicalDsh, join(fakeBin, 'dsh'))
-    const webPort = await new Promise<number>((resolvePort, rejectPort) => {
-      const server = createServer()
-      server.once('error', rejectPort)
-      server.listen(0, '127.0.0.1', () => {
-        const address = server.address()
-        if (address === null || typeof address === 'string') return rejectPort(new Error('missing test port'))
-        server.close(error => error === undefined ? resolvePort(address.port) : rejectPort(error))
-      })
-    })
+    const webPort = await allocateUnusedTcpPort()
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
 if [[ "${'$'}{1:-}" == '--version' ]]; then printf '11.7.0\\n'; else printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"; fi
 `)
