@@ -4866,6 +4866,12 @@ async function restoreOriginalActiveSet({
 }
 
 function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraEnvironment = {}, pnpmStoreFd, pnpmStorePath, pnpmCacheFd, workspaceFds = [], localPackageFds = [] }) {
+  const cwd = process.cwd()
+  // `/tmp` and `/run` are hidden by fresh tmpfs mounts inside bwrap, so avoid
+  // `--chdir` into an unmounted caller directory under those trees.
+  const sandboxCwd = (inside('/tmp', cwd) || inside('/run', cwd)) && !inside(homePath, cwd)
+    ? homePath
+    : cwd
   const args = [
     '--unshare-all', '--die-with-parent', '--new-session',
     '--ro-bind', '/', '/',
@@ -4874,7 +4880,7 @@ function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraE
     '--bind-fd', '3', homePath,
     '--perms', '0400', '--ro-bind-data', '4', validatorPath,
     '--proc', '/proc', '--dev', '/dev',
-    '--chdir', process.cwd(),
+    '--chdir', sandboxCwd,
     '--clearenv',
     '--setenv', 'PATH', process.env.PATH ?? '/usr/bin:/bin',
     '--setenv', 'HOME', process.env.HOME ?? dirname(homePath),

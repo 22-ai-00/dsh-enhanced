@@ -41,6 +41,11 @@ async function trackTempDir(parent: string, prefix: string): Promise<string> {
   return dir
 }
 
+function outsideTmpParent(): string {
+  const value = tmpdir()
+  return value !== '/tmp' && !value.startsWith('/tmp/') ? value : '/var/tmp'
+}
+
 async function startAssetServer() {
   const assets = new Map<AssetName, { bytes: Buffer; sha256: string }>()
   await Promise.all(ASSET_NAMES.map(async name => {
@@ -260,6 +265,7 @@ async function invokeStandalone(
   scriptPath: string,
   args: readonly string[],
   env: Record<string, string | undefined>,
+  cwd = dirname(scriptPath),
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   // Omit TMPDIR when testing Linux standalone remote download so install-npm.sh
   // picks root-owned /tmp for its TEMPORARY_DIRECTORY ancestor trust check.
@@ -270,7 +276,7 @@ async function invokeStandalone(
   }
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn('/bin/bash', [scriptPath, ...args], {
-      cwd: dirname(scriptPath),
+      cwd,
       env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -313,9 +319,10 @@ describe('standalone install-npm.sh remote asset closure & non-TTY pnpm', () => 
     const server = await startAssetServer()
     const scriptPath = await createStandaloneInstallerCopy()
     const workspace = await trackTempDir(tmpdir(), 'dsh-standalone-upgrade-')
+    const runtimeRoot = await trackTempDir(outsideTmpParent(), 'dsh-standalone-runtime-')
     const dshHome = join(workspace, 'dsh-home')
     const profileDir = join(dshHome, 'profiles', 'web')
-    const binDir = join(workspace, 'bin')
+    const binDir = join(runtimeRoot, 'bin')
     await Promise.all([
       mkdir(profileDir, { mode: 0o700, recursive: true }),
       mkdir(binDir, { mode: 0o755, recursive: true }),
@@ -329,8 +336,8 @@ describe('standalone install-npm.sh remote asset closure & non-TTY pnpm', () => 
     }, null, 2) + '\n', { mode: 0o600 })
     await writeFile(join(profileDir, 'pnpm-workspace.yaml'), 'packages:\n  - .\n', { mode: 0o600 })
     await writeFile(join(profileDir, 'cordis.patch.yml'), '[]\n', { mode: 0o600 })
-    const dshLog = await createFakeDshHost(workspace, binDir)
-    const { pnpmLog } = await createFakeNpmAndPnpm(workspace, binDir)
+    const dshLog = await createFakeDshHost(runtimeRoot, binDir)
+    const { pnpmLog } = await createFakeNpmAndPnpm(runtimeRoot, binDir)
 
     const result = await invokeStandalone(scriptPath, [
       '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--scenario', 'web', '--plugin-version', '0.2.2',
@@ -353,6 +360,48 @@ describe('standalone install-npm.sh remote asset closure & non-TTY pnpm', () => 
     expect(await readFile(join(profileDir, 'node_modules', '.ci-observed'), 'utf8')).toBe('true')
     const pnpmCalls = (await readFile(pnpmLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
     expect(pnpmCalls.every((call: { ci: string | null }) => call.ci === 'true')).toBe(true)
+  }, 30_000)
+
+  test.skipIf(process.platform !== 'linux')('standalone --operation upgrade succeeds through bwrap when caller cwd is under /tmp and DSH_HOME is outside /tmp', async () => {
+    const server = await startAssetServer()
+    const scriptPath = await createStandaloneInstallerCopy()
+    const callerTmpCwd = await trackTempDir('/tmp', 'dsh-bwrap-tmp-cwd-')
+    const workspace = await trackTempDir(outsideTmpParent(), 'dsh-outside-tmp-upgrade-')
+    const dshHome = join(workspace, 'dsh-home')
+    const profileDir = join(dshHome, 'profiles', 'web')
+    const binDir = join(workspace, 'bin')
+    await Promise.all([
+      mkdir(profileDir, { mode: 0o700, recursive: true }),
+      mkdir(binDir, { mode: 0o755, recursive: true }),
+    ])
+    await chmod(dshHome, 0o700)
+    await writeFile(join(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-web',
+      private: true,
+      dependencies: { '@dsh-ray/personal-assistant': '0.2.1' },
+      dsh: { profile: { bundles: ['@dsh-ray/personal-assistant'] } },
+    }, null, 2) + '\n', { mode: 0o600 })
+    await writeFile(join(profileDir, 'pnpm-workspace.yaml'), 'packages:\n  - .\n', { mode: 0o600 })
+    await writeFile(join(profileDir, 'cordis.patch.yml'), '[]\n', { mode: 0o600 })
+    const dshLog = await createFakeDshHost(workspace, binDir)
+    await createFakeNpmAndPnpm(workspace, binDir)
+
+    const result = await invokeStandalone(scriptPath, [
+      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--scenario', 'web', '--plugin-version', '0.2.2',
+    ], {
+      PATH: `${binDir}:${dirname(process.execPath)}:/usr/bin:/bin`,
+      HOME: workspace,
+      DSH_HOME: dshHome,
+      STANDALONE_DSH_LOG: dshLog,
+      DSH_RAY_INSTALL_REF: 'v9.8.7',
+      DSH_RAY_INSTALL_BASE_URL: server.baseUrl,
+      ...server.hashEnv,
+    }, callerTmpCwd)
+
+    expect(result.stderr).not.toContain('Can\'t chdir to')
+    expect(result.status, result.stderr).toBe(0)
+    const upgradedManifest = JSON.parse(await readFile(join(profileDir, 'package.json'), 'utf8'))
+    expect(upgradedManifest.dependencies['@dsh-ray/personal-assistant']).toBe('0.2.2')
   }, 30_000)
 
   test.skipIf(process.platform !== 'linux')('standalone --operation uninstall downloads all 5 .mjs helpers and runs lifecycle-profile.mjs without ERR_MODULE_NOT_FOUND', async () => {
@@ -444,7 +493,10 @@ describe('standalone install-npm.sh remote asset closure & non-TTY pnpm', () => 
         sealedDir,
       ], { encoding: 'utf8' })
       expect(check.status, check.stderr).toBe(0)
-      expect(check.stderr).toBe('')
+      const unexpectedStderr = check.stderr
+        .replace(/^\(node:\d+\) ExperimentalWarning: SQLite[^\n]*\n(?:\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\n)?/gmu, '')
+        .trim()
+      expect(unexpectedStderr).toBe('')
     } finally {
       await chmod(sealedDir, 0o700)
     }
@@ -461,6 +513,10 @@ describe('standalone install-npm.sh remote asset closure & non-TTY pnpm', () => 
 
     const cleanEnv = { ...process.env, HOME: dir, XDG_CONFIG_HOME: cfgDir, npm_config_store_dir: storeDir }
     delete cleanEnv.CI
+    delete cleanEnv.CONTINUOUS_INTEGRATION
+    delete cleanEnv.GITHUB_ACTIONS
+    delete cleanEnv.BUILD_NUMBER
+    delete cleanEnv.RUN_ID
     const withoutCi = spawnSync('pnpm', ['install', '--offline'], {
       cwd: dir,
       env: cleanEnv,
