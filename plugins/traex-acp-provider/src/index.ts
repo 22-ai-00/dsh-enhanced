@@ -9,21 +9,24 @@ import {
   redactDiagnostic,
   TRAEX_PROVIDER_ROUTE,
   TraexAcpAdapter,
+  type AcpImageAttachmentReader,
   type AcpProviderRoute,
   type AcpReadinessProbeOptions,
   type TraexReadinessProbeOptions,
 } from './adapter.js'
-import { buildAgyArgs, SAFE_TRAEX_ARGS, type AcpBackend } from './acp-client.js'
+import { buildAgyArgs, SAFE_TRAEX_ARGS, type AcpBackend, type TraexAcpPromptImage } from './acp-client.js'
 import {
   AGY_MAX_PROMPT_BYTES_CEILING,
   Config,
   DEFAULT_AGY_CONTEXT_WINDOW,
   DEFAULT_AGY_MAX_PROMPT_BYTES,
+  DEFAULT_MAX_REQUEST_IMAGE_BYTES,
   normalizeConfig,
   type AcpCwdMode,
   type AgySessionMode,
   type TraexAcpProviderConfig,
 } from './config.js'
+import type { BuiltAcpPrompt, ImageAttachmentRef } from './prompt.js'
 import type { LiveSessionLookup } from './session-cwd.js'
 import { version } from './version.js'
 
@@ -38,6 +41,7 @@ export {
   Config,
   DEFAULT_AGY_CONTEXT_WINDOW,
   DEFAULT_AGY_MAX_PROMPT_BYTES,
+  DEFAULT_MAX_REQUEST_IMAGE_BYTES,
   normalizeConfig,
   probeAcpReadiness,
   probeTraexReadiness,
@@ -51,7 +55,19 @@ export { resolveAcpCommand } from './command-resolve.js'
 export { ACP_USAGE_DSH_MAPPING_GATE } from './acp-client.js'
 export type { CatalogCacheKeyParts, CachedCatalog } from './catalog-cache.js'
 export type { AcpCommandResolver, ResolveAcpCommandOptions } from './command-resolve.js'
-export type { AcpBackend, AcpCwdMode, AcpProviderRoute, AcpReadinessProbeOptions, AgySessionMode, TraexReadinessProbeOptions, TraexAcpProviderConfig }
+export type {
+  AcpBackend,
+  AcpCwdMode,
+  AcpImageAttachmentReader,
+  AcpProviderRoute,
+  AcpReadinessProbeOptions,
+  AgySessionMode,
+  BuiltAcpPrompt,
+  ImageAttachmentRef,
+  TraexAcpPromptImage,
+  TraexReadinessProbeOptions,
+  TraexAcpProviderConfig,
+}
 
 function registerConfigurableRoutes(ctx: Context, llm: LlmRuntime): (() => void) | undefined {
   const register = (llm as { registerConfigurableProviders?: (entries: readonly LlmConfigurableProvider[]) => () => void })
@@ -105,6 +121,8 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
     // prompt-selected or static workspace path.
     liveSessions: ctx.get('sessions') as LiveSessionLookup,
     requestAttestor,
+    // Attachments are optional and may mount/unmount independently; resolve per operation.
+    getAttachments: () => ctx.get('attachments') as AcpImageAttachmentReader | undefined,
     onDiagnostic(diagnostic) {
       if (config.logDiagnostics) {
         ctx.logger.warn(`${name} diagnostic: ${redactDiagnostic(diagnostic)}`)

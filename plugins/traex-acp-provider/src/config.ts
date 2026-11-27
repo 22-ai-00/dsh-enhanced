@@ -16,6 +16,7 @@ export type AcpCwdMode = 'session' | 'exact'
 export const AGY_MAX_PROMPT_BYTES_CEILING = 190_000
 export const DEFAULT_AGY_MAX_PROMPT_BYTES = 180 * 1024
 export const DEFAULT_AGY_CONTEXT_WINDOW = 128_000
+export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 24 * 1024 * 1024
 
 export interface TraexAcpProviderConfig {
   /** Register the experimental TraeX route (`traex-agent`) after the local runtime is prepared. */
@@ -81,6 +82,8 @@ export interface TraexAcpProviderConfig {
    * `<USER_REQUEST>` payloads above ~192 KiB. Effective limit is `min(maxPromptBytes, agyMaxPromptBytes)`.
    */
   agyMaxPromptBytes: number
+  /** Maximum cumulative raw bytes of attached images forwarded in one ACP prompt request. */
+  maxRequestImageBytes: number
   /** Additional environment variable names inherited by the child process. */
   extraEnvNames: string[]
   /** Include a redacted tail of child stderr in host logs. */
@@ -124,6 +127,7 @@ const schema = Schema.object({
   maxStderrBytes: Schema.natural().min(256).max(4 * 1024 * 1024).default(32 * 1024),
   maxPromptBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(4 * 1024 * 1024),
   agyMaxPromptBytes: Schema.natural().min(1_024).max(AGY_MAX_PROMPT_BYTES_CEILING).default(DEFAULT_AGY_MAX_PROMPT_BYTES),
+  maxRequestImageBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(DEFAULT_MAX_REQUEST_IMAGE_BYTES),
   extraEnvNames: Schema.array(Schema.string().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
   logDiagnostics: Schema.boolean().default(false),
 })

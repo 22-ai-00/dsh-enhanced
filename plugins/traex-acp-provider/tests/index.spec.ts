@@ -15,6 +15,7 @@ describe('dsh-ray-traex-acp-provider', () => {
     expect(Plugin.probeAcpReadiness).toBeTypeOf('function')
     expect(Plugin.resolveAcpCommand).toBeTypeOf('function')
     expect(Plugin.DEFAULT_CATALOG_CACHE_TTL_MS).toBe(20 * 60_000)
+    expect(Plugin.DEFAULT_MAX_REQUEST_IMAGE_BYTES).toBe(24 * 1024 * 1024)
     expect(Plugin.ACP_PROVIDER_ROUTES).toEqual(['traex-agent', 'agy-agent'])
   })
 
@@ -95,6 +96,46 @@ describe('dsh-ray-traex-acp-provider', () => {
     expect(resolveLlmRouteCapability(ctx.llm, 'traex-agent', 'default')).toBeUndefined()
     expect(resolveLlmRouteCapability(ctx.llm, 'agy-agent', 'default')).toBeUndefined()
     expect(ctx.llm.listConfigurableProviders()).toEqual([])
+    await ctx.fiber.dispose()
+  })
+
+  it('wires optional ctx.attachments dynamically into registered traex-agent and agy-agent routes', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    ctx.provide('sessionProjections', {
+      register: async () => ({ stateOf: () => ({}), readerFor: () => () => ({}), dispose: async () => {} }),
+    } as never)
+    await ctx.plugin(AgentRegistry)
+
+    const config = Plugin.Config()
+    config.enabled = true
+    config.agyEnabled = true
+    await ctx.plugin(Plugin, config)
+
+    await expect(ctx.llm.resolveModelInfo('agy-agent', 'gemini-pro-orchestrator-neon')).resolves.toMatchObject({
+      inputModalities: ['text'],
+    })
+    await expect(ctx.llm.resolveModelInfo('traex-agent', 'default')).resolves.toMatchObject({
+      inputModalities: ['text'],
+    })
+
+    const disposeAttachments = ctx.provide('attachments' as never, {
+      readImage: async (ref: never) => ({ ref, data: Uint8Array.from([1, 2, 3]) }),
+    } as never)
+
+    await expect(ctx.llm.resolveModelInfo('agy-agent', 'gemini-pro-orchestrator-neon')).resolves.toMatchObject({
+      inputModalities: ['text', 'image'],
+    })
+    await expect(ctx.llm.resolveModelInfo('traex-agent', 'default')).resolves.toMatchObject({
+      inputModalities: ['text', 'image'],
+    })
+
+    disposeAttachments()
+    await expect(ctx.llm.resolveModelInfo('agy-agent', 'gemini-pro-orchestrator-neon')).resolves.toMatchObject({
+      inputModalities: ['text'],
+    })
+
     await ctx.fiber.dispose()
   })
 })

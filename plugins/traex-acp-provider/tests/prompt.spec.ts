@@ -1,6 +1,6 @@
-import { createMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { createMessage, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
-import { buildPrompt, parseDelegatedToolCalls } from '../src/prompt.ts'
+import { buildPrompt, buildPromptPayload, parseDelegatedToolCalls } from '../src/prompt.ts'
 
 function request(): GenerateOptions {
   return {
@@ -896,5 +896,257 @@ describe('DSH request serialization', () => {
     }
     expect(userError).toBeInstanceOf(Error)
     expect((userError as Error).cause).toBe('prompt-limit')
+  })
+
+  it('serializes user and read_image tool-result images with 1-based descriptors and preserves order across earlier tool truncation', () => {
+    const userImg = {
+      attachmentId: 'sha256:user-1',
+      mediaType: 'image/png',
+      bytes: 1_024,
+      width: 640,
+      height: 480,
+      name: `${'u'.repeat(300)}.png`,
+    } as never
+    const oldToolImg = {
+      attachmentId: 'sha256:tool-old',
+      mediaType: 'image/jpeg',
+      bytes: 2_048,
+      width: 800,
+      height: 600,
+    } as never
+    const latestToolImg = {
+      attachmentId: 'sha256:tool-latest',
+      mediaType: 'image/webp',
+      bytes: 4_096,
+      width: 1024,
+      height: 768,
+      name: 'screen.webp',
+    } as never
+    const oldCall = 'call-old-read-image' as never
+    const latestCall = 'call-latest-read-image' as never
+    const options: GenerateOptions = {
+      provider: 'agy-agent',
+      model: 'gemini-pro-orchestrator-neon',
+      system: 'Inspect screenshots carefully.',
+      tools: [{ name: 'read_image', description: 'Read an image.', parameters: { type: 'object' } }],
+      messages: [
+        createMessage({
+          role: 'user',
+          source: { kind: 'user' },
+          content: [
+            { type: 'text', text: 'Compare these screenshots.' },
+            { type: 'image', attachment: userImg },
+          ],
+        }),
+        createMessage({
+          role: 'assistant',
+          source: { kind: 'model', provider: 'agy-agent', model: 'gemini-pro-orchestrator-neon' },
+          content: [{ type: 'tool-call', id: oldCall, name: 'read_image', arguments: '{"path":"old.png"}' }],
+        }),
+        createMessage({
+          role: 'tool',
+          source: { kind: 'tool', callId: oldCall },
+          toolCallId: oldCall,
+          content: [
+            { type: 'text', text: `OLD_META_${'M'.repeat(185_000)}_TAIL` },
+            { type: 'image', attachment: oldToolImg },
+          ],
+        }),
+        createMessage({
+          role: 'assistant',
+          source: { kind: 'model', provider: 'agy-agent', model: 'gemini-pro-orchestrator-neon' },
+          content: [{ type: 'tool-call', id: latestCall, name: 'read_image', arguments: '{"path":"latest.webp"}' }],
+        }),
+        createMessage({
+          role: 'tool',
+          source: { kind: 'tool', callId: latestCall },
+          toolCallId: latestCall,
+          content: [
+            { type: 'text', text: 'LATEST_META_KEEP' },
+            { type: 'image', attachment: latestToolImg },
+          ],
+        }),
+      ],
+    }
+
+    const built = buildPromptPayload(options, 184_320, 'Antigravity', { allowImages: true })
+    expect(Buffer.byteLength(built.prompt, 'utf8')).toBeLessThanOrEqual(184_320)
+    expect(built.imageRefs).toEqual([userImg, oldToolImg, latestToolImg])
+
+    const payload = JSON.parse(built.prompt.slice(built.prompt.indexOf('{'))) as {
+      instruction: string
+      conversation: Array<{
+        role: string
+        content: Array<{ type: string; index?: number; mediaType?: string; width?: number; height?: number; name?: string; text?: string; content?: Array<Record<string, unknown>> }>
+      }>
+    }
+    expect(payload.instruction).toContain(
+      'Attached ACP image blocks follow this JSON request in 1-based order: each {"type":"image","index":N,...} entry in conversation or tool-result content corresponds to the Nth attached image.',
+    )
+    expect(payload.conversation[0]?.content[1]).toMatchObject({
+      type: 'image',
+      index: 1,
+      mediaType: 'image/png',
+      width: 640,
+      height: 480,
+    })
+    expect(payload.conversation[0]?.content[1]?.name?.length).toBeLessThanOrEqual(128)
+    expect(payload.conversation[0]?.content[1]?.name).toContain('…')
+
+    const earlierToolBlocks = payload.conversation[2]?.content[0]?.content ?? []
+    expect((earlierToolBlocks[0] as { text?: string })?.text).toContain('…[earlier tool output truncated to fit local ACP prompt byte limit')
+    expect(earlierToolBlocks[1]).toEqual({
+      type: 'image',
+      index: 2,
+      mediaType: 'image/jpeg',
+      width: 800,
+      height: 600,
+    })
+    expect(earlierToolBlocks[1]).not.toHaveProperty('name')
+
+    const latestToolBlocks = payload.conversation[4]?.content[0]?.content ?? []
+    expect(latestToolBlocks[0]).toEqual({ type: 'text', text: 'LATEST_META_KEEP' })
+    expect(latestToolBlocks[1]).toEqual({
+      type: 'image',
+      index: 3,
+      mediaType: 'image/webp',
+      width: 1024,
+      height: 768,
+      name: 'screen.webp',
+    })
+  })
+
+  it('enforces maxRequestImageBytes with IMAGE_OFFLOAD_REQUIRED and projects offloaded: true placeholders cleanly', () => {
+    const img1 = { attachmentId: 'sha256:img1', mediaType: 'image/png', bytes: 600, width: 10, height: 10, name: 'a.png' } as never
+    const img2 = { attachmentId: 'sha256:img2', mediaType: 'image/png', bytes: 600, width: 10, height: 10, name: 'b.png' } as never
+    const img3 = { attachmentId: 'sha256:img3', mediaType: 'image/png', bytes: 600, width: 10, height: 10, name: 'c.png' } as never
+    const callId = 'call-img' as never
+    const messages = [
+      createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'image', attachment: img1 }, { type: 'image', attachment: img2 }],
+      }),
+      createMessage({
+        role: 'tool',
+        source: { kind: 'tool', callId },
+        toolCallId: callId,
+        content: [{ type: 'image', attachment: img3 }],
+      }),
+    ]
+
+    let caught: unknown
+    try {
+      buildPromptPayload({ provider: 'agy-agent', model: 'default', messages }, 100_000, 'Antigravity', {
+        allowImages: true,
+        maxRequestImageBytes: 1_000,
+      })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(LlmError)
+    expect((caught as LlmError).code).toBe(IMAGE_OFFLOAD_REQUIRED_CODE)
+    expect((caught as LlmError).failure).toMatchObject({
+      code: IMAGE_OFFLOAD_REQUIRED_CODE,
+      offloadImages: 2,
+    })
+
+    const offloadedMessages = [
+      createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [
+          { type: 'image', attachment: img1, offloaded: true },
+          { type: 'image', attachment: img2, offloaded: true },
+        ],
+      }),
+      createMessage({
+        role: 'tool',
+        source: { kind: 'tool', callId },
+        toolCallId: callId,
+        content: [{ type: 'image', attachment: img3 }],
+      }),
+    ]
+    const built = buildPromptPayload({ provider: 'agy-agent', model: 'default', messages: offloadedMessages }, 100_000, 'Antigravity', {
+      allowImages: true,
+      maxRequestImageBytes: 1_000,
+    })
+    expect(built.imageRefs).toEqual([img3])
+    const payload = JSON.parse(built.prompt.slice(built.prompt.indexOf('{'))) as {
+      conversation: Array<{ content: Array<Record<string, unknown>> }>
+    }
+    expect(payload.conversation[0]?.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('[image omitted to keep the request within its image limit'),
+    })
+    expect(payload.conversation[1]?.content[0]).toMatchObject({
+      type: 'tool-result',
+      content: [{ type: 'image', index: 1, mediaType: 'image/png', width: 10, height: 10, name: 'c.png' }],
+    })
+
+    const textOnlyOffloaded = buildPromptPayload({
+      provider: 'traex-agent',
+      model: 'default',
+      messages: [createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'image', attachment: img1, offloaded: true }],
+      })],
+    }, 100_000, 'TraeX', { allowImages: false })
+    expect(textOnlyOffloaded.imageRefs).toEqual([])
+    expect(textOnlyOffloaded.prompt).toContain('[image omitted to keep the request within its image limit')
+  })
+
+  it('rejects images in assistant and system messages and projects history images to text during compaction', () => {
+    const img = { attachmentId: 'sha256:hist', mediaType: 'image/png', bytes: 256, width: 32, height: 32, name: 'hist.png' } as never
+    const callId = 'call-compaction-img' as never
+
+    expect(() => buildPromptPayload({
+      provider: 'agy-agent',
+      model: 'default',
+      messages: [createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: 'agy-agent', model: 'default' },
+        content: [{ type: 'image', attachment: img } as never],
+      })],
+    }, 100_000, 'Antigravity', { allowImages: true })).toThrow(/cannot serialize image in a assistant message/)
+
+    expect(() => buildPromptPayload({
+      provider: 'agy-agent',
+      model: 'default',
+      messages: [createMessage({
+        role: 'system',
+        source: { kind: 'system-prompt' } as never,
+        content: [{ type: 'image', attachment: img } as never],
+      })],
+    }, 100_000, 'Antigravity', { allowImages: true })).toThrow(/cannot serialize image in a system message/)
+
+    const compactionBuilt = buildPromptPayload({
+      provider: 'agy-agent',
+      model: 'default',
+      purpose: 'compaction' as never,
+      messages: [
+        createMessage({
+          role: 'user',
+          source: { kind: 'user' },
+          content: [
+            { type: 'image', attachment: img, offloaded: true },
+            { type: 'image', attachment: img },
+          ],
+        }),
+        createMessage({
+          role: 'tool',
+          source: { kind: 'tool', callId },
+          toolCallId: callId,
+          content: [{ type: 'image', attachment: img }],
+        }),
+        { role: 'user', content: [{ type: 'text', text: 'Compact now.' }] },
+      ],
+    }, 100_000, 'Antigravity', { allowImages: true })
+
+    expect(compactionBuilt.imageRefs).toEqual([])
+    expect(compactionBuilt.prompt).toContain('[image omitted to keep the request within its image limit')
+    expect(compactionBuilt.prompt).toContain('[DSH image attachment in history; attachmentId=\\"sha256:hist\\"')
+    expect(compactionBuilt.prompt).not.toContain('Attached ACP image blocks follow this JSON request')
   })
 })

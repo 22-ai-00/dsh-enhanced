@@ -79,6 +79,7 @@ interface Script {
   readonly initializeTitle?: string
   readonly malformedHandshake?: boolean
   readonly observedCliResponseShape?: boolean
+  readonly promptCapabilities?: { readonly audio?: boolean; readonly embeddedContext?: boolean; readonly image?: boolean } | null
   readonly onPrompt?: (connection: AgentConnection, request: PromptRequest) => Promise<StopReason>
   readonly onCloseSession?: (sessionId: string) => Promise<Record<string, never>>
 }
@@ -213,9 +214,12 @@ function harness(script: Script = {}): { state: FakeState; spawn: SpawnProcess }
               title: script.initializeTitle ?? 'TRAE CLI',
               version: script.observedCliResponseShape ? '0.210.1' : '0.201.1',
             },
-            agentCapabilities: script.advertiseClose === false
-              ? {}
-              : { sessionCapabilities: { close: {} } },
+            agentCapabilities: script.promptCapabilities === undefined
+              ? (script.advertiseClose === false ? {} : { sessionCapabilities: { close: {} } })
+              : {
+                  ...(script.advertiseClose === false ? {} : { sessionCapabilities: { close: {} } }),
+                  ...(script.promptCapabilities === null ? {} : { promptCapabilities: script.promptCapabilities }),
+                },
             authMethods: script.advertiseTraeSso === false
               ? [{ id: 'chatgpt', name: 'Login with ChatGPT' }]
               : script.observedCliResponseShape
@@ -1144,6 +1148,7 @@ function agyHarness(options: {
   readonly includeModeOption?: boolean
   readonly rejectModelSwitch?: ReadonlyMap<string, { code: number; message: string }>
   readonly malformedReasoningFor?: ReadonlySet<string>
+  readonly promptCapabilities?: { readonly audio?: boolean; readonly embeddedContext?: boolean; readonly image?: boolean } | null
 } = {}): { state: FakeState; spawn: SpawnProcess } {
   const state: FakeState = {
     initialize: [],
@@ -1233,7 +1238,9 @@ function agyHarness(options: {
             agentCapabilities: {
               loadSession: true,
               load_session: true,
-              promptCapabilities: { image: true, audio: false, embeddedContext: true },
+              promptCapabilities: options.promptCapabilities === undefined
+                ? { image: true, audio: false, embeddedContext: true }
+                : (options.promptCapabilities === null ? undefined : options.promptCapabilities),
               sessionCapabilities: { close: {}, resume: {}, load: {}, list: {}, additionalDirectories: {} },
               session_capabilities: { close: {}, resume: {}, load: {}, list: {}, additionalDirectories: {} },
             } as never,
@@ -1506,5 +1513,119 @@ describe('Antigravity ACP subprocess transport', () => {
     const env = buildTraexEnv()
     expect(env.ALL_PROXY).toBe('socks5://proxy.internal:1080')
     expect(env.all_proxy).toBe('http://proxy.internal:8080/')
+  })
+
+  it('forwards native ACP ImageContent blocks when promptCapabilities.image is true and records supportsImages', async () => {
+    const samplePng = Buffer.from([137, 80, 78, 71]).toString('base64')
+    const sampleJpeg = Buffer.from([255, 216, 255]).toString('base64')
+    const traex = harness({ promptCapabilities: { image: true, audio: false, embeddedContext: false } })
+    let traexObs: CatalogObservation | undefined
+    await expect(collect({
+      ...invocation,
+      images: [
+        { mimeType: 'image/png', data: samplePng },
+        { mimeType: 'image/jpeg', data: sampleJpeg },
+      ],
+    }, {
+      spawn: traex.spawn,
+      onCatalogObserved: obs => { traexObs = obs },
+    })).resolves.toEqual(['answer'])
+
+    expect(traexObs?.supportsImages).toBe(true)
+    expect(traex.state.prompts).toEqual([{
+      sessionId: 'session-current',
+      prompt: [
+        { type: 'text', text: 'answer this' },
+        { type: 'image', mimeType: 'image/png', data: samplePng },
+        { type: 'image', mimeType: 'image/jpeg', data: sampleJpeg },
+      ],
+    }])
+
+    const agy = agyHarness()
+    let agyObs: CatalogObservation | undefined
+    await expect(collect({
+      ...agyInvocation,
+      images: [{ mimeType: 'image/png', data: samplePng }],
+    }, {
+      spawn: agy.spawn,
+      onCatalogObserved: obs => { agyObs = obs },
+    })).resolves.toEqual(['agy-answer'])
+    expect(agyObs?.supportsImages).toBe(true)
+    expect(agy.state.prompts).toEqual([{
+      sessionId: 'agy-session-1',
+      prompt: [
+        { type: 'text', text: 'answer this' },
+        { type: 'image', mimeType: 'image/png', data: samplePng },
+      ],
+    }])
+
+    const legacyWithoutPromptCaps = harness()
+    const legacyCatalog = await discoverTraexAcpModels({
+      command: 'traex',
+      args: safeArgs,
+      cwd: process.cwd(),
+    }, { spawn: legacyWithoutPromptCaps.spawn })
+    expect(legacyCatalog).not.toHaveProperty('supportsImages')
+  })
+
+  it('rejects invalid image invocations in pre-spawn validate() with protocol cause', async () => {
+    const spawn = vi.fn<SpawnProcess>()
+    const validB64 = Buffer.from([1, 2, 3]).toString('base64')
+
+    await expect(collect({
+      ...invocation,
+      prompt: '',
+      operation: 'catalog',
+      images: [{ mimeType: 'image/png', data: validB64 }],
+    }, { spawn })).rejects.toMatchObject({ cause: 'protocol' })
+
+    for (const badImage of [
+      { mimeType: 'text/plain', data: validB64 },
+      { mimeType: 'image/png; charset=utf-8', data: validB64 },
+      { mimeType: 'image/png', data: '' },
+      { mimeType: 'image/png', data: 'abc' },
+      { mimeType: 'image/png', data: 'bad!' },
+      { mimeType: 'image/png', data: '====' },
+    ]) {
+      let settled: ProviderFailureContext | undefined
+      await expect(collect({
+        ...invocation,
+        images: [badImage],
+      }, {
+        spawn,
+        onSettled: context => { settled = context },
+      })).rejects.toMatchObject({ cause: 'protocol' })
+      expect(settled).toMatchObject({ phase: 'initialize', promptSubmissionState: 'not-submitted' })
+    }
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it('fails closed with image-unsupported before prompt submission when server does not advertise promptCapabilities.image: true', async () => {
+    const sampleB64 = Buffer.from([1, 2, 3, 4]).toString('base64')
+    for (const promptCapabilities of [{ image: false }, null] as const) {
+      const { state, spawn } = agyHarness({ promptCapabilities })
+      let settled: ProviderFailureContext | undefined
+      let observed: CatalogObservation | undefined
+      await expect(collect({
+        ...agyInvocation,
+        images: [{ mimeType: 'image/png', data: sampleB64 }],
+      }, {
+        spawn,
+        onCatalogObserved: obs => { observed = obs },
+        onSettled: context => { settled = context },
+      })).rejects.toMatchObject({
+        cause: 'image-unsupported',
+        message: 'Antigravity ACP server did not advertise image prompt capability',
+      })
+
+      expect(state.prompts).toHaveLength(0)
+      expect(settled?.promptSubmissionState).toBe('not-submitted')
+      expect(settled?.phase).not.toBe('prompt')
+      if (promptCapabilities === null) {
+        expect(observed).not.toHaveProperty('supportsImages')
+      } else {
+        expect(observed?.supportsImages).toBe(false)
+      }
+    }
   })
 })

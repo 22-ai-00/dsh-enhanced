@@ -1,4 +1,14 @@
-import type { ContentBlock, GenerateOptions, RequestMessage, ToolSchema } from '@deepseek-ai/dsh-llm'
+import {
+  IMAGE_OFFLOAD_REQUIRED_CODE,
+  LlmError,
+  projectOffloadedImages,
+  requiredImageOffload,
+  type ContentBlock,
+  type GenerateOptions,
+  type RequestMessage,
+  type ToolSchema,
+} from '@deepseek-ai/dsh-llm'
+import { DEFAULT_MAX_REQUEST_IMAGE_BYTES } from './config.js'
 
 export const DSH_TOOL_CALL_PROTOCOL = 'dsh-tool-calls/v1'
 
@@ -6,6 +16,23 @@ const MAX_TOOL_RESULT_IMAGE_DESCRIPTION_CHARS = 640
 const MAX_ATTACHMENT_ID_DESCRIPTION_CHARS = 192
 const MAX_ATTACHMENT_MEDIA_TYPE_DESCRIPTION_CHARS = 48
 const MAX_ATTACHMENT_NAME_DESCRIPTION_CHARS = 128
+
+const OFFLOADED_IMAGE_PLACEHOLDER =
+  '[image omitted to keep the request within its image limit; older images are omitted first. If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]'
+const ATTACHED_ACP_IMAGE_INSTRUCTION =
+  ' Attached ACP image blocks follow this JSON request in 1-based order: each {"type":"image","index":N,...} entry in conversation or tool-result content corresponds to the Nth attached image.'
+
+export type ImageAttachmentRef = Extract<ContentBlock, { type: 'image' }>['attachment']
+
+export interface BuiltAcpPrompt {
+  readonly prompt: string
+  readonly imageRefs: readonly ImageAttachmentRef[]
+}
+
+export interface BuildPromptOptions {
+  readonly allowImages?: boolean
+  readonly maxRequestImageBytes?: number
+}
 
 export interface DelegatedToolCall {
   readonly name: string
@@ -15,6 +42,10 @@ export interface DelegatedToolCall {
 interface TranscriptBlock {
   type: string
   text?: string
+  index?: number
+  mediaType?: string
+  width?: number
+  height?: number
   name?: string
   id?: string
   arguments?: string
@@ -53,7 +84,10 @@ function boundedQuotedDescription(value: unknown, maxEncodedChars: number): stri
   return `"${output}"`
 }
 
-function toolResultImageDescription(block: Extract<ContentBlock, { type: 'image' }>): string {
+function imageAttachmentDescription(
+  block: Extract<ContentBlock, { type: 'image' }>,
+  prefix: string,
+): string {
   const attachment = block.attachment
   const fields = [
     `attachmentId=${boundedQuotedDescription(attachment.attachmentId, MAX_ATTACHMENT_ID_DESCRIPTION_CHARS)}`,
@@ -66,12 +100,33 @@ function toolResultImageDescription(block: Extract<ContentBlock, { type: 'image'
       : [`name=${boundedQuotedDescription(attachment.name, MAX_ATTACHMENT_NAME_DESCRIPTION_CHARS)}`]),
   ]
   return boundedDescription(
-    `[DSH image attachment omitted by text-only backend; ${fields.join('; ')}]`,
+    `[${prefix}; ${fields.join('; ')}]`,
     MAX_TOOL_RESULT_IMAGE_DESCRIPTION_CHARS,
   )
 }
 
-function serializeBlock(block: ContentBlock, agentLabel: string): TranscriptBlock {
+function imageDescriptorBlock(index: number, attachment: ImageAttachmentRef): TranscriptBlock {
+  return {
+    type: 'image',
+    index,
+    mediaType: boundedDescription(attachment.mediaType, MAX_ATTACHMENT_MEDIA_TYPE_DESCRIPTION_CHARS),
+    width: attachment.width,
+    height: attachment.height,
+    ...(attachment.name === undefined
+      ? {}
+      : { name: boundedDescription(attachment.name, MAX_ATTACHMENT_NAME_DESCRIPTION_CHARS) }),
+  }
+}
+
+type ImageSerializationMode = 'text-only' | 'images' | 'compaction'
+
+function serializeBlock(
+  block: ContentBlock,
+  agentLabel: string,
+  role: RequestMessage['role'],
+  mode: ImageSerializationMode,
+  imageRefs: ImageAttachmentRef[],
+): TranscriptBlock {
   switch (block.type) {
     case 'text':
       return { type: 'text', text: block.text }
@@ -80,24 +135,55 @@ function serializeBlock(block: ContentBlock, agentLabel: string): TranscriptBloc
     case 'tool-call':
       return { type: 'tool-call', id: block.id, name: block.name, arguments: block.arguments }
     case 'image':
+      if (mode === 'compaction') {
+        if (role === 'user' || role === 'tool') {
+          return { type: 'text', text: imageAttachmentDescription(block, 'DSH image attachment in history') }
+        }
+        throw new Error(`${agentLabel} ACP provider cannot serialize image in a ${role} message`)
+      }
+      if (mode === 'images') {
+        if (role === 'user' || role === 'tool') {
+          imageRefs.push(block.attachment)
+          return imageDescriptorBlock(imageRefs.length, block.attachment)
+        }
+        throw new Error(`${agentLabel} ACP provider cannot serialize image in a ${role} message`)
+      }
+      if (role === 'tool') {
+        return {
+          type: 'text',
+          text: imageAttachmentDescription(block, 'DSH image attachment omitted by text-only backend'),
+        }
+      }
       throw new Error(`${agentLabel} ACP provider currently accepts text-only DSH requests`)
     default:
       throw new Error(`${agentLabel} ACP provider does not support content block type: ${String((block as { type?: unknown }).type)}`)
   }
 }
 
-function serializeMessage(message: RequestMessage, agentLabel: string): TranscriptMessage {
-  if (message.role === 'tool') return { role: 'tool', content: [{
-    type: 'tool-result', toolCallId: message.toolCallId,
-    ...(message.isError === undefined ? {} : { isError: message.isError }),
-    content: message.content.map(block => block.type === 'image'
-      ? { type: 'text', text: toolResultImageDescription(block) }
-      : serializeBlock(block, agentLabel)),
-  }] }
+function serializeMessage(
+  message: RequestMessage,
+  agentLabel: string,
+  mode: ImageSerializationMode,
+  imageRefs: ImageAttachmentRef[],
+): TranscriptMessage {
+  if (message.role === 'tool') {
+    return {
+      role: 'tool',
+      content: [{
+        type: 'tool-result',
+        toolCallId: message.toolCallId,
+        ...(message.isError === undefined ? {} : { isError: message.isError }),
+        content: message.content.map(block => serializeBlock(block, agentLabel, 'tool', mode, imageRefs)),
+      }],
+    }
+  }
   if (message.role === 'user' && message.source?.kind === 'tool') {
     throw new Error(`${agentLabel} ACP provider received a tool result in a user message`)
   }
-  return { role: message.role, content: message.content.map(block => serializeBlock(block, agentLabel)) }
+  return {
+    role: message.role,
+    content: message.content.map(block => serializeBlock(block, agentLabel, message.role, mode, imageRefs)),
+  }
 }
 
 const COMPACTION_TEXT_BLOCK_MAX_BYTES = 8_192
@@ -462,24 +548,52 @@ function buildToolConstraints(
   }
 }
 
-/** Serialize one provider-neutral DSH call into a stateless ACP turn. */
-export function buildPrompt(
+/** Serialize one provider-neutral DSH call into a stateless ACP turn and collect ordered image references. */
+export function buildPromptPayload(
   options: GenerateOptions,
   maxPromptBytes: number,
   agentLabel = 'TraeX',
-): string {
+  promptOptions?: BuildPromptOptions,
+): BuiltAcpPrompt {
+  const isCompaction = options.purpose === 'compaction'
+  const mode: ImageSerializationMode = isCompaction
+    ? 'compaction'
+    : (promptOptions?.allowImages === true ? 'images' : 'text-only')
+
+  if (mode === 'images') {
+    const maxRequestImageBytes = promptOptions?.maxRequestImageBytes ?? DEFAULT_MAX_REQUEST_IMAGE_BYTES
+    const offloadImages = requiredImageOffload(
+      options.messages,
+      { maxBytes: maxRequestImageBytes, representation: 'raw' },
+      block => block.attachment.bytes,
+    )
+    if (offloadImages > 0) {
+      throw LlmError.fromFailure({
+        message: `${agentLabel} ACP provider requires older images to be offloaded`,
+        code: IMAGE_OFFLOAD_REQUIRED_CODE,
+        offloadImages,
+      })
+    }
+  }
+
+  const projectedMessages = projectOffloadedImages(options.messages, () => OFFLOADED_IMAGE_PLACEHOLDER)
+  const imageRefs: ImageAttachmentRef[] = []
+  const conversation = effectiveMessages(projectedMessages)
+    .map(message => serializeMessage(message, agentLabel, mode, imageRefs))
+
   const tools = options.tools ?? []
   const planGuard = agentLabel === 'Antigravity'
     ? ' Do not enter or use plan mode and never invoke exit_plan_mode, ask_question, subagents, or swarms; produce the complete response directly in this single turn.'
     : ''
-  const baseInstruction = options.purpose === 'compaction'
+  const imageAttachmentNote = imageRefs.length > 0 ? ATTACHED_ACP_IMAGE_INSTRUCTION : ''
+  const baseInstruction = isCompaction
     ? 'Produce only the requested compaction checkpoint as normal assistant text. Do not request or invoke any tool, and do not emit a DSH tool-call JSON envelope. Tool schemas remain present only so the host can verify that this auxiliary request is an exact projection of the active Agent Loop request.'
     : tools.length === 0
     ? `Continue the conversation as the assistant within the DSH system and user instructions in this request. Return only the next assistant response. Do not modify files or execute commands inside ${agentLabel}.`
     : `Continue the conversation as the assistant within the DSH system and user instructions in this request. Do not modify files or execute commands inside ${agentLabel} and do not invoke ${agentLabel}-native tools; they are unavailable in this backend session. Tools can only be used through DSH. Declared tools describe availability, not authorization: follow the applicable DSH system, user, policy, and prior tool-result constraints before requesting one. If a tool action was rejected or denied by the user, by policy, or because authorization is absent, do not retry it, bypass the rejection, or substitute an equivalent action unless a later authorized user or system instruction explicitly permits it. You may correct invalid arguments through authorized read-only discovery when the tool result recommends it. You may continue independent permitted work, or honestly report that the requested work is blocked; do not claim completion for work that did not occur. When an authorized tool call is needed, request it now instead of merely describing future work: return exactly one JSON object matching constraints.tools.responseFormat. Each call.arguments value must be a JSON object matching that tool's parameter schema, never a JSON-encoded string. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. Otherwise, return only the next assistant response as normal text.`
   const buildRequest = (policy: ToolSchemaCompactionPolicy): SerializedPromptRequest => ({
     protocol: 'dsh-traex-acp-provider/v1',
-    instruction: `${baseInstruction}${planGuard}`,
+    instruction: `${baseInstruction}${planGuard}${imageAttachmentNote}`,
     constraints: {
       tools: buildToolConstraints(tools, options.purpose, policy),
       stop: options.stop ?? null,
@@ -489,14 +603,14 @@ export function buildPrompt(
       purpose: options.purpose ?? null,
     },
     system: options.system ?? null,
-    conversation: effectiveMessages(options.messages).map(message => serializeMessage(message, agentLabel)),
+    conversation,
   })
 
   let request = buildRequest(DEFAULT_TOOL_SCHEMA_COMPACTION)
   let prompt = renderPrompt(request)
   let size = Buffer.byteLength(prompt, 'utf8')
 
-  if (options.purpose !== 'compaction' && tools.length > 0) {
+  if (!isCompaction && tools.length > 0) {
     const available = (request.constraints.tools as { available?: unknown }).available
     const availableBytes = Buffer.byteLength(JSON.stringify(available), 'utf8')
     if (availableBytes > LARGE_TOOL_CATALOG_BYTES_THRESHOLD
@@ -513,14 +627,14 @@ export function buildPrompt(
     }
   }
 
-  if (size <= maxPromptBytes) return prompt
+  if (size <= maxPromptBytes) return { prompt, imageRefs }
 
-  if (options.purpose === 'compaction') {
+  if (isCompaction) {
     const bounded = boundCompactionConversation(request, maxPromptBytes)
-    if (bounded !== undefined) return bounded
+    if (bounded !== undefined) return { prompt: bounded, imageRefs }
   } else {
     const bounded = boundEarlierToolResults(request, maxPromptBytes)
-    if (bounded !== undefined) return bounded
+    if (bounded !== undefined) return { prompt: bounded, imageRefs }
   }
 
   throw new Error(
@@ -528,6 +642,15 @@ export function buildPrompt(
     + 'Raise `maxPromptBytes` (or `agyMaxPromptBytes` within Antigravity\'s 190000-byte input cap) or compact the conversation.',
     { cause: 'prompt-limit' },
   )
+}
+
+/** Serialize one provider-neutral DSH call into a stateless ACP turn. */
+export function buildPrompt(
+  options: GenerateOptions,
+  maxPromptBytes: number,
+  agentLabel = 'TraeX',
+): string {
+  return buildPromptPayload(options, maxPromptBytes, agentLabel, { allowImages: false }).prompt
 }
 
 function toolArguments(value: unknown): Record<string, unknown> | undefined {

@@ -33,12 +33,18 @@ import { version } from './version.js'
 
 export type AcpBackend = 'traex' | 'agy'
 
+export interface TraexAcpPromptImage {
+  readonly mimeType: string
+  readonly data: string
+}
+
 export interface TraexAcpInvocation {
   readonly backend?: AcpBackend
   readonly command: string
   readonly args: readonly string[]
   readonly cwd: string
   readonly prompt: string
+  readonly images?: readonly TraexAcpPromptImage[]
   readonly model?: string
   readonly reasoningEffort?: string
   readonly agyMode?: AgySessionMode
@@ -216,6 +222,8 @@ export interface CatalogObservation {
   /** True only when discovery inspected each model's post-selection reasoning selector. */
   readonly completeReasoning: boolean
   readonly observedAt: number
+  /** Advertised ACP `agentCapabilities.promptCapabilities.image` when boolean. */
+  readonly supportsImages?: boolean
 }
 
 export interface CatalogReasoningEffort {
@@ -247,6 +255,7 @@ export type TraexAcpFailure =
   | 'refusal'
   | 'process'
   | 'output-limit'
+  | 'image-unsupported'
 
 export type TraexSuccessfulStopReason = Extract<StopReason, 'end_turn' | 'max_tokens' | 'max_turn_requests'>
 
@@ -699,6 +708,8 @@ export async function* runTraexAcpText(
       if (!initialized.authMethods?.some(spec.isAllowedAuthMethod)) {
         throw new TraexAcpError('auth', failureMessage('auth', backend))
       }
+      const rawImageCapability = initialized.agentCapabilities?.promptCapabilities?.image
+      const supportsImages = typeof rawImageCapability === 'boolean' ? rawImageCapability : undefined
 
       phase = 'new-session'
       const session = await awaitRpc(client.newSession({ cwd: invocation.cwd, mcpServers: [] }))
@@ -719,6 +730,8 @@ export async function* runTraexAcpText(
           ? new Map()
           : new Map([[initialModelOption.currentValue, catalogReasoning(initialReasoning)]]),
         false,
+        initialModelOption.currentValue,
+        supportsImages,
       ))
 
       if (invocation.operation === 'catalog') {
@@ -760,6 +773,7 @@ export async function* runTraexAcpText(
           reasoningByModel,
           true,
           initialCurrentValue,
+          supportsImages,
         ))
         // Catalog discovery is a successful no-prompt operation. Mark the session complete so a
         // clean child close cannot be mistaken for premature EOF.
@@ -849,7 +863,14 @@ export async function* runTraexAcpText(
           ? new Map()
           : new Map([[activeModelOption.currentValue, catalogReasoning(activeReasoning)]]),
         false,
+        activeModelOption.currentValue,
+        supportsImages,
       ))
+
+      if ((invocation.images?.length ?? 0) > 0
+        && initialized.agentCapabilities?.promptCapabilities?.image !== true) {
+        throw new TraexAcpError('image-unsupported', failureMessage('image-unsupported', backend))
+      }
 
       // The prompt is about to enter the ACP stream; from here replay is never safe.
       phase = 'prompt'
@@ -858,7 +879,14 @@ export async function* runTraexAcpText(
       promptAt = performance.now()
       const result = await awaitRpc(client.prompt({
         sessionId,
-        prompt: [{ type: 'text', text: invocation.prompt }],
+        prompt: [
+          { type: 'text', text: invocation.prompt },
+          ...(invocation.images ?? []).map(image => ({
+            type: 'image' as const,
+            mimeType: image.mimeType,
+            data: image.data,
+          })),
+        ],
       }))
       promptActive = false
       throwIfFatal(fatal)
@@ -984,6 +1012,9 @@ function sanitizeEnvValue(name: string, value: string): string | undefined {
   }
 }
 
+const ACP_IMAGE_MIME_PATTERN = /^image\/[A-Za-z0-9.+-]+$/u
+const CANONICAL_BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u
+
 function validate(
   invocation: TraexAcpInvocation,
   options: RunTraexAcpOptions,
@@ -996,9 +1027,21 @@ function validate(
     throw new TraexAcpError('protocol')
   }
   if (invocation.operation === 'catalog'
-    && (invocation.prompt.length !== 0 || invocation.model !== undefined
+    && (invocation.prompt.length !== 0 || (invocation.images?.length ?? 0) > 0
+      || invocation.model !== undefined
       || invocation.reasoningEffort !== undefined || invocation.agyMode !== undefined)) {
     throw new TraexAcpError('protocol')
+  }
+  if (invocation.images !== undefined) {
+    if (!Array.isArray(invocation.images)) throw new TraexAcpError('protocol')
+    for (const img of invocation.images) {
+      if (img === null || typeof img !== 'object'
+        || typeof img.mimeType !== 'string' || !ACP_IMAGE_MIME_PATTERN.test(img.mimeType)
+        || typeof img.data !== 'string' || img.data.length === 0 || img.data.length % 4 !== 0
+        || !CANONICAL_BASE64_PATTERN.test(img.data)) {
+        throw new TraexAcpError('protocol')
+      }
+    }
   }
   if (invocation.model !== undefined && invocation.model.length === 0) {
     throw new TraexAcpError('protocol')
@@ -1116,6 +1159,7 @@ function buildCatalogObservation(
   reasoningByModel: ReadonlyMap<string, CatalogModelReasoning>,
   completeReasoning: boolean,
   currentValue = modelOption.currentValue,
+  supportsImages?: boolean,
 ): CatalogObservation {
   return {
     currentValue,
@@ -1130,6 +1174,7 @@ function buildCatalogObservation(
     })),
     completeReasoning,
     observedAt: Date.now(),
+    ...(typeof supportsImages === 'boolean' ? { supportsImages } : {}),
   }
 }
 
@@ -1205,6 +1250,7 @@ function failureMessage(failure: TraexAcpFailure, backend: AcpBackend = 'traex')
     refusal: `${label} ACP refused the request`,
     process: `${label} ACP process failed`,
     'output-limit': `${label} ACP output exceeded its configured limit`,
+    'image-unsupported': `${label} ACP server did not advertise image prompt capability`,
   }
   return messages[failure]
 }

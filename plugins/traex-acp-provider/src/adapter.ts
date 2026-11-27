@@ -29,13 +29,14 @@ import {
   type RunTraexAcpOptions,
   type TraexAcpInvocation,
   type TraexAcpCatalogInvocation,
+  type TraexAcpPromptImage,
   type TraexSuccessfulStopReason,
 } from './acp-client.js'
 import { verifyTraexAuth, type TraexAuthVerifier } from './auth.js'
 import { CatalogObservationCache, type CatalogCacheKeyParts, type CachedCatalog } from './catalog-cache.js'
 import { resolveAcpCommand, type AcpCommandResolver } from './command-resolve.js'
 import type { TraexAcpProviderConfig } from './config.js'
-import { buildPrompt, parseDelegatedToolCalls } from './prompt.js'
+import { buildPromptPayload, parseDelegatedToolCalls, type ImageAttachmentRef } from './prompt.js'
 import { resolveTrustedSessionCwd, TrustedSessionCwdError, type LiveSessionLookup } from './session-cwd.js'
 
 export const TRAEX_PROVIDER_ROUTE = 'traex-agent'
@@ -134,6 +135,13 @@ export type RouteOutcome =
   | 'preflight'
   | 'failed'
 
+export interface AcpImageAttachmentReader {
+  readImage(
+    ref: ImageAttachmentRef,
+    signal?: AbortSignal,
+  ): Promise<{ readonly data: Uint8Array; readonly ref: ImageAttachmentRef }>
+}
+
 export interface AdapterDependencies {
   runText?: TraexAcpTextRunner
   discoverModels?: TraexAcpCatalogDiscoverer
@@ -154,6 +162,10 @@ export interface AdapterDependencies {
   liveSessions?: LiveSessionLookup
   /** Scoped Host proof retained when LlmRuntime creates a legitimate adapter request clone. */
   requestAttestor?: AgentLoopRequestAttestor
+  /** Static attachment store reader used to hydrate image blocks into ACP `ImageContent`. */
+  attachments?: AcpImageAttachmentReader
+  /** Dynamic attachment store lookup called per operation so plugin reload/unload stays current. */
+  getAttachments?: () => AcpImageAttachmentReader | undefined
 }
 
 const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
@@ -240,6 +252,9 @@ function connectorFailure(command: string, error: unknown, label = 'TraeX'): Err
   if (error instanceof Error && error.cause === 'output-limit') {
     return LlmError.fromFailure({ message: `${label} ACP output exceeded the configured safety limit`, code: 'ACP_OUTPUT_LIMIT' }, { cause: error })
   }
+  if (error instanceof Error && error.cause === 'image-unsupported') {
+    return LlmError.fromFailure({ message: `${label} ACP server did not advertise image input capability`, code: 'ACP_IMAGE_UNSUPPORTED' }, { cause: error })
+  }
   if (error instanceof Error && error.cause === 'protocol') {
     return LlmError.fromFailure({ message: `${label} ACP returned an invalid or incomplete protocol exchange`, code: 'ACP_PROTOCOL_ERROR' }, { cause: error })
   }
@@ -252,6 +267,7 @@ function connectorFailure(command: string, error: unknown, label = 'TraeX'): Err
  * unclassified failure; the prompt provably never entered the ACP stream.
  */
 function preflightFailure(error: unknown, label = 'TraeX'): Error {
+  if (error instanceof LlmError) return error
   if (error instanceof Error && error.cause === 'prompt-limit') {
     return LlmError.fromFailure({ message: error.message, code: CONTEXT_WINDOW_EXCEEDED_CODE }, { cause: error })
   }
@@ -274,23 +290,76 @@ function outcomeFor(error: unknown): RouteOutcome {
   if (cause === 'reasoning') return 'reasoning'
   if (cause === 'refusal') return 'refusal'
   if (cause === 'output-limit') return 'output-limit'
+  if (cause === 'image-unsupported') return 'protocol'
   if (cause === 'protocol') return 'protocol'
   if (cause === 'process') return 'process'
   return 'failed'
+}
+
+const ACP_IMAGE_MEDIA_TYPE_PATTERN = /^image\/[A-Za-z0-9.+-]+$/u
+
+function sameImageRef(left: ImageAttachmentRef, right: ImageAttachmentRef): boolean {
+  return left.attachmentId === right.attachmentId
+    && left.mediaType === right.mediaType
+    && left.bytes === right.bytes
+    && left.width === right.width
+    && left.height === right.height
+}
+
+async function hydratePromptImages(
+  imageRefs: readonly ImageAttachmentRef[],
+  attachments: AcpImageAttachmentReader | undefined,
+  signal: AbortSignal,
+  label: string,
+): Promise<readonly TraexAcpPromptImage[]> {
+  if (imageRefs.length === 0) return []
+  if (attachments === undefined) {
+    throw new Error(`${label} ACP provider requires attachment storage for image input`)
+  }
+  const images: TraexAcpPromptImage[] = []
+  for (const ref of imageRefs) {
+    if (signal.aborted) throw abortReason(signal, label)
+    if (!ACP_IMAGE_MEDIA_TYPE_PATTERN.test(ref.mediaType)) {
+      throw new Error(`${label} ACP provider received an unsupported image mediaType`)
+    }
+    const stored = await waitForAbort(attachments.readImage(ref, signal), signal, label)
+    if (signal.aborted) throw abortReason(signal, label)
+    if (stored === undefined
+      || stored === null
+      || !(stored.data instanceof Uint8Array)
+      || !Number.isSafeInteger(ref.bytes)
+      || ref.bytes <= 0
+      || stored.data.byteLength !== ref.bytes
+      || stored.ref === undefined
+      || !sameImageRef(ref, stored.ref)) {
+      throw new Error(`${label} ACP provider received an invalid stored image`)
+    }
+    images.push({
+      mimeType: ref.mediaType,
+      data: Buffer.from(stored.data.buffer, stored.data.byteOffset, stored.data.byteLength).toString('base64'),
+    })
+  }
+  return images
 }
 
 function mergePartialCatalog(
   previous: CatalogObservation,
   incoming: CatalogObservation,
 ): CatalogObservation {
+  const supportsImages = incoming.supportsImages ?? previous.supportsImages
   const priorReasoning = new Map(
     previous.models
       .filter((model): model is CatalogModel & { reasoning: NonNullable<CatalogModel['reasoning']> } => model.reasoning !== undefined)
       .map(model => [model.id, model.reasoning]),
   )
-  if (priorReasoning.size === 0) return incoming
+  if (priorReasoning.size === 0) {
+    return supportsImages !== undefined && incoming.supportsImages === undefined
+      ? { ...incoming, supportsImages }
+      : incoming
+  }
   return {
     ...incoming,
+    ...(supportsImages === undefined ? {} : { supportsImages }),
     models: incoming.models.map(model => (
       model.reasoning !== undefined || model.id === incoming.currentValue || !priorReasoning.has(model.id)
         ? model
@@ -328,6 +397,7 @@ export class TraexAcpAdapter extends LlmAdapter {
   private readonly catalogCache: CatalogObservationCache
   private readonly liveSessions: LiveSessionLookup | undefined
   private readonly requestAttestor: AgentLoopRequestAttestor | undefined
+  private readonly getAttachments: () => AcpImageAttachmentReader | undefined
   private readonly lifecycle = new AbortController()
   private readonly catalogRefreshInFlight = new Map<AcpProviderRoute, Promise<CatalogObservation | undefined>>()
 
@@ -350,6 +420,13 @@ export class TraexAcpAdapter extends LlmAdapter {
     })
     this.liveSessions = dependencies.liveSessions
     this.requestAttestor = dependencies.requestAttestor
+    this.getAttachments = dependencies.getAttachments ?? (() => dependencies.attachments)
+  }
+
+  private inputModalitiesFor(catalog: CatalogObservation | undefined): readonly ('text' | 'image')[] {
+    return this.getAttachments() !== undefined && catalog?.supportsImages !== false
+      ? ['text', 'image']
+      : ['text']
   }
 
   private resolvedCommandFor(spec: RouteSpec): string {
@@ -582,6 +659,7 @@ export class TraexAcpAdapter extends LlmAdapter {
     const catalog = cached?.completeReasoning === true
       ? cached
       : (await this.refreshCatalogForList(spec)) ?? this.peekObservedCatalog(spec.route)?.observation
+    const inputModalities = this.inputModalitiesFor(catalog)
     const active = catalog?.models.find(model => model.id === catalog.currentValue)
     const entries = new Map<string, LlmModelInfo>()
     for (const model of spec.models(this.config)) {
@@ -591,8 +669,8 @@ export class TraexAcpAdapter extends LlmAdapter {
         name: model === 'default'
           ? `${spec.label} active model${active === undefined ? '' : ` (${active.name})`}`
           : model,
-        description: `Experimental text compatibility route backed by a local ${spec.label} ACP agent`,
-        inputModalities: ['text'],
+        description: `Experimental local ACP compatibility route backed by ${spec.label}`,
+        inputModalities: [...inputModalities],
       })
     }
     for (const model of catalog?.models ?? []) {
@@ -601,7 +679,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         id: model.id,
         name: model.name,
         ...(model.description === undefined ? {} : { description: model.description }),
-        inputModalities: ['text'],
+        inputModalities: [...inputModalities],
       })
     }
     return [...entries.values()]
@@ -614,6 +692,7 @@ export class TraexAcpAdapter extends LlmAdapter {
       : AbortSignal.any([signal, this.lifecycle.signal])
     if (effectiveSignal.aborted) throw abortReason(effectiveSignal, spec.label)
     const catalog = this.peekObservedCatalog(spec.route)?.observation
+    const inputModalities = this.inputModalitiesFor(catalog)
     const catalogModel = model === 'default'
       ? catalog?.models.find(entry => entry.id === catalog.currentValue)
       : catalog?.models.find(entry => entry.id === model)
@@ -625,7 +704,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         : (catalogModel?.name ?? model),
       description: catalogModel?.description ?? 'Experimental local ACP coding-agent delegation',
       context: { contextWindow: spec.contextWindow(this.config) },
-      inputModalities: ['text'],
+      inputModalities: [...inputModalities],
       ...reasoningInfo(catalogModel),
     }
   }
@@ -699,17 +778,35 @@ export class TraexAcpAdapter extends LlmAdapter {
       phase = 'preflight'
       let invocation: TraexAcpInvocation
       try {
+        const attachments = this.getAttachments()
+        const built = buildPromptPayload(options, spec.maxPromptBytes(this.config), spec.label, {
+          allowImages: attachments !== undefined,
+          maxRequestImageBytes: this.config.maxRequestImageBytes,
+        })
+        const images = built.imageRefs.length === 0
+          ? undefined
+          : await hydratePromptImages(built.imageRefs, attachments, signal, spec.label)
         invocation = {
           ...(spec.backend === 'traex' ? {} : { backend: spec.backend }),
           command,
           args: spec.args(this.config),
           cwd,
-          prompt: buildPrompt(options, spec.maxPromptBytes(this.config), spec.label),
+          prompt: built.prompt,
+          ...(images === undefined ? {} : { images }),
           ...(options.model === 'default' ? {} : { model: options.model }),
           ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) }),
           ...(spec.backend === 'agy' ? { agyMode: this.config.agyMode } : {}),
         }
       } catch (error: unknown) {
+        if (signal.aborted) {
+          const reason = abortReason(signal, spec.label)
+          outcome = reason.cause === 'timeout' ? 'timeout' : 'aborted'
+          throw reason
+        }
+        if (error instanceof Error && error.cause === 'abort') {
+          outcome = 'aborted'
+          throw error
+        }
         outcome = 'preflight'
         throw preflightFailure(error, spec.label)
       }

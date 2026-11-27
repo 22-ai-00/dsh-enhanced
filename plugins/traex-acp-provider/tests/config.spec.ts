@@ -4,6 +4,7 @@ import {
   Config,
   DEFAULT_AGY_CONTEXT_WINDOW,
   DEFAULT_AGY_MAX_PROMPT_BYTES,
+  DEFAULT_MAX_REQUEST_IMAGE_BYTES,
   normalizeConfig,
 } from '../src/config.ts'
 
@@ -26,13 +27,16 @@ describe('configuration', () => {
       agyContextWindow: DEFAULT_AGY_CONTEXT_WINDOW,
       maxMessageBytes: 2 * 1024 * 1024,
       agyMaxPromptBytes: DEFAULT_AGY_MAX_PROMPT_BYTES,
+      maxRequestImageBytes: DEFAULT_MAX_REQUEST_IMAGE_BYTES,
       authProbeTimeoutMs: 30_000,
       extraEnvNames: [],
       logDiagnostics: false,
     })
     expect(DEFAULT_AGY_CONTEXT_WINDOW).toBe(128_000)
+    expect(DEFAULT_MAX_REQUEST_IMAGE_BYTES).toBe(24 * 1024 * 1024)
     expect(config.agyContextWindow).toBe(128_000)
     expect(config.agyMaxPromptBytes).toBe(184_320)
+    expect(config.maxRequestImageBytes).toBe(25_165_824)
     expect(config.agyMaxPromptBytes).toBeLessThanOrEqual(AGY_MAX_PROMPT_BYTES_CEILING)
     expect(config.timeoutMs).toBeGreaterThan(0)
     expect(config.maxMessageBytes).toBeGreaterThan(0)
@@ -50,6 +54,10 @@ describe('configuration', () => {
     expect(() => Config({ contextWindow: 1024 } as never)).toThrow()
     expect(() => Config({ agyContextWindow: 1024 } as never)).toThrow()
     expect(() => Config({ agyMaxPromptBytes: 200_000 } as never)).toThrow()
+    expect(() => Config({ maxRequestImageBytes: 512 } as never)).toThrow()
+    expect(() => Config({ maxRequestImageBytes: 65 * 1024 * 1024 } as never)).toThrow()
+    expect(Config({ maxRequestImageBytes: 1_024 } as never).maxRequestImageBytes).toBe(1_024)
+    expect(Config({ maxRequestImageBytes: 64 * 1024 * 1024 } as never).maxRequestImageBytes).toBe(64 * 1024 * 1024)
     expect(() => Config({ extraEnvNames: ['API-KEY'] } as never)).toThrow()
   })
 

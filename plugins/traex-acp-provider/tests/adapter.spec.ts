@@ -3,10 +3,13 @@ import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, {
   createMessage,
   createSystemMessage,
+  createToolResultMessage,
+  IMAGE_OFFLOAD_REQUIRED_CODE,
   isAgentLoopRequest,
   LlmAdapter,
   markAgentLoopRequest,
   ReasoningEffortId,
+  ToolCallId,
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
@@ -22,8 +25,11 @@ import {
   probeAcpReadiness,
   probeTraexReadiness,
   redactDiagnostic,
+  TRAEX_PROVIDER_ROUTE,
   TraexAcpAdapter as RawTraexAcpAdapter,
+  type AcpImageAttachmentReader,
   type AdapterDependencies,
+  type RouteFailureContext,
   type TraexAcpTextRunner,
 } from '../src/adapter.ts'
 import { buildAgyArgs, type RunTraexAcpOptions, type TraexAcpInvocation } from '../src/acp-client.ts'
@@ -2289,5 +2295,610 @@ describe('TraeX ACP LLM adapter', () => {
     await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'claude-opus-5-5')).resolves.toMatchObject({
       reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'high' },
     })
+  })
+
+  it('advertises image inputModalities across agy-agent (including gemini-pro-orchestrator-neon and default) and traex-agent only when attachments exist and supportsImages !== false', async () => {
+    const attachments: AcpImageAttachmentReader = {
+      readImage: async ref => ({ ref, data: Uint8Array.from([1, 2, 3]) }),
+    }
+    let currentAttachments: AcpImageAttachmentReader | undefined = attachments
+    let supportsImages: boolean | undefined = true
+
+    const discoverModels = vi.fn(async (inv: { backend?: string }) => ({
+      currentValue: inv.backend === 'agy' ? 'gemini-pro-orchestrator-neon' : 'trae-pro',
+      modelValues: inv.backend === 'agy'
+        ? ['gemini-pro-orchestrator-neon', 'gemini-4-neon']
+        : ['trae-pro'],
+      models: inv.backend === 'agy'
+        ? [
+            { id: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+            { id: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+          ]
+        : [{ id: 'trae-pro', name: 'Trae Pro' }],
+      completeReasoning: true,
+      observedAt: 1,
+      ...(supportsImages === undefined ? {} : { supportsImages }),
+    }))
+
+    const adapter = new TraexAcpAdapter(Config({ enabled: true, agyEnabled: true } as never), {
+      verifyAuth: async () => {},
+      discoverModels,
+      getAttachments: () => currentAttachments,
+      runText: (_inv, options) => (async function* () {
+        options?.onCatalogObserved?.({
+          currentValue: 'gemini-pro-orchestrator-neon',
+          modelValues: ['gemini-pro-orchestrator-neon'],
+          models: [{ id: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' }],
+          completeReasoning: false,
+          observedAt: 2,
+          supportsImages: false,
+        })
+        yield 'ok'
+        options?.onStopReason?.('end_turn')
+      })(),
+    })
+
+    // Cold resolveModel with attachments: optimistic ['text', 'image'] for all routes/models.
+    await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-pro-orchestrator-neon')).resolves.toMatchObject({
+      inputModalities: ['text', 'image'],
+    })
+    await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'default')).resolves.toMatchObject({
+      inputModalities: ['text', 'image'],
+    })
+    await expect(adapter.resolveModel(TRAEX_PROVIDER_ROUTE, 'default')).resolves.toMatchObject({
+      inputModalities: ['text', 'image'],
+    })
+
+    // Warm with supportsImages: true + attachments.
+    await expect(adapter.listModels(AGY_PROVIDER_ROUTE)).resolves.toEqual([
+      expect.objectContaining({ id: 'default', inputModalities: ['text', 'image'] }),
+      expect.objectContaining({ id: 'gemini-pro-orchestrator-neon', inputModalities: ['text', 'image'] }),
+      expect.objectContaining({ id: 'gemini-4-neon', inputModalities: ['text', 'image'] }),
+    ])
+    await expect(adapter.listModels(TRAEX_PROVIDER_ROUTE)).resolves.toEqual([
+      expect.objectContaining({ id: 'default', inputModalities: ['text', 'image'] }),
+      expect.objectContaining({ id: 'trae-pro', inputModalities: ['text', 'image'] }),
+    ])
+
+    // Absent attachments drops back to ['text'] dynamically even with warm supportsImages: true.
+    currentAttachments = undefined
+    await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-pro-orchestrator-neon')).resolves.toMatchObject({
+      inputModalities: ['text'],
+    })
+    await expect(adapter.listModels(AGY_PROVIDER_ROUTE)).resolves.toEqual([
+      expect.objectContaining({ id: 'default', inputModalities: ['text'] }),
+      expect.objectContaining({ id: 'gemini-pro-orchestrator-neon', inputModalities: ['text'] }),
+      expect.objectContaining({ id: 'gemini-4-neon', inputModalities: ['text'] }),
+    ])
+
+    // Warm with promptCapabilities.image: false + attachments drops both configured aliases & catalog models to ['text'].
+    currentAttachments = attachments
+    supportsImages = false
+    const falseAdapter = new TraexAcpAdapter(Config({ enabled: true, agyEnabled: true } as never), {
+      verifyAuth: async () => {},
+      discoverModels,
+      getAttachments: () => currentAttachments,
+    })
+    await expect(falseAdapter.listModels(AGY_PROVIDER_ROUTE)).resolves.toEqual([
+      expect.objectContaining({ id: 'default', inputModalities: ['text'] }),
+      expect.objectContaining({ id: 'gemini-pro-orchestrator-neon', inputModalities: ['text'] }),
+      expect.objectContaining({ id: 'gemini-4-neon', inputModalities: ['text'] }),
+    ])
+    await expect(falseAdapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-pro-orchestrator-neon')).resolves.toMatchObject({
+      inputModalities: ['text'],
+    })
+
+    // mergePartialCatalog preserves supportsImages when a subsequent partial observation omits it.
+    let streamStep = 0
+    const mergingAdapter = new TraexAcpAdapter(Config({ agyEnabled: true } as never), {
+      attachments,
+      runText: (_inv, options) => (async function* () {
+        if (streamStep++ === 0) {
+          options?.onCatalogObserved?.({
+            currentValue: 'gemini-pro-orchestrator-neon',
+            modelValues: ['gemini-pro-orchestrator-neon', 'gemini-4-neon'],
+            models: [
+              {
+                id: 'gemini-pro-orchestrator-neon',
+                name: 'Orchestrator (Neon)',
+                reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' },
+              },
+              { id: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+            ],
+            completeReasoning: false,
+            observedAt: 1,
+            supportsImages: false,
+          })
+        } else {
+          options?.onCatalogObserved?.({
+            currentValue: 'gemini-4-neon',
+            modelValues: ['gemini-pro-orchestrator-neon', 'gemini-4-neon'],
+            models: [
+              { id: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+              { id: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+            ],
+            completeReasoning: false,
+            observedAt: 2,
+          })
+        }
+        yield 'ok'
+        options?.onStopReason?.('end_turn')
+      })(),
+    })
+    for await (const _chunk of mergingAdapter.stream({ ...request('gemini-pro-orchestrator-neon'), provider: AGY_PROVIDER_ROUTE })) { /* drain */ }
+    for await (const _chunk of mergingAdapter.stream({ ...request('gemini-4-neon'), provider: AGY_PROVIDER_ROUTE })) { /* drain */ }
+    await expect(mergingAdapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-4-neon')).resolves.toMatchObject({
+      inputModalities: ['text'],
+    })
+    expect(mergingAdapter.peekObservedCatalog(AGY_PROVIDER_ROUTE)?.observation.supportsImages).toBe(false)
+  })
+
+  it('hydrates user + read_image tool images through LlmRuntime + requestAttestor (claim & claimCompaction) while keeping order across earlier tool truncation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-vision-runtime-'))
+    try {
+      const workspace = join(root, 'workspace')
+      await mkdir(workspace)
+      const ctx = new Context()
+      ctx.provide('sessionProjections', {
+        register: async () => ({ stateOf: () => ({}), readerFor: () => () => ({}), dispose: async () => {} }),
+      } as never)
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(LlmRuntime)
+
+      const imgUserBytes = Uint8Array.from([137, 80, 78, 71])
+      const imgToolOldBytes = Uint8Array.from([255, 216, 255, 224, 0, 16])
+      const imgToolNewBytes = Uint8Array.from([82, 73, 70, 70, 1, 2, 3, 4])
+      const imgUser = {
+        attachmentId: 'sha256:user-img' as never,
+        mediaType: 'image/png' as const,
+        bytes: imgUserBytes.byteLength,
+        width: 320,
+        height: 240,
+        name: 'user.png',
+      }
+      const imgToolOld = {
+        attachmentId: 'sha256:tool-old-img' as never,
+        mediaType: 'image/jpeg' as const,
+        bytes: imgToolOldBytes.byteLength,
+        width: 640,
+        height: 480,
+        name: 'old.jpg',
+      }
+      const imgToolNew = {
+        attachmentId: 'sha256:tool-new-img' as never,
+        mediaType: 'image/webp' as const,
+        bytes: imgToolNewBytes.byteLength,
+        width: 800,
+        height: 600,
+        name: 'new.webp',
+      }
+      const byteMap = new Map<string, { ref: typeof imgUser; data: Uint8Array }>([
+        [imgUser.attachmentId, { ref: imgUser, data: imgUserBytes }],
+        [imgToolOld.attachmentId, { ref: imgToolOld as never, data: imgToolOldBytes }],
+        [imgToolNew.attachmentId, { ref: imgToolNew as never, data: imgToolNewBytes }],
+      ])
+      const readImage = vi.fn(async (ref: { attachmentId: string }) => {
+        const hit = byteMap.get(ref.attachmentId)
+        if (hit === undefined) throw new Error('missing image')
+        return hit
+      })
+
+      const callOld = ToolCallId('call-read-image-old')
+      const callNew = ToolCallId('call-read-image-new')
+      const tools = [{ name: 'read_image', description: 'Read an image.', parameters: { type: 'object' } }]
+      const system = createSystemMessage('Inspect multimodal inputs.')
+      const userMessage = createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [
+          { type: 'text', text: 'Analyze user image and tool images.' },
+          { type: 'image', attachment: imgUser },
+        ],
+      })
+      const assistant1 = createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: 'foreign-route', model: 'old-model', replayState: { response: { id: 'r1' } } },
+        content: [{ type: 'tool-call', id: callOld, name: 'read_image', arguments: '{"path":"old.jpg"}' }],
+      })
+      const tool1 = createToolResultMessage({
+        callId: callOld,
+        isError: false,
+        content: [
+          { type: 'text', text: `OLD_TOOL_${'X'.repeat(185_000)}_TAIL` },
+          { type: 'image', attachment: imgToolOld },
+        ],
+      })
+      const assistant2 = createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: AGY_PROVIDER_ROUTE, model: 'gemini-pro-orchestrator-neon' },
+        content: [{ type: 'tool-call', id: callNew, name: 'read_image', arguments: '{"path":"new.webp"}' }],
+      })
+      const tool2 = createToolResultMessage({
+        callId: callNew,
+        isError: false,
+        content: [
+          { type: 'text', text: '<image_read path="new.webp"/>' },
+          { type: 'image', attachment: imgToolNew },
+        ],
+      })
+
+      let derivedMessages = [system, userMessage, assistant1, tool1, assistant2, tool2]
+      const compactionEvents = [
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+        { type: 'compaction/start', seq: 1, time: 2, data: { compactionId: '8e90cc20-8275-43c9-b34f-a3fbe3536d84', turn: 1 } },
+      ]
+      const session = {
+        id: TEST_SESSION_ID,
+        header: { cwd: workspace },
+        snapshotEvents: () => compactionEvents,
+        requestHeader: () => ({
+          config: { provider: AGY_PROVIDER_ROUTE, model: 'gemini-pro-orchestrator-neon' },
+          tools,
+        }),
+        toolHistory: () => ({ tools, updates: [] }),
+        deriveMessages: () => derivedMessages,
+      } as unknown as Agent['session']
+      const agent = {
+        id: TEST_SESSION_ID,
+        session,
+        status: 'running',
+        model: { current: () => ({ provider: AGY_PROVIDER_ROUTE, model: 'gemini-pro-orchestrator-neon' }), select: () => {} },
+        ctx,
+      } as unknown as Agent
+      ctx.agents.register(agent)
+
+      const hostAttestor = createAgentLoopRequestAttestor(ctx.agents, [TRAEX_PROVIDER_ROUTE, AGY_PROVIDER_ROUTE])
+      const claims: boolean[] = []
+      const compactionClaims: boolean[] = []
+      const captured: TraexAcpInvocation[] = []
+      const verifyAuth = vi.fn(async () => {})
+      const adapter = new RawTraexAcpAdapter(Config({ enabled: true, agyEnabled: true, cwd: workspace } as never), {
+        liveSessions: { get: id => id === TEST_SESSION_ID ? session : undefined },
+        verifyAuth,
+        requestAttestor: {
+          claim(req, sess) {
+            const ok = hostAttestor.claim(req, sess)
+            claims.push(ok)
+            return ok
+          },
+          claimCompaction(req, sess) {
+            const ok = hostAttestor.claimCompaction?.(req, sess) ?? false
+            compactionClaims.push(ok)
+            return ok
+          },
+        },
+        attachments: { readImage },
+        runText: (inv, opts) => {
+          captured.push(inv)
+          return (async function* () {
+            yield inv.prompt.includes('compaction checkpoint') ? 'compacted summary' : 'saw all 3 images'
+            opts?.onStopReason?.('end_turn')
+          })()
+        },
+      })
+      ctx.llm.registerAdapter([TRAEX_PROVIDER_ROUTE, AGY_PROVIDER_ROUTE], adapter)
+
+      const traexPrepared = await ctx.llm.prepareCall({ provider: TRAEX_PROVIDER_ROUTE, model: 'default' })
+      expect(traexPrepared.inputModalities).toEqual(['text', 'image'])
+      await expect(ctx.llm.resolveModelInfo(AGY_PROVIDER_ROUTE, 'default')).resolves.toMatchObject({
+        inputModalities: ['text', 'image'],
+      })
+
+      const prepared = await ctx.llm.prepareCall({
+        provider: AGY_PROVIDER_ROUTE,
+        model: 'gemini-pro-orchestrator-neon',
+      })
+      expect(prepared.inputModalities).toEqual(['text', 'image'])
+
+      const loopRequest = markAgentLoopRequest(deepFreeze({
+        provider: AGY_PROVIDER_ROUTE,
+        model: 'gemini-pro-orchestrator-neon',
+        messages: derivedMessages,
+        tools,
+        toolHistory: session.toolHistory(),
+        sessionId: TEST_SESSION_ID,
+        signal: new AbortController().signal,
+      }))
+
+      const chunks = await ctx.agents.withInitiator(agent, async () => {
+        const result: StreamChunk[] = []
+        for await (const chunk of prepared.stream(loopRequest)) result.push(chunk)
+        return result
+      })
+      expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+      expect(claims).toEqual([true, true])
+      expect(readImage).toHaveBeenCalledTimes(3)
+      expect(captured).toHaveLength(1)
+      expect(Buffer.byteLength(captured[0]!.prompt, 'utf8')).toBeLessThanOrEqual(184_320)
+      expect(captured[0]!.images).toEqual([
+        { mimeType: 'image/png', data: Buffer.from(imgUserBytes).toString('base64') },
+        { mimeType: 'image/jpeg', data: Buffer.from(imgToolOldBytes).toString('base64') },
+        { mimeType: 'image/webp', data: Buffer.from(imgToolNewBytes).toString('base64') },
+      ])
+      const payload = JSON.parse(captured[0]!.prompt.slice(captured[0]!.prompt.indexOf('{'))) as {
+        conversation: Array<{ role: string; content: Array<{ content?: Array<Record<string, unknown>> }> }>
+      }
+      expect(payload.conversation[1]?.content[1]).toMatchObject({ type: 'image', index: 1, name: 'user.png' })
+      expect(payload.conversation[3]?.content[0]?.content?.[0]).toMatchObject({
+        type: 'text',
+        text: expect.stringContaining('…[earlier tool output truncated to fit local ACP prompt byte limit'),
+      })
+      expect(payload.conversation[3]?.content[0]?.content?.[1]).toMatchObject({ type: 'image', index: 2, name: 'old.jpg' })
+      expect(payload.conversation[5]?.content[0]?.content?.[1]).toMatchObject({ type: 'image', index: 3, name: 'new.webp' })
+
+      // Verify claimCompaction with ImageBlocks in history: no readImage calls, history descriptions emitted.
+      readImage.mockClear()
+      const COMPACTION_INSTRUCTION = [
+        'You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.',
+        '',
+        'Output EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write "(none)" for an empty section — never drop a section.',
+        '',
+        '## Primary Request and Intent',
+        '- [the user\'s original and evolving goals; quote verbatim where the exact wording matters]',
+        '',
+        '## Key Technical Concepts',
+        '- [technologies, frameworks, patterns, and conventions in play]',
+        '',
+        '## Files and Code',
+        '- [exact path: why it matters, key changes or snippets]',
+        '',
+        '## Errors and Fixes',
+        '- [error: how it was resolved, plus any related user feedback]',
+        '',
+        '## Pending Jobs',
+        '- [explicitly requested work not yet completed]',
+        '',
+        '## Current Work',
+        '- [precisely what was in progress at this checkpoint]',
+        '',
+        '## Next Step',
+        '- [the single next action, directly in line with the most recent request, or "(none)"]',
+        '',
+        '## Critical Context',
+        '- [decisions and their rationale, constraints, user preferences, open questions, data needed to continue]',
+        '',
+        'Rules:',
+        '- Write concise English engineering prose. Preserve exact file paths, commands, error strings, identifiers, numeric values, function signatures, and syntax fragments.',
+        '- Capture user feedback and explicit instructions faithfully, especially corrections.',
+        '- Do NOT mention this summarization request or that the context was compacted.',
+        '- Output only the checkpoint text: do not call any tool or take any other action.',
+        '- If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.',
+      ].join('\n')
+      const latestUser = createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'trailing turn' }] })
+      derivedMessages = [system, userMessage, assistant2, tool2, latestUser]
+      const compactionRequest: GenerateOptions = {
+        provider: AGY_PROVIDER_ROUTE,
+        model: 'gemini-pro-orchestrator-neon',
+        messages: [
+          system,
+          userMessage,
+          assistant2,
+          tool2,
+          { role: 'user', content: [{ type: 'text', text: COMPACTION_INSTRUCTION }] },
+        ],
+        tools,
+        toolHistory: session.toolHistory(),
+        maxTokens: 65_536,
+        sessionId: TEST_SESSION_ID,
+        purpose: 'compaction' as never,
+        signal: new AbortController().signal,
+      }
+      const compactionChunks = await ctx.agents.withInitiator(agent, async () => {
+        const result: StreamChunk[] = []
+        for await (const chunk of ctx.llm.stream(compactionRequest)) result.push(chunk)
+        return result
+      })
+      expect(compactionChunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+      expect(compactionClaims.length).toBeGreaterThanOrEqual(1)
+      expect(compactionClaims.every(Boolean)).toBe(true)
+      expect(readImage).not.toHaveBeenCalled()
+      expect(captured[1]?.images).toBeUndefined()
+      expect(captured[1]?.prompt).toContain('[DSH image attachment in history;')
+
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('propagates IMAGE_OFFLOAD_REQUIRED through LlmRuntime and streams retained images once older images are offloaded', async () => {
+    const imgOld = {
+      attachmentId: 'sha256:old' as never,
+      mediaType: 'image/png' as const,
+      bytes: 1_500,
+      width: 100,
+      height: 100,
+      name: 'old.png',
+    }
+    const imgNewBytes = Uint8Array.from([10, 20, 30, 40])
+    const imgNew = {
+      attachmentId: 'sha256:new' as never,
+      mediaType: 'image/png' as const,
+      bytes: imgNewBytes.byteLength,
+      width: 10,
+      height: 10,
+      name: 'new.png',
+    }
+    const readImage = vi.fn(async (ref: { attachmentId: string }) => {
+      if (ref.attachmentId === imgNew.attachmentId) return { ref: imgNew, data: imgNewBytes }
+      throw new Error('unexpected readImage for offloaded/rejected image')
+    })
+    const settled: RouteFailureContext[] = []
+    const captured: TraexAcpInvocation[] = []
+    const adapter = new TraexAcpAdapter(Config({
+      agyEnabled: true,
+      maxRequestImageBytes: 1_024,
+    } as never), {
+      attachments: { readImage },
+      onSettled: context => { settled.push(context) },
+      runText: (inv, opts) => {
+        captured.push(inv)
+        return (async function* () {
+          yield 'retained only'
+          opts?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter([AGY_PROVIDER_ROUTE], adapter)
+
+    const overBudget = loopOwnedRequest({
+      provider: AGY_PROVIDER_ROUTE,
+      model: 'default',
+      messages: [createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [
+          { type: 'image', attachment: imgOld },
+          { type: 'image', attachment: imgNew },
+        ],
+      })],
+    })
+    const errChunks: StreamChunk[] = []
+    for await (const chunk of ctx.llm.stream(overBudget)) errChunks.push(chunk)
+    expect(errChunks).toEqual([{
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: {
+          message: 'Antigravity ACP provider requires older images to be offloaded',
+          code: IMAGE_OFFLOAD_REQUIRED_CODE,
+          offloadImages: 1,
+        },
+      },
+    }])
+    expect(readImage).not.toHaveBeenCalled()
+    expect(captured).toHaveLength(0)
+    expect(settled.at(-1)).toMatchObject({
+      phase: 'preflight',
+      promptSubmissionState: 'not-submitted',
+      outcome: 'preflight',
+    })
+
+    const offloaded = loopOwnedRequest({
+      provider: AGY_PROVIDER_ROUTE,
+      model: 'default',
+      messages: [createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [
+          { type: 'image', attachment: imgOld, offloaded: true },
+          { type: 'image', attachment: imgNew },
+        ],
+      })],
+    })
+    const okChunks: StreamChunk[] = []
+    for await (const chunk of ctx.llm.stream(offloaded)) okChunks.push(chunk)
+    expect(okChunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    expect(readImage).toHaveBeenCalledTimes(1)
+    expect(captured[0]?.images).toEqual([
+      { mimeType: 'image/png', data: Buffer.from(imgNewBytes).toString('base64') },
+    ])
+    await ctx.fiber.dispose()
+  })
+
+  it('maps image-unsupported transport error to ACP_IMAGE_UNSUPPORTED with promptSubmissionState not-submitted and rejects invalid stored images as ACP_PROMPT_INVALID', async () => {
+    const imgBytes = Uint8Array.from([1, 2, 3, 4])
+    const imgRef = {
+      attachmentId: 'sha256:bad-or-unsupported' as never,
+      mediaType: 'image/png' as const,
+      bytes: imgBytes.byteLength,
+      width: 10,
+      height: 10,
+      name: 'img.png',
+    }
+    const settled: RouteFailureContext[] = []
+    const unsupportedAdapter = new TraexAcpAdapter(Config({ agyEnabled: true } as never), {
+      attachments: {
+        readImage: async () => ({ ref: imgRef, data: imgBytes }),
+      },
+      onSettled: context => { settled.push(context) },
+      runText: (_inv, options) => {
+        options?.onCatalogObserved?.({
+          currentValue: 'gemini-4-neon',
+          modelValues: ['gemini-4-neon'],
+          models: [{ id: 'gemini-4-neon', name: 'Gemini 4 Neon' }],
+          completeReasoning: false,
+          observedAt: 1,
+          supportsImages: false,
+        })
+        options?.onSettled?.({
+          phase: 'model-catalog',
+          promptSubmissionState: 'not-submitted',
+          assistantTextObserved: false,
+          teardownState: 'completed',
+        })
+        return failedTextStream('image-unsupported')
+      },
+    })
+
+    const imgReq: GenerateOptions = {
+      provider: AGY_PROVIDER_ROUTE,
+      model: 'gemini-4-neon',
+      messages: [createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'image', attachment: imgRef }],
+      })],
+    }
+
+    const iterator = unsupportedAdapter.stream(imgReq)[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'block-start' } })
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: 'ACP_IMAGE_UNSUPPORTED',
+      message: 'Antigravity ACP server did not advertise image input capability',
+    })
+    expect(settled.at(-1)).toMatchObject({
+      phase: 'model-catalog',
+      promptSubmissionState: 'not-submitted',
+      outcome: 'protocol',
+    })
+    await expect(unsupportedAdapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-4-neon')).resolves.toMatchObject({
+      inputModalities: ['text'],
+    })
+
+    // Check auth + trustedCwd precede attachments.readImage, and invalid stored images fail with ACP_PROMPT_INVALID.
+    const readSpy = vi.fn(async () => ({ ref: imgRef, data: Uint8Array.from([1]) }))
+    const authFailAdapter = new TraexAcpAdapter(Config({ enabled: true } as never), {
+      attachments: { readImage: readSpy },
+      verifyAuth: () => Promise.reject(new Error('not logged in', { cause: 'auth' })),
+    })
+    await expect(authFailAdapter.stream({ ...imgReq, provider: TRAEX_PROVIDER_ROUTE })[Symbol.asyncIterator]().next())
+      .rejects.toMatchObject({ code: 'ACP_AUTH_REQUIRED' })
+    expect(readSpy).not.toHaveBeenCalled()
+
+    const runTextSpy = vi.fn(() => (async function* () { yield 'never' })())
+    for (const badReturn of [
+      { ref: imgRef, data: 'not-uint8array' as never },
+      { ref: imgRef, data: Uint8Array.from([1, 2]) },
+      { ref: { ...imgRef, attachmentId: 'sha256:mismatch' as never }, data: imgBytes },
+    ]) {
+      const badStoreAdapter = new TraexAcpAdapter(Config({ agyEnabled: true } as never), {
+        attachments: { readImage: async () => badReturn },
+        runText: runTextSpy,
+      })
+      await expect(badStoreAdapter.stream(imgReq)[Symbol.asyncIterator]().next())
+        .rejects.toMatchObject({ code: 'ACP_PROMPT_INVALID' })
+    }
+    expect(runTextSpy).not.toHaveBeenCalled()
+
+    // Abort while attachments.readImage is pending settles promptly without touching runText.
+    const controller = new AbortController()
+    const hangingAdapter = new TraexAcpAdapter(Config({ agyEnabled: true } as never), {
+      attachments: { readImage: () => new Promise(() => {}) },
+      runText: runTextSpy,
+      onSettled: context => { settled.push(context) },
+    })
+    const pending = hangingAdapter.stream({ ...imgReq, signal: controller.signal })[Symbol.asyncIterator]().next()
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ cause: 'abort' })
+    expect(settled.at(-1)).toMatchObject({
+      phase: 'preflight',
+      promptSubmissionState: 'not-submitted',
+      outcome: 'aborted',
+    })
+    expect(runTextSpy).not.toHaveBeenCalled()
   })
 })
