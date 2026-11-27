@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-verifier",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Independent, bounded task acceptance verification with durable contracts and receipts.",
   "license": "MIT",
   "type": "module",

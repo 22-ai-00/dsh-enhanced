@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Global dsh-ray command: status, doctor, web-url, and full purge for DSH Ray plugin installations.",
   "license": "MIT",
   "type": "module",
