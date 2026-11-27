@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-health",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Policy-gated, content-free health and readiness aggregation for DSH assistant services.",
   "license": "MIT",
   "type": "module",

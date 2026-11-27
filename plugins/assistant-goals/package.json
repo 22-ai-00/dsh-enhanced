@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/assistant-goals",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Persistent owner-scoped business goals over the native DSH goal domain.",
   "license": "MIT",
   "type": "module",
