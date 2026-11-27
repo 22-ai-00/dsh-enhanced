@@ -1,6 +1,6 @@
 {
   "name": "@dsh-ray/acp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Use DeepSeek Harness as an Agent Client Protocol (ACP) stdio agent.",
   "license": "MIT",
   "type": "module",
