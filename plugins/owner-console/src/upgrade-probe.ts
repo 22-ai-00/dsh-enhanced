@@ -21,7 +21,7 @@ const REGISTRY_TIMEOUT_MS = 6_000
 const EARLY_SPAWN_SETTLE_MS = 60
 const MAX_HOST_METADATA_BYTES = 16_384
 const MAX_REGISTRY_BYTES = 32_768
-const MAX_LOG_TAIL_READ_BYTES = 16_384
+const MAX_LOG_TAIL_READ_BYTES = 32_768
 const MAX_LOG_TAIL_CHARS = 1_800
 const UPGRADE_LOG_PATTERN = /^owner-console-upgrade-(\d+)\.log$/u
 const CSI_ANSI_PATTERN = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[ -/]*[@-~]`, 'gu')
@@ -522,7 +522,12 @@ interface TrackedUpgradeRun {
   readonly spawnError?: string
 }
 
-function readUpgradeLogTail(logPath: string | undefined): string | undefined {
+interface UpgradeLogSnapshot {
+  readonly rawText: string
+  readonly logTail: string | undefined
+}
+
+function readUpgradeLogSnapshot(logPath: string | undefined): UpgradeLogSnapshot | undefined {
   if (logPath === undefined || logPath.trim() === '') return undefined
   let fd: number | undefined
   try {
@@ -546,9 +551,12 @@ function readUpgradeLogTail(logPath: string | undefined): string | undefined {
       .split(/\r?\n/u)
       .map(line => redactProbeDetail(line))
       .filter(line => line !== '')
-    if (redactedLines.length === 0) return undefined
     const joined = redactedLines.join('\n')
-    return joined.length > MAX_LOG_TAIL_CHARS ? joined.slice(-MAX_LOG_TAIL_CHARS) : joined
+    const logTail = redactedLines.length === 0
+      ? undefined
+      : (joined.length > MAX_LOG_TAIL_CHARS ? joined.slice(-MAX_LOG_TAIL_CHARS) : joined)
+    if (rawText.trim() === '' && logTail === undefined) return undefined
+    return { rawText, logTail }
   } catch {
     return undefined
   } finally {
@@ -587,40 +595,68 @@ function findLatestUpgradeLogPath(dshHome: string | null): Readonly<{ path: stri
   }
 }
 
-function parseUpgradeLogOutcome(logTail: string | undefined): Readonly<{
+function extractLastUpgradeJsonObject(text: string): Record<string, unknown> | undefined {
+  const closePositions: number[] = []
+  for (let i = text.length - 1; i >= 0 && closePositions.length < 16; i--) {
+    if (text[i] === '}') closePositions.push(i)
+  }
+  for (const closeIdx of closePositions) {
+    const openCandidates: number[] = []
+    for (let i = closeIdx - 1; i >= 0; i--) {
+      if (text[i] === '{' && (i === 0 || text[i - 1] === '\n' || text[i - 1] === '\r' || text[i - 1] === ' ')) {
+        openCandidates.push(i)
+      }
+    }
+    for (const openIdx of openCandidates.slice(0, 64)) {
+      try {
+        const raw = JSON.parse(text.slice(openIdx, closeIdx + 1)) as unknown
+        if (isPlainObject(raw) && (
+          raw['command'] === 'upgrade'
+          || typeof raw['ok'] === 'boolean'
+          || isPlainObject(raw['execution'])
+          || isPlainObject(raw['readiness'])
+        )) {
+          return raw as Record<string, unknown>
+        }
+      } catch {
+        // Ignore partial brace spans and try earlier opening braces.
+      }
+    }
+  }
+  return undefined
+}
+
+function parseUpgradeLogOutcome(snapshot: UpgradeLogSnapshot | undefined): Readonly<{
   jsonOk?: boolean
   error?: string
   lastLine?: string
 }> {
-  if (logTail === undefined || logTail.trim() === '') return {}
-  const lines = logTail.split(/\r?\n/u).map(l => l.trim()).filter(l => l !== '')
-  if (lines.length === 0) return {}
+  if (snapshot === undefined) return {}
   let jsonOk: boolean | undefined
   let parsedError: string | undefined
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]!
-    const jsonStart = line.indexOf('{')
-    if (jsonStart >= 0) {
-      try {
-        const raw = JSON.parse(line.slice(jsonStart)) as unknown
-        if (isPlainObject(raw)) {
-          if (typeof raw['ok'] === 'boolean') jsonOk = raw['ok']
-          const execObj = isPlainObject(raw['execution']) ? raw['execution'] : undefined
-          const errStr = textOrNull(raw['error']) ?? textOrNull(execObj?.['error'])
-          if (errStr !== null) parsedError = redactProbeDetail(errStr)
-          if (jsonOk !== undefined || parsedError !== undefined) break
-        }
-      } catch {
-        // Non-JSON log line.
-      }
-    }
+
+  const report = extractLastUpgradeJsonObject(snapshot.rawText)
+  if (report !== undefined) {
+    if (typeof report['ok'] === 'boolean') jsonOk = report['ok']
+    const execObj = isPlainObject(report['execution']) ? report['execution'] : undefined
+    const readinessObj = isPlainObject(report['readiness']) ? report['readiness'] : undefined
+    const blockedReasons = Array.isArray(readinessObj?.['blockedReasons'])
+      ? readinessObj['blockedReasons'].map(item => textOrNull(item)).filter((item): item is string => item !== null)
+      : []
+    const errStr = textOrNull(report['error']) ?? textOrNull(execObj?.['error']) ?? blockedReasons[0] ?? null
+    if (errStr !== null) parsedError = redactProbeDetail(errStr)
   }
+
+  const lines = snapshot.logTail !== undefined
+    ? snapshot.logTail.split(/\r?\n/u).map(l => l.trim()).filter(l => l !== '')
+    : []
   const errorLine = [...lines].reverse().find(line =>
     /ERR_PNPM_|ENOENT|EACCES|npm ERR!|ETIMEDOUT|\bError:\b|升级失败|失败：|退出码\s*[1-9]/u.test(line))
+  const resolvedError = parsedError ?? errorLine ?? (jsonOk === false ? '后台升级 CLI 返回 ok: false，请查看日志' : undefined)
   return {
     ...(jsonOk === undefined ? {} : { jsonOk }),
-    ...(parsedError !== undefined ? { error: parsedError } : errorLine !== undefined ? { error: errorLine } : {}),
-    lastLine: lines[lines.length - 1]!,
+    ...(resolvedError !== undefined ? { error: resolvedError } : {}),
+    ...(lines.length > 0 ? { lastLine: lines[lines.length - 1]! } : {}),
   }
 }
 
@@ -684,10 +720,11 @@ export class SelfUpgradeProber {
 
     const logPath = tracked?.logPath ?? diskLog?.path
     const startedAt = tracked?.startedAt ?? diskLog?.startedAt ?? this.now()
-    const logTail = readUpgradeLogTail(logPath)
-    if (tracked === undefined && logTail === undefined) return undefined
+    const snapshot = readUpgradeLogSnapshot(logPath)
+    const logTail = snapshot?.logTail
+    if (tracked === undefined && snapshot === undefined) return undefined
 
-    const outcome = parseUpgradeLogOutcome(logTail)
+    const outcome = parseUpgradeLogOutcome(snapshot)
     if (tracked?.spawnError !== undefined) {
       const error = redactProbeDetail(tracked.spawnError).slice(0, 500)
       return Object.freeze({
@@ -1177,8 +1214,8 @@ export class SelfUpgradeProber {
       }
 
       if (pid === undefined || pid <= 0) {
-        const logTail = readUpgradeLogTail(log.path)
-        const outcome = parseUpgradeLogOutcome(logTail)
+        const snapshot = readUpgradeLogSnapshot(log.path)
+        const outcome = parseUpgradeLogOutcome(snapshot)
         const reason = outcome.error ?? '未能创建独立升级进程'
         this.latestRuns.set(cacheKey, {
           startedAt,
@@ -1196,8 +1233,8 @@ export class SelfUpgradeProber {
       }
 
       if (settledExitCode !== undefined && settledExitCode !== null) {
-        const logTail = readUpgradeLogTail(log.path)
-        const outcome = parseUpgradeLogOutcome(logTail)
+        const snapshot = readUpgradeLogSnapshot(log.path)
+        const outcome = parseUpgradeLogOutcome(snapshot)
         if (settledExitCode !== 0 || outcome.jsonOk === false) {
           const detail = outcome.error ?? `退出码 ${settledExitCode}`
           this.latestRuns.set(cacheKey, {

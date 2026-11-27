@@ -417,4 +417,65 @@ describe('AutonomyWizardCard & SelfUpgradeCard UI surfaces', () => {
     expect(upgradeCard.textContent).toContain('ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY')
     expect(upgradeCard.textContent).toContain('/Users/test/.dsh/logs/owner-console-upgrade-1.log')
   })
+
+  it('immediately refreshes and renders latestRun failure log when runSelfUpgrade returns applied=false', async () => {
+    let triggeredFailure = false
+    const checkSelfUpgrade = vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        ...baseUpgradeStatus(false),
+        ...(triggeredFailure
+          ? {
+              latestRun: {
+                state: 'failed' as const,
+                pid: 77777,
+                startedAt: 1_760_000_000_000,
+                finishedAt: 1_760_000_000_050,
+                logPath: '/Users/test/.dsh/logs/owner-console-upgrade-fast-fail.log',
+                summary: '后台升级失败：dsh-ray upgrade exited with ENOENT node',
+                error: 'dsh-ray upgrade exited with ENOENT node',
+                logTail: 'env: node: No such file or directory',
+              },
+            }
+          : {}),
+      },
+    }))
+    const runSelfUpgrade = vi.fn(async () => {
+      triggeredFailure = true
+      return {
+        ok: true as const,
+        value: {
+          applied: false,
+          entry: 'dsh-ray-upgrade',
+          note: '后台升级启动后立即失败（env: node: No such file or directory）；日志：/Users/test/.dsh/logs/owner-console-upgrade-fast-fail.log',
+        },
+      }
+    })
+    const remote = makeBaseRemote({
+      autonomySetupStatus: async () => ({ ok: true, value: baseAutonomyStatus() }),
+      checkSelfUpgrade,
+      runSelfUpgrade,
+    })
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push({ root, el: container })
+
+    await act(async () => {
+      root.render(jsx(WenyaoSettingsSection, { remote, navigation: { openConversation: vi.fn(), openPlugins: vi.fn() } }))
+    })
+    await flushUi()
+
+    const upgradeCard = container.querySelector('[data-owner-console-card="self-upgrade"]')!
+    await act(async () => { clickButtonByText(upgradeCard, '准备自助升级') })
+    await act(async () => { clickButtonByText(upgradeCard, '确认并启动后台升级') })
+    await flushUi()
+
+    expect(runSelfUpgrade).toHaveBeenCalledWith(true)
+    expect(checkSelfUpgrade).toHaveBeenCalledWith(true)
+    expect(upgradeCard.querySelector('[data-self-upgrade-run-state="failed"]')).not.toBeNull()
+    expect(upgradeCard.textContent).toContain('dsh-ray upgrade exited with ENOENT node')
+    expect(upgradeCard.textContent).toContain('env: node: No such file or directory')
+  })
 })

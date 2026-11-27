@@ -3409,6 +3409,9 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
             ? { ok: res.value.applied, text: res.value.note }
             : { ok: false, text: `启动后台升级失败（${remoteFailureText(res.error)}）` })
         }
+        if (!res.ok || !res.value.applied) {
+          await ctrl.syncUpgradeStatus?.()
+        }
         return res
       } catch (cause) {
         if (mountedRef.current) {

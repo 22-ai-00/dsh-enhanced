@@ -706,5 +706,69 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
       expect(doneCheck.latestRun?.state).toBe('succeeded')
       expect(doneCheck.latestRun?.summary).toContain('重启 Host')
     }
+
+    // Case 3: parses pretty-printed multi-line JSON report (>1.8KB) on immediate failure AND on recreated prober
+    {
+      const dshHome3 = mkdtempSync(join(tmpdir(), 'owner-console-upg-multiline-'))
+      dirs.push(dshHome3)
+      const host3 = makeHost(dshHome3, 'desktop')
+      const prettyFailedReport = JSON.stringify({
+        schemaVersion: 1,
+        command: 'upgrade',
+        action: 'yes',
+        ok: false,
+        mode: 'standard-local',
+        frozenSystemd: { detected: false, profiles: [] },
+        packages: {
+          cliPackageVersion: '0.2.1',
+          installedEnhancedVersion: '0.2.0',
+          targetEnhancedVersion: '0.2.1',
+          upgradeAvailable: true,
+          profiles: Array.from({ length: 24 }, (_, idx) => ({
+            profile: `p-${idx}`,
+            padding: 'x'.repeat(80),
+          })),
+        },
+        readiness: { ok: false, blockedReasons: ['blocked fallback reason'] },
+        execution: { error: 'token: tok-hide-me pnpm install exited with 1 during modules check' },
+      }, null, 2)
+      expect(prettyFailedReport.length).toBeGreaterThan(2_400)
+
+      const ts3 = 1_760_000_980_000
+      const proberPretty = new SelfUpgradeProber({
+        currentVersion: '0.2.0',
+        platform: 'darwin',
+        now: () => ts3,
+        env: { HOME: '/Users/test', PATH: '/usr/bin:/bin' },
+        execFn: async (_cmd, args) => ({ stdout: checkJson(args.includes('--dry-run') ? 'dry-run' : 'check'), stderr: '', exitCode: 0 }),
+        spawnFn: () => {
+          const emitter = new EventEmitter() as EventEmitter & { pid?: number; unref: () => void }
+          emitter.pid = 93939
+          emitter.unref = vi.fn()
+          writeFileSync(join(dshHome3, 'logs', `owner-console-upgrade-${ts3}.log`), `starting upgrade...\n${prettyFailedReport}\n`, 'utf8')
+          queueMicrotask(() => emitter.emit('exit', 1))
+          return emitter
+        },
+      })
+
+      const failedTrigger = await proberPretty.trigger(host3, true)
+      expect(failedTrigger.applied).toBe(false)
+      expect(failedTrigger.note).toContain('pnpm install exited with 1 during modules check')
+      expect(failedTrigger.note).not.toContain('tok-hide-me')
+      expect(failedTrigger.note).not.toContain('退出码 1')
+
+      // Recreated prober (simulating Host restart where latestRuns Map is empty) still classifies multi-line ok:false log as failed
+      const recreatedProber = new SelfUpgradeProber({
+        currentVersion: '0.2.0',
+        platform: 'darwin',
+        now: () => ts3 + 1_000,
+        env: { HOME: '/Users/test', PATH: '/usr/bin:/bin' },
+        execFn: async (_cmd, args) => ({ stdout: checkJson(args.includes('--dry-run') ? 'dry-run' : 'check'), stderr: '', exitCode: 0 }),
+      })
+      const diskCheck = await recreatedProber.check(host3, true)
+      expect(diskCheck.latestRun?.state).toBe('failed')
+      expect(diskCheck.latestRun?.error).toContain('pnpm install exited with 1 during modules check')
+      expect(diskCheck.latestRun?.error).not.toContain('tok-hide-me')
+    }
   })
 })
