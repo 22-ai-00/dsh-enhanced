@@ -448,7 +448,7 @@ describe('assistant delivery Cordis service', () => {
     const store = runtimeStoreFromService(reopened.service)
     expect(store.getOutboxByIdempotencyKey(`inbound:${inbox.id}:interrupted`)).toMatchObject({
       status: 'accepted', intent: { replyToEventId: inbox.eventId,
-        text: '这次请求等待超时；已有操作的结果尚未确认，因此不会自动重跑。' },
+        text: '这次请求等待超时；已有操作的结果尚未确认，因此不会自动重跑。可发送 /status 查看当前会话状态，或缩小单次文件读取范围、拆分任务，也可以用 /model 切换其他模型后重试。' },
     })
     expect(store.getInbox(inbox.id)).toMatchObject({ status: 'dead_letter',
       failureCode: 'agent-task-timeout', attemptCount: 1 })

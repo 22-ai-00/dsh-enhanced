@@ -1,6 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantDeliveryService } from '@dsh-ray/assistant-delivery'
 import { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { existsSync } from 'node:fs'
 import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,7 +9,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { parse } from 'yaml'
 import { LarkChannelService, applySelfIterationProfileToggle } from '../src/service.js'
 import { normalizeLarkMessage } from '../src/normalize.js'
-import type { LarkInboundConfig, LarkTransport } from '../src/types.js'
+import type { LarkInboundConfig, LarkSendInput, LarkTransport, LarkTransportHandlers } from '../src/types.js'
 
 const roots: string[] = []
 afterEach(async () => Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))))
@@ -864,6 +865,271 @@ describe('Lark self-iteration NL & slash controls', () => {
     expect(sends.at(-1)?.text).toContain('累计自迭代次数：11')
     expect(sends.at(-1)?.text).toContain('核心插件 36 个')
     expect(llmRequests).toEqual([])
+    await ctx.fiber.restart()
+  })
+
+  test('LarkChannelService routes /update & /upgrade via shared auto-update launcher, rejects /update foo, and reconciles completion & rollback notices on connect', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-auto-update-reconcile-'))
+    roots.push(root)
+    const home = join(root, 'dsh-home')
+    const workspace = join(root, 'workspace')
+    await mkdir(join(home, 'profiles', 'web', '.dsh'), { recursive: true })
+    await mkdir(join(home, '.dsh-ray'), { recursive: true, mode: 0o700 })
+    await mkdir(workspace, { recursive: true })
+
+    // Use real CLI auto-update helpers via dynamic import of built packages/cli
+    const {
+      autoUpdateNotifyPath,
+      autoUpdateStatusPath,
+      clearAutoUpdateNotifyMarker,
+      inspectPendingAutoUpdateNotification,
+      launchUnattendedAutoUpgrade,
+    } = await import('../../../packages/cli/lib/index.js')
+
+    // Seed a completed run BEFORE LarkChannelService connects to test startup reconciliation
+    const completedRunId = 'auto-update-boot-ok'
+    await writeFile(autoUpdateNotifyPath(home), JSON.stringify({
+      schemaVersion: 1,
+      runId: completedRunId,
+      channel: 'lark',
+      account: 'primary-bot',
+      chatId: 'oc_dm_ou_owner',
+      requestedAt: new Date(Date.now() - 5_000).toISOString(),
+    }), { mode: 0o600 })
+    await writeFile(autoUpdateStatusPath(home), JSON.stringify({
+      schemaVersion: 1,
+      runId: completedRunId,
+      status: 'succeeded',
+      version: '0.2.2',
+      updatedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+    }), { mode: 0o600 })
+
+    const ctx = new Context()
+    const sends: Array<{ chatId: string; input: LarkSendInput }> = []
+    let handlers: LarkTransportHandlers | undefined
+    const transport: LarkTransport = {
+      subscribe: next => {
+        handlers = next
+        return () => { handlers = undefined }
+      },
+      connect: async () => {},
+      disconnect: async () => {},
+      addReaction: async () => 'r1',
+      createProgress: async () => ({ cotId: 'cot1', messageId: 'om_cot1' }),
+      writeProgress: async () => {},
+      send: async (chatId, input) => {
+        sends.push({ chatId, input })
+        return { messageId: `om_s_${sends.length}` }
+      },
+    }
+
+    const llmRequests: unknown[] = []
+    await ctx.plugin(AssistantPolicyService, {
+      databasePath: join(root, 'policy.sqlite'),
+      rules: [
+        { id: 'pair', effect: 'allow', subject: { kind: 'external', id: 'local:owner' }, actions: ['pair.issue'],
+          resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
+        { id: 'owner', effect: 'allow', subject: { kind: 'external', id: 'lark/primary-bot/tenant-1/ou_owner' },
+          actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'reply-owner', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace, principal: 'lark/primary-bot/tenant-1/ou_owner' },
+          actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground', 'external'] } },
+      ],
+    })
+    ctx.provide('agents' as never, {
+      create: async (opts: { sessionId: string; meta?: { cwd?: string; agentPreset?: string }; setup?: (agentCtx: Context, agent?: unknown) => Promise<unknown> }) => {
+        const id = opts.sessionId
+        const session = {
+          id,
+          header: { id, cwd: opts.meta?.cwd ?? workspace, agentPreset: opts.meta?.agentPreset ?? 'primary' },
+          append: () => {},
+          snapshotEvents: () => [],
+          deriveMessages: () => [],
+        }
+        const agent = {
+          id, ctx, session,
+          model: { select: () => {}, current: () => ({ provider: 'fixture', model: 'fixture' }) },
+          status: 'idle', whenIdle: async () => {},
+          runMaintenance: (fn: (signal: AbortSignal) => unknown) => fn(new AbortController().signal),
+          cancel: () => {},
+        }
+        await opts.setup?.(ctx, agent)
+        return { agent, dispose: async () => {} }
+      },
+      resume: vi.fn(async () => { throw new Error('LLM should not wake') }),
+    } as never)
+    ctx.provide('sessions' as never, { list: async () => [], flush: async () => true } as never)
+    ctx.provide('llm' as never, {
+      get: () => undefined,
+      stream: async function* (req: unknown) {
+        llmRequests.push(req)
+        yield { type: 'text-delta', text: 'unexpected' }
+        yield { type: 'finish', reason: { kind: 'completed' } }
+      },
+    } as never)
+
+    await ctx.plugin(AssistantDeliveryService, {
+      databasePath: join(root, 'delivery.sqlite'),
+      spoolPath: join(root, 'spool'),
+      defaultWorkspace: workspace,
+      defaultAgentPreset: 'primary',
+      schedulerEnabled: false,
+    })
+    const delivery = ctx.get('assistantDelivery') as AssistantDeliveryService
+    const principal = { channel: 'lark', account: 'primary-bot', tenant: 'tenant-1', user: 'ou_owner' }
+    const pairing = delivery.issuePairing('owner', principal)
+    delivery.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    const launchedCalls: Array<Record<string, unknown>> = []
+    const service = new LarkChannelService(ctx, {
+      enabled: true,
+      account: 'primary-bot',
+      tenant: 'tenant-1',
+      appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET',
+      domain: 'feishu',
+      requireMentionInGroups: true,
+      groupTopicThreads: false,
+      maxTextBytes: 16_384,
+      staleAfterMs: 60_000,
+    }, {
+      env: { LARK_APP_SECRET: 'secret-1', DSH_HOME: home, DSH_PROFILE: 'web' },
+      dshHome: home,
+      profile: 'web',
+      createTransport: () => transport,
+      writeLifecycleMarker: () => {},
+      reconcilePollMs: 40,
+      loadAutoUpdateCli: async () => ({
+        launchUnattendedAutoUpgrade: async opts => {
+          launchedCalls.push(opts as unknown as Record<string, unknown>)
+          return await launchUnattendedAutoUpgrade(opts, {
+            runUpgrade: async () => ({
+              exitCode: 0,
+              report: {
+                schemaVersion: 1,
+                command: 'upgrade',
+                action: 'check',
+                ok: true,
+                ready: true,
+                dshHome: home,
+                mode: 'standard-local',
+                frozenSystemd: { detected: false, profiles: [] },
+                packages: {
+                  cliPackageVersion: '0.2.2',
+                  installedEnhancedVersion: '0.2.0',
+                  targetEnhancedVersion: '0.2.2',
+                  upgradeAvailable: true,
+                  boundHost: { status: 'ready', upgradeAvailable: false },
+                  profiles: [],
+                },
+                registry: { url: 'https://registry.npmjs.org', checked: true, status: 'ok', latestEnhancedVersion: '0.2.2' },
+                readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+                plan: { canExecute: true, steps: [], rollbackSupported: true, backupFiles: [] },
+              },
+            }),
+            collectDoctor: async () => ({ ok: true, profiles: [] }) as never,
+            spawnDetached: () => 5555,
+            runnerScriptPath: '/opt/dsh-ray/lib/auto-update-runner.js',
+            nodeExecutable: '/usr/bin/node',
+          })
+        },
+        inspectPendingAutoUpdateNotification,
+        clearAutoUpdateNotifyMarker,
+      }),
+    })
+
+    await service.whenReady()
+    // 1. Reconciled startup completion marker and cleared it atomically
+    await vi.waitFor(() => {
+      expect(sends.some(s => 'commandCard' in s.input && JSON.stringify(s.input.commandCard).includes('自动升级完成：当前版本 v0.2.2'))).toBe(true)
+    })
+    expect(existsSync(autoUpdateNotifyPath(home))).toBe(false)
+
+    // 2. Owner sends invalid `/update foo` -> usage error, zero LLM / launcher calls
+    const now = 2_000_000
+    const badUpdate = normalizeLarkMessage({
+      account: 'primary-bot',
+      tenant: 'tenant-1',
+      requireMentionInGroups: true,
+      maxTextBytes: 16_384,
+      staleAfterMs: 60_000,
+    }, {
+      messageId: 'om_upd_bad',
+      chatId: 'oc_dm_ou_owner',
+      chatType: 'p2p',
+      senderId: 'ou_owner',
+      content: '/update foo',
+      rawContentType: 'text',
+      resources: [],
+      mentionAll: false,
+      mentionedBot: false,
+      createTime: now,
+    }, now)
+    expect(badUpdate.outcome).toBe('accept')
+    if (badUpdate.outcome === 'accept') await delivery.acceptInbound(badUpdate.envelope)
+    await delivery.tick()
+    await delivery.whenIdle()
+    await delivery.tick()
+    await delivery.whenIdle()
+    expect(launchedCalls).toHaveLength(0)
+    expect(JSON.stringify(sends.at(-1)?.input)).toContain('用法：/update 或 /upgrade')
+
+    // 3. Owner sends exact `/update` -> writes 0600 notify marker & launches background updater
+    const goodUpdate = normalizeLarkMessage({
+      account: 'primary-bot',
+      tenant: 'tenant-1',
+      requireMentionInGroups: true,
+      maxTextBytes: 16_384,
+      staleAfterMs: 60_000,
+    }, {
+      messageId: 'om_upd_ok',
+      chatId: 'oc_dm_ou_owner',
+      chatType: 'p2p',
+      senderId: 'ou_owner',
+      content: '/Update ',
+      rawContentType: 'text',
+      resources: [],
+      mentionAll: false,
+      mentionedBot: false,
+      createTime: now + 10,
+    }, now + 10)
+    expect(goodUpdate.outcome).toBe('accept')
+    if (goodUpdate.outcome === 'accept') await delivery.acceptInbound(goodUpdate.envelope)
+    await delivery.tick()
+    await delivery.whenIdle()
+    await delivery.tick()
+    await delivery.whenIdle()
+
+    expect(launchedCalls).toHaveLength(1)
+    expect(launchedCalls[0]).toMatchObject({
+      dshHome: home,
+      profile: 'web',
+      notify: expect.objectContaining({
+        channel: 'lark',
+        account: 'primary-bot',
+        chatId: 'oc_dm_ou_owner',
+      }),
+    })
+    expect(JSON.stringify(sends.at(-1)?.input)).toContain('🔄 已启动后台自动升级与服务恢复（v0.2.0 -> v0.2.2）')
+    expect(existsSync(autoUpdateNotifyPath(home))).toBe(true)
+
+    // 4. Simulate background runner rollback/failure WITHOUT restarting lark-channel -> poll reconciles & sends alert!
+    const statusJson = JSON.parse(await readFile(autoUpdateStatusPath(home), 'utf8')) as { runId: string }
+    await writeFile(autoUpdateStatusPath(home), JSON.stringify({
+      schemaVersion: 1,
+      runId: statusJson.runId,
+      status: 'failed',
+      error: 'doctor failed after rollback',
+      updatedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+    }), { mode: 0o600 })
+
+    await vi.waitFor(() => {
+      expect(sends.some(s => JSON.stringify(s.input).includes('⚠️ 自动升级失败并已回滚保护：doctor failed after rollback'))).toBe(true)
+    }, { timeout: 3_000 })
+    expect(existsSync(autoUpdateNotifyPath(home))).toBe(false)
+    expect(llmRequests).toEqual([])
+    expect(handlers).toBeDefined()
     await ctx.fiber.restart()
   })
 })

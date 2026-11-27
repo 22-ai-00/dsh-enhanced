@@ -1,9 +1,6 @@
-import { execFile } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { lstat, open, readFile, realpath, rename, rm } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
-import { promisify } from 'node:util'
 import { Context, Service } from '@deepseek-ai/cordis'
 import {
   type AssistantDeliveryService,
@@ -13,13 +10,17 @@ import {
 } from '@dsh-ray/assistant-delivery'
 import { isMap, isScalar, isSeq, parseDocument, type YAMLMap } from 'yaml'
 import { LarkDeliveryAdapter } from './adapter.js'
+import { loadCliAutoUpdateModule, type CliAutoUpdateModule } from './auto-update-bridge.js'
+import { tryBuildLarkCommandCard } from './command-card.js'
 import { Config } from './config.js'
-import { createOfficialLarkTransport, type OfficialLarkTransportOptions } from './sdk.js'
+import {
+  createOfficialLarkTransport,
+  LARK_APPROVAL_CARD_MAX_BYTES,
+  renderLarkMessage,
+  type OfficialLarkTransportOptions,
+} from './sdk.js'
 import { withDshHomeLifecycleLock } from './setup.js'
-import type { LarkChannelHealth, LarkTransport } from './types.js'
-
-const execFileAsync = promisify(execFile)
-const requireOptionalPeer = createRequire(import.meta.url)
+import { LarkTransportError, type LarkChannelHealth, type LarkSendInput, type LarkTransport } from './types.js'
 
 const SELF_ITERATION_TOGGLE_SPECS = [
   { rowId: 'dsh-ray-assistant-work-items', pkgName: '@dsh-ray/assistant-work-items' },
@@ -121,6 +122,8 @@ export interface LarkChannelServiceOptions {
   runUpgrade?: (
     options: Readonly<{ dshHome: string; profile: string }>,
   ) => Promise<OwnerSelfIterationControlResult>
+  loadAutoUpdateCli?: () => Promise<CliAutoUpdateModule | undefined>
+  reconcilePollMs?: number
 }
 
 export type LarkLifecycleMarker = 'lark-channel: connected' | 'lark-channel: disconnected'
@@ -199,6 +202,12 @@ export class LarkChannelService extends Service {
   private adapter: LarkDeliveryAdapter | undefined
   private transport: LarkTransport | undefined
   private transportSignal: AbortSignal | undefined
+  private activeAccount: string | undefined
+  private readonly deliveryRef: AssistantDeliveryService
+  private readonly optionsRef: LarkChannelServiceOptions
+  private autoUpdateReconcileFlight: Promise<void> | undefined
+  private autoUpdatePollTimer: ReturnType<typeof setTimeout> | undefined
+  private autoUpdatePollCount = 0
   private readonly allowedCalendarIds: ReadonlySet<string>
   private disabled = false
   private active = true
@@ -208,6 +217,8 @@ export class LarkChannelService extends Service {
     super(ctx, 'larkChannel')
     const delivery = ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
     if (delivery === undefined) throw new Error('lark-channel: assistantDelivery service is required')
+    this.deliveryRef = delivery
+    this.optionsRef = options
     const config = Config(input) as Required<Omit<import('./config.js').Config, 'appSecretEnv' | 'credentialHandle'>>
       & Pick<import('./config.js').Config, 'appSecretEnv' | 'credentialHandle'>
     this.allowedCalendarIds = new Set(config.allowedCalendarIds)
@@ -248,6 +259,10 @@ export class LarkChannelService extends Service {
       // already unwinding. Observe only this disposal race; genuine startup
       // failures before disposal must remain visible to the Host.
       if (!this.startupFailed) void this.ready.promise.catch(() => {})
+      if (this.autoUpdatePollTimer !== undefined) {
+        clearTimeout(this.autoUpdatePollTimer)
+        this.autoUpdatePollTimer = undefined
+      }
       this.stopController.abort(new Error('lark-channel stopped'))
       await this.lifecycle.catch(() => {})
     }, 'lark-channel.transport')
@@ -316,6 +331,7 @@ export class LarkChannelService extends Service {
     const generation = new AbortController()
     this.transportSignal = AbortSignal.any([generation.signal, this.stopController.signal, ...(credentialSignal ? [credentialSignal] : [])])
     this.transport = transport
+    this.activeAccount = config.account
     const adapter = new LarkDeliveryAdapter({
       account: config.account,
       tenant: config.tenant,
@@ -327,7 +343,10 @@ export class LarkChannelService extends Service {
       // These exact stdout markers are consumed from one fresh systemd
       // Invocation journal. Cordis' built-in logger only buffers unless a
       // console exporter is installed, so it cannot be the readiness source.
-      onConnected: () => lifecycleMarker('lark-channel: connected'),
+      onConnected: () => {
+        lifecycleMarker('lark-channel: connected')
+        void this.reconcileAutoUpdateStatus(this.ctx)
+      },
       onDisconnected: () => lifecycleMarker('lark-channel: disconnected'),
       approvalSecret: appSecret,
       progressCredentialFingerprint: createHash('sha256')
@@ -411,6 +430,93 @@ export class LarkChannelService extends Service {
     }
   }
 
+  private reconcileAutoUpdateStatus(ctx: Context): Promise<void> {
+    if (this.autoUpdateReconcileFlight !== undefined) return this.autoUpdateReconcileFlight
+    const flight = this.runAutoUpdateReconcile(ctx)
+      .catch(error => {
+        ctx.logger.warn(`lark-channel: auto-update reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      .finally(() => {
+        if (this.autoUpdateReconcileFlight === flight) this.autoUpdateReconcileFlight = undefined
+      })
+    this.autoUpdateReconcileFlight = flight
+    return flight
+  }
+
+  private scheduleAutoUpdatePoll(ctx: Context): void {
+    if (!this.active || this.stopController.signal.aborted) return
+    if (this.autoUpdatePollTimer !== undefined || this.autoUpdatePollCount >= 400) return
+    this.autoUpdatePollCount += 1
+    const delayMs = this.optionsRef.reconcilePollMs ?? 3_000
+    this.autoUpdatePollTimer = setTimeout(() => {
+      this.autoUpdatePollTimer = undefined
+      void this.reconcileAutoUpdateStatus(ctx)
+    }, delayMs)
+    this.autoUpdatePollTimer.unref?.()
+  }
+
+  private clearAutoUpdatePoll(): void {
+    if (this.autoUpdatePollTimer !== undefined) {
+      clearTimeout(this.autoUpdatePollTimer)
+      this.autoUpdatePollTimer = undefined
+    }
+    this.autoUpdatePollCount = 0
+  }
+
+  private async runAutoUpdateReconcile(ctx: Context): Promise<void> {
+    const transport = this.transport
+    const transportSignal = this.transportSignal
+    if (transport === undefined || transportSignal === undefined || transportSignal.aborted || this.stopController.signal.aborted) {
+      return
+    }
+    const env = this.optionsRef.env ?? process.env
+    const { dshHome } = resolveDshTarget(this.deliveryRef, this.optionsRef, env)
+    if (!dshHome || !isAbsolute(dshHome)) return
+
+    const cli = await (this.optionsRef.loadAutoUpdateCli
+      ? this.optionsRef.loadAutoUpdateCli()
+      : loadCliAutoUpdateModule(env))
+    if (cli === undefined) return
+
+    const pending = await cli.inspectPendingAutoUpdateNotification(dshHome)
+    if (pending === undefined) {
+      this.clearAutoUpdatePoll()
+      return
+    }
+    if (!pending.ready || pending.message === undefined) {
+      this.scheduleAutoUpdatePoll(ctx)
+      return
+    }
+    this.clearAutoUpdatePoll()
+    if (pending.notify.channel !== undefined && pending.notify.channel !== 'lark') return
+    if (pending.notify.account !== undefined && this.activeAccount !== undefined
+      && pending.notify.account !== this.activeAccount) return
+
+    const chatId = pending.notify.chatId ?? pending.notify.conversation?.chat
+    if (!chatId) return
+
+    const sendSignal = AbortSignal.any([this.stopController.signal, transportSignal])
+    const requestKey = `auto-update:${pending.notify.runId}:${pending.status ?? 'done'}`
+    const commandCard = tryBuildLarkCommandCard(pending.message)
+    let sendInput: LarkSendInput = { text: pending.message }
+    if (commandCard !== undefined) {
+      const candidate: LarkSendInput = { commandCard }
+      if (Buffer.byteLength(renderLarkMessage(candidate).content, 'utf8') <= LARK_APPROVAL_CARD_MAX_BYTES) {
+        sendInput = candidate
+      }
+    }
+    try {
+      await transport.send(chatId, sendInput, { requestKey, signal: sendSignal })
+    } catch (error) {
+      if (error instanceof LarkTransportError && error.code === 'format_error' && 'commandCard' in sendInput) {
+        await transport.send(chatId, { text: pending.message }, { requestKey: `${requestKey}:fallback`, signal: sendSignal })
+      } else {
+        throw error
+      }
+    }
+    await cli.clearAutoUpdateNotifyMarker(dshHome, pending.notify.runId)
+  }
+
   private async handleOwnerSelfIterationControl(
     ctx: Context,
     delivery: AssistantDeliveryService,
@@ -431,32 +537,62 @@ export class LarkChannelService extends Service {
       }>>
       handleControlAction?: (req: Readonly<Record<string, unknown>>) => Promise<OwnerSelfIterationControlResult>
     }> | undefined
-    if (typeof ownerConsole?.controlSelfIteration === 'function') {
-      const result = await ownerConsole.controlSelfIteration(request.action, true)
-      const message = result.note ?? result.message
-      return {
-        ok: result.ok,
-        ...(result.state === undefined ? {} : { state: result.state }),
-        ...(result.error === undefined ? {} : { error: result.error }),
-        ...(result.reason === undefined ? {} : { reason: result.reason }),
-        ...(message === undefined ? {} : { message }),
+    const env = options.env ?? process.env
+    const { dshHome, profile } = resolveDshTarget(delivery, options, env)
+
+    if (request.action === 'enableSelfIteration' || request.action === 'disableSelfIteration') {
+      if (typeof ownerConsole?.controlSelfIteration === 'function') {
+        const result = await ownerConsole.controlSelfIteration(request.action, true)
+        const message = result.note ?? result.message
+        return {
+          ok: result.ok,
+          ...(result.state === undefined ? {} : { state: result.state }),
+          ...(result.error === undefined ? {} : { error: result.error }),
+          ...(result.reason === undefined ? {} : { reason: result.reason }),
+          ...(message === undefined ? {} : { message }),
+        }
+      }
+      if (typeof ownerConsole?.handleControlAction === 'function') {
+        return await ownerConsole.handleControlAction(Object.freeze({
+          ownerAuthorized: true,
+          action: request.action,
+        }))
       }
     }
-    if (typeof ownerConsole?.handleControlAction === 'function') {
-      return await ownerConsole.handleControlAction(Object.freeze({
+
+    const notify = {
+      channel: request.channel ?? 'lark',
+      account: request.account ?? this.activeAccount ?? 'default',
+      ...(request.chatId !== undefined ? { chatId: request.chatId } : {}),
+      ...(request.conversation !== undefined ? { conversation: request.conversation } : {}),
+      ...(request.principal !== undefined ? { principal: request.principal } : {}),
+      ownerPrincipal: request.principalId,
+    }
+
+    if (request.action === 'upgradeAssistantAndRecover' && typeof options.runUpgrade === 'function') {
+      if (!dshHome || !isAbsolute(dshHome) || !profile || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(profile)) {
+        return {
+          ok: false,
+          error: '未配置有效的 DSH_HOME 或 profile，且当前未加载 ownerConsole；本次自迭代控制未执行。',
+          reason: 'control-target-unconfigured',
+        }
+      }
+      return await options.runUpgrade({ dshHome, profile })
+    }
+
+    if (request.action === 'upgradeAssistantAndRecover' && typeof ownerConsole?.handleControlAction === 'function') {
+      const result = await ownerConsole.handleControlAction(Object.freeze({
         ownerAuthorized: true,
         action: request.action,
+        notify,
       }))
+      if (result.ok && this.transport !== undefined) {
+        this.autoUpdatePollCount = 0
+        void this.reconcileAutoUpdateStatus(ctx)
+      }
+      return result
     }
-    const env = options.env ?? process.env
-    const reloadProfilePath = (delivery as unknown as { config?: { inProcessReload?: { profilePath?: string } } })
-      .config?.inProcessReload?.profilePath
-    const inferred = typeof reloadProfilePath === 'string' && isAbsolute(reloadProfilePath)
-      && basename(dirname(reloadProfilePath)) === 'profiles'
-      ? { dshHome: dirname(dirname(reloadProfilePath)), profile: basename(reloadProfilePath) }
-      : undefined
-    const dshHome = options.dshHome ?? env.DSH_HOME ?? inferred?.dshHome
-    const profile = options.profile ?? env.DSH_PROFILE ?? inferred?.profile
+
     if (!dshHome || !isAbsolute(dshHome) || !profile || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(profile)) {
       return {
         ok: false,
@@ -471,10 +607,37 @@ export class LarkChannelService extends Service {
         enable: request.action === 'enableSelfIteration',
       })
     }
-    if (typeof options.runUpgrade === 'function') {
-      return await options.runUpgrade({ dshHome, profile })
+    const result = await runDefaultAssistantUpgrade({
+      dshHome,
+      profile,
+      env,
+      notify,
+      ...(options.loadAutoUpdateCli ? { loadAutoUpdateCli: options.loadAutoUpdateCli } : {}),
+    })
+    if (result.ok && this.transport !== undefined) {
+      this.autoUpdatePollCount = 0
+      void this.reconcileAutoUpdateStatus(ctx)
     }
-    return await runDefaultAssistantUpgrade({ dshHome, profile, env })
+    return result
+  }
+}
+
+function resolveDshTarget(
+  delivery: AssistantDeliveryService,
+  options: LarkChannelServiceOptions,
+  env: Readonly<Record<string, string | undefined>>,
+): { dshHome?: string; profile?: string } {
+  const reloadProfilePath = (delivery as unknown as { config?: { inProcessReload?: { profilePath?: string } } })
+    .config?.inProcessReload?.profilePath
+  const inferred = typeof reloadProfilePath === 'string' && isAbsolute(reloadProfilePath)
+    && basename(dirname(reloadProfilePath)) === 'profiles'
+    ? { dshHome: dirname(dirname(reloadProfilePath)), profile: basename(reloadProfilePath) }
+    : undefined
+  const dshHome = options.dshHome ?? env.DSH_HOME ?? inferred?.dshHome
+  const profile = options.profile ?? env.DSH_PROFILE ?? inferred?.profile
+  return {
+    ...(dshHome === undefined ? {} : { dshHome }),
+    ...(profile === undefined ? {} : { profile }),
   }
 }
 
@@ -622,65 +785,48 @@ async function runDefaultAssistantUpgrade(input: Readonly<{
   dshHome: string
   profile: string
   env: Readonly<Record<string, string | undefined>>
+  notify?: {
+    channel: string
+    account: string
+    chatId?: string
+    conversation?: Readonly<{ kind?: string; chat: string }>
+    principal?: Readonly<Record<string, unknown>> | string
+    ownerPrincipal?: string
+  }
+  loadAutoUpdateCli?: () => Promise<CliAutoUpdateModule | undefined>
 }>): Promise<OwnerSelfIterationControlResult> {
-  try {
-    const cliPath = requireOptionalPeer.resolve('@dsh-ray/cli')
-    const cliMod = await import(cliPath) as {
-      upgradeAssistantAndRecover?: (opts: Record<string, unknown>) => Promise<{
-        ok: boolean
-        healthy?: boolean
-        upgraded?: boolean
-        restarted?: boolean
-        error?: string
-      }>
+  const cli = await (input.loadAutoUpdateCli ? input.loadAutoUpdateCli() : loadCliAutoUpdateModule(input.env))
+  if (cli === undefined) {
+    return {
+      ok: false,
+      error: '未找到支持后台自动升级的 @dsh-ray/cli，请先安装或升级全局 dsh-ray（npm install -g @dsh-ray/cli@latest）。',
+      reason: 'auto-update-cli-unavailable',
     }
-    if (typeof cliMod.upgradeAssistantAndRecover === 'function') {
-      const outcome = await cliMod.upgradeAssistantAndRecover({
-        dshHome: input.dshHome,
-        profile: input.profile,
-        yes: true,
-        env: input.env,
-      })
-      if (outcome.ok && outcome.healthy !== false) {
-        return {
-          ok: true,
-          state: 'upgraded',
-          message: `已完成 profile ${input.profile} 的整体助手升级、健康检查与恢复。`,
-        }
-      }
-      return {
-        ok: false,
-        error: outcome.error ?? '升级或健康检查未通过，服务未处于健康就绪状态。',
-        reason: 'upgrade-unhealthy',
-      }
-    }
-  } catch {
-    // Fall back to invoking `dsh-ray` CLI executable when programmatic import is unavailable.
   }
   try {
-    const { stdout } = await execFileAsync(
-      'dsh-ray',
-      ['upgrade', '--profile', input.profile, '--dsh-home', input.dshHome, '--yes', '--json'],
-      { env: input.env as NodeJS.ProcessEnv, timeout: 120_000 },
-    )
-    const parsed = JSON.parse(stdout.trim() || '{}') as { ok?: boolean; healthy?: boolean; error?: string }
-    if (parsed.ok === true && parsed.healthy !== false) {
+    const result = await cli.launchUnattendedAutoUpgrade({
+      dshHome: input.dshHome,
+      profile: input.profile,
+      env: input.env,
+      ...(input.notify !== undefined ? { notify: input.notify } : {}),
+    })
+    if (result.ok) {
       return {
         ok: true,
         state: 'upgraded',
-        message: `已完成 profile ${input.profile} 的整体助手升级、健康检查与恢复。`,
+        message: result.message,
       }
     }
     return {
       ok: false,
-      error: parsed.error ?? 'dsh-ray upgrade 未返回健康就绪状态。',
-      reason: 'upgrade-failed',
+      error: result.error ?? result.message,
+      reason: 'auto-update-launch-failed',
     }
   } catch (error) {
     return {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
-      reason: 'upgrade-command-failed',
+      reason: 'auto-update-launch-failed',
     }
   }
 }

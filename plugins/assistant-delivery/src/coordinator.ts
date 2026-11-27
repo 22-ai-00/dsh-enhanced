@@ -1,4 +1,5 @@
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { isClassifiedAgentTurnFailureCode } from './interrupted-notices.js'
 import {
   isFeedbackDispatchRecoveryCode,
   isFeedbackRetryableFailureCode,
@@ -833,9 +834,10 @@ export class InboundCoordinator {
       return
     }
     if (dispatchMarked && result.outcome !== 'processed') {
-      if (result.failureCode === 'agent-task-timeout') {
+      if (result.failureCode === 'agent-task-timeout'
+        || isClassifiedAgentTurnFailureCode(result.failureCode)) {
         this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
-          outcome: 'dead_letter', failureCode: 'agent-task-timeout' })
+          outcome: 'dead_letter', failureCode: result.failureCode })
         return
       }
       if (permissionDispatchRecoveryFromFailureCode(result.failureCode) !== undefined
@@ -859,9 +861,10 @@ export class InboundCoordinator {
       this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken, outcome: 'processed' })
       return
     }
-    if (result.failureCode === 'agent-task-timeout') {
+    if (result.failureCode === 'agent-task-timeout'
+      || isClassifiedAgentTurnFailureCode(result.failureCode)) {
       this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
-        outcome: 'dead_letter', failureCode: 'agent-task-timeout' })
+        outcome: 'dead_letter', failureCode: result.failureCode })
       return
     }
     if (result.failureCode === 'session-lease-busy'

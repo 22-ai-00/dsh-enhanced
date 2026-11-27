@@ -44,6 +44,7 @@ function tryBuildHelpCard(text: string): LarkCommandCard | undefined {
         { kind: 'markdown', content: '`/feedback`：提交结构化偏好；回复任务结果可记录 achieved/partial/not-achieved' },
         { kind: 'markdown', content: '`/learning`：查看、导出、暂停、恢复或清除当前 scope 的偏好学习' },
         { kind: 'markdown', content: '`/autonomy`：开启、关闭或升级整体助手自迭代能力' },
+        { kind: 'markdown', content: '`/update`（`/upgrade`）：在后台升级整体助手并自动重启恢复（仅限 owner）' },
         { kind: 'markdown', content: '`/version`：查看当前助手、Host、插件版本与自迭代演进统计' },
       ],
     },
@@ -169,6 +170,10 @@ const AUTONOMY_SUCCESS_PREFIXES = [
   '已完成 profile ',
   '已完成整体助手升级',
   '升级完成并已恢复',
+  '🔄 已启动后台自动升级与服务恢复',
+  '🔄 后台自动升级与服务恢复正在进行中',
+  '当前已是最新版本 ',
+  '✅ 自动升级完成',
 ] as const
 
 const AUTONOMY_WARNING_PREFIXES = [
@@ -179,6 +184,8 @@ const AUTONOMY_WARNING_PREFIXES = [
   'owner 或会话绑定已变化；本次自迭代控制未执行',
   '当前身份不是此会话的 owner；本次自迭代控制未执行',
   '自迭代控制命令不接受文件、图片或其他附件',
+  '用法：/update 或 /upgrade',
+  '⚠️ 自动升级失败并已回滚保护',
 ] as const
 
 function tryBuildAutonomyCard(text: string): LarkCommandCard | undefined {
@@ -196,7 +203,7 @@ function tryBuildAutonomyCard(text: string): LarkCommandCard | undefined {
           items: [
             { kind: 'markdown', content: '`/autonomy enable`（或「开启自迭代」）：开启当前助手自迭代能力' },
             { kind: 'markdown', content: '`/autonomy disable`（或「关闭自迭代」）：关闭当前助手自迭代能力' },
-            { kind: 'markdown', content: '`/autonomy upgrade`（或「升级整体助手」）：执行整体升级与健康恢复' },
+            { kind: 'markdown', content: '`/autonomy upgrade`（或 `/update`、`/upgrade`、「升级整体助手」）：在后台执行整体升级与服务恢复' },
             { kind: 'markdown', content: '`/autonomy version`（或 `/version`）：查看助手版本与自迭代统计' },
           ],
         },

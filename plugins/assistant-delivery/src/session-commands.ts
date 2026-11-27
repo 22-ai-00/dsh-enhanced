@@ -148,6 +148,14 @@ const ownerSelfIterationSlashActions: Readonly<Record<string, OwnerSelfIteration
   upgrade: 'upgradeAssistantAndRecover',
 })
 
+export const OWNER_UPDATE_USAGE = '用法：/update 或 /upgrade（不接受额外参数）；如需升级并恢复整体助手，请直接发送 /update。'
+
+export function isOwnerUpdateSlashAttempt(text: string): boolean {
+  if (typeof text !== 'string') return false
+  const trimmed = text.trim()
+  return /^\/(?:update|upgrade)(?:$|[^a-z0-9_-])/iu.test(trimmed)
+}
+
 /**
  * Deterministic closed-set parser for owner self-iteration control intents.
  * Rejects questions, multi-clause prose, and conversational mentions of "自迭代"/"升级".
@@ -158,6 +166,10 @@ export function parseOwnerSelfIterationCommand(
   if (typeof text !== 'string') return undefined
   const trimmed = text.trim()
   if (trimmed === '') return undefined
+
+  if (/^\/(?:update|upgrade)$/iu.test(trimmed)) {
+    return Object.freeze({ action: 'upgradeAssistantAndRecover', sourceText: text })
+  }
 
   const slashMatch = /^\/autonomy[\t ]+([a-z]+)$/iu.exec(trimmed)
   if (slashMatch !== null) {

@@ -13603,3 +13603,113 @@ test.each(['rotate', 'revoke'] as const)('owner status read rejects a %s route i
     expect(staleRead).toBeUndefined()
   } finally { await fixture.ctx.fiber.restart() }
 }, 20_000)
+
+test('routes /update, /upgrade, /help, rejects /update with extra args, and forwards conversation notify metadata without entering the model', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'delivery-update-cmd-'))
+  roots.push(root)
+  const fixture = await runtimeHarness(root, new Map())
+  const requests: Array<Record<string, unknown>> = []
+  fixture.service.registerOwnerSelfIterationHandler(async req => {
+    requests.push(req as unknown as Record<string, unknown>)
+    return {
+      ok: true,
+      state: 'upgraded',
+      message: '🔄 已启动后台自动升级与服务恢复（v0.2.0 -> v0.2.2），完成后服务将自动重启恢复并通知结果，全程无需人工干预。',
+    }
+  })
+  try {
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound({ ...message('evt-help-upd', '/help'), kind: 'command' })
+    await drive(fixture.service)
+    await fixture.service.acceptInbound({ ...message('evt-bad-upd', '/update foo'), kind: 'command' })
+    await drive(fixture.service)
+    await fixture.service.acceptInbound({ ...message('evt-bad-upg', '/upgrade --force'), kind: 'command' })
+    await drive(fixture.service)
+    await fixture.service.acceptInbound({ ...message('evt-ok-upd', '/UPDATE  '), kind: 'command' })
+    await drive(fixture.service)
+    await fixture.service.acceptInbound({ ...message('evt-ok-upg', '/Upgrade'), kind: 'command' })
+    await drive(fixture.service)
+
+    expect(fixture.llm.requests).toEqual([])
+    expect(requests).toHaveLength(2)
+    expect(requests[0]).toMatchObject({
+      action: 'upgradeAssistantAndRecover',
+      channel: 'lark',
+      account: 'bot-1',
+      chatId: conversation.chat,
+      conversation: { kind: 'dm', chat: conversation.chat },
+      principal,
+    })
+    expect(requests[1]).toMatchObject({ action: 'upgradeAssistantAndRecover' })
+
+    const texts = fixture.sends.map(send => send.text)
+    expect(texts.some(t => t.includes('/update（/upgrade）'))).toBe(true)
+    expect(texts.filter(t => t.includes('用法：/update 或 /upgrade'))).toHaveLength(2)
+    expect(texts.filter(t => t.includes('🔄 已启动后台自动升级与服务恢复'))).toHaveLength(2)
+  } finally {
+    await fixture.ctx.fiber.restart()
+  }
+}, 20_000)
+
+test.each([
+  {
+    name: 'missing credential turn/end error',
+    streamError: Object.assign(new Error('missing deepseek-official api key sk-secret-xyz at /private/path'), { code: 'MISSING_CREDENTIAL' }),
+    expectedCode: 'agent-turn-missing-credential',
+    expectedSnippet: '凭据',
+    forbiddenSnippet: 'sk-secret-xyz',
+  },
+  {
+    name: 'TraeX ACP execution aborted turn/end error',
+    streamError: new Error('TraeX ACP execution was aborted due to Bearer leak999'),
+    expectedCode: 'agent-turn-provider-aborted',
+    expectedSnippet: 'ACP',
+    forbiddenSnippet: 'leak999',
+  },
+  {
+    name: 'prompt byte limit mid-turn error',
+    streamError: new Error('prompt-limit: prompt exceeds 184320 bytes'),
+    expectedCode: 'agent-turn-prompt-limit',
+    expectedSnippet: '/compact',
+    forbiddenSnippet: '184320 bytes',
+  },
+] as const)('notifies owner cleanly without replay on non-timeout dispatched $name', async ({
+  streamError,
+  expectedCode,
+  expectedSnippet,
+  forbiddenSnippet,
+}) => {
+  const root = await mkdtemp(join(tmpdir(), `delivery-midturn-${expectedCode}-`))
+  roots.push(root)
+  const fixture = await runtimeHarness(root, new Map())
+  vi.spyOn(fixture.llm, 'stream').mockImplementationOnce(async function* (options) {
+    fixture.llm.requests.push(options)
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: '正在检查' }
+    throw streamError
+  })
+  try {
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const accepted = await fixture.service.acceptInbound(message(`evt-${expectedCode}`, '请分析仓库问题'))
+    await drive(fixture.service)
+    await fixture.service.tick()
+    await fixture.service.whenIdle()
+
+    expect(fixture.llm.requests).toHaveLength(1)
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId!)).toMatchObject({
+      status: 'dead_letter',
+      attemptCount: 1,
+      failureCode: expectedCode,
+    })
+    expect(fixture.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: expectedCode })
+    const notices = fixture.sends.filter(item => item.idempotencyKey === `inbound:${accepted.inboxId}:interrupted`)
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.text).toContain(expectedSnippet)
+    expect(notices[0]?.text).not.toContain(forbiddenSnippet)
+  } finally {
+    await fixture.ctx.fiber.restart()
+  }
+}, 20_000)

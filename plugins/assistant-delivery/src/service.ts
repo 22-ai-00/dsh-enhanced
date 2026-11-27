@@ -117,6 +117,10 @@ import {
   type ParsedOwnerVersionQuery,
 } from './session-commands.js'
 import {
+  interruptedTurnNoticeForFailureCode,
+  isNotifiableInterruptedFailureCode,
+} from './interrupted-notices.js'
+import {
   collectDeliveryVersionReport,
   type AssistantVersionReport,
 } from './version-query.js'
@@ -168,6 +172,7 @@ import type {
   DeliveryInboundIntakeSignal,
   DeliveryInboundObservation,
   ExternalPrincipalKey,
+  ConversationKind,
   InboundEnvelope,
   InboxRecord,
   ModelPickerIntent,
@@ -243,8 +248,6 @@ const goalOutcomeFeedbackFooter = [
   '`helpful` 等只记录偏好，不会被当成目标成败。',
 ].join('\n')
 const goalWakeCompletionNotice = '目标已通过独立验收并完成。'
-const interruptedTurnNotice = '这次请求在执行过程中被中断，当前已停止等待；已有操作的结果尚未确认，因此没有自动重跑。你可以继续发送消息；涉及写入的任务需要先核对现有结果。'
-const timedOutTurnNotice = '这次请求等待超时；已有操作的结果尚未确认，因此不会自动重跑。'
 
 interface GoalOutcomeFeedbackAuthority {
   issueOwnerGoalOutcomeFeedbackTarget(locator: Readonly<OwnerGoalOutcomeFeedbackLocator>): unknown
@@ -840,6 +843,11 @@ export interface OwnerSelfIterationControlRequest {
   readonly workspace: string
   readonly agentPreset: string
   readonly eventId: string
+  readonly channel?: string
+  readonly account?: string
+  readonly chatId?: string
+  readonly conversation?: Readonly<{ kind: ConversationKind; chat: string }>
+  readonly principal?: Readonly<ExternalPrincipalKey>
 }
 
 export interface OwnerSelfIterationControlResult {
@@ -4093,6 +4101,14 @@ export class AssistantDeliveryService extends Service {
       workspace: binding.workspace,
       agentPreset: binding.agentPreset,
       eventId: envelope.eventId,
+      channel: binding.conversation.channel,
+      account: binding.conversation.account,
+      chatId: binding.conversation.chat,
+      conversation: Object.freeze({
+        kind: binding.conversation.kind,
+        chat: binding.conversation.chat,
+      }),
+      principal: binding.principal,
     })
     if (this.ownerSelfIterationHandler !== undefined) {
       try {
@@ -6540,8 +6556,7 @@ export class AssistantDeliveryService extends Service {
         const inboxId = key.slice('inbound:'.length, -':interrupted'.length)
         const inbox = this.deliveryStore.getInbox(inboxId)
         const binding = this.deliveryStore.getBinding(record.intent.bindingId)
-        const expectedNotice = inbox?.failureCode === 'agent-task-timeout'
-          ? timedOutTurnNotice : interruptedTurnNotice
+        const expectedNotice = interruptedTurnNoticeForFailureCode(inbox?.failureCode)
         if (record.intent.text !== expectedNotice || inbox === undefined || binding === undefined
           || !this.deliveryStore.canSendInterruptedInboxNotice(record)
           || !this.isInboundAuthorized(binding, inbox.envelope)) {
@@ -8494,7 +8509,7 @@ export class AssistantDeliveryService extends Service {
       try {
         const current = this.deliveryStore.getInbox(inbox.id)
         if (current?.status !== 'dead_letter'
-          || (current.failureCode !== 'dispatch-ambiguous' && current.failureCode !== 'agent-task-timeout')
+          || !isNotifiableInterruptedFailureCode(current.failureCode)
           || current.bindingId === undefined
           || this.deliveryStore.getDeadLetterResolution({ kind: 'inbox', id: current.id,
             attemptCount: current.attemptCount }) !== undefined
@@ -8509,7 +8524,7 @@ export class AssistantDeliveryService extends Service {
           || this.registry.get(binding.conversation.channel, binding.conversation.account) === undefined) continue
         this.replyCommand(binding, { idempotencyKey: `inbound:${current.id}:interrupted`,
           interruptedInboxId: current.id, replyToEventId: current.eventId,
-          text: current.failureCode === 'agent-task-timeout' ? timedOutTurnNotice : interruptedTurnNotice })
+          text: interruptedTurnNoticeForFailureCode(current.failureCode) })
       } catch (error) {
         if (!this.active) return
         if ((error instanceof AssistantDeliveryError && (error.code === 'policy-denied' || error.code === 'missing-binding'))

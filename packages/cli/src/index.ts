@@ -119,6 +119,37 @@ export {
   type UpgradeOptions,
   type UpgradeDeps,
 } from './upgrade.ts'
+export {
+  AUTO_UPDATE_DIR_NAME,
+  AUTO_UPDATE_NOTIFY_FILE,
+  AUTO_UPDATE_STATUS_FILE,
+  AUTO_UPDATE_LOG_FILE,
+  autoUpdateStateDir,
+  autoUpdateNotifyPath,
+  autoUpdateStatusPath,
+  autoUpdateLogPath,
+  redactAutoUpdateText,
+  readAutoUpdateNotifyMarker,
+  readAutoUpdateStatus,
+  clearAutoUpdateNotifyMarker,
+  detectAutoUpdateSourceState,
+  checkUnattendedAutoUpgrade,
+  launchUnattendedAutoUpgrade,
+  parseAutoUpdateWorkerArgs,
+  runAutoUpdateWorker,
+  inspectPendingAutoUpdateNotification,
+  type AutoUpdateNotifyTarget,
+  type AutoUpdateNotifyMarker,
+  type AutoUpdateStatusRecord,
+  type AutoUpdateSourceState,
+  type AutoUpdatePrecheckResult,
+  type LaunchAutoUpdateOptions,
+  type LaunchAutoUpdateResult,
+  type LaunchAutoUpdateDeps,
+  type AutoUpdateWorkerOptions,
+  type AutoUpdateWorkerDeps,
+  type ReconciledAutoUpdateNotification,
+} from './auto-update.ts'
 export { resolveDshHome } from './paths.ts'
 export { version } from './version.ts'
 export {

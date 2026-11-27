@@ -80,6 +80,8 @@ export type { OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLe
 
 export type { EngineeringReportRef, EngineeringNode, EngineeringRootInput, EngineeringContinuationInput, WorkItemEngineeringMaterial, OwnerWorkItemEngineeringManifest, OwnerWorkItemEngineeringContextLocator, OwnerWorkItemEngineeringContextExpectation, OwnerWorkItemEngineeringContextReadInput, OwnerWorkItemEngineeringContextPage, OwnerWorkItemEngineeringContext, OwnerWorkItemEngineeringContextSource } from './work-item-engineering-context.js'
 export {
+  isOwnerUpdateSlashAttempt,
+  OWNER_UPDATE_USAGE,
   parseOwnerSelfIterationCommand,
   parseOwnerVersionQuery,
   type OwnerSelfIterationAction,

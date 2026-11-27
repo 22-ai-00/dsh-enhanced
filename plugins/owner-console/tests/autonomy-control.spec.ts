@@ -10,9 +10,11 @@ import {
   SELF_ITERATION_TOGGLE_ROWS,
 } from '../src/autonomy-control.js'
 import {
+  OWNER_UPDATE_SLASH_USAGE,
   apply,
   handleOwnerConsoleControlAction,
   parseOwnerSelfIterationCommand,
+  parseOwnerUpdateSlashUsageError,
 } from '../src/index.js'
 import { OwnerConsoleService } from '../src/service.js'
 import type { SetupDoctorReport } from '../src/typert.js'
@@ -71,6 +73,16 @@ describe('parseOwnerSelfIterationCommand', () => {
     expect(parseOwnerSelfIterationCommand('升级助手')?.action).toBe('upgradeAssistantAndRecover')
     expect(parseOwnerSelfIterationCommand('upgrade assistant')?.action).toBe('upgradeAssistantAndRecover')
     expect(parseOwnerSelfIterationCommand('/autonomy upgrade')?.action).toBe('upgradeAssistantAndRecover')
+    expect(parseOwnerSelfIterationCommand('/update')?.action).toBe('upgradeAssistantAndRecover')
+    expect(parseOwnerSelfIterationCommand('  /UPGRADE  ')?.action).toBe('upgradeAssistantAndRecover')
+
+    expect(parseOwnerSelfIterationCommand('/update foo')).toBeUndefined()
+    expect(parseOwnerSelfIterationCommand('/upgrade --yes')).toBeUndefined()
+    expect(parseOwnerSelfIterationCommand('/update!')).toBeUndefined()
+    expect(parseOwnerUpdateSlashUsageError('/update foo')).toBe(OWNER_UPDATE_SLASH_USAGE)
+    expect(parseOwnerUpdateSlashUsageError('/upgrade bar')).toBe(OWNER_UPDATE_SLASH_USAGE)
+    expect(parseOwnerUpdateSlashUsageError('/update')).toBeUndefined()
+    expect(parseOwnerUpdateSlashUsageError('/upgrade  ')).toBeUndefined()
 
     expect(parseOwnerSelfIterationCommand('')).toBeUndefined()
     expect(parseOwnerSelfIterationCommand('   ')).toBeUndefined()
@@ -483,7 +495,7 @@ describe('handleOwnerConsoleControlAction', () => {
     expect(validRows[0]?.config).not.toHaveProperty('retired')
   })
 
-  it('upgrades & recovers minimal unbound fixture via doctor repair, and fails closed on frozen-linux-systemd or corrupt host metadata', async () => {
+  it('upgrades & recovers minimal unbound fixture via doctor repair, delegates frozen-linux-systemd via out-of-cgroup updater, and fails closed on corrupt host metadata', async () => {
     const { dshHome, profileDir, patchPath } = makeTempHome()
     mkdirSync(profileDir, { recursive: true, mode: 0o700 })
     writeFileSync(
@@ -519,18 +531,71 @@ describe('handleOwnerConsoleControlAction', () => {
     expect(corruptHost.error ?? corruptHost.reason).toBeTruthy()
     rmSync(join(dshHome, '.dsh-ray-host.json'))
 
-    // Frozen Linux systemd profile must fail closed
+    // Frozen Linux systemd profile routes cleanly through shared out-of-cgroup launcher when authorized
     mkdirSync(join(dshHome, 'rsi-local-cohorts', 'web'), { recursive: true })
     writeFileSync(join(dshHome, 'rsi-local-cohorts', 'web', 'receipt.json'), '{}', 'utf8')
+    const frozenCalls: Array<Record<string, unknown>> = []
+    const frozenUnauth = await handleOwnerConsoleControlAction(ctx, {
+      dshHome,
+      ownerAuthorized: false,
+      action: 'upgradeAssistantAndRecover',
+      platform: 'linux',
+      env: {},
+      deps: {
+        launchAutoUpdate: async opts => {
+          frozenCalls.push(opts as unknown as Record<string, unknown>)
+          return { ok: true, state: 'upgraded', started: true, message: 'unexpected' }
+        },
+      },
+    })
+    expect(frozenUnauth.ok).toBe(false)
+    expect(frozenCalls).toHaveLength(0)
+
     const frozen = await handleOwnerConsoleControlAction(ctx, {
       dshHome,
       ownerAuthorized: true,
       action: 'upgradeAssistantAndRecover',
       platform: 'linux',
       env: {},
+      deps: {
+        launchAutoUpdate: async opts => {
+          frozenCalls.push(opts as unknown as Record<string, unknown>)
+          return {
+            ok: true,
+            state: 'upgraded',
+            started: true,
+            background: true,
+            launcher: 'systemd-run',
+            toNpm: true,
+            message: '🔄 已启动后台自动升级与服务恢复（v0.2.0 -> v0.2.2），完成后服务将自动重启恢复并通知结果，全程无需人工干预。',
+          }
+        },
+      },
     })
-    expect(frozen.ok).toBe(false)
-    expect(frozen.error ?? frozen.reason).toMatch(/frozen-linux-systemd/u)
+    expect(frozen.ok).toBe(true)
+    expect(frozen.state).toBe('upgraded')
+    expect(frozen.note).toContain('🔄 已启动后台自动升级与服务恢复')
+    expect(frozenCalls).toHaveLength(1)
+    expect(frozenCalls[0]).toMatchObject({ dshHome, profile: 'web', platform: 'linux' })
+
+    const frozenFail = await handleOwnerConsoleControlAction(ctx, {
+      dshHome,
+      ownerAuthorized: true,
+      action: 'upgradeAssistantAndRecover',
+      platform: 'linux',
+      env: {},
+      deps: {
+        launchAutoUpdate: async () => ({
+          ok: false,
+          state: 'upgraded',
+          started: false,
+          message: 'systemd-run unavailable',
+          error: 'systemd-run unavailable',
+        }),
+      },
+    })
+    expect(frozenFail.ok).toBe(false)
+    expect(frozenFail.error).toContain('systemd-run unavailable')
   })
 
   it('orchestrates bound upgrade -> doctor -> restart and fails closed if doctor remains unhealthy', async () => {

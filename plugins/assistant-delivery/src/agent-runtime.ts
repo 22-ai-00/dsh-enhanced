@@ -74,7 +74,9 @@ import { admitRestartContinuation, createRestartContinuation } from './restart-n
 import { renderOwnerApprovalStatus, type OwnerApprovalStatusRead } from './approval-status-context.js'
 import {
   isExactDeliveryCommand,
+  isOwnerUpdateSlashAttempt,
   learningDispatchRecoveryCode,
+  OWNER_UPDATE_USAGE,
   parseDeliveryCommand,
   parseOwnerSelfIterationCommand,
   parseOwnerVersionQuery,
@@ -84,6 +86,7 @@ import {
   type ParsedOwnerVersionQuery,
   type PermissionDispatchRecovery,
 } from './session-commands.js'
+import { classifyMidTurnFailure } from './interrupted-notices.js'
 import {
   collectDeliveryVersionReport,
   formatAssistantVersionSummary,
@@ -270,7 +273,7 @@ const ownerSelfIterationUsage = [
   '自迭代控制命令（仅限 owner，不进入模型）：',
   '- /autonomy enable（或「开启自迭代」）',
   '- /autonomy disable（或「关闭自迭代」）',
-  '- /autonomy upgrade（或「升级整体助手」）',
+  '- /autonomy upgrade（或 /update、/upgrade、「升级整体助手」）',
   '- /autonomy version（或 /version：查看助手版本与自迭代统计）',
 ].join('\n')
 
@@ -1577,6 +1580,8 @@ function finalAssistant(
   hasUnpairedToolCall: boolean
   hadToolCall: boolean
   failureCode?: string
+  turnEndKind?: string
+  errorMessage?: string
 } {
   if (expectedTurn === undefined) {
     return { text: '', completed: false, truncated: false, stopped: false, hasUnpairedToolCall: false, hadToolCall: false }
@@ -1588,6 +1593,8 @@ function finalAssistant(
   const unpairedToolCalls = new Set<string>()
   let hadToolCall = false
   let failureCode: string | undefined
+  let turnEndKind: string | undefined
+  let errorMessage: string | undefined
   for (const event of events.slice(from)) {
     if (event.type === 'assistant/message' && event.data.turn === expectedTurn) {
       text = event.data.message.content.filter(block => block.type === 'text')
@@ -1605,19 +1612,22 @@ function finalAssistant(
     }
     if (event.type === 'turn/end' && event.data.turn === expectedTurn) {
       const reason = event.data.reason
-      completed = typeof reason === 'object' && reason !== null && 'kind' in reason
-        && (reason as { kind: string }).kind === 'completed'
-      truncated = typeof reason === 'object' && reason !== null && 'kind' in reason
-        && (reason as { kind: string }).kind === 'max-tokens'
-      stopped = typeof reason === 'object' && reason !== null
-        && (reason as { kind?: unknown }).kind === 'aborted'
+      turnEndKind = typeof reason === 'object' && reason !== null && 'kind' in reason
+        && typeof (reason as { kind?: unknown }).kind === 'string'
+        ? (reason as { kind: string }).kind
+        : undefined
+      completed = turnEndKind === 'completed'
+      truncated = turnEndKind === 'max-tokens'
+      stopped = turnEndKind === 'aborted'
         && typeof (reason as { reason?: unknown }).reason === 'object'
         && (reason as { reason?: { kind?: unknown } }).reason?.kind === 'user'
-      // Keep only the short upstream code: the provider message can quote the prompt or payload.
+      // Keep only the short upstream code on progress; keep `errorMessage` strictly internal
+      // for error classification (never echoed into user messages or progress events).
       const error = typeof reason === 'object' && reason !== null && 'error' in reason
-        ? (reason as { error?: { code?: unknown } }).error
+        ? (reason as { error?: { code?: unknown; message?: unknown } }).error
         : undefined
       failureCode = completed || truncated || typeof error?.code !== 'string' ? undefined : error.code
+      errorMessage = completed || truncated || typeof error?.message !== 'string' ? undefined : error.message
     }
   }
   return {
@@ -1628,6 +1638,8 @@ function finalAssistant(
     hasUnpairedToolCall: unpairedToolCalls.size > 0,
     hadToolCall,
     ...(failureCode === undefined ? {} : { failureCode }),
+    ...(turnEndKind === undefined ? {} : { turnEndKind }),
+    ...(errorMessage === undefined ? {} : { errorMessage }),
   }
 }
 
@@ -3762,7 +3774,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     }
     if (command === undefined) {
       return this.replySessionCommand(binding, envelope, {
-        text: ownerSelfIterationUsage,
+        text: isOwnerUpdateSlashAttempt(envelope.text) ? OWNER_UPDATE_USAGE : ownerSelfIterationUsage,
         format: 'plain',
       }, signal, markDispatching)
     }
@@ -3867,6 +3879,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       '- /feedback：提交结构化偏好；回复自动化结果可记录 achieved/partial/not-achieved；不进入模型。',
       '- /learning：查看、导出、暂停、恢复或清除当前 scope 的偏好学习；不进入模型。',
       '- /autonomy：开启、关闭或升级整体助手自迭代能力；不进入模型。',
+      '- /update（/upgrade）：在后台升级整体助手并自动重启恢复（仅限 owner）；不进入模型。',
       '- /version：查看当前助手、Host、插件版本与自迭代演进统计；不进入模型。',
       '- /help：显示当前实际可用命令。',
     ]
@@ -4076,7 +4089,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   ): Promise<InboundProcessResult> {
     const sessionCommand = parseDeliveryCommand(envelope)
     const isAutonomyCommand = envelope.kind === 'command' && /^\/autonomy(?:[\t ]|$)/iu.test(envelope.text)
-    if (envelope.kind === 'command' && sessionCommand === undefined && !isAutonomyCommand) {
+    const isUpdateSlash = envelope.kind === 'command' && isOwnerUpdateSlashAttempt(envelope.text)
+    if (envelope.kind === 'command' && sessionCommand === undefined && !isAutonomyCommand && !isUpdateSlash) {
       return this.replySessionCommand(binding, envelope, {
         text: '命令格式无效。命令必须以小写 /name 开头，并使用普通空格分隔参数；发送 /help 查看用法。',
         format: 'plain',
@@ -4207,7 +4221,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     }
     const rawSelfIterationCommand = parseOwnerSelfIterationCommand(envelope.text)
     const isAutonomyCommand = envelope.kind === 'command' && /^\/autonomy(?:[\t ]|$)/iu.test(envelope.text)
-    if (sessionCommand?.name === 'autonomy' || isAutonomyCommand || rawSelfIterationCommand !== undefined) {
+    const isUpdateCommand = isOwnerUpdateSlashAttempt(envelope.text)
+    if (sessionCommand?.name === 'autonomy' || isAutonomyCommand || isUpdateCommand || rawSelfIterationCommand !== undefined) {
       return await this.runOwnerSelfIterationCommand(
         rawSelfIterationCommand,
         binding,
@@ -4332,6 +4347,9 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let acceptance: AcceptanceHandle | undefined
     let foregroundExecution: string | undefined
     let foregroundTurn: number | undefined
+    let turnFrom = 0
+    let deliveryTurn: number | undefined
+    let completionKind: AutomaticCompletionKind | undefined
     let terminationCause: NativeTerminationCause | undefined
     let removeAcceptanceRequest: (() => void) | undefined
     let acceptanceSucceeded = false
@@ -4431,7 +4449,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         const authorizationFailure = preDispatchAuthorizationFailure()
         if (authorizationFailure !== undefined) return authorizationFailure
       }
-      let turnFrom = agent.session.snapshotEvents().length
+      turnFrom = agent.session.snapshotEvents().length
       const automaticCompletionTurns = new Map<number, AutomaticCompletionKind>()
       const automaticCompletionToolViolations = new Set<number>()
       const abort = () => {
@@ -4519,7 +4537,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId,
         trust: 'untrusted',
       } }) : createRestartContinuation({ continuationId: restartContinuation.id, text: restartContinuationText })
-      let deliveryTurn = await this.followupTurn(agent, message, claimForegroundTurn, undefined, restartContinuation === undefined ? undefined
+      deliveryTurn = await this.followupTurn(agent, message, claimForegroundTurn, undefined, restartContinuation === undefined ? undefined
         : () => admitRestartContinuation(agent, message, { signal,
           authorize: () => {
             this.sessionLeases.assert(String(agent.session.id))
@@ -4542,7 +4560,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         // Publish the maintenance handoff only after teardown and ready commit.
         return { outcome: 'processed' }
       }
-      let completionKind: AutomaticCompletionKind | undefined
+      completionKind = undefined
       let automaticTurns = 0
       let assembledText = ''
       let bestEffortText = ''
@@ -4700,8 +4718,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             })
             return { outcome: 'processed' }
           }
-          publishProgress({ kind: 'failed', ...(output.failureCode === undefined ? {} : { code: output.failureCode }) })
-          return { outcome: 'not-processed', failureCode: 'agent-turn-incomplete', retryable: false }
+          const classified = classifyMidTurnFailure({
+            upstreamCode: output.failureCode,
+            upstreamMessage: output.errorMessage,
+            turnEndKind: output.turnEndKind,
+            userCancelled: output.stopped,
+          })
+          terminationCause = classified.code === 'agent-turn-provider-aborted' ? 'execution-aborted' : 'runtime-error'
+          publishProgress({ kind: 'failed', code: classified.code })
+          return { outcome: 'not-processed', failureCode: classified.code, retryable: false }
         }
         if (currentEmpty || assembledText.trim() === '') {
           // A tool-only foreground turn can arm a native goal (typically
@@ -4764,11 +4789,33 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       if (dispatched) {
         const timedOut = signal.reason instanceof AgentTaskTimeoutError
         terminationCause = timedOut ? 'execution-timeout' : 'runtime-error'
-        publishProgress({ kind: 'failed', ...(timedOut
-          ? { code: 'agent-task-timeout' } : {}) })
-        // Preserve an exact durable diagnosis so the existing interruption
-        // Outbox can notify the owner even when progress presentation failed.
-        if (timedOut) return { outcome: 'not-processed', failureCode: 'agent-task-timeout', retryable: false }
+        if (timedOut) {
+          publishProgress({ kind: 'failed', code: 'agent-task-timeout' })
+          // Preserve an exact durable diagnosis so the existing interruption
+          // Outbox can notify the owner even when progress presentation failed.
+          return { outcome: 'not-processed', failureCode: 'agent-task-timeout', retryable: false }
+        }
+        const isRestartAuth = error instanceof Error && error.message === 'restart authority changed'
+        if (!signal.aborted && !causedByDurableIdentity(error) && !isRestartAuth && checkAuthorization() === 'authorized') {
+          const observedOutput = handle !== undefined
+            ? finalAssistant(handle.agent.session.snapshotEvents(), turnFrom, deliveryTurn)
+            : undefined
+          const classified = classifyMidTurnFailure({
+            error,
+            upstreamCode: observedOutput?.failureCode,
+            upstreamMessage: observedOutput?.errorMessage,
+            turnEndKind: observedOutput?.turnEndKind,
+            userCancelled: observedOutput?.stopped,
+          })
+          const turnEndedWithError = observedOutput?.turnEndKind === 'error'
+            || (observedOutput?.turnEndKind === 'aborted' && !observedOutput.stopped)
+          if (completionKind === undefined || classified.matchedSpecific || turnEndedWithError) {
+            terminationCause = classified.code === 'agent-turn-provider-aborted' ? 'execution-aborted' : 'runtime-error'
+            publishProgress({ kind: 'failed', code: classified.code })
+            return { outcome: 'not-processed', failureCode: classified.code, retryable: false }
+          }
+        }
+        publishProgress({ kind: 'failed' })
         throw new Error(`assistant-delivery: Agent turn became ambiguous: ${String(error)}`, { cause: error })
       }
       if (causedByDurableIdentity(error)) {

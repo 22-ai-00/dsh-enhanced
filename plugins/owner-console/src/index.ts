@@ -13,8 +13,10 @@ export {
   type OwnerConsoleControlResult,
 } from './autonomy-control.js'
 export {
+  OWNER_UPDATE_SLASH_USAGE,
   formatOwnerConsoleVersionSummary,
   parseOwnerSelfIterationCommand,
+  parseOwnerUpdateSlashUsageError,
   parseOwnerVersionQuery,
   type OwnerSelfIterationAction,
   type OwnerVersionQueryIntent,

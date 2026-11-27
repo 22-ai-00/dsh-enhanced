@@ -269,4 +269,33 @@ describe('LarkDeliveryAdapter command card routing & fallback', () => {
     expect(Buffer.byteLength(renderLarkMessage({ commandCard: oversizedBoundaryCard! }).content, 'utf8'))
       .toBeLessThan(LARK_APPROVAL_CARD_MAX_BYTES)
   })
+
+  test('renders /update, /upgrade, /help with /update, usage warnings, and completion/rollback notices as Card 2.0', () => {
+    const helpWithUpdate = tryBuildLarkCommandCard([
+      '会话命令：',
+      '- /new（/clear）：开始空白新会话；旧会话保留。',
+      '- /update（/upgrade）：在后台升级整体助手并自动重启恢复（仅限 owner）；不进入模型。',
+      '- /help：显示当前实际可用命令。',
+    ].join('\n'))
+    expect(helpWithUpdate).toBeDefined()
+    const helpRendered = renderLarkMessage({ commandCard: helpWithUpdate! }).content
+    expect(helpRendered).toContain('/update')
+
+    const launchingCard = tryBuildLarkCommandCard(
+      '🔄 已启动后台自动升级与服务恢复（v0.2.0 -> v0.2.2），完成后服务将自动重启恢复并通知结果，全程无需人工干预。',
+    )
+    expect(launchingCard).toMatchObject({ template: 'green' })
+
+    const currentCard = tryBuildLarkCommandCard('当前已是最新版本 v0.2.2 且服务运行正常，无需升级。')
+    expect(currentCard).toMatchObject({ template: 'green' })
+
+    const completedCard = tryBuildLarkCommandCard('✅ 自动升级完成：当前版本 v0.2.2，服务已恢复运行。')
+    expect(completedCard).toMatchObject({ template: 'green' })
+
+    const usageWarnCard = tryBuildLarkCommandCard('用法：/update 或 /upgrade（不接受额外参数）；如需升级并恢复整体助手，请直接发送 /update。')
+    expect(usageWarnCard).toMatchObject({ template: 'orange' })
+
+    const failedCard = tryBuildLarkCommandCard('⚠️ 自动升级失败并已回滚保护：doctor failed')
+    expect(failedCard).toMatchObject({ template: 'orange' })
+  })
 })

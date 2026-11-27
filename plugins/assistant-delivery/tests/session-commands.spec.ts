@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import {
+  isOwnerUpdateSlashAttempt,
   parseDeliveryCommand,
   parseOwnerSelfIterationCommand,
   parseOwnerVersionQuery,
@@ -45,6 +46,10 @@ describe('Owner self-iteration NL and /autonomy command parser', () => {
     ['升级并恢复整体助手.', 'upgradeAssistantAndRecover'],
     ['upgrade assistant', 'upgradeAssistantAndRecover'],
     ['/autonomy upgrade', 'upgradeAssistantAndRecover'],
+    ['/update', 'upgradeAssistantAndRecover'],
+    ['/UPDATE   ', 'upgradeAssistantAndRecover'],
+    ['  /upgrade\t', 'upgradeAssistantAndRecover'],
+    ['/Upgrade', 'upgradeAssistantAndRecover'],
   ] as const)('matches %j to %s', (text, action) => {
     expect(parseOwnerSelfIterationCommand(text)).toEqual({
       action,
@@ -65,8 +70,21 @@ describe('Owner self-iteration NL and /autonomy command parser', () => {
     '/autonomy',
     '/autonomy status',
     '/autonomy enable now',
+    '/update foo',
+    '/upgrade bar',
+    '/update --yes',
+    '/update!',
+    '/upgrade?',
   ])('rejects non-command or ambiguous input %j', text => {
     expect(parseOwnerSelfIterationCommand(text)).toBeUndefined()
+  })
+
+  test('identifies invalid /update and /upgrade attempts for clear usage errors', () => {
+    expect(isOwnerUpdateSlashAttempt('/update foo')).toBe(true)
+    expect(isOwnerUpdateSlashAttempt('/upgrade bar')).toBe(true)
+    expect(isOwnerUpdateSlashAttempt('/update!')).toBe(true)
+    expect(isOwnerUpdateSlashAttempt('/updates')).toBe(false)
+    expect(isOwnerUpdateSlashAttempt('upgrade assistant')).toBe(false)
   })
 })
 

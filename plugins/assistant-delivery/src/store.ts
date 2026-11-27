@@ -2,6 +2,10 @@ import { WorkItemFeedbackStore } from './work-item-feedback-store.js'
 import { AttentionAuditStore } from './attention-audit-store.js'
 import { WorkItemRepliesStore } from './work-item-replies-store.js'
 import { normalizeForegroundTerminationObservation, type ForegroundTerminationObservation } from './foreground-termination.js'
+import {
+  INTERRUPTED_INBOX_NOTICE_FAILURE_CODES,
+  isNotifiableInterruptedFailureCode,
+} from './interrupted-notices.js'
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import type { DatabaseSync, StatementSync } from 'node:sqlite'
@@ -4099,9 +4103,10 @@ export class DeliveryStore {
       throw new DeliveryStoreError('conflict', 'invalid interrupted Inbox cursor')
     }
     const limit = boundedMaintenanceLimit(input.limit, 100, 'interrupted Inbox')
+    const codeListSql = INTERRUPTED_INBOX_NOTICE_FAILURE_CODES.map(code => `'${code}'`).join(', ')
     const rows = this.database.prepare(`${inboxSelect}
       WHERE inbox_messages.status = 'dead_letter'
-        AND inbox_messages.failure_code IN ('dispatch-ambiguous', 'agent-task-timeout')
+        AND inbox_messages.failure_code IN (${codeListSql})
         AND json_extract(inbox_messages.envelope_json, '$.kind') = 'text'
         AND inbox_messages.channel != 'web'
         AND inbox_messages.binding_id IS NOT NULL
@@ -4172,7 +4177,7 @@ export class DeliveryStore {
       binding_version: number; binding_generation: number; workspace: string; preset: string
     } | undefined
     return inbox?.status === 'dead_letter'
-      && (inbox.failureCode === 'dispatch-ambiguous' || inbox.failureCode === 'agent-task-timeout')
+      && isNotifiableInterruptedFailureCode(inbox.failureCode)
       && inbox.envelope.kind === 'text' && inbox.channel !== 'web'
       && binding?.status === 'active' && binding.id === input.binding.id
       && binding.version === input.binding.version && binding.generation === input.binding.generation

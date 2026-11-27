@@ -26,6 +26,17 @@ export interface ParsedOwnerVersionQuery {
 const ENABLE_PATTERN = /^(?:开启自迭代|打开自迭代|启用自迭代|恢复自迭代|enable\s+autonomy|enable\s+self[-\s]+iteration|\/autonomy\s+enable)$/iu
 const DISABLE_PATTERN = /^(?:关闭自迭代|停用自迭代|暂停自迭代|disable\s+autonomy|disable\s+self[-\s]+iteration|\/autonomy\s+disable)$/iu
 const UPGRADE_PATTERN = /^(?:升级整体助手|升级助手|upgrade\s+assistant|upgrade\s+autonomy|\/autonomy\s+upgrade)$/iu
+const EXACT_SLASH_UPDATE_PATTERN = /^\/(?:update|upgrade)$/iu
+const SLASH_UPDATE_ATTEMPT_PATTERN = /^\/(?:update|upgrade)(?:$|[^a-z0-9_-])/iu
+
+export const OWNER_UPDATE_SLASH_USAGE = '用法：/update 或 /upgrade（不接受额外参数）；如需升级并恢复整体助手，请直接发送 /update。'
+
+export function parseOwnerUpdateSlashUsageError(text: string): string | undefined {
+  if (typeof text !== 'string') return undefined
+  const trimmed = text.trim()
+  if (EXACT_SLASH_UPDATE_PATTERN.test(trimmed)) return undefined
+  return SLASH_UPDATE_ATTEMPT_PATTERN.test(trimmed) ? OWNER_UPDATE_SLASH_USAGE : undefined
+}
 
 const SLASH_VERSION_PATTERN = /^\/(?:version(?:\s+--short)?|autonomy[\t ]+version)$/iu
 
@@ -87,6 +98,10 @@ export function parseOwnerSelfIterationCommand(
   if (typeof text !== 'string') return undefined
   const trimmed = text.trim()
   if (trimmed === '') return undefined
+  if (EXACT_SLASH_UPDATE_PATTERN.test(trimmed)) {
+    return { action: 'upgradeAssistantAndRecover', sourceText: trimmed }
+  }
+  if (SLASH_UPDATE_ATTEMPT_PATTERN.test(trimmed)) return undefined
   if (/[?？]$/u.test(trimmed)) return undefined
   const normalized = trimmed.replace(/[。！!.]+$/u, '').trim()
   if (normalized === '') return undefined

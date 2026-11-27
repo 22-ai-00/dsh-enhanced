@@ -1,7 +1,14 @@
 import { execFile as nodeExecFile } from 'node:child_process'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { isMap, isScalar, isSeq, type YAMLMap, type YAMLSeq } from 'yaml'
+import {
+  loadCliAutoUpdateModule,
+  type CliAutoUpdateNotifyTarget,
+  type CliLaunchAutoUpdateOptions,
+  type CliLaunchAutoUpdateResult,
+} from './auto-update-bridge.js'
 import {
   atomicWritePatchWithBackup, ensureConfigMap, findPatchRow, readConfigMap, readPatchDocument,
   resolveProfilePaths, type AutonomyHostContext,
@@ -117,6 +124,7 @@ export interface OwnerConsoleControlDeps {
     issueIds: readonly string[]
   }>) => Promise<OwnerConsoleWriteResult>
   readonly restartService?: (host: AutonomyHostContext) => Promise<OwnerConsoleWriteResult>
+  readonly launchAutoUpdate?: (options: CliLaunchAutoUpdateOptions) => Promise<CliLaunchAutoUpdateResult>
 }
 
 export interface OwnerConsoleControlRequest {
@@ -128,6 +136,7 @@ export interface OwnerConsoleControlRequest {
   readonly now?: number
   readonly env?: NodeJS.ProcessEnv
   readonly platform?: NodeJS.Platform
+  readonly notify?: CliAutoUpdateNotifyTarget
   readonly deps?: OwnerConsoleControlDeps
 }
 
@@ -589,13 +598,6 @@ export async function handleOwnerConsoleControlAction(
   }
 
   // action === 'upgradeAssistantAndRecover'
-  if (detectFrozenSystemdProfile(canonicalHome, profileName, platform, env)) {
-    return failControl(
-      'frozen-linux-systemd profile forbids in-process upgrade; run dsh-ray upgrade out-of-band after stopping the service',
-      action,
-    )
-  }
-
   const bound = readBoundHostMetadata(canonicalHome)
   if (bound.status === 'corrupt' || bound.status === 'unreadable') {
     return failControl(bound.error ?? `host metadata is ${bound.status}`, action)
@@ -607,6 +609,55 @@ export async function handleOwnerConsoleControlAction(
     } catch (error: unknown) {
       return failControl(error instanceof Error ? error.message : String(error), action)
     }
+  }
+
+  const frozen = detectFrozenSystemdProfile(canonicalHome, profileName, platform, env)
+  const useCustomLegacyDeps = request.deps?.runUpgrade !== undefined
+    || request.deps?.runDoctor !== undefined
+    || request.deps?.restartService !== undefined
+
+  const shouldUseUnattendedAutoUpdate = request.deps?.launchAutoUpdate !== undefined
+    || (!useCustomLegacyDeps && (frozen || bound.status === 'ready'))
+
+  if (shouldUseUnattendedAutoUpdate) {
+    const launcher = request.deps?.launchAutoUpdate
+      ?? (await loadCliAutoUpdateModule(env))?.launchUnattendedAutoUpgrade
+    if (launcher !== undefined) {
+      const outcome = await launcher({
+        dshHome: canonicalHome,
+        profile: profileName,
+        platform,
+        osHome: env.HOME || homedir(),
+        env,
+        notify: request.notify ?? {
+          channel: 'web',
+          account: 'owner-console',
+          ownerPrincipal: 'owner',
+        },
+      })
+      if (!outcome.ok) {
+        return failControl(outcome.error ?? outcome.message, action)
+      }
+      return Object.freeze({
+        ok: true,
+        action,
+        state: 'upgraded',
+        healthy: true,
+        patchPath,
+        note: outcome.message,
+      })
+    }
+    if (frozen) {
+      return failControl(
+        'frozen-linux-systemd profile requires @dsh-ray/cli unattended auto-update support; install @dsh-ray/cli@latest or run dsh-ray update --all --yes --to-npm out-of-band',
+        action,
+      )
+    }
+  } else if (frozen) {
+    return failControl(
+      'frozen-linux-systemd profile forbids in-process upgrade; run dsh-ray upgrade out-of-band after stopping the service',
+      action,
+    )
   }
 
   const notes: string[] = []

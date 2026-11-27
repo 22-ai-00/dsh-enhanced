@@ -1370,4 +1370,37 @@ describe('文鳐 dedicated assistant dialog & slot compatibility', () => {
     expect(versionInfo).toHaveBeenCalledTimes(5)
     expect(fake.prompt).toHaveBeenCalledExactlyOnceWith([{ type: 'text', text: '请帮我总结一下今天的日程安排' }], 'queue', undefined)
   })
+
+  it('dispatches /update and /upgrade to controlSelfIteration and rejects /update with unexpected args locally', async () => {
+    const controlSelfIteration = vi.fn(async (action: string, confirmed: boolean) => ({
+      ok: true as const,
+      value: {
+        ok: true,
+        action: action as 'upgradeAssistantAndRecover',
+        state: 'upgraded' as const,
+        note: confirmed
+          ? '🔄 已启动后台自动升级与服务恢复（v0.2.0 -> v0.2.2），完成后服务将自动重启恢复并通知结果，全程无需人工干预。'
+          : '',
+      },
+    }))
+    const fake = harness({ controlSelfIteration }, [])
+    await render(createElement(OwnerConsoleChat, { runtime: fake.runtime, onOpenSettings: vi.fn() }))
+
+    await fillMessage('/update foo')
+    await click(byLabel('发送消息'))
+    expect(controlSelfIteration).not.toHaveBeenCalled()
+    expect(fake.prompt).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('用法：/update 或 /upgrade')
+
+    await fillMessage('/UPDATE  ')
+    await click(byLabel('发送消息'))
+    expect(controlSelfIteration).toHaveBeenCalledExactlyOnceWith('upgradeAssistantAndRecover', true)
+    expect(fake.prompt).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('🔄 已启动后台自动升级与服务恢复')
+
+    await fillMessage('/upgrade')
+    await click(byLabel('发送消息'))
+    expect(controlSelfIteration).toHaveBeenCalledTimes(2)
+    expect(fake.prompt).not.toHaveBeenCalled()
+  })
 })
