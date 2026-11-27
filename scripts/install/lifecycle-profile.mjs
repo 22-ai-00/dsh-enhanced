@@ -102,8 +102,87 @@ const SUPERVISED_POLL_INTERVAL_MS = 100
 const SCANNER_RETIREMENT_PROTOCOL = 'dsh-ray/scanner-retirement-transaction/v1'
 const SCANNER_RETIREMENT_TIMEOUT_MS = 30_000
 const SCANNER_RETIREMENT_ARTIFACT_MAX_BYTES = 8 * 1024 * 1024
+const HOST_PEER_RESOLVER_SNIPPET = String.raw`
+import { createRequire as __dshCreateRequire, register as __dshRegisterModule } from 'node:module'
+import { readFileSync as __dshReadFileSync, realpathSync as __dshRealpathSync } from 'node:fs'
+import { basename as __dshBasename, dirname as __dshDirname, join as __dshJoin, resolve as __dshResolve } from 'node:path'
+import { pathToFileURL as __dshPathToFileURL } from 'node:url'
+function resolveHostManifestPath(dshExecutable) {
+  if (typeof dshExecutable !== 'string' || dshExecutable === '') return undefined
+  const exec = __dshRealpathSync(__dshResolve(dshExecutable))
+  const inspectManifest = (candidate, strictTarget) => {
+    let manifestPath
+    let raw
+    try {
+      manifestPath = __dshRealpathSync(candidate)
+      raw = __dshReadFileSync(manifestPath, 'utf8')
+    } catch {
+      return undefined
+    }
+    let manifest
+    try {
+      manifest = JSON.parse(raw)
+    } catch {
+      if (strictTarget) throw new Error('DSH executable does not belong to @deepseek-ai/dsh')
+      return undefined
+    }
+    if (manifest?.name === '@deepseek-ai/dsh') return manifestPath
+    if (strictTarget) throw new Error('DSH executable does not belong to @deepseek-ai/dsh')
+    return undefined
+  }
+  let resolvedByModule
+  try {
+    resolvedByModule = __dshCreateRequire(exec).resolve('@deepseek-ai/dsh/package.json')
+  } catch {}
+  if (resolvedByModule !== undefined) {
+    const accepted = inspectManifest(resolvedByModule, true)
+    if (accepted !== undefined) return accepted
+  }
+  const packageRoot = __dshDirname(__dshDirname(exec))
+  const strictNearby = __dshBasename(__dshDirname(packageRoot)) === 'node_modules'
+    || __dshBasename(__dshDirname(__dshDirname(packageRoot))) === 'node_modules'
+  const nearby = inspectManifest(__dshJoin(packageRoot, 'package.json'), strictNearby)
+  if (nearby !== undefined) return nearby
+  if (__dshBasename(__dshDirname(exec)) === '.bin') {
+    const sibling = inspectManifest(__dshJoin(packageRoot, '@deepseek-ai', 'dsh', 'package.json'), true)
+    if (sibling !== undefined) return sibling
+  }
+  return undefined
+}
+function installHostPeerResolver(dshExecutable) {
+  const dshManifestPath = resolveHostManifestPath(dshExecutable)
+  if (dshManifestPath === undefined) return false
+  const installedKey = Symbol.for('dsh-ray.host-peer-resolver-installed')
+  if (Reflect.get(globalThis, installedKey)) return true
+  const hookCode = [
+    "import { createRequire } from 'node:module'",
+    "import { pathToFileURL } from 'node:url'",
+    'const hostRequire = createRequire(' + JSON.stringify(dshManifestPath) + ')',
+    'const ALLOWED_HOST_PEER = /^@deepseek-ai\\/[a-z0-9][a-z0-9._-]*(?:\\/[a-z0-9][a-z0-9._-]*)*$/u',
+    'export async function resolve(specifier, context, nextResolve) {',
+    '  try {',
+    '    return await nextResolve(specifier, context)',
+    '  } catch (error) {',
+    "    if (error?.code === 'ERR_MODULE_NOT_FOUND' && (ALLOWED_HOST_PEER.test(specifier) || specifier === 'yaml')) {",
+    '      try {',
+    '        const resolved = hostRequire.resolve(specifier)',
+    '        return { url: pathToFileURL(resolved).href, shortCircuit: true }',
+    '      } catch {',
+    '        throw error',
+    '      }',
+    '    }',
+    '    throw error',
+    '  }',
+    '}',
+  ].join('\n')
+  __dshRegisterModule('data:text/javascript,' + encodeURIComponent(hookCode), __dshPathToFileURL(dshManifestPath))
+  Reflect.set(globalThis, installedKey, true)
+  return true
+}
+`
 const SCANNER_RETIREMENT_SOURCE_PROGRAM = String.raw`
 import { pathToFileURL } from 'node:url'
+${HOST_PEER_RESOLVER_SNIPPET}
 const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
@@ -128,7 +207,8 @@ if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
   process.emitWarning = filteredEmitWarning
 }
-const [helperPath, homePath, profile] = process.argv.slice(1)
+const [helperPath, homePath, profile, dsh = ''] = process.argv.slice(1)
+installHostPeerResolver(dsh)
 const helper = await import(pathToFileURL(helperPath).href)
 process.stdout.write(JSON.stringify(await helper.inspectRsiScannerOwnerSource({ homePath, physicalHome: homePath, profile })))
 `
@@ -165,6 +245,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+${HOST_PEER_RESOLVER_SNIPPET}
 const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
@@ -198,6 +279,7 @@ const read = async (path, expected) => {
 }
 const source = await read(sourcePath, sourceDigest)
 if (source.homePath !== home || source.profile !== profile) throw new Error('scanner retirement source scope differs')
+installHostPeerResolver(dsh)
 const require = createRequire(join(home, 'profiles', profile, 'package.json'))
 const lark = await import(require.resolve('@dsh-ray/lark-channel'))
 const scope = { dshHome: home, profile, owner: source.ownerSource.owner, effectiveConfig: source.effectiveConfig }
@@ -238,6 +320,84 @@ import { spawnSync } from 'node:child_process'
 import { readFile, writeFile, rename } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+
+import { createRequire as __dshCreateRequire, register as __dshRegisterModule } from 'node:module'
+import { readFileSync as __dshReadFileSync, realpathSync as __dshRealpathSync } from 'node:fs'
+import { basename as __dshBasename, dirname as __dshDirname, join as __dshJoin, resolve as __dshResolve } from 'node:path'
+import { pathToFileURL as __dshPathToFileURL } from 'node:url'
+function resolveHostManifestPath(dshExecutable) {
+  if (typeof dshExecutable !== 'string' || dshExecutable === '') return undefined
+  const exec = __dshRealpathSync(__dshResolve(dshExecutable))
+  const inspectManifest = (candidate, strictTarget) => {
+    let manifestPath
+    let raw
+    try {
+      manifestPath = __dshRealpathSync(candidate)
+      raw = __dshReadFileSync(manifestPath, 'utf8')
+    } catch {
+      return undefined
+    }
+    let manifest
+    try {
+      manifest = JSON.parse(raw)
+    } catch {
+      if (strictTarget) throw new Error('DSH executable does not belong to @deepseek-ai/dsh')
+      return undefined
+    }
+    if (manifest?.name === '@deepseek-ai/dsh') return manifestPath
+    if (strictTarget) throw new Error('DSH executable does not belong to @deepseek-ai/dsh')
+    return undefined
+  }
+  let resolvedByModule
+  try {
+    resolvedByModule = __dshCreateRequire(exec).resolve('@deepseek-ai/dsh/package.json')
+  } catch {}
+  if (resolvedByModule !== undefined) {
+    const accepted = inspectManifest(resolvedByModule, true)
+    if (accepted !== undefined) return accepted
+  }
+  const packageRoot = __dshDirname(__dshDirname(exec))
+  const strictNearby = __dshBasename(__dshDirname(packageRoot)) === 'node_modules'
+    || __dshBasename(__dshDirname(__dshDirname(packageRoot))) === 'node_modules'
+  const nearby = inspectManifest(__dshJoin(packageRoot, 'package.json'), strictNearby)
+  if (nearby !== undefined) return nearby
+  if (__dshBasename(__dshDirname(exec)) === '.bin') {
+    const sibling = inspectManifest(__dshJoin(packageRoot, '@deepseek-ai', 'dsh', 'package.json'), true)
+    if (sibling !== undefined) return sibling
+  }
+  return undefined
+}
+function installHostPeerResolver(dshExecutable) {
+  const dshManifestPath = resolveHostManifestPath(dshExecutable)
+  if (dshManifestPath === undefined) return false
+  const installedKey = Symbol.for('dsh-ray.host-peer-resolver-installed')
+  if (Reflect.get(globalThis, installedKey)) return true
+  const hookCode = [
+    "import { createRequire } from 'node:module'",
+    "import { pathToFileURL } from 'node:url'",
+    'const hostRequire = createRequire(' + JSON.stringify(dshManifestPath) + ')',
+    'const ALLOWED_HOST_PEER = /^@deepseek-ai\\/[a-z0-9][a-z0-9._-]*(?:\\/[a-z0-9][a-z0-9._-]*)*$/u',
+    'export async function resolve(specifier, context, nextResolve) {',
+    '  try {',
+    '    return await nextResolve(specifier, context)',
+    '  } catch (error) {',
+    "    if (error?.code === 'ERR_MODULE_NOT_FOUND' && (ALLOWED_HOST_PEER.test(specifier) || specifier === 'yaml')) {",
+    '      try {',
+    '        const resolved = hostRequire.resolve(specifier)',
+    '        return { url: pathToFileURL(resolved).href, shortCircuit: true }',
+    '      } catch {',
+    '        throw error',
+    '      }',
+    '    }',
+    '    throw error',
+    '  }',
+    '}',
+  ].join('\n')
+  __dshRegisterModule('data:text/javascript,' + encodeURIComponent(hookCode), __dshPathToFileURL(dshManifestPath))
+  Reflect.set(globalThis, installedKey, true)
+  return true
+}
+
 const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
@@ -268,6 +428,7 @@ const canonical = value => value === null || typeof value !== 'object' ? JSON.st
   : Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']'
     : '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}'
 const jsonDigest = value => digest(canonical(value))
+installHostPeerResolver(dsh)
 const require = createRequire(join(home, 'profiles', profile, 'package.json'))
 const load = async name => import(require.resolve(name))
 const [lark, delivery, recovery, automations] = await Promise.all([
@@ -411,6 +572,84 @@ process.stdout.write(JSON.stringify(output))
 const SUPERVISED_CAPABILITY_PROGRAM = String.raw`
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
+
+import { createRequire as __dshCreateRequire, register as __dshRegisterModule } from 'node:module'
+import { readFileSync as __dshReadFileSync, realpathSync as __dshRealpathSync } from 'node:fs'
+import { basename as __dshBasename, dirname as __dshDirname, join as __dshJoin, resolve as __dshResolve } from 'node:path'
+import { pathToFileURL as __dshPathToFileURL } from 'node:url'
+function resolveHostManifestPath(dshExecutable) {
+  if (typeof dshExecutable !== 'string' || dshExecutable === '') return undefined
+  const exec = __dshRealpathSync(__dshResolve(dshExecutable))
+  const inspectManifest = (candidate, strictTarget) => {
+    let manifestPath
+    let raw
+    try {
+      manifestPath = __dshRealpathSync(candidate)
+      raw = __dshReadFileSync(manifestPath, 'utf8')
+    } catch {
+      return undefined
+    }
+    let manifest
+    try {
+      manifest = JSON.parse(raw)
+    } catch {
+      if (strictTarget) throw new Error('DSH executable does not belong to @deepseek-ai/dsh')
+      return undefined
+    }
+    if (manifest?.name === '@deepseek-ai/dsh') return manifestPath
+    if (strictTarget) throw new Error('DSH executable does not belong to @deepseek-ai/dsh')
+    return undefined
+  }
+  let resolvedByModule
+  try {
+    resolvedByModule = __dshCreateRequire(exec).resolve('@deepseek-ai/dsh/package.json')
+  } catch {}
+  if (resolvedByModule !== undefined) {
+    const accepted = inspectManifest(resolvedByModule, true)
+    if (accepted !== undefined) return accepted
+  }
+  const packageRoot = __dshDirname(__dshDirname(exec))
+  const strictNearby = __dshBasename(__dshDirname(packageRoot)) === 'node_modules'
+    || __dshBasename(__dshDirname(__dshDirname(packageRoot))) === 'node_modules'
+  const nearby = inspectManifest(__dshJoin(packageRoot, 'package.json'), strictNearby)
+  if (nearby !== undefined) return nearby
+  if (__dshBasename(__dshDirname(exec)) === '.bin') {
+    const sibling = inspectManifest(__dshJoin(packageRoot, '@deepseek-ai', 'dsh', 'package.json'), true)
+    if (sibling !== undefined) return sibling
+  }
+  return undefined
+}
+function installHostPeerResolver(dshExecutable) {
+  const dshManifestPath = resolveHostManifestPath(dshExecutable)
+  if (dshManifestPath === undefined) return false
+  const installedKey = Symbol.for('dsh-ray.host-peer-resolver-installed')
+  if (Reflect.get(globalThis, installedKey)) return true
+  const hookCode = [
+    "import { createRequire } from 'node:module'",
+    "import { pathToFileURL } from 'node:url'",
+    'const hostRequire = createRequire(' + JSON.stringify(dshManifestPath) + ')',
+    'const ALLOWED_HOST_PEER = /^@deepseek-ai\\/[a-z0-9][a-z0-9._-]*(?:\\/[a-z0-9][a-z0-9._-]*)*$/u',
+    'export async function resolve(specifier, context, nextResolve) {',
+    '  try {',
+    '    return await nextResolve(specifier, context)',
+    '  } catch (error) {',
+    "    if (error?.code === 'ERR_MODULE_NOT_FOUND' && (ALLOWED_HOST_PEER.test(specifier) || specifier === 'yaml')) {",
+    '      try {',
+    '        const resolved = hostRequire.resolve(specifier)',
+    '        return { url: pathToFileURL(resolved).href, shortCircuit: true }',
+    '      } catch {',
+    '        throw error',
+    '      }',
+    '    }',
+    '    throw error',
+    '  }',
+    '}',
+  ].join('\n')
+  __dshRegisterModule('data:text/javascript,' + encodeURIComponent(hookCode), __dshPathToFileURL(dshManifestPath))
+  Reflect.set(globalThis, installedKey, true)
+  return true
+}
+
 const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
@@ -435,7 +674,8 @@ if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
   process.emitWarning = filteredEmitWarning
 }
-const [home, profile] = process.argv.slice(1)
+const [home, profile, dsh = ''] = process.argv.slice(1)
+installHostPeerResolver(dsh)
 const require = createRequire(join(home, 'profiles', profile, 'package.json'))
 const load = async name => import(require.resolve(name))
 const [lark, delivery, recovery, automations] = await Promise.all([
@@ -2177,7 +2417,7 @@ async function recoverBoundTransaction({
       await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
       manifest = await writeManifest(physicalTransactionRoot, manifest, 'cleanup-started')
     }
-    await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
+    await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome, dshExecutable })
     process.stdout.write('profile 生命周期恢复：已完成上次提交后的绑定清理。\n')
     return 'committed'
   }
@@ -3684,18 +3924,18 @@ function restorationRequiresHostReady(policy, unit) {
   return policy?.records.get(unit)?.hostReady !== false
 }
 
-async function assertRestorationActivation(policy, homePath, service, since) {
+async function assertRestorationActivation(policy, homePath, service, since, dshExecutable = '') {
   if (policy?.coordinatorProfile === service.profile) {
     if (policy.records.get(service.unit)?.coordinatorActivated !== false && !policy.activation(since)) {
       fail('owner repair original coordinator has no fresh native activation')
     }
-  } else await assertRsiCoordinatorActivation(homePath, service, since)
+  } else await assertRsiCoordinatorActivation(homePath, service, since, dshExecutable)
 }
 
-async function serviceReadySignal(journalctlExecutable, homePath, service, startedAt, originalRestoration) {
+async function serviceReadySignal(journalctlExecutable, homePath, service, startedAt, originalRestoration, dshExecutable = '') {
   if (restorationRequiresHostReady(originalRestoration, service.unit)
     && !await journalHasReadyMarker(journalctlExecutable, service)) return false
-  try { await assertRestorationActivation(originalRestoration, homePath, service, startedAt) }
+  try { await assertRestorationActivation(originalRestoration, homePath, service, startedAt, dshExecutable) }
   catch { return false }
   return true
 }
@@ -3731,7 +3971,7 @@ async function latestLarkJournalState(journalctlExecutable, service) {
 async function startAndAcceptServices({
   systemctlExecutable, journalctlExecutable, services, serviceMasks,
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], timeouts,
-  acceptAfterReady, durableAccept, requireLarkReady = false, larkReadyProfiles = [], originalRestoration,
+  acceptAfterReady, durableAccept, requireLarkReady = false, larkReadyProfiles = [], originalRestoration, dshExecutable = '',
 }) {
   const startedAt = originalRestoration?.startedAt ?? Date.now()
   const activeBefore = services.filter(service => service.wasActive)
@@ -3771,7 +4011,7 @@ async function startAndAcceptServices({
         const readinessLarkCounts = new Map()
         for (const candidate of candidates) {
           if (!await serviceReadySignal(journalctlExecutable, homePath, candidate.current,
-            startedAt, originalRestoration)) { logsReady = false; break }
+            startedAt, originalRestoration, dshExecutable)) { logsReady = false; break }
           if (requireLarkReady && candidate.current.profile === targetProfile
             || larkReadyProfiles.includes(candidate.current.profile)) {
             const states = await larkJournalStates(journalctlExecutable, candidate.current)
@@ -3809,7 +4049,7 @@ async function startAndAcceptServices({
       for (const service of stable) assertExpectedServiceEnvironment(service, service)
       const stableByUnit = new Map(stable.map(service => [service.unit, service]))
       for (const acceptedService of accepted) {
-        await assertRestorationActivation(originalRestoration, homePath, acceptedService, startedAt)
+        await assertRestorationActivation(originalRestoration, homePath, acceptedService, startedAt, dshExecutable)
         const service = stableByUnit.get(acceptedService.unit)
         if (service === undefined || service.activeState !== 'active' || service.subState !== 'running' || service.mainPid <= 0
           || service.mainPid !== acceptedService.mainPid || service.controlPid !== 0
@@ -3891,7 +4131,7 @@ async function assertAcceptedServicesStillBound({
 async function acceptedServicesStillBound({
   systemctlExecutable, journalctlExecutable, services, serviceMasks, serviceStartBarriers, homePath, targetProfile,
   unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
-  larkReadyProfiles = [], originalRestoration,
+  larkReadyProfiles = [], originalRestoration, dshExecutable = '',
 }) {
   await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
   await assertCleanProfileInventory(homePath, cleanProfiles)
@@ -3953,7 +4193,7 @@ async function acceptedServicesStillBound({
       || service.mainPid !== proof.mainPid || service.invocationId !== proof.invocationId
       || service.nRestarts !== proof.nRestarts) readyForCleanup = false
     await assertRestorationActivation(originalRestoration, homePath, original,
-      originalRestoration?.startedAt ?? 0)
+      originalRestoration?.startedAt ?? 0, dshExecutable)
     if ((requireLarkReady && original.profile === targetProfile
       || larkReadyProfiles.includes(original.profile))
       && !LARK_ACCEPTED_STATES.has(await latestLarkJournalState(journalctlExecutable, service))) {
@@ -3964,7 +4204,8 @@ async function acceptedServicesStillBound({
 }
 
 async function removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome }) {
-  await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot })
+  const { dshExecutable = '' } = arguments[0] ?? {}
+  await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot, dshExecutable })
   if (manifest.localSourceMaintenance !== undefined) {
     const service = manifest.services.find(service => service.profile === manifest.profile)
     await assertLocalSourceHome({ manifest, physicalHome: manifest.homePath, selection: 'candidate',
@@ -4174,7 +4415,7 @@ async function recoverServiceTransaction({
 }) {
   if (manifest.supervisedLifecycle?.scannerRetirement !== undefined) {
     await readScannerRetirementEvidence(physicalTransactionRoot, manifest)
-    if (homeIsStaged) await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot })
+    if (homeIsStaged) await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot, dshExecutable })
     if (homeIsOriginal || homeStat === undefined && backupIsOriginal) {
       await assertScannerOriginalRestorePossible(manifest, physicalTransactionRoot)
     }
@@ -4222,7 +4463,7 @@ async function recoverServiceTransaction({
     }
     await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
     const acceptanceStillBound = await acceptedServicesStillBound({
-      ...serviceContext, services, serviceMasks, serviceStartBarriers, homePath, targetProfile: profile, unitUniverse,
+      ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers, homePath, targetProfile: profile, unitUniverse,
       foreignOwnership, cleanProfiles, acceptance: manifest.serviceAcceptance,
       requireLarkReady: (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION || manifest.version === LOCAL_SOURCE_MANIFEST_VERSION) && manifest.operation === 'upgrade',
     })
@@ -4236,7 +4477,7 @@ async function recoverServiceTransaction({
       })
     }
     if (acceptanceStillBound) {
-      await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
+      await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome, dshExecutable })
       process.stdout.write('service-aware 生命周期恢复：已完成崩溃中断的绑定清理。\n')
       return 'service-committed'
     }
@@ -4459,7 +4700,7 @@ async function recoverServiceTransaction({
     await assertCommittedCleanProfile()
     await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
     manifest = await writeManifest(physicalTransactionRoot, manifest, 'cleanup-started')
-    await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
+    await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome, dshExecutable })
     process.stdout.write('service-aware 生命周期恢复：swapped home 已重新验收并完成绑定清理。\n')
     return 'service-committed'
   }
@@ -4720,11 +4961,12 @@ async function assertRsiCoordinatorFiles(homePath, profile, snapshot) {
   }
 }
 
-async function assertRsiCoordinatorActivation(homePath, service, startedAt) {
+async function assertRsiCoordinatorActivation(homePath, service, startedAt, dshExecutable = '') {
   if (service.coordinatorRuntime === undefined) return
   const program = String.raw`
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
+` + HOST_PEER_RESOLVER_SNIPPET + String.raw`
 const sqliteWarningFiltered = Symbol.for('dsh-ray.sqlite-warning-filtered')
 if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   const originalEmitWarning = process.emitWarning
@@ -4749,7 +4991,8 @@ if (!Reflect.get(process.emitWarning, sqliteWarningFiltered)) {
   Reflect.set(filteredEmitWarning, sqliteWarningFiltered, true)
   process.emitWarning = filteredEmitWarning
 }
-const [home, profile, contractSource, since] = process.argv.slice(1)
+const [home, profile, dsh, contractSource, since] = process.argv.slice(1)
+installHostPeerResolver(dsh)
 const require = createRequire(join(home, 'profiles', profile, 'package.json'))
 const { listActiveAutomationsLocally } = await import(require.resolve('@dsh-ray/assistant-automations'))
 const { controlPlaneDigest } = await import(require.resolve('@dsh-ray/plugin-control-plane'))
@@ -4764,7 +5007,7 @@ if (!registration || registration.owner !== 'plugin-control-plane-adoption-coord
   || registration.definition.agentPreset !== scope.preset) throw new Error('RSI coordinator has no fresh owner-bound native activation')
 `
   await run(process.execPath, ['--input-type=module', '--eval', program,
-    homePath, service.profile, JSON.stringify(service.coordinatorRuntime), String(startedAt)], { capture: true, timeoutMs: 5000 })
+    homePath, service.profile, dshExecutable, JSON.stringify(service.coordinatorRuntime), String(startedAt)], { capture: true, timeoutMs: 5000 })
 }
 
 async function rsiCoordinatorUpgradeTargets(targets) {
@@ -5210,7 +5453,7 @@ async function captureScannerRetirementSource({ manifest, physicalTransactionRoo
   // The legacy installed reader and its dependencies run with logical Home
   // mapped to the stopped copy, never in the parent's original Home namespace.
   const ownerResult = await sandboxRun(sandbox, [process.execPath, '--input-type=module', '--eval', SCANNER_RETIREMENT_SOURCE_PROGRAM,
-    join(dirname(SCRIPT_PATH), 'host-rsi-update.mjs'), manifest.homePath, manifest.profile],
+    join(dirname(SCRIPT_PATH), 'host-rsi-update.mjs'), manifest.homePath, manifest.profile, sandbox.dshExecutable ?? ''],
   { capture: true, rejectTruncated: true, timeoutMs: SCANNER_RETIREMENT_TIMEOUT_MS, readonlyRoots: [dirname(SCRIPT_PATH)] })
   const ownerSource = parseJsonOutput(ownerResult.stdout, 'scanner-retirement-source')
   await assertCriticalDirectory(sandbox.stageHome, manifest.stagedIdentity)
@@ -5226,7 +5469,7 @@ async function captureScannerRetirementSource({ manifest, physicalTransactionRoo
   return writeManifest(physicalTransactionRoot, next, 'prepared')
 }
 
-async function runScannerRetirementOperator({ manifest, physicalTransactionRoot, sandbox, action }) {
+async function runScannerRetirementOperator({ manifest, physicalTransactionRoot, sandbox, dshExecutable = '', action }) {
   const evidence = await readScannerRetirementEvidence(physicalTransactionRoot, manifest)
   const journal = manifest.supervisedLifecycle?.scannerRetirement
   if (evidence === undefined || !['capture', 'apply', 'verify'].includes(action)
@@ -5240,7 +5483,7 @@ async function runScannerRetirementOperator({ manifest, physicalTransactionRoot,
   const referenceArgs = [journal.sourceArtifact, journal.captureArtifact, journal.completionArtifact].flatMap(reference =>
     reference === undefined ? ['', ''] : [join(manifest.transactionPath, reference.file), reference.digest])
   const command = [process.execPath, '--input-type=module', '--eval', SCANNER_RETIREMENT_OPERATOR_PROGRAM,
-    action, manifest.homePath, manifest.profile, sandbox?.dshExecutable ?? '',
+    action, manifest.homePath, manifest.profile, sandbox?.dshExecutable ?? dshExecutable,
     ...referenceArgs]
   const options = { capture: true, rejectTruncated: true, timeoutMs: SCANNER_RETIREMENT_TIMEOUT_MS }
   const result = sandbox === undefined
@@ -5273,13 +5516,15 @@ async function prepareScannerRetirement({ manifest, physicalTransactionRoot, san
   return writeManifest(physicalTransactionRoot, next, 'prepared')
 }
 
-async function assertScannerRetirementPersistent({ manifest, physicalTransactionRoot, sandbox }) {
+async function assertScannerRetirementPersistent({ manifest, physicalTransactionRoot, sandbox, dshExecutable = '' }) {
   const journal = manifest.supervisedLifecycle?.scannerRetirement
   if (journal === undefined) return
   const evidence = await readScannerRetirementEvidence(physicalTransactionRoot, manifest)
   if (journal.phase === 'unchanged') return
   if (journal.phase !== 'completed' || evidence.completion === undefined) fail('scanner retirement completion is missing')
-  const current = await runScannerRetirementOperator({ manifest, physicalTransactionRoot, sandbox, action: 'verify' })
+  const current = await runScannerRetirementOperator({
+    manifest, physicalTransactionRoot, sandbox, dshExecutable: sandbox?.dshExecutable ?? dshExecutable, action: 'verify',
+  })
   if (unmanagedAutomationDigest(current.records) !== journal.unmanagedAutomationsDigest) fail('scanner retirement unmanaged inventory drifted')
 }
 
@@ -5290,10 +5535,11 @@ function validSupervisedCapabilityProof(proof) {
 }
 
 async function assertSupervisedLifecycleCapability(homePath, profile) {
+  const dshExecutable = arguments[2] ?? ''
   let result
   try {
     result = await run(process.execPath, [
-      '--input-type=module', '--eval', SUPERVISED_CAPABILITY_PROGRAM, homePath, profile,
+      '--input-type=module', '--eval', SUPERVISED_CAPABILITY_PROGRAM, homePath, profile, dshExecutable,
     ], { capture: true, env: { ...process.env, DSH_HOME: homePath } })
   } catch (error) {
     fail(`当前 supervised source 缺少安全升级所需的只读 operator/attestation seam；请先安装支持该协议的 cohort：${error instanceof Error ? error.message : String(error)}`)
@@ -6019,7 +6265,7 @@ async function performNpmServiceUpgrade({
   })
   await assertLockedLifecycleScenario({ dshExecutable, profile, homePath, expectedScenario, serviceAware: true })
   if (recovery !== undefined) fail('已恢复上次生命周期事务；本次未访问 npm registry，请重试 upgrade。')
-  if (expectedScenario === 'supervised') await assertSupervisedLifecycleCapability(homePath, profile)
+  if (expectedScenario === 'supervised') await assertSupervisedLifecycleCapability(homePath, profile, dshExecutable)
   const pair = expectedScenario === 'supervised' ? await captureRsiCoordinator({ homePath, profile, dshExecutable }) : undefined
   await assertRsiPairUpgradeSource(homePath, profile, pair)
   const current = await readProfile(physicalHomePath, profile)
@@ -7136,7 +7382,7 @@ async function performLifecycle({
     }
   }
   if (supervisedOwner) {
-    await assertSupervisedLifecycleCapability(homePath, profile)
+    await assertSupervisedLifecycleCapability(homePath, profile, dshExecutable)
   }
   let serviceInventory
   if (serviceContext !== undefined) {
@@ -7634,7 +7880,7 @@ async function performLifecycle({
     if (supervisedOwner && operation === 'uninstall') await assertArchivedProfile(physicalHomePath, manifest)
     if (serviceContext !== undefined) {
       if (supervisedOwner && operation === 'upgrade') {
-        await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot })
+        await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot, dshExecutable })
         const rawBeforeStart = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
           homePath, profile, dshExecutable,
         }, 'snapshot'), false)
@@ -7776,10 +8022,10 @@ async function performLifecycle({
       await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
       if (supervisedOwner) await assertArchivedProfile(physicalHomePath, manifest)
     }
-    await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot })
+    await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot, dshExecutable })
     manifest = await writeManifest(physicalTransactionRoot, manifest, 'cleanup-started')
     committedCleanup = true
-    await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
+    await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome, dshExecutable })
     committedCleanup = false
     process.stdout.write(operation === 'uninstall'
       ? 'profile 生命周期事务完成：uninstall；旧 profile 已归档，事务未主动清除 live profile 外状态。\n'
@@ -9173,7 +9419,7 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
   const targetProfile = services.find(service => service.profile === manifest.profile)?.profile
     ?? services[0]?.profile ?? manifest.profile
   const accepted = services.length === 0 ? [] : await startAndAcceptServices({
-    ...serviceContext, services, serviceMasks: masks, homePath, targetProfile,
+    ...serviceContext, dshExecutable: candidateDshExecutable, services, serviceMasks: masks, homePath, targetProfile,
     unitUniverse: manifest.unitUniverse, foreignOwnership: manifest.foreignOwnership,
     cleanProfiles: [], timeouts: serviceTimeouts(), requireLarkReady: migration.localSource !== undefined,
     larkReadyProfiles,
@@ -9252,7 +9498,9 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
   }
   manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
     hostMigration: { ...manifest.hostMigration, phase: 'cleanup-started' } }, 'cleanup-started')
-  await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
+  await removeCommittedTransaction({
+    physicalTransactionRoot, transactionRoot, manifest, backupHome, dshExecutable: candidateDshExecutable,
+  })
   process.stdout.write(manifest.hostMigration.localSource && plan.status === 'current'
     ? `managed Home source updated; Host unchanged: ${plan.candidateRuntime.version}\n`
     : `managed Host updated: ${plan.originalRuntime.version} -> ${plan.candidateRuntime.version}\n`)
@@ -9300,7 +9548,10 @@ async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath
       manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
         hostMigration: { ...manifest.hostMigration, phase: 'cleanup-started' } }, 'cleanup-started')
     }
-    await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
+    await removeCommittedTransaction({
+      physicalTransactionRoot, transactionRoot, manifest, backupHome,
+      dshExecutable: migration.plan?.candidateRuntime?.dshPath ?? '',
+    })
     return 'host-candidate-committed'
   }
   if (migration.phase === 'initializing' && manifest.serviceMasks.length === 0) {
@@ -9655,6 +9906,9 @@ export const lifecycleProfileTest = Object.freeze({
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
   validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest, loadManifest,
   validSupervisedCapabilityProof, assertHostRsiRuntimeSuccessor, hostSandboxRun, MANIFEST_MAX_BYTES,
+  HOST_PEER_RESOLVER_SNIPPET, SUPERVISED_CAPABILITY_PROGRAM, SUPERVISED_OPERATOR_PROGRAM,
+  assertSupervisedLifecycleCapability, runSupervisedOperator, runSupervisedOperatorDirect,
+  runScannerRetirementOperator, captureScannerRetirementSource, assertRsiCoordinatorActivation,
   validLocalSourceManifest, validLocalSourceSelection, localSourcePhysicalProof, profileTreeDigest,
   pinLocalPnpmExecutable, assertLocalPnpmExecutable, assertLocalPnpmPackageManager, localSourceOriginalNpmEnvironment,
   prepareLocalSourceOfflineCache, assertLocalSourcePreparation, prepareLocalSourcePackageCaches, sandboxArgs,

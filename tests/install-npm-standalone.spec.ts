@@ -619,3 +619,384 @@ describe('standalone install-npm.sh remote asset closure & non-TTY pnpm', () => 
     expect(lifecycleProfileSource).toContain('dsh-ray update --all --yes --to-npm')
   })
 })
+
+interface LifecycleProfileTestExports {
+  HOST_PEER_RESOLVER_SNIPPET: string
+  SUPERVISED_CAPABILITY_PROGRAM: string
+  SUPERVISED_OPERATOR_PROGRAM: string
+  SCANNER_RETIREMENT_OPERATOR_PROGRAM: string
+  SCANNER_RETIREMENT_SOURCE_PROGRAM: string
+  assertSupervisedLifecycleCapability: (homePath: string, profile: string, dshExecutable?: string) => Promise<void>
+  runSupervisedOperator: (
+    context: {
+      stageHome: string
+      homePath: string
+      profile: string
+      dshExecutable: string
+      bwrapExecutable: string
+    },
+    action: string,
+  ) => Promise<Record<string, unknown>>
+  runSupervisedOperatorDirect: (
+    context: { homePath: string; profile: string; dshExecutable: string },
+    action: string,
+  ) => Promise<Record<string, unknown>>
+  assertRsiCoordinatorActivation: (
+    homePath: string,
+    service: {
+      profile: string
+      coordinatorRuntime?: {
+        targetProfile: string
+        coordinatorId: string
+        scope: { ownerRouteId: string; principalId: string; workspace: string; preset: string }
+      }
+    },
+    startedAt: number,
+    dshExecutable?: string,
+  ) => Promise<void>
+}
+
+interface HostPeerTestFixture {
+  homePath: string
+  stubDsh: string
+  symlinkedBinDsh: string
+  wrapperBinDsh: string
+  badManifestDsh: string
+  missingDsh: string
+  evilConsumerDir: string
+  digestDigest: string
+}
+
+async function createIsolatedHostPeerFixture(): Promise<HostPeerTestFixture> {
+  // Fake DSH_HOME deliberately lives inside /tmp so no ancestor node_modules/@deepseek-ai/cordis exists.
+  const homePath = await trackTempDir('/tmp', 'dsh-host-peer-home-')
+  const profileDir = join(homePath, 'profiles', 'web')
+  const profileNodeModules = join(profileDir, 'node_modules', '@dsh-ray')
+  await Promise.all([
+    mkdir(profileNodeModules, { recursive: true }),
+    mkdir(join(homePath, 'rsi-coordinators', 'web'), { recursive: true }),
+  ])
+  await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true }), 'utf8')
+  await writeFile(join(profileDir, 'cordis.patch.yml'), 'plugins: {}\n', 'utf8')
+
+  const hostParent = await trackTempDir(outsideTmpParent(), 'dsh-host-peer-host-')
+  const hostModules = join(hostParent, 'host', 'node_modules')
+  const dshDir = join(hostModules, '@deepseek-ai', 'dsh')
+  const cordisDir = join(hostModules, '@deepseek-ai', 'cordis')
+  const yamlDir = join(hostModules, 'yaml')
+  const binDir = join(hostModules, '.bin')
+  const wrapperHostModules = join(hostParent, 'wrapper-host', 'node_modules')
+  const wrapperDshDir = join(wrapperHostModules, '@deepseek-ai', 'dsh')
+  const wrapperBinDir = join(wrapperHostModules, '.bin')
+  const badHostBinDir = join(hostParent, 'bad-host', 'node_modules', 'other-cli', 'bin')
+  const badHostRoot = join(hostParent, 'bad-host', 'node_modules', 'other-cli')
+  await Promise.all([
+    mkdir(join(dshDir, 'lib'), { recursive: true }),
+    mkdir(cordisDir, { recursive: true }),
+    mkdir(yamlDir, { recursive: true }),
+    mkdir(binDir, { recursive: true }),
+    mkdir(join(wrapperDshDir, 'lib'), { recursive: true }),
+    mkdir(join(wrapperHostModules, '@deepseek-ai', 'cordis'), { recursive: true }),
+    mkdir(wrapperBinDir, { recursive: true }),
+    mkdir(badHostBinDir, { recursive: true }),
+  ])
+
+  const writeHostPeers = async (targetModules: string, includeBinDshScript: string): Promise<void> => {
+    const targetDsh = join(targetModules, '@deepseek-ai', 'dsh')
+    const targetCordis = join(targetModules, '@deepseek-ai', 'cordis')
+    const targetYaml = join(targetModules, 'yaml')
+    const targetEvil = join(targetModules, 'not-allowlisted-peer')
+    await mkdir(targetYaml, { recursive: true })
+    await mkdir(targetEvil, { recursive: true })
+    await writeFile(join(targetDsh, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh',
+      version: '0.2.2-test',
+      exports: { './package.json': './package.json' },
+    }), 'utf8')
+    await writeFile(includeBinDshScript, [
+      '#!/usr/bin/env node',
+      "if (process.argv.includes('--dump-config')) process.stdout.write('plugins: {}\\n')",
+    ].join('\n'), 'utf8')
+    await chmod(includeBinDshScript, 0o755)
+    await writeFile(join(targetCordis, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/cordis',
+      type: 'module',
+      exports: { '.': './index.js', './subpath': './subpath.js' },
+    }), 'utf8')
+    await writeFile(join(targetCordis, 'index.js'), "export const cordisMarker = 'host-cordis-resolved'\n", 'utf8')
+    await writeFile(join(targetCordis, 'subpath.js'), "export const cordisSubpathMarker = 'host-cordis-subpath'\n", 'utf8')
+    await writeFile(join(targetYaml, 'package.json'), JSON.stringify({
+      name: 'yaml',
+      type: 'module',
+      main: './index.js',
+    }), 'utf8')
+    await writeFile(join(targetYaml, 'index.js'), "export const parse = source => ({ parsed: source.trim() })\n", 'utf8')
+    await writeFile(join(targetEvil, 'package.json'), JSON.stringify({
+      name: 'not-allowlisted-peer',
+      type: 'module',
+      main: './index.js',
+    }), 'utf8')
+    await writeFile(join(targetEvil, 'index.js'), "export const secret = 'must-not-resolve'\n", 'utf8')
+  }
+
+  const symlinkTarget = join(dshDir, 'lib', 'bin.js')
+  await writeHostPeers(hostModules, symlinkTarget)
+  const symlinkedBinDsh = join(binDir, 'dsh')
+  await symlink(join('..', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), symlinkedBinDsh)
+
+  const wrapperBinDsh = join(wrapperBinDir, 'dsh')
+  await writeHostPeers(wrapperHostModules, join(wrapperDshDir, 'lib', 'bin.js'))
+  await writeFile(wrapperBinDsh, [
+    '#!/usr/bin/env sh',
+    'if [ "$1" = "--profile" ]; then printf "plugins: {}\\n"; exit 0; fi',
+  ].join('\n'), 'utf8')
+  await chmod(wrapperBinDsh, 0o755)
+
+  await writeFile(join(badHostRoot, 'package.json'), JSON.stringify({ name: 'other-cli', version: '1.0.0' }), 'utf8')
+  const badManifestDsh = join(badHostBinDir, 'dsh')
+  await writeFile(badManifestDsh, '#!/usr/bin/env sh\nexit 0\n', 'utf8')
+  await chmod(badManifestDsh, 0o755)
+
+  const stubDsh = join(homePath, 'dsh')
+  await writeFile(stubDsh, '#!/usr/bin/env sh\nprintf "plugins: {}\\n"\n', 'utf8')
+  await chmod(stubDsh, 0o755)
+
+  const digestDigest = createHash('sha256').update('recovery-catalog').digest('hex')
+  const coordinatorIdDigest = 'a'.repeat(64)
+
+  const writeProfilePlugin = async (name: string, body: string): Promise<void> => {
+    const dir = join(profileNodeModules, name)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'package.json'), JSON.stringify({
+      name: `@dsh-ray/${name}`,
+      type: 'module',
+      main: './index.js',
+    }), 'utf8')
+    await writeFile(join(dir, 'index.js'), body, 'utf8')
+  }
+
+  await writeProfilePlugin('lark-channel', [
+    "import { cordisMarker } from '@deepseek-ai/cordis'",
+    "import { cordisSubpathMarker } from '@deepseek-ai/cordis/subpath'",
+    "import { parse as parseYaml } from 'yaml'",
+    "if (cordisMarker !== 'host-cordis-resolved' || cordisSubpathMarker !== 'host-cordis-subpath') throw new Error('bad cordis host export')",
+    "if (parseYaml('ok').parsed !== 'ok') throw new Error('bad yaml host export')",
+    'export function captureSupervisedGrowthLifecycleAttestation() {',
+    "  return { protocol: 'dsh-ray/supervised-growth-attestation/v1', cordisMarker, cordisSubpathMarker }",
+    '}',
+    'export function configureSupervisedGrowthProfilePatch() { return "plugins: {}\\n" }',
+    'export function assertEffectiveSupervisedGrowthConfig() {}',
+    'export function expectedSupervisedGrowthRecoveryBootstrap() { return { attestationSetDigest: "' + 'b'.repeat(64) + '" } }',
+    'export function expectedSupervisedGrowthManagedAutomationDigest() { return { digest: "' + 'c'.repeat(64) + '" } }',
+    'export function buildSupervisedGrowthPreviewOverlay() { return "plugins: {}\\n" }',
+    'export function assertSupervisedGrowthPreviewDerivation() {}',
+    'export function supervisedGrowthDatabasePaths(_cfg, home) {',
+    "  return { deliveryDatabasePath: `${home}/delivery.sqlite`, recoveryDatabasePath: `${home}/recovery.sqlite`, automationsDatabasePath: `${home}/automations.sqlite` }",
+    '}',
+    'export function supervisedGrowthBindingQuery() { return { channel: "lark" } }',
+    'export function deriveScannerRetirementConfiguration() { return { effectiveConfigDigest: "' + 'd'.repeat(64) + '" } }',
+    'export function captureScannerRetirementPlan() { return { status: "no-op" } }',
+    'export function applyScannerRetirementPlan() { return {} }',
+    'export function verifyScannerRetirementPersistence({ completion }) { return { records: completion.after.records, cordisMarker } }',
+  ].join('\n'))
+
+  await writeProfilePlugin('assistant-delivery', [
+    "import { cordisMarker } from '@deepseek-ai/cordis'",
+    "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
+    'export function inspectActiveLarkOwnerBindingsLocally() {',
+    "  return { scope: { owner: 'owner-1' }, storageDigest: '" + 'e'.repeat(64) + "', bindings: [{ id: 'bind-1' }] }",
+    '}',
+  ].join('\n'))
+
+  await writeProfilePlugin('assistant-recovery', [
+    "import { cordisMarker } from '@deepseek-ai/cordis'",
+    "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
+    `export const RECOVERY_CATALOG_DIGEST = '${digestDigest}'`,
+    "export function inspectRecoveryOperatorSnapshot() { return { bootstrap: { generation: 1 } } }",
+  ].join('\n'))
+
+  await writeProfilePlugin('assistant-automations', [
+    "import { cordisMarker } from '@deepseek-ai/cordis'",
+    "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
+    "export function inspectAutomationsOperatorSnapshot() { return { inFlightCount: 0, inventoryDigest: '" + 'f'.repeat(64) + "', records: [] } }",
+    "export function automationDefinitionDigest() { return '" + '0'.repeat(64) + "' }",
+    'export function listActiveAutomationsLocally() {',
+    `  return [{ id: 'adoption-coordinator-${coordinatorIdDigest.slice(0, 40)}', owner: 'plugin-control-plane-adoption-coordinator', updatedAt: Number.MAX_SAFE_INTEGER,`,
+    "    definition: { execution: { kind: 'host', executorId: 'plugin-control-plane-adoption-coordinator-v1', ownerRouteId: 'route-1' },",
+    "      principal: 'p1', workspace: 'ws1', agentPreset: 'default' } }]",
+    '}',
+  ].join('\n'))
+
+  await writeProfilePlugin('plugin-control-plane', [
+    "import { cordisMarker } from '@deepseek-ai/cordis'",
+    "if (cordisMarker !== 'host-cordis-resolved') throw new Error('bad cordis')",
+    `export function controlPlaneDigest() { return '${coordinatorIdDigest}' }`,
+  ].join('\n'))
+
+  // Isolated consumer attempting to resolve a non-allowlisted host peer (must fail even with resolver installed).
+  const evilConsumerDir = join(homePath, 'evil-consumer')
+  await mkdir(evilConsumerDir, { recursive: true })
+  await writeFile(join(evilConsumerDir, 'package.json'), JSON.stringify({ name: 'evil-consumer', type: 'module' }), 'utf8')
+  await writeFile(join(evilConsumerDir, 'index.js'), "import { secret } from 'not-allowlisted-peer'\nexport default secret\n", 'utf8')
+
+  return {
+    homePath,
+    stubDsh,
+    symlinkedBinDsh,
+    wrapperBinDsh,
+    badManifestDsh,
+    missingDsh: join(hostParent, 'does-not-exist-dsh'),
+    evilConsumerDir,
+    digestDigest,
+  }
+}
+
+describe('host peer resolution outside monorepo', () => {
+  test('keeps inline resolver snippets in sync across all 5 inline programs', async () => {
+    const { lifecycleProfileTest } = await import(pathToFileURL(join(installDirectory, 'lifecycle-profile.mjs')).href) as {
+      lifecycleProfileTest: LifecycleProfileTestExports
+    }
+    const trimmedSnippet = lifecycleProfileTest.HOST_PEER_RESOLVER_SNIPPET.trim()
+    expect(lifecycleProfileTest.SUPERVISED_OPERATOR_PROGRAM).toContain(trimmedSnippet)
+    expect(lifecycleProfileTest.SUPERVISED_CAPABILITY_PROGRAM).toContain(trimmedSnippet)
+    expect(lifecycleProfileTest.SCANNER_RETIREMENT_OPERATOR_PROGRAM).toContain('installHostPeerResolver(dsh)')
+    expect(lifecycleProfileTest.SCANNER_RETIREMENT_SOURCE_PROGRAM).toContain('installHostPeerResolver(dsh)')
+    const source = await readFile(join(installDirectory, 'lifecycle-profile.mjs'), 'utf8')
+    expect(source).toContain('` + HOST_PEER_RESOLVER_SNIPPET + String.raw`')
+  })
+
+  test('resolves @deepseek-ai/* and yaml from fake Host for all inline lifecycle programs inside /tmp', async () => {
+    const { lifecycleProfileTest } = await import(pathToFileURL(join(installDirectory, 'lifecycle-profile.mjs')).href) as {
+      lifecycleProfileTest: LifecycleProfileTestExports
+    }
+    const f = await createIsolatedHostPeerFixture()
+
+    await expect(
+      lifecycleProfileTest.assertSupervisedLifecycleCapability(f.homePath, 'web', f.symlinkedBinDsh),
+    ).resolves.toBeUndefined()
+    await expect(
+      lifecycleProfileTest.assertSupervisedLifecycleCapability(f.homePath, 'web', f.wrapperBinDsh),
+    ).resolves.toBeUndefined()
+
+    const directSnapshot = await lifecycleProfileTest.runSupervisedOperatorDirect(
+      { homePath: f.homePath, profile: 'web', dshExecutable: f.symlinkedBinDsh },
+      'snapshot',
+    )
+    expect(directSnapshot.databasePaths).toEqual({
+      delivery: 'delivery.sqlite',
+      recovery: 'recovery.sqlite',
+      automations: 'automations.sqlite',
+    })
+
+    if (process.platform === 'linux') {
+      const bwrapPath = '/usr/bin/bwrap'
+      const probe = spawnSync(bwrapPath, ['--version'], { stdio: 'ignore' })
+      if (probe.status === 0) {
+        const sandboxSnapshot = await lifecycleProfileTest.runSupervisedOperator(
+          {
+            stageHome: f.homePath,
+            homePath: f.homePath,
+            profile: 'web',
+            dshExecutable: f.symlinkedBinDsh,
+            bwrapExecutable: bwrapPath,
+          },
+          'snapshot',
+        )
+        expect(sandboxSnapshot.databasePaths).toEqual(directSnapshot.databasePaths)
+      }
+    }
+
+    const artifactDir = await trackTempDir('/tmp', 'dsh-scanner-artifacts-')
+    const writeArtifact = async (name: string, payload: unknown): Promise<{ path: string; digest: string }> => {
+      const target = join(artifactDir, name)
+      const encoded = JSON.stringify(payload)
+      await writeFile(target, encoded, 'utf8')
+      return { path: target, digest: createHash('sha256').update(encoded).digest('hex') }
+    }
+    const sourceArt = await writeArtifact('source.json', { homePath: f.homePath, profile: 'web', ownerSource: { owner: {} }, effectiveConfig: '' })
+    const captureArt = await writeArtifact('capture.json', { capture: { status: 'prepared', plan: {} } })
+    const completionArt = await writeArtifact('completion.json', { after: { records: [{ id: 'custom-1' }] } })
+
+    const verifyOut = spawnSync(process.execPath, [
+      '--input-type=module', '--eval', lifecycleProfileTest.SCANNER_RETIREMENT_OPERATOR_PROGRAM,
+      'verify', f.homePath, 'web', f.wrapperBinDsh,
+      sourceArt.path, sourceArt.digest,
+      captureArt.path, captureArt.digest,
+      completionArt.path, completionArt.digest,
+    ], { cwd: '/tmp', encoding: 'utf8', env: { ...process.env, DSH_HOME: f.homePath } })
+    expect(verifyOut.status, verifyOut.stderr).toBe(0)
+    expect(JSON.parse(verifyOut.stdout)).toEqual({
+      records: [{ id: 'custom-1' }],
+      cordisMarker: 'host-cordis-resolved',
+    })
+
+    const fakeHelper = join(artifactDir, 'fake-rsi-helper.mjs')
+    await writeFile(fakeHelper, [
+      `import { createRequire } from 'node:module'`,
+      `const req = createRequire(${JSON.stringify(join(f.homePath, 'profiles', 'web', 'package.json'))})`,
+      `export async function inspectRsiScannerOwnerSource({ homePath, profile }) {`,
+      `  const lark = await import(req.resolve('@dsh-ray/lark-channel'))`,
+      `  return { homePath, profile, marker: lark.captureSupervisedGrowthLifecycleAttestation().cordisMarker }`,
+      `}`,
+    ].join('\n'), 'utf8')
+    const sourceProgramOut = spawnSync(process.execPath, [
+      '--input-type=module', '--eval', lifecycleProfileTest.SCANNER_RETIREMENT_SOURCE_PROGRAM,
+      fakeHelper, f.homePath, 'web', f.symlinkedBinDsh,
+    ], { cwd: '/tmp', encoding: 'utf8', env: { ...process.env, DSH_HOME: f.homePath } })
+    expect(sourceProgramOut.status, sourceProgramOut.stderr).toBe(0)
+    expect(JSON.parse(sourceProgramOut.stdout)).toEqual({
+      homePath: f.homePath,
+      profile: 'web',
+      marker: 'host-cordis-resolved',
+    })
+
+    await expect(lifecycleProfileTest.assertRsiCoordinatorActivation(
+      f.homePath,
+      {
+        profile: 'web',
+        coordinatorRuntime: {
+          targetProfile: 'web',
+          coordinatorId: 'coord-1',
+          scope: { ownerRouteId: 'route-1', principalId: 'p1', workspace: 'ws1', preset: 'default' },
+        },
+      },
+      1,
+      f.symlinkedBinDsh,
+    )).resolves.toBeUndefined()
+  })
+
+  test('fails closed on missing, invalid, or non-allowlisted host peer lookups', async () => {
+    const { lifecycleProfileTest } = await import(pathToFileURL(join(installDirectory, 'lifecycle-profile.mjs')).href) as {
+      lifecycleProfileTest: LifecycleProfileTestExports
+    }
+    const f = await createIsolatedHostPeerFixture()
+
+    // Omitted or stub dshExecutable skips host fallback and reproduces natural ERR_MODULE_NOT_FOUND.
+    await expect(
+      lifecycleProfileTest.assertSupervisedLifecycleCapability(f.homePath, 'web'),
+    ).rejects.toThrow(/ERR_MODULE_NOT_FOUND/u)
+    await expect(
+      lifecycleProfileTest.assertSupervisedLifecycleCapability(f.homePath, 'web', f.stubDsh),
+    ).rejects.toThrow(/ERR_MODULE_NOT_FOUND/u)
+
+    // Nonexistent executable path fails closed (ENOENT) rather than silently skipping resolver.
+    await expect(
+      lifecycleProfileTest.assertSupervisedLifecycleCapability(f.homePath, 'web', f.missingDsh),
+    ).rejects.toThrow(/ENOENT/u)
+
+    // Executable belonging to another node_modules package rejects spoofed host manifest.
+    await expect(
+      lifecycleProfileTest.assertSupervisedLifecycleCapability(f.homePath, 'web', f.badManifestDsh),
+    ).rejects.toThrow(/does not belong to @deepseek-ai\/dsh/u)
+
+    // Allowlist check: even with a valid Host resolver installed, non-@deepseek-ai/* non-yaml packages stay blocked.
+    const evilProbe = spawnSync(process.execPath, [
+      '--input-type=module',
+      '--eval',
+      `${lifecycleProfileTest.HOST_PEER_RESOLVER_SNIPPET}\ninstallHostPeerResolver(${JSON.stringify(f.symlinkedBinDsh)})\nawait import(${JSON.stringify(pathToFileURL(join(f.evilConsumerDir, 'index.js')).href)})\n`,
+    ], { cwd: '/tmp', encoding: 'utf8' })
+    expect(evilProbe.status).not.toBe(0)
+    expect(evilProbe.stderr).toContain('ERR_MODULE_NOT_FOUND')
+  })
+})
+
