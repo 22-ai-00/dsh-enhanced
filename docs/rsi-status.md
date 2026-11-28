@@ -1,10 +1,10 @@
 # RSI 当前状态
 
-更新：2026-11-27（已通过纯 GitHub OIDC 发布 `dsh-ray` / `@dsh-ray/cli` 与全部 40 个 `@dsh-ray/*@0.2.4` 包：`.github/workflows/release.yml` Run `46055285713` `publish`/`verify-npm`/`record` 全部通过并提交 `fe9c4363`，40/40 包上线 npm 并完成校验；在 `0.2.3` 基线上修复 `pnpm 11.7.0` 隔离布局下 `supervised` 探针无法解析传递依赖 `@dsh-ray/assistant-automations` 的问题，并在 `@dsh-ray/cli` 升级前清理 `node_modules/@dsh-ray/*` 遗留非符号链接旧实目录以恢复 `dsh-ray update --all` 幂等与准确版本报告）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
+更新：2026-11-28（确立 [Ray 自主成长设计](ray-autonomous-self.md) 与 P1–P6 演进路线；已通过纯 GitHub OIDC 发布 `dsh-ray` / `@dsh-ray/cli` 与全部 40 个 `@dsh-ray/*@0.2.4` 包并在 npm 完成校验，合回 `fe9c4363`）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
 
 ## 目标
 
-让受认证的日常任务反馈与可重放经验沉淀自动驱动受控修复、可复用技能/工具/插件候选、独立验收、有限采用与退化回退；新装及常规预设默认开启全套自迭代与主动进化能力，并支持用户通过统一 CLI（`@dsh-ray/cli` / `dsh-ray enable|disable|update|upgrade|provider|version`）、桌面端 DSH 左栏（`@dsh-ray/owner-console`）与飞书/Web（`/version`、`/help`、`/status`、`/update`、`/autonomy`、`/learning`、`/feedback`）一站式查询版本与演进统计、开启、关闭、升级与恢复可用状态。
+让受认证的日常任务反馈与可重放经验沉淀自动驱动受控修复、可复用技能/工具/插件候选、独立验收、有限采用与退化回退；新装及常规预设默认开启全套自迭代与主动进化能力，并支持用户通过统一 CLI（`@dsh-ray/cli` / `dsh-ray enable|disable|update|upgrade|provider|version`）、桌面端 DSH 左栏（`@dsh-ray/owner-console`）与飞书/Web（`/version`、`/help`、`/status`、`/update`、`/autonomy`、`/learning`、`/feedback`）一站式查询版本与演进统计、开启、关闭、升级与恢复可用状态。长期目标是演进为脱离本仓库独立持续成长的个人助手 **Ray（文鳐 / 小鳐）**，详见[Ray 自主成长设计](ray-autonomous-self.md)。
 
 ## 能力边界
 
@@ -18,7 +18,8 @@
 
 - **平台验证边界（Linux 宿主与 Windows Named Pipe 边界）**：当前物理验证宿主为 Linux，Linux 原生隔离/cgroup、`SO_PEERCRED`、独立沙箱仓与全部服务端链路已在本地实测通过；macOS（`macos-seatbelt`、`LOCAL_PEERCRED`、`launchd`）与 Windows（`windows-job`、Named Pipe/ACL）路径由跨平台 CI（`macos-verify`、`windows-acp-smoke`）门禁覆盖。在真实 Windows Node.js `net.Socket` Named Pipe 上，`socket._handle` 不暴露底层 Win32 句柄，默认 `inspectWindowsPeerCredentials` 按 fail-closed 返回 `undefined`（仅在具备句柄或注入 FFI 绑定时执行进程与 `TokenUser` SID 核验）。
 - **D 类纵向验证边界**：真实用户在长期普通使用中的质量、成本、延迟、打扰分布与长期因果收益（D 类纵向证据）属于发布后（post-release）真实使用观测范围，显式排除在发版前工程验收门禁之外。
-- **下一步验收**：基于已发布的 `@dsh-ray/*@0.2.4` 完成本机 `0.2.3 -> 0.2.4` 升级、幂等 no-op 与 capability 探针实测、外部节点（`xtorybot` / macOS Desktop）升级与隔离临时 `DSH_HOME` 公网 `install-npm.sh` 冒烟，以及日常普通使用中的 D 类长期纵向观察。
+- **下一步验收（P1 自我与家）**：建立 Ray Home（默认 `~/.ray`、支持任意磁盘挂载）、身体内核（精力/凭据/对外授权/独立验收器/回滚/根本立场）、全渠道统一自我模型与自传、搬家导出导入与现有 SQLite 迁入；验收要求为新装或换盘后自动建家并正常运行，飞书与桌面端同人格且首次启动写出自述与理想（`/status` 或面板可见），成长执行体写内核被拒且 owner 否决一轮内生效，跨机导入 Ray Home 并补凭据后记忆/技能/自创插件/自传完整接续，以及 `pnpm check` 通过。
+- **后续基线与纵向观察**：基于已发布的 `@dsh-ray/*@0.2.4` 完成本机 `0.2.3 -> 0.2.4` 升级、幂等 no-op 与 capability 探针实测、外部节点（`xtorybot` / macOS Desktop）升级与隔离临时 `DSH_HOME` 公网 `install-npm.sh` 冒烟，以及日常普通使用中的 D 类长期纵向观察。
 
 ## 最新验证
 

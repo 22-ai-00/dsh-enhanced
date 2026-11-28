@@ -19,6 +19,7 @@
 ## 自迭代主线
 
 - [当前状态](rsi-status.md)：唯一进展入口；目标是在普通使用中完成反馈、改进、独立验证、采用和后续观察。
+- [Ray 自主成长设计](ray-autonomous-self.md)：身体内核、永续生命流（前台意识+持久 worker）、情景记忆、点子池与主动性、分级热插拔、Ray Home 搬家/传授及 P1–P6 路线。
 - [双 Host 安装](../plugins/lark-channel/docs/rsi-setup.md)、[有限试用采用](bounded-live-adoption.md)：当前主线部署与采用合同。
 - [Linux 原生运行时](dockerless-runtime.md)：无 Docker 安装、委派 cgroup v1 / 统一 cgroup v2 要求，以及 pre-owner 维护与已有 owner 迁移的不同边界。
 - [持久后台任务](../plugins/assistant-work-items/README.md)：默认关闭；显式授权后支持诊断、断点召回、报告回复续办与主人结果反馈。

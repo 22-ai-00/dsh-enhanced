@@ -2,7 +2,9 @@
 
 ## Mission
 
-Build an intelligent tool that improves through ordinary use: authenticated task feedback → durable learning → skill/tool/plugin candidate → independent verification → bounded adoption → subsequent tasks → observation/rollback. Evolution includes durable factual/experience memory and engineering capabilities, primarily through creating and dynamically loading Cordis plugins. After initial setup and authorization, the owner should not need to orchestrate each improvement.
+Build **Ray (`文鳐 / 小鳐`)**, an independent, self-growing personal assistant for a single owner living in one continuous life stream across Lark, Web, and Desktop: a conversational front consciousness collaborates with persistent concurrent workers, reflects and associates to consolidate experience into memory, skills, tools, and Cordis plugins, acts proactively from both events and its own ideas/interests, and forms its own interests, stage goals, and ideals through authenticated feedback → candidate → independent verification → bounded adoption → observation/rollback. After initial setup, the owner does not orchestrate improvements one by one.
+
+Ray's self is portable and independent of this repository: identity, autobiography, life stream, memories, skills, self-authored plugin sources/artifacts, evidence, idea pool, and energy ledger reside in Ray Home (default `~/.ray`, movable to any disk). DSH/Cordis is Ray's body—push hot-loading and hot-unplugging so capability updates avoid restarts; models and Hosts are replaceable suppliers; this repo serves as factory genes. See [Ray autonomous self](docs/ray-autonomous-self.md).
 
 This pnpm monorepo contains independently publishable DSH bundles in `plugins/*`; `packages/*` contains shared libraries that never auto-enable.
 
@@ -21,6 +23,7 @@ Keep one active delivery in context. Completed work is a capability boundary, no
 | DSH/Cordis dependency or new upstream API | [Compatibility](docs/compatibility.md); keep baseline and affected packages consistent. |
 | Lifecycle, injection, config, effects, isolation, Loader or HMR | [Cordis runtime contracts](docs/cordis-runtime-contracts.md) and a local checkout of the locked Cordis fork; verify executable behavior against this lockfile's installed fork and Loader/Include versions. |
 | Acceptance or release | Relevant rows of [acceptance contract](docs/rsi-acceptance.md) and [release guide](docs/releasing.md). |
+| Ray self, kernel, life stream, proactivity, migration | [Ray autonomous self](docs/ray-autonomous-self.md) |
 
 ## Implementation discipline
 
@@ -31,12 +34,16 @@ Keep one active delivery in context. Completed work is a capability boundary, no
 
 ## Self-iteration principles
 
-- Reuse DSH's native agent loop and Cordis lifecycle; do not add duplicate loops or goal state machines. Models are replaceable suppliers; identity, history and versioned capabilities must survive supplier changes.
+- Reuse DSH's native agent loop and Cordis lifecycle; do not add duplicate loops or goal state machines. Models are replaceable suppliers; identity, history and versioned capabilities must survive supplier and Host changes.
+- Keep the **body kernel** owner-only (Ray may propose changes, never self-modify): strict owner precedence (owner instructions and vetoes override Ray's aspirations, no harm to owner interests, personal aspirations use only free energy), energy/concurrency caps, credentials, external side-effect authorization, independent verifier and growth metrics, and rollback. Outside the kernel, Ray evolves persona, values, interests, goals, skills, and plugins autonomously, logging changes with reasons in its autobiography; owner vetoes take effect within one conversation turn.
 - Repair/growth inherits the triggering conversation/task model unless explicitly overridden. Freeze and persist the resolved supplier, budget and acceptance contract per run; never silently switch during recovery.
 - Ordinary authenticated outcomes, corrections and repeated work must drive learning without developer orchestration or a preconfigured task acceptance scenario. Fixed scenarios are regression evidence, not the product loop.
 - Keep acceptance rules and held-out tasks outside candidate write authority. Promote only from fresh independently checked outcomes, never model self-ratings or successful tool exits alone.
 - Judge improvement on subsequent real tasks: quality, cost, latency and regressions. Deduplicate canonical task revisions, fence decisions against corrections/withdrawals, and do not treat deployment association as causal evidence. Use bounded versioned comparisons with the same supplier/budget where needed; retain failed attempts.
-- Link actions and peer claims to agent/run identity, capability versions and original evidence. Derive repair triggers from current owner-bound feedback, not global gap records. Enforce existing owner authorization before action; observe afterward, bound changes, retain rollback and reconcile unknown outcomes before retrying.
+- Link actions and peer claims to agent/run identity, capability versions and original evidence. Derive repair triggers from current owner-bound feedback, not global gap records. Enforce owner authorization before external effects or kernel changes; observe afterward, bound changes, retain rollback and reconcile unknown outcomes before retrying.
+- Maintain one life stream per owner: the front consciousness responds immediately and routes, long work runs in persistent recoverable workers, and interruptions route to matching workers as follow-ups without cancelling work; replace lossy front compaction with persistent episodic memory and on-demand recall.
+- Feed associations, dreaming, events, and web learning into an idea pool across three tiers—silent internal exploration (free energy), capped natural mentions, and owner-gated external work—tuning thresholds from owner reactions; reflect post-conversation, daily, weekly, and per stage.
+- Promote self-authored stateful plugins from sandbox/child Loader through verification and observation into live Cordis hot-load, rolling back via Cordis scope disposal without restart (spine plugins such as Delivery and control-plane remain non-hot-swappable); support plaintext Ray Home cloning across disks (re-authenticating excluded credentials) and full-content teaching packs that re-verify with provenance and merge while preserving recipient identity.
 - Publish installable experimental npm releases after installation, runtime readiness and release verification pass. Validate long-term ordinary-use learning and improvement after installation; do not block experimental distribution on that longitudinal evidence or claim the complete loop is accepted before it exists. Preserve independent verification, owner authorization, finite budgets and rollback in every release.
 
 ## Repository contracts
