@@ -8,6 +8,8 @@ export type {
   RayIdeal,
   RayInterest,
   RayStageGoal,
+  RayTeachingExportResult,
+  RayTeachingImportResult,
 } from '@dsh-ray/assistant-growth-contract'
 export {
   RayEnergyRuntime,
@@ -26,6 +28,7 @@ export {
   type RayCloneExportResult,
   type RayCloneImportResult,
   type RayMissingCredentialItem,
+  type RayPluginVerifier,
   type RaySelfEvolutionInput,
   type RaySelfSnapshot,
   type RayVetoHandler,

@@ -1508,10 +1508,20 @@ export class OwnerConsoleService extends TypertRemoteService {
     }
   }
 
-  /** Import a plaintext Ray Home clone directory onto this Host instance (credentials excluded). */
+  /** Import a plaintext Ray Home clone directory or ray-teaching-pack/v1 Teaching Pack onto this Host instance (credentials excluded). */
   async importRayHome(sourceDir: string): Promise<OwnerConsoleWriteResult> {
-    const raySelf = this.getRaySelf()
-    if (raySelf === undefined || typeof raySelf.importClone !== 'function') {
+    const raySelf = this.getRaySelf() as (ReturnType<OwnerConsoleService['getRaySelf']> & {
+      importTeachingPack?: (dir: string) => Promise<{
+        packId: string
+        teacher: { rayId: string; name: string }
+        recipientName: string
+        adoptedCapabilities: readonly string[]
+        keptExistingCapabilities: readonly string[]
+        importedMemories: number
+        importedEpisodes: number
+      }>
+    }) | undefined
+    if (raySelf === undefined || (typeof raySelf.importClone !== 'function' && typeof raySelf.importTeachingPack !== 'function')) {
       return refuse('assistant-policy', '当前尚未启用 Ray Home（assistant-policy.raySelf 未挂载）')
     }
     const clean = sourceDir.trim()
@@ -1519,7 +1529,15 @@ export class OwnerConsoleService extends TypertRemoteService {
       return refuse('assistant-policy', '导入路径无效')
     }
     try {
-      const res = raySelf.importClone(clean)
+      if (existsSync(`${clean.replace(/\/+$/u, '')}/teaching-pack.json`) && typeof raySelf.importTeachingPack === 'function') {
+        const res = await raySelf.importTeachingPack(clean)
+        return Object.freeze({
+          applied: true,
+          entry: 'assistant-policy',
+          note: `已从 ${clean} 导入传授包 ${res.packId}（传授方 ${res.teacher.name} -> 保留本机 ${res.recipientName}；采纳 ${res.adoptedCapabilities.length}、保留新版 ${res.keptExistingCapabilities.length}、记忆 +${res.importedMemories}、情景 +${res.importedEpisodes}）`,
+        })
+      }
+      const res = raySelf.importClone!(clean)
       const missingNote = res.missingCredentials.length > 0
         ? `；待重新认证凭据（${res.missingCredentials.length}）：${res.missingCredentials.map(c => c.label ?? c.id).join('、')}`
         : '；所需凭据均已就绪'

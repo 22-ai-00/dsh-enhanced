@@ -30,7 +30,7 @@ import { inspectLaunchdDefinition, inspectLoadedLaunchd } from './launchd-servic
 import { defaultRunner, findRunningProfiles, type CommandRunner } from './run.ts'
 import { formatSelfUpdateReport, runSelfUpdate } from './update.ts'
 import { assertFrozenCliUpdateVersion, assertFrozenUpdateArgs, detectFrozenOwner, runFrozenOwnerUpdate } from './program-update.ts'
-import { runHomeCommand } from './ray-home.ts'
+import { runHomeCommand, runTeachCommand } from './ray-home.ts'
 import { formatWebUrlResult, resolveManagedWebUrl, waitForManagedWebUrl } from './weburl.ts'
 import {
   collectLogs,
@@ -106,6 +106,7 @@ export {
   resolveTargetProfiles,
   tailLogFile,
 } from './services.ts'
+export { exportRayTeachingPack, importRayTeachingPack, runHomeCommand, runTeachCommand } from './ray-home.ts'
 export { extractWebUrlFromText, formatWebUrlResult, resolveManagedWebUrl, waitForManagedWebUrl } from './weburl.ts'
 export {
   runUpgrade,
@@ -721,6 +722,7 @@ const HELP = `dsh-ray — DSH Ray 插件集合的安装 / 控制 / 诊断 / 彻�
   purge       彻底卸载：停服 → 备份 → 删除 profile/DSH home → 清理外部凭据
   maintenance 运维结算：列出并结算死信、列出并暂停系统自有 automation（写 receipt）
   home        管理独立 Ray Home：status / init / migrate / export / import（迁移 SQLite 至 ~/.ray 或外置盘，明文克隆与重认证清单）
+  teach       导出或导入全量 Ray 传授包：export / import（ray-teaching-pack/v1，保留接收方身份与内核并重验证能力）
   version     查看助手 / Host / 核心与自演进插件版本及只读自迭代演进统计（支持 --json / --short）
 
 全局选项：
@@ -853,7 +855,7 @@ interface ParsedArgs {
 
 const KNOWN_COMMANDS = new Set([
   'status', 'doctor', 'growth-report', 'open', 'start', 'stop', 'restart', 'logs', 'web-url', 'update', 'upgrade',
-  'enable', 'disable', 'install', 'provider', 'reinstall', 'purge', 'version', 'maintenance', 'home',
+  'enable', 'disable', 'install', 'provider', 'reinstall', 'purge', 'version', 'maintenance', 'home', 'teach',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
 const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--dsh-version', '--wait', '--registry', '--since', '--now'])
@@ -982,8 +984,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       throw new PurgeError(`无法识别的参数：${token}（用 -h 查看用法）`)
     }
 
-    // maintenance、provider 与 home 自行解析子命令与选项，cli 顶层不再解释其余 token。
-    if (result.command === 'maintenance' || result.command === 'provider' || result.command === 'home') {
+    // maintenance、provider、home 与 teach 自行解析子命令与选项，cli 顶层不再解释其余 token。
+    if (result.command === 'maintenance' || result.command === 'provider' || result.command === 'home' || result.command === 'teach') {
       result.passthrough.push(token)
       continue
     }
@@ -1775,6 +1777,13 @@ export async function main(
           ...(args.profile === undefined ? {} : { profile: args.profile }),
           json: args.json,
           dryRun: args.dryRun,
+          env,
+        })
+      case 'teach':
+        return await runTeachCommand(args.passthrough, {
+          dshHome: args.dshHome,
+          ...(args.profile === undefined ? {} : { profile: args.profile }),
+          json: args.json,
           env,
         })
       case 'maintenance':

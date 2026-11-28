@@ -619,3 +619,4 @@ v31 `delivery_attention_audit` 以 `outbox_id` 为主键并外键到 Outbox，`l
 - **插话不取消**：主人中途发来补充要求时，前台通过 `ticket_followup` 原生注入 `agent.steer` 或 `agent.followup` 到正在运行的 Worker 会话，不中断已有进度。
 - **交回与转述**：Worker 仅持有预授权的 `ticket_handback`（限定 `ownsWorkerSessionAgent`）；遇到超出工单范围的需求或需要主人再确认时交回前台；工单结束或交回时优先复用现有 Outbox/通知守卫通道推送自然语言转述，并在下一轮前台 `ray:worker-tickets` 上下文中保底同步。
 - **冷恢复与命令**：宿主重启重新注入 `agents`/`sessions`/`llm` 后，自动经 `ctx.agents.resume` 恢复未完成的 `running` 工单；`/status` 附带工单摘要，`/tickets` 查看当前及近期 Worker 列表。
+- **Ray 自主控制与传授包工具（预授权）**：当 `assistantPolicy.raySelfRuntime()` 活跃时，为已认证 Owner 前台会话额外注册预授权工具 `ray_owner_veto`（1 轮即时否决）、`ray_home_import`（导入明文搬家克隆，或自动识别目录内 `teaching-pack.json` 切换传授包合并）、`ray_teach_export`（导出 `ray-teaching-pack/v1` 全量传授包）与 `ray_teach_import`（独立重验证并合入传授包，保留接收方身份与内核）。

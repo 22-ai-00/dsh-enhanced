@@ -1,11 +1,13 @@
+import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync,
   readFileSync, realpathSync, renameSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { pathToFileURL } from 'node:url'
 import { isMap, isSeq, parseDocument, Scalar, YAMLMap } from 'yaml'
 import { resolveDshHome } from './paths.ts'
 import { PurgeError } from './purge.ts'
@@ -918,5 +920,789 @@ export async function runHomeCommand(
           ? [`需重新认证凭据（${res.missingCredentials.length}）：${res.missingCredentials.map(c => c.label ?? c.id).join('、')}`]
           : ['无待补充凭据清单。']),
       ].join('\n') + '\n')
+  return 0
+}
+
+const TEACH_SPINE_DENYLIST = new Set([
+  '@dsh-ray/plugin-control-plane',
+  '@dsh-ray/assistant-delivery',
+  '@dsh-ray/assistant-policy',
+  '@dsh-ray/assistant-verifier',
+  'dsh-ray-plugin-control-plane',
+  'dsh-ray-assistant-delivery',
+  'dsh-ray-assistant-policy',
+  'dsh-ray-assistant-verifier',
+  'plugin-control-plane',
+  'assistant-delivery',
+  'assistant-policy',
+  'assistant-verifier',
+])
+
+export interface ExportRayTeachingPackResult {
+  readonly ok: true
+  readonly sourceRayHome: string
+  readonly destination: string
+  readonly packId: string
+  readonly teacherRayId: string
+  readonly teacherName: string
+  readonly credentialsExcluded: true
+  readonly fileCount: number
+  readonly stats: {
+    readonly pluginsCount: number
+    readonly skillsCount: number
+    readonly memoriesCount: number
+    readonly episodesCount: number
+    readonly turnsCount: number
+    readonly reflectionsCount: number
+  }
+}
+
+export interface ImportRayTeachingPackResult {
+  readonly ok: true
+  readonly source: string
+  readonly targetRayHome: string
+  readonly packId: string
+  readonly teacher: Readonly<{ rayId: string; name: string }>
+  readonly recipientRayId: string
+  readonly recipientName: string
+  readonly alreadyImported: boolean
+  readonly identityPreserved: true
+  readonly adoptedCapabilities: readonly string[]
+  readonly keptExistingCapabilities: readonly string[]
+  readonly verifiedPlugins: readonly string[]
+  readonly importedMemories: number
+  readonly importedEpisodes: number
+  readonly importedReflections: number
+}
+
+function sha256Text(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+function walkRegularFilesStrict(dir: string, visitor: (filePath: string) => void): void {
+  if (!existsSync(dir)) return
+  for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const full = join(dir, entry.name)
+    const stat = lstatSync(full)
+    if (stat.isSymbolicLink()) {
+      throw new PurgeError(`检测到不安全符号链接：${full}`)
+    }
+    if (entry.isDirectory()) {
+      walkRegularFilesStrict(full, visitor)
+    } else if (entry.isFile()) {
+      visitor(full)
+    }
+  }
+}
+
+function compareSemverStrings(left: string, right: string): number {
+  const cl = left.trim().replace(/^v/iu, '')
+  const cr = right.trim().replace(/^v/iu, '')
+  if (cl === cr) return 0
+  const lp = cl.split('-', 2)[0]!.split('.').map(n => Number.parseInt(n, 10))
+  const rp = cr.split('-', 2)[0]!.split('.').map(n => Number.parseInt(n, 10))
+  const n = Math.max(lp.length, rp.length)
+  for (let i = 0; i < n; i += 1) {
+    const a = Number.isFinite(lp[i]) ? lp[i]! : 0
+    const b = Number.isFinite(rp[i]) ? rp[i]! : 0
+    if (a !== b) return a > b ? 1 : -1
+  }
+  return cl.localeCompare(cr)
+}
+
+function isUnsafeRel(rel: string): boolean {
+  const clean = rel.replaceAll('\\', '/')
+  return clean === ''
+    || clean.startsWith('/')
+    || clean.includes('\0')
+    || clean.split('/').some(seg => seg === '..' || seg === '.')
+    || CREDENTIAL_NAME_RE.test(clean)
+}
+
+function verifyTaughtPluginIsolatedSubprocess(
+  pluginDir: string,
+  entryFile: string,
+  slug: string,
+  version: string,
+): { ok: boolean; verificationDigest?: string; reason?: string } {
+  const entryUrl = pathToFileURL(join(pluginDir, entryFile)).href
+  const probeScript = `
+    import { createHash } from 'node:crypto';
+    import { registerHooks } from 'node:module';
+    const cordisStubSource = [
+      'export class Service {',
+      '  constructor(ctx, name, config) {',
+      '    this.ctx = ctx;',
+      '    this.name = name;',
+      '    this.config = config;',
+      '    if (ctx && typeof ctx.provide === "function" && typeof name === "string") {',
+      '      ctx.provide(name, this);',
+      '    }',
+      '  }',
+      '}',
+      'export class Context {',
+      '  constructor() {',
+      '    this._s = new Map();',
+      '    this.fiber = { dispose: async () => {} };',
+      '  }',
+      '  provide(k, v) { this._s.set(k, v); }',
+      '  get(k) { return this._s.get(k); }',
+      '  effect() { return () => {}; }',
+      '  inject() { return { dispose: () => {} }; }',
+      '  plugin(p, c) {',
+      '    if (typeof p === "function" && p.prototype) { try { new p(this, c); } catch { p(this, c); } }',
+      '    else if (p && typeof p.apply === "function") { p.apply(this, c); }',
+      '    return { state: 2, dispose: async () => {} };',
+      '  }',
+      '}',
+    ].join('\\n');
+    const cordisStubUrl = 'data:text/javascript,' + encodeURIComponent(cordisStubSource);
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        try {
+          return nextResolve(specifier, context);
+        } catch (err) {
+          if (specifier === '@deepseek-ai/cordis') {
+            return { shortCircuit: true, url: cordisStubUrl };
+          }
+          throw err;
+        }
+      },
+    });
+    const mod = await import(process.env.TEACH_PLUGIN_URL);
+    const exp = mod.default ?? mod;
+    const valid = typeof exp === 'function' || (exp && typeof exp === 'object' && typeof exp.apply === 'function');
+    if (!valid) {
+      console.error('invalid cordis plugin export');
+      process.exit(1);
+    }
+    const { Context } = await import('@deepseek-ai/cordis');
+    const fakeCtx = new Context();
+    if (typeof mod.verifyTrial === 'function') {
+      if (typeof exp === 'function' && exp.prototype && exp.prototype.constructor === exp) {
+        try { new exp(fakeCtx, {}); } catch { try { exp(fakeCtx, {}); } catch {} }
+      } else if (typeof exp === 'function') {
+        exp(fakeCtx, {});
+      } else if (typeof exp.apply === 'function') {
+        exp.apply(fakeCtx, {});
+      }
+      const res = await mod.verifyTrial(fakeCtx);
+      if (res === false || (res && typeof res === 'object' && res.ok === false)) {
+        console.error('verifyTrial returned false');
+        process.exit(1);
+      }
+    }
+    const digest = createHash('sha256').update(process.env.TEACH_PLUGIN_ID).digest('hex');
+    process.stdout.write(JSON.stringify({ ok: true, verificationDigest: digest }));
+  `
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', probeScript], {
+    encoding: 'utf8',
+    env: {
+      PATH: process.env.PATH ?? '',
+      TEACH_PLUGIN_URL: entryUrl,
+      TEACH_PLUGIN_ID: `${slug}@${version}`,
+    },
+    timeout: 15_000,
+  })
+  if (run.status !== 0) {
+    return { ok: false, reason: (run.stderr || run.stdout || `exit ${run.status}`).trim() }
+  }
+  try {
+    const parsed = JSON.parse(run.stdout.trim()) as { ok?: boolean; verificationDigest?: string }
+    return {
+      ok: Boolean(parsed.ok),
+      ...(parsed.verificationDigest ? { verificationDigest: parsed.verificationDigest } : {}),
+    }
+  } catch {
+    return { ok: false, reason: 'invalid subprocess verifier output' }
+  }
+}
+
+export function exportRayTeachingPack(options: Readonly<{
+  rayHome: string
+  outputDir: string
+  now?: number
+}>): ExportRayTeachingPackResult {
+  const rayHome = resolve(options.rayHome)
+  const outputDir = resolve(options.outputDir)
+  if (!existsSync(join(rayHome, 'self', 'self-model.json'))) {
+    throw new PurgeError(`Ray Home 尚未初始化：${rayHome}`)
+  }
+  if (outputDir === rayHome || isWithin(rayHome, outputDir)) {
+    throw new PurgeError('传授包导出目录不能位于源 Ray Home 内部。')
+  }
+  const selfModel = readJson<{ rayId: string; name: string }>(join(rayHome, 'self', 'self-model.json'))
+  if (!selfModel?.rayId || !selfModel?.name) throw new PurgeError('self-model.json 无效')
+  const manifest = readJson<{ capabilities?: Record<string, { kind: string; version: string; active: boolean; provenance: Record<string, unknown> }> }>(
+    join(rayHome, 'manifest.json'),
+  )
+  const now = options.now ?? Date.now()
+  const packId = `teach-${randomUUID()}`
+  ensurePrivateDir(outputDir)
+
+  const pluginDescriptors: Array<{
+    slug: string; version: string; kind: string; entryFile: string; sourceRelDir: string
+    config?: Record<string, unknown>; precondition?: Record<string, unknown>
+  }> = []
+  const sourcesRoot = join(rayHome, 'plugins', 'sources')
+  if (existsSync(sourcesRoot)) {
+    for (const entry of readdirSync(sourcesRoot, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || TEACH_SPINE_DENYLIST.has(entry.name)) continue
+      const srcDir = join(sourcesRoot, entry.name)
+      const relDir = `plugins/sources/${entry.name}`
+      const dstDir = join(outputDir, relDir)
+      const copied: string[] = []
+      walkRegularFilesStrict(srcDir, (fp) => {
+        const rel = relative(srcDir, fp).replaceAll('\\', '/')
+        if (CREDENTIAL_NAME_RE.test(rel)) return
+        const dst = join(dstDir, rel)
+        ensurePrivateDir(dirname(dst))
+        copyFileSync(fp, dst)
+        chmodSync(dst, 0o600)
+        copied.push(rel)
+      })
+      if (copied.length === 0) continue
+      const pkg = readJson<{ version?: string; main?: string }>(join(srcDir, 'package.json'))
+      const cap = manifest?.capabilities?.[`plugin:${entry.name}`]
+      const version = cap?.version ?? pkg?.version ?? '1.0.0'
+      const rawMain = pkg?.main?.replace(/^\.\//u, '') ?? 'index.mjs'
+      const entryFile = copied.includes(rawMain) ? rawMain : (copied.find(f => f.endsWith('.mjs') || f.endsWith('.js')) ?? copied[0]!)
+      pluginDescriptors.push({ slug: entry.name, version, kind: 'service', entryFile, sourceRelDir: relDir })
+    }
+  }
+  atomicWritePrivateText(join(outputDir, 'plugins', 'descriptors.json'), `${JSON.stringify({ plugins: pluginDescriptors }, null, 2)}\n`)
+
+  const skillDescriptors: Array<{ skillId: string; version: string; relDir: string }> = []
+  for (const base of [join(rayHome, 'state', 'skills'), join(rayHome, 'skills')]) {
+    if (!existsSync(base)) continue
+    for (const entry of readdirSync(base, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || skillDescriptors.some(s => s.skillId === entry.name)) continue
+      const srcDir = join(base, entry.name)
+      const relDir = `skills/${entry.name}`
+      const dstDir = join(outputDir, relDir)
+      let cnt = 0
+      walkRegularFilesStrict(srcDir, (fp) => {
+        const rel = relative(srcDir, fp).replaceAll('\\', '/')
+        if (CREDENTIAL_NAME_RE.test(rel)) return
+        const dst = join(dstDir, rel)
+        ensurePrivateDir(dirname(dst))
+        copyFileSync(fp, dst)
+        chmodSync(dst, 0o600)
+        cnt += 1
+      })
+      if (cnt === 0) continue
+      const sMeta = readJson<{ version?: string }>(join(srcDir, 'skill.json')) ?? readJson<{ version?: string }>(join(srcDir, 'package.json'))
+      const cap = manifest?.capabilities?.[`skill:${entry.name}`]
+      skillDescriptors.push({ skillId: entry.name, version: cap?.version ?? sMeta?.version ?? '1.0.0', relDir })
+    }
+  }
+  atomicWritePrivateText(join(outputDir, 'skills', 'descriptors.json'), `${JSON.stringify({ skills: skillDescriptors }, null, 2)}\n`)
+
+  const memLines: string[] = []
+  const pmDir = join(rayHome, 'state', 'personal-memory')
+  if (existsSync(pmDir)) {
+    for (const file of readdirSync(pmDir).filter(f => f.endsWith('.sqlite')).sort()) {
+      try {
+        const mdb = new DatabaseSync(join(pmDir, file), { readOnly: true })
+        try {
+          const tables = new Set((mdb.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map(r => r.name))
+          if (tables.has('memory_records')) {
+            for (const r of mdb.prepare(`SELECT id, kind, content, created_at FROM memory_records WHERE status = 'active'`).all() as Array<{ id: string; kind?: string; content: string; created_at?: number }>) {
+              memLines.push(JSON.stringify({ id: r.id, kind: r.kind ?? 'semantic', content: r.content, createdAt: r.created_at ?? now }))
+            }
+          } else if (tables.has('memories')) {
+            for (const r of mdb.prepare(`SELECT id, content FROM memories`).all() as Array<{ id: string; content: string }>) {
+              memLines.push(JSON.stringify({ id: r.id, kind: 'semantic', content: r.content, createdAt: now }))
+            }
+          }
+        } finally {
+          mdb.close()
+        }
+      } catch { /* ignore */ }
+    }
+  }
+  atomicWritePrivateText(join(outputDir, 'taught', 'memories.jsonl'), memLines.length > 0 ? `${memLines.join('\n')}\n` : '')
+
+  const epLines: string[] = []
+  const turnLines: string[] = []
+  const epDbPath = join(rayHome, 'episodes', 'episodes.sqlite')
+  if (existsSync(epDbPath)) {
+    try {
+      const edb = new DatabaseSync(epDbPath, { readOnly: true })
+      try {
+        for (const ep of edb.prepare(`SELECT * FROM ray_episodes ORDER BY started_at ASC`).all()) epLines.push(JSON.stringify(ep))
+        for (const turn of edb.prepare(`SELECT * FROM ray_episode_turns ORDER BY created_at ASC, seq_start ASC`).all()) turnLines.push(JSON.stringify(turn))
+      } finally {
+        edb.close()
+      }
+    } catch { /* ignore */ }
+  }
+  atomicWritePrivateText(join(outputDir, 'taught', 'episodes.jsonl'), epLines.length > 0 ? `${epLines.join('\n')}\n` : '')
+  atomicWritePrivateText(join(outputDir, 'taught', 'turns.jsonl'), turnLines.length > 0 ? `${turnLines.join('\n')}\n` : '')
+
+  const reflLines: string[] = []
+  const reflDir = join(rayHome, 'reflections')
+  if (existsSync(reflDir)) {
+    for (const file of readdirSync(reflDir).filter(f => f.endsWith('.jsonl')).sort()) {
+      for (const l of readFileSync(join(reflDir, file), 'utf8').split('\n')) {
+        if (l.trim()) reflLines.push(l.trim())
+      }
+    }
+  }
+  atomicWritePrivateText(join(outputDir, 'taught', 'reflections.jsonl'), reflLines.length > 0 ? `${reflLines.join('\n')}\n` : '')
+
+  atomicWritePrivateText(join(outputDir, 'clone-meta.json'), `${JSON.stringify({
+    protocol: 'ray-teaching-pack/v1',
+    packId,
+    teacherRayId: selfModel.rayId,
+    teacherName: selfModel.name,
+    exportedAt: now,
+    credentialsExcluded: true,
+  }, null, 2)}\n`)
+
+  const files: Record<string, { sha256: string; bytes: number }> = {}
+  let fileCount = 0
+  walkRegularFilesStrict(outputDir, (fp) => {
+    const rel = relative(outputDir, fp).replaceAll('\\', '/')
+    if (rel === 'teaching-pack.json') return
+    files[rel] = sha256File(fp)
+    fileCount += 1
+  })
+  const stats = {
+    pluginsCount: pluginDescriptors.length,
+    skillsCount: skillDescriptors.length,
+    memoriesCount: memLines.length,
+    episodesCount: epLines.length,
+    turnsCount: turnLines.length,
+    reflectionsCount: reflLines.length,
+  }
+  atomicWritePrivateText(join(outputDir, 'teaching-pack.json'), `${JSON.stringify({
+    protocol: 'ray-teaching-pack/v1',
+    packId,
+    exportedAt: now,
+    teacher: { rayId: selfModel.rayId, name: selfModel.name },
+    credentialsExcluded: true,
+    files,
+    capabilities: manifest?.capabilities ?? {},
+    plugins: pluginDescriptors,
+    skills: skillDescriptors,
+    stats,
+  }, null, 2)}\n`)
+  fileCount += 1
+
+  return {
+    ok: true,
+    sourceRayHome: rayHome,
+    destination: outputDir,
+    packId,
+    teacherRayId: selfModel.rayId,
+    teacherName: selfModel.name,
+    credentialsExcluded: true,
+    fileCount,
+    stats,
+  }
+}
+
+export function importRayTeachingPack(options: Readonly<{
+  sourceDir: string
+  rayHome: string
+  now?: number
+}>): ImportRayTeachingPackResult {
+  const sourceDir = resolve(options.sourceDir)
+  const rayHome = resolve(options.rayHome)
+  const packPath = join(sourceDir, 'teaching-pack.json')
+  const pack = readJson<{
+    protocol: string
+    packId: string
+    teacher: { rayId: string; name: string }
+    files: Record<string, { sha256: string; bytes: number }>
+    capabilities: Record<string, { kind: 'skill' | 'plugin' | 'tool'; version: string; active: boolean; provenance: Record<string, unknown> }>
+    plugins: Array<{ slug: string; version: string; kind: string; entryFile: string; sourceRelDir: string }>
+    skills: Array<{ skillId: string; version: string; relDir: string }>
+  }>(packPath)
+  if (!pack || pack.protocol !== 'ray-teaching-pack/v1' || !pack.packId || !pack.teacher?.rayId) {
+    throw new PurgeError(`未找到有效的 ray-teaching-pack/v1 清单：${packPath}`)
+  }
+
+  const expectedRels = new Set(Object.keys(pack.files))
+  for (const [rel, meta] of Object.entries(pack.files)) {
+    if (isUnsafeRel(rel)) throw new PurgeError(`传授包包含不安全路径或凭据字段：${rel}`)
+    const full = resolve(sourceDir, rel)
+    if (!isWithin(sourceDir, full) || !existsSync(full)) throw new PurgeError(`传授包缺少文件：${rel}`)
+    const actual = sha256File(full)
+    if (actual.sha256 !== meta.sha256 || actual.bytes !== meta.bytes) {
+      throw new PurgeError(`传授包文件摘要不匹配（拒绝导入）：${rel}`)
+    }
+  }
+  walkRegularFilesStrict(sourceDir, (fp) => {
+    const rel = relative(sourceDir, fp).replaceAll('\\', '/')
+    if (rel === 'teaching-pack.json') return
+    if (isUnsafeRel(rel) || !expectedRels.has(rel)) {
+      throw new PurgeError(`传授包包含未登记或凭据文件：${rel}`)
+    }
+  })
+
+  if (!existsSync(join(rayHome, 'self', 'self-model.json'))) {
+    initRayHome(rayHome, options.now === undefined ? {} : { now: options.now })
+  }
+  const recipientSelf = readJson<{ rayId: string; name: string }>(join(rayHome, 'self', 'self-model.json'))
+  if (!recipientSelf?.rayId || !recipientSelf?.name) throw new PurgeError('接收方 self-model.json 无效')
+  const manifestPath = join(rayHome, 'manifest.json')
+  const manifest = readJson<{
+    protocol: string
+    rayId: string
+    schemaVersion: number
+    createdAt: number
+    updatedAt: number
+    artifacts: Record<string, unknown>
+    databases: Record<string, unknown>
+    credentialHandles: unknown[]
+    capabilities: Record<string, { kind: 'skill' | 'plugin' | 'tool'; version: string; active: boolean; provenance: Record<string, unknown> }>
+  }>(manifestPath)
+  if (!manifest) throw new PurgeError('接收方 manifest.json 无效')
+
+  for (const p of pack.plugins) {
+    if (TEACH_SPINE_DENYLIST.has(p.slug) || isUnsafeRel(p.sourceRelDir)) {
+      throw new PurgeError(`传授插件 ${p.slug} 被安全策略拒绝`)
+    }
+    const pDir = resolve(sourceDir, p.sourceRelDir)
+    walkRegularFilesStrict(pDir, (fp) => {
+      const content = readFileSync(fp, 'utf8')
+      if (/\bkernel\.json\b|\benergy\.sqlite\b|credentials-keychain/iu.test(content)
+        || content.replaceAll('\\', '/').includes(join(rayHome, 'kernel').replaceAll('\\', '/'))) {
+        throw new PurgeError(`传授插件 ${p.slug} 触及内核/精力/凭据边界，拒绝导入`)
+      }
+    })
+  }
+
+  const importedPacksPath = join(rayHome, 'state', 'imported-teaching-packs.json')
+  const importedLedger = readJson<Record<string, { importedAt: number; packSha256: string }>>(importedPacksPath) ?? {}
+  const packSha = sha256File(packPath).sha256
+  if (importedLedger[pack.packId]?.packSha256 === packSha) {
+    return {
+      ok: true,
+      source: sourceDir,
+      targetRayHome: rayHome,
+      packId: pack.packId,
+      teacher: pack.teacher,
+      recipientRayId: recipientSelf.rayId,
+      recipientName: recipientSelf.name,
+      alreadyImported: true,
+      identityPreserved: true,
+      adoptedCapabilities: [],
+      keptExistingCapabilities: [],
+      verifiedPlugins: [],
+      importedMemories: 0,
+      importedEpisodes: 0,
+      importedReflections: 0,
+    }
+  }
+
+  const now = options.now ?? Date.now()
+  const adoptedCapabilities: string[] = []
+  const keptExistingCapabilities: string[] = []
+  const verifiedPlugins: string[] = []
+  const backupsPath = join(rayHome, 'state', 'taught-capability-backups.json')
+  const backups = readJson<Record<string, unknown>>(backupsPath) ?? {}
+
+  for (const p of pack.plugins) {
+    const capId = `plugin:${p.slug}`
+    const existing = manifest.capabilities[capId]
+    if (existing?.active && compareSemverStrings(existing.version, p.version) >= 0) {
+      keptExistingCapabilities.push(capId)
+      continue
+    }
+    const srcPluginDir = resolve(sourceDir, p.sourceRelDir)
+    const verify = verifyTaughtPluginIsolatedSubprocess(srcPluginDir, p.entryFile, p.slug, p.version)
+    if (!verify.ok) {
+      throw new PurgeError(`传授插件 ${p.slug}@${p.version} 对端独立重验证失败：${verify.reason ?? 'unknown'}`)
+    }
+    verifiedPlugins.push(capId)
+    if (!Object.prototype.hasOwnProperty.call(backups, capId)) backups[capId] = existing ?? null
+    copyTreeFiltered(srcPluginDir, join(rayHome, 'plugins', 'sources', p.slug), true)
+    manifest.capabilities[capId] = {
+      kind: 'plugin',
+      version: p.version,
+      active: true,
+      provenance: {
+        origin: 'taught',
+        teacherRayId: pack.teacher.rayId,
+        importedAt: now,
+        ...(verify.verificationDigest ? { verificationDigest: verify.verificationDigest } : {}),
+      },
+    }
+    adoptedCapabilities.push(capId)
+  }
+
+  for (const s of pack.skills) {
+    const capId = `skill:${s.skillId}`
+    const existing = manifest.capabilities[capId]
+    if (existing?.active && compareSemverStrings(existing.version, s.version) >= 0) {
+      keptExistingCapabilities.push(capId)
+      continue
+    }
+    if (!Object.prototype.hasOwnProperty.call(backups, capId)) backups[capId] = existing ?? null
+    copyTreeFiltered(resolve(sourceDir, s.relDir), join(rayHome, 'state', 'skills', s.skillId), true)
+    manifest.capabilities[capId] = {
+      kind: 'skill',
+      version: s.version,
+      active: true,
+      provenance: { origin: 'taught', teacherRayId: pack.teacher.rayId, importedAt: now },
+    }
+    adoptedCapabilities.push(capId)
+  }
+
+  atomicWritePrivateText(backupsPath, `${JSON.stringify(backups, null, 2)}\n`)
+  manifest.updatedAt = now
+  atomicWritePrivateText(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+
+  let importedEpisodes = 0
+  let importedMemories = 0
+  let importedReflections = 0
+  const memLines = existsSync(join(sourceDir, 'taught', 'memories.jsonl'))
+    ? readFileSync(join(sourceDir, 'taught', 'memories.jsonl'), 'utf8').split('\n').filter(Boolean)
+    : []
+  const epLines = existsSync(join(sourceDir, 'taught', 'episodes.jsonl'))
+    ? readFileSync(join(sourceDir, 'taught', 'episodes.jsonl'), 'utf8').split('\n').filter(Boolean)
+    : []
+  const turnLines = existsSync(join(sourceDir, 'taught', 'turns.jsonl'))
+    ? readFileSync(join(sourceDir, 'taught', 'turns.jsonl'), 'utf8').split('\n').filter(Boolean)
+    : []
+
+  if (memLines.length > 0 || epLines.length > 0 || turnLines.length > 0) {
+    const epDbPath = join(rayHome, 'episodes', 'episodes.sqlite')
+    ensurePrivateDir(dirname(epDbPath))
+    const edb = new DatabaseSync(epDbPath)
+    let hasFts = false
+    try {
+      edb.exec(`
+        CREATE TABLE IF NOT EXISTS ray_episodes (
+          episode_id TEXT PRIMARY KEY, title TEXT NOT NULL, topic_keywords TEXT NOT NULL,
+          channels_json TEXT NOT NULL, session_ids_json TEXT NOT NULL, ticket_id TEXT,
+          turn_count INTEGER NOT NULL DEFAULT 0, char_count INTEGER NOT NULL DEFAULT 0,
+          first_turn_id TEXT, last_turn_id TEXT, preview_text TEXT NOT NULL DEFAULT '',
+          started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS ray_episode_turns (
+          turn_id TEXT PRIMARY KEY, episode_id TEXT NOT NULL, session_id TEXT NOT NULL,
+          channel TEXT NOT NULL, turn_number INTEGER NOT NULL, seq_start INTEGER NOT NULL,
+          seq_end INTEGER NOT NULL, role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+          text TEXT NOT NULL, ticket_id TEXT, created_at INTEGER NOT NULL
+        );
+      `)
+      try {
+        edb.exec('CREATE VIRTUAL TABLE IF NOT EXISTS ray_episode_turns_fts USING fts5(turn_id UNINDEXED, episode_id UNINDEXED, text);')
+        hasFts = true
+      } catch { hasFts = false }
+
+      const insertEp = edb.prepare(`
+        INSERT OR IGNORE INTO ray_episodes (
+          episode_id, title, topic_keywords, channels_json, session_ids_json, ticket_id,
+          turn_count, char_count, first_turn_id, last_turn_id, preview_text, started_at, updated_at, closed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      const insertTurn = edb.prepare(`
+        INSERT OR IGNORE INTO ray_episode_turns (
+          turn_id, episode_id, session_id, channel, turn_number, seq_start, seq_end, role, text, ticket_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      const insertFts = hasFts
+        ? edb.prepare('INSERT INTO ray_episode_turns_fts (turn_id, episode_id, text) VALUES (?, ?, ?)')
+        : undefined
+
+      for (const l of epLines) {
+        const ep = JSON.parse(l) as {
+          episode_id: string; title: string; topic_keywords: string; channels_json: string; session_ids_json: string
+          ticket_id: string | null; turn_count: number; char_count: number; first_turn_id: string | null
+          last_turn_id: string | null; preview_text: string; started_at: number; updated_at: number; closed_at: number | null
+        }
+        const channels = JSON.parse(String(ep.channels_json ?? '[]')) as string[]
+        const tc = `taught:${pack.teacher.rayId}`
+        if (!channels.includes(tc)) channels.push(tc)
+        const title = String(ep.title ?? '').startsWith('[传授自 ') ? String(ep.title) : `[传授自 ${pack.teacher.name}] ${String(ep.title ?? '')}`
+        const r = insertEp.run(
+          ep.episode_id, title, ep.topic_keywords, JSON.stringify(channels), ep.session_ids_json, ep.ticket_id ?? null,
+          ep.turn_count, ep.char_count, ep.first_turn_id ?? null, ep.last_turn_id ?? null, ep.preview_text ?? '',
+          ep.started_at, ep.updated_at, ep.closed_at ?? null,
+        )
+        if (Number(r.changes) > 0) importedEpisodes += 1
+      }
+      for (const l of turnLines) {
+        const t = JSON.parse(l) as {
+          turn_id: string; episode_id: string; session_id: string; channel: string
+          turn_number: number; seq_start: number; seq_end: number; role: 'user' | 'assistant'
+          text: string; ticket_id: string | null; created_at: number
+        }
+        const ch = String(t.channel ?? '').startsWith('taught:') ? String(t.channel) : `taught:${pack.teacher.rayId}:${String(t.channel ?? '')}`
+        const r = insertTurn.run(
+          t.turn_id, t.episode_id, t.session_id, ch, t.turn_number, t.seq_start, t.seq_end, t.role, t.text, t.ticket_id ?? null, t.created_at,
+        )
+        if (Number(r.changes) > 0) insertFts?.run(t.turn_id, t.episode_id, t.text)
+      }
+      if (memLines.length > 0) {
+        const memPath = join(rayHome, 'state', 'taught-memories.jsonl')
+        const seen = new Set<string>()
+        if (existsSync(memPath)) {
+          for (const ex of readFileSync(memPath, 'utf8').split('\n').filter(Boolean)) {
+            try {
+              const c = (JSON.parse(ex) as { content?: string }).content?.trim()
+              if (c) seen.add(sha256Text(c))
+            } catch { /* ignore */ }
+          }
+        }
+        const appended: string[] = []
+        for (const l of memLines) {
+          const parsed = JSON.parse(l) as { id?: string; kind?: string; content?: string; createdAt?: number }
+          const clean = parsed.content?.trim()
+          if (!clean) continue
+          const h = sha256Text(clean)
+          if (seen.has(h)) continue
+          seen.add(h)
+          importedMemories += 1
+          appended.push(JSON.stringify({
+            id: parsed.id ?? `mem-${h.slice(0, 16)}`,
+            kind: parsed.kind ?? 'semantic',
+            content: clean,
+            provenance: { origin: 'taught', teacherRayId: pack.teacher.rayId, teacherName: pack.teacher.name, importedAt: now },
+            createdAt: parsed.createdAt ?? now,
+          }))
+        }
+        if (appended.length > 0) {
+          const prev = existsSync(memPath) ? readFileSync(memPath, 'utf8') : ''
+          atomicWritePrivateText(memPath, `${prev}${prev && !prev.endsWith('\n') ? '\n' : ''}${appended.join('\n')}\n`)
+        }
+      }
+    } finally {
+      edb.close()
+    }
+  }
+
+  const reflSrc = join(sourceDir, 'taught', 'reflections.jsonl')
+  if (existsSync(reflSrc)) {
+    const reflDst = join(rayHome, 'reflections', 'taught.jsonl')
+    const seen = new Set<string>()
+    if (existsSync(reflDst)) {
+      for (const l of readFileSync(reflDst, 'utf8').split('\n')) if (l.trim()) seen.add(sha256Text(l.trim()))
+    }
+    const added: string[] = []
+    for (const l of readFileSync(reflSrc, 'utf8').split('\n')) {
+      const c = l.trim()
+      if (!c) continue
+      const h = sha256Text(c)
+      if (seen.has(h)) continue
+      seen.add(h)
+      added.push(c)
+      importedReflections += 1
+    }
+    if (added.length > 0) {
+      const prev = existsSync(reflDst) ? readFileSync(reflDst, 'utf8') : ''
+      atomicWritePrivateText(reflDst, `${prev}${prev && !prev.endsWith('\n') ? '\n' : ''}${added.join('\n')}\n`)
+    }
+  }
+
+  importedLedger[pack.packId] = { importedAt: now, packSha256: packSha }
+  atomicWritePrivateText(importedPacksPath, `${JSON.stringify(importedLedger, null, 2)}\n`)
+
+  const autoPath = join(rayHome, 'self', 'autobiography.jsonl')
+  const prevAuto = existsSync(autoPath) ? readFileSync(autoPath, 'utf8') : ''
+  const autoEntry = JSON.stringify({
+    protocol: 'ray-autobiography/v1',
+    entryId: `teach-${randomUUID()}`,
+    timestamp: now,
+    kind: 'migration',
+    summary: `通过 CLI 导入 ${pack.teacher.name} (${pack.teacher.rayId}) 的传授包 ${pack.packId}（保留本机身份 ${recipientSelf.name}；重验证插件 ${verifiedPlugins.length}、采纳 ${adoptedCapabilities.length}、记忆 +${importedMemories}、情景 +${importedEpisodes}）。`,
+    reason: 'ray-teaching-pack/v1 跨机传授导入（独立重验证 + 保留接收方身份与内核）。',
+  })
+  atomicWritePrivateText(autoPath, `${prevAuto}${prevAuto && !prevAuto.endsWith('\n') ? '\n' : ''}${autoEntry}\n`)
+
+  return {
+    ok: true,
+    source: sourceDir,
+    targetRayHome: rayHome,
+    packId: pack.packId,
+    teacher: pack.teacher,
+    recipientRayId: recipientSelf.rayId,
+    recipientName: recipientSelf.name,
+    alreadyImported: false,
+    identityPreserved: true,
+    adoptedCapabilities,
+    keptExistingCapabilities,
+    verifiedPlugins,
+    importedMemories,
+    importedEpisodes,
+    importedReflections,
+  }
+}
+
+export async function runTeachCommand(
+  argv: readonly string[],
+  context: Readonly<{ dshHome: string; profile?: string; json?: boolean; env?: NodeJS.ProcessEnv }>,
+): Promise<number> {
+  const env = context.env ?? process.env
+  let subcommand: 'export' | 'import' = 'export'
+  let rayHomeArg: string | undefined
+  let dshHomeArg = context.dshHome
+  let profileArg = context.profile
+  let outputArg: string | undefined
+  let sourceArg: string | undefined
+  let json = Boolean(context.json)
+  let help = false
+
+  let seenSub = false
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!
+    if (token === '--help' || token === '-h') { help = true; continue }
+    if (token === '--json') { json = true; continue }
+    if (token === '--ray-home' || token === '--dsh-home' || token === '--profile' || token === '--output' || token === '--source') {
+      const value = argv[++i]
+      if (!value || value.startsWith('--')) throw new PurgeError(`${token} 需要一个参数值`)
+      if (token === '--ray-home') rayHomeArg = value
+      else if (token === '--dsh-home') dshHomeArg = value
+      else if (token === '--profile') profileArg = value
+      else if (token === '--output') outputArg = value
+      else sourceArg = value
+      continue
+    }
+    if (!seenSub && (token === 'export' || token === 'import')) {
+      subcommand = token
+      seenSub = true
+      continue
+    }
+    throw new PurgeError(`dsh-ray teach 无法识别的参数：${token}`)
+  }
+
+  if (help) {
+    process.stdout.write([
+      'dsh-ray teach — 导出与导入全量 Ray 传授包（ray-teaching-pack/v1，保留接收方身份与内核）',
+      '',
+      '用法：',
+      '  dsh-ray teach export --output <dir> [--ray-home <dir>] [--json]',
+      '  dsh-ray teach import --source <dir> [--ray-home <dir>] [--json]',
+      '',
+    ].join('\n'))
+    return 0
+  }
+
+  const rayHome = resolveRayHome({
+    ...(rayHomeArg === undefined ? {} : { rayHome: rayHomeArg }),
+    dshHome: dshHomeArg,
+    ...(profileArg === undefined ? {} : { profile: profileArg }),
+    env,
+  })
+
+  if (subcommand === 'export') {
+    if (!outputArg) throw new PurgeError('dsh-ray teach export 需要 --output <dir>')
+    const res = exportRayTeachingPack({ rayHome, outputDir: outputArg })
+    process.stdout.write(json
+      ? `${JSON.stringify(res, null, 2)}\n`
+      : `已导出全量传授包：${res.destination}（${res.fileCount} 文件，插件 ${res.stats.pluginsCount}、技能 ${res.stats.skillsCount}、记忆 ${res.stats.memoriesCount}、情景 ${res.stats.episodesCount}，已排除凭据与内核）\n`)
+    return 0
+  }
+
+  if (!sourceArg) throw new PurgeError('dsh-ray teach import 需要 --source <dir>')
+  const res = importRayTeachingPack({ sourceDir: sourceArg, rayHome })
+  process.stdout.write(json
+    ? `${JSON.stringify(res, null, 2)}\n`
+    : `已导入传授包 ${res.packId}（传授方 ${res.teacher.name} -> 保留本机 ${res.recipientName}；重验证插件 ${res.verifiedPlugins.length}、采纳 ${res.adoptedCapabilities.length}、跳过旧版 ${res.keptExistingCapabilities.length}、记忆 +${res.importedMemories}、情景 +${res.importedEpisodes}）\n`)
   return 0
 }

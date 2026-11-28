@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AssistantDeliveryService } from './service.js'
@@ -124,35 +126,15 @@ export function registerDeliveryTools(ctx: Context, service: AssistantDeliverySe
 
   const rayImportTool = defineTool({
     name: 'ray_home_import',
-    description: 'Import an exported plaintext Ray Home clone directory into this Ray instance while excluding raw credentials and listing any credentials requiring owner re-authentication.',
+    description: 'Import an exported plaintext Ray Home clone directory (or auto-detect and merge a ray-teaching-pack/v1 Teaching Pack) into this Ray instance while excluding raw credentials.',
     parameters: {
       source_dir: { type: 'string', required: true },
     },
     output: {
       schema: {
         type: 'object',
-        additionalProperties: false,
-        properties: {
-          ok: { type: 'boolean', required: true },
-          rayId: { type: 'string', required: true },
-          name: { type: 'string', required: true },
-          importedFiles: { type: 'integer', required: true },
-          missingCredentials: {
-            type: 'array',
-            required: true,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                id: { type: 'string', required: true },
-                service: { type: 'string', required: true },
-                label: { type: 'string' },
-                required: { type: 'boolean', required: true },
-                reason: { type: 'string', required: true },
-              },
-            },
-          },
-        },
+        additionalProperties: true,
+        properties: {},
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
@@ -161,8 +143,15 @@ export function registerDeliveryTools(ctx: Context, service: AssistantDeliverySe
         throw new Error('assistant-delivery: ray_home_import requires an authenticated owner session')
       }
       const raySelf = service.raySelfRuntime()
-      if (raySelf?.importClone === undefined) {
+      if (raySelf === undefined) {
         throw new Error('assistant-delivery: Ray Home runtime is not active')
+      }
+      if (existsSync(join(args.source_dir, 'teaching-pack.json')) && typeof raySelf.importTeachingPack === 'function') {
+        const res = await raySelf.importTeachingPack(args.source_dir)
+        return JSON.parse(JSON.stringify({ mode: 'teaching-pack', ...res })) as Record<string, never>
+      }
+      if (raySelf.importClone === undefined) {
+        throw new Error('assistant-delivery: Ray Home clone import is not available')
       }
       const res = raySelf.importClone(args.source_dir)
       return {
@@ -181,8 +170,52 @@ export function registerDeliveryTools(ctx: Context, service: AssistantDeliverySe
     },
   })
 
+  const rayTeachExportTool = defineTool({
+    name: 'ray_teach_export',
+    description: 'Export a full-content ray-teaching-pack/v1 directory (plugins, skills, personal memories, episodes, reflections) while excluding raw credentials and Body Kernel.',
+    parameters: {
+      destination: { type: 'string', required: true },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true, properties: {} },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    async execute(args, exec) {
+      if (!service.isOwnerSessionAgent(exec.agent)) {
+        throw new Error('assistant-delivery: ray_teach_export requires an authenticated owner session')
+      }
+      const raySelf = service.raySelfRuntime()
+      if (raySelf?.exportTeachingPack === undefined) {
+        throw new Error('assistant-delivery: Ray Home teaching-pack runtime is not active')
+      }
+      return JSON.parse(JSON.stringify(raySelf.exportTeachingPack(args.destination))) as Record<string, never>
+    },
+  })
+
+  const rayTeachImportTool = defineTool({
+    name: 'ray_teach_import',
+    description: 'Import a ray-teaching-pack/v1 Teaching Pack: preserve recipient Ray identity/kernel/autobiography, re-verify taught plugins independently before adoption, stamp taught provenance, and merge capabilities & memories without downgrading newer versions.',
+    parameters: {
+      source_dir: { type: 'string', required: true },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true, properties: {} },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    async execute(args, exec) {
+      if (!service.isOwnerSessionAgent(exec.agent)) {
+        throw new Error('assistant-delivery: ray_teach_import requires an authenticated owner session')
+      }
+      const raySelf = service.raySelfRuntime()
+      if (raySelf?.importTeachingPack === undefined) {
+        throw new Error('assistant-delivery: Ray Home teaching-pack runtime is not active')
+      }
+      return JSON.parse(JSON.stringify(await raySelf.importTeachingPack(args.source_dir))) as Record<string, never>
+    },
+  })
+
   if (service.raySelfRuntime() !== undefined) {
-    for (const rayTool of [rayVetoTool, rayImportTool]) {
+    for (const rayTool of [rayVetoTool, rayImportTool, rayTeachExportTool, rayTeachImportTool]) {
       ctx.tools.register(rayTool)
       if (typeof ctx.assistantPolicy?.registerPreauthorizedTool === 'function') {
         ctx.assistantPolicy.registerPreauthorizedTool(

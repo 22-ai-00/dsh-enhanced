@@ -40,6 +40,8 @@ Linux native 安装及运行要求已委派给当前用户的 cgroup v1 四控�
 | `maintenance` | 运维结算两个没有模型入口的台账：`dead-letters` / `resolve` 结算 Delivery 死信，`system-automations` / `pause-system` 暂停卡在未授权恢复重试上的系统自有 automation。写操作会先在同一事务里落不可变 receipt，再做精确状态与版本的 CAS 更新；重复提交同一决定会重放，换操作者或相反决定会冲突。 |
 | `provider` | 交互式引导配置三方/自定义模型 Provider（也可传 `--provider <id>` 非交互执行；支持 `list` 查看已配置路由与内置目录，`remove <id>` 移除配置与派生凭据引用）。直接复用已绑定的 DSH Host 内置目录、`supportedProtocols()`、`discoverModels()`、`llm-pi-ai` / `agent-default-model` patch 结构与 `.credentials.yaml` v1 `refs:` 布局（`0600`），写入后用 `dsh --dump-config` 校验并在失败时回滚。 |
 | `version` | 查看助手（`dsh-ray`）、私有/运行 Host（`@deepseek-ai/dsh`）、已安装核心与自演进插件版本以及只读自迭代/进化统计（累计迭代次数、工作项、Dreaming/Recovery/GoalStrategy、候选生成与采用、插件创建与修订、回滚、演化规则、联想参数档案、评估调优与放宽采用、活跃记忆/偏好叠加、工作流晋升、技能部署与自我升级/备份快照；严格区分 `no-data` 与 `zero`）；支持 `--dsh-home`、`--profile`、`--json`（`dsh-ray/version/v1`）与 `--short`。顶层 `dsh-ray --version` / `-V` 仅输出简洁版本号。 |
+| `home` | 管理独立于源码仓库的 Ray Home（默认 `~/.ray` 或 `--ray-home <dir>`）：`status`、`init`、`migrate`（`VACUUM INTO` 安全迁移 `$DSH_HOME` 非凭据账本/Wiki/源码并重写 `cordis.patch.yml`）、`export`（明文搬家克隆导出，自动排除凭据并生成重认证清单）与 `import`（克隆导入或自动识别 `teaching-pack.json` 执行全量传授包合并）。 |
+| `teach` | 导出与导入全量 Ray 传授包（`ray-teaching-pack/v1`，含技能、自创插件、记忆、情景历史与反思，自动排除凭据与身体内核）：`export --output <dir>` 与 `import --source <dir>`；导入时保留接收方身份/内核/历史自传、在独立隔离 Node 子进程执行 Stage 1 插件重验证、标注 `taught` provenance，并以 semver 比较合并能力（绝不降级本机更高版本）。 |
 
 不带 `--profile` 时，服务、日志和 Web URL 命令面向当前 DSH Home 下的全部真实 profile。可用 `--profile <name>` 指定一个。`status` / `doctor` 返回 0 只说明诊断命令执行成功，不证明真实模型可用或普通使用学习闭环通过；当前能力边界见[RSI 状态](../../docs/rsi-status.md)。
 

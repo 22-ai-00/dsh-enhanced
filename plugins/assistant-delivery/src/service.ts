@@ -8336,6 +8336,41 @@ export class AssistantDeliveryService extends Service {
       importedFiles: number
       missingCredentials: readonly { id: string; service: string; label?: string; required: boolean; reason: string }[]
     }
+    exportTeachingPack?: (destination: string) => {
+      ok: true
+      sourceRayHome: string
+      destination: string
+      packId: string
+      teacherRayId: string
+      teacherName: string
+      credentialsExcluded: true
+      fileCount: number
+      stats: {
+        pluginsCount: number
+        skillsCount: number
+        memoriesCount: number
+        episodesCount: number
+        turnsCount: number
+        reflectionsCount: number
+      }
+    }
+    importTeachingPack?: (sourceDir: string) => Promise<{
+      ok: true
+      source: string
+      rayHome: string
+      packId: string
+      teacher: { rayId: string; name: string }
+      recipientRayId: string
+      recipientName: string
+      alreadyImported: boolean
+      identityPreserved: true
+      adoptedCapabilities: readonly string[]
+      keptExistingCapabilities: readonly string[]
+      verifiedPlugins: readonly string[]
+      importedMemories: number
+      importedEpisodes: number
+      importedReflections: number
+    }>
     setSessionRole?: (sessionId: string, role: 'front' | 'worker') => void
     registerDatabase?: (plugin: string, dbPath: string, migratedFrom?: string) => void
     energySnapshot?: () => {

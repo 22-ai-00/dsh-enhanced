@@ -16,6 +16,7 @@ export const RAY_SELF_DIRNAME = 'self' as const
 export const RAY_SELF_MODEL_FILENAME = 'self-model.json' as const
 export const RAY_AUTOBIOGRAPHY_FILENAME = 'autobiography.jsonl' as const
 export const RAY_MANIFEST_FILENAME = 'manifest.json' as const
+export const RAY_TEACHING_PACK_FILENAME = 'teaching-pack.json' as const
 
 export const RAY_HOME_SUBDIRS: readonly string[] = Object.freeze([
   'kernel',
@@ -293,4 +294,93 @@ export function isWithinAllowedHomes(
     return true
   }
   return false
+}
+
+export interface RayTeachingPluginDescriptor {
+  readonly slug: string
+  readonly version: string
+  readonly kind: 'service' | 'channel' | 'ui' | 'tool'
+  readonly entryFile: string
+  readonly sourceRelDir: string
+  readonly config?: Readonly<Record<string, unknown>>
+  readonly precondition?: Readonly<Record<string, unknown>>
+}
+
+export interface RayTeachingSkillDescriptor {
+  readonly skillId: string
+  readonly version: string
+  readonly relDir: string
+}
+
+export interface RayTeachingPackManifest {
+  readonly protocol: typeof RAY_TEACHING_PACK_PROTOCOL
+  readonly packId: string
+  readonly exportedAt: number
+  readonly teacher: Readonly<{
+    rayId: string
+    name: string
+  }>
+  readonly credentialsExcluded: true
+  readonly files: Readonly<Record<string, Readonly<{ sha256: string; bytes: number }>>>
+  readonly capabilities: Readonly<Record<string, RayHomeCapabilityEntry>>
+  readonly plugins: readonly RayTeachingPluginDescriptor[]
+  readonly skills: readonly RayTeachingSkillDescriptor[]
+  readonly stats: Readonly<{
+    pluginsCount: number
+    skillsCount: number
+    memoriesCount: number
+    episodesCount: number
+    turnsCount: number
+    reflectionsCount: number
+  }>
+}
+
+export interface RayTeachingExportResult {
+  readonly ok: true
+  readonly sourceRayHome: string
+  readonly destination: string
+  readonly packId: string
+  readonly teacherRayId: string
+  readonly teacherName: string
+  readonly credentialsExcluded: true
+  readonly fileCount: number
+  readonly stats: RayTeachingPackManifest['stats']
+}
+
+export interface RayTeachingImportResult {
+  readonly ok: true
+  readonly source: string
+  readonly rayHome: string
+  readonly packId: string
+  readonly teacher: Readonly<{ rayId: string; name: string }>
+  readonly recipientRayId: string
+  readonly recipientName: string
+  readonly alreadyImported: boolean
+  readonly identityPreserved: true
+  readonly adoptedCapabilities: readonly string[]
+  readonly keptExistingCapabilities: readonly string[]
+  readonly verifiedPlugins: readonly string[]
+  readonly importedMemories: number
+  readonly importedEpisodes: number
+  readonly importedReflections: number
+}
+
+/** Compare semver-like version strings (`> 0` means `left` is newer than `right`). */
+export function compareRayCapabilityVersions(left: string, right: string): number {
+  const cleanLeft = left.trim().replace(/^v/iu, '')
+  const cleanRight = right.trim().replace(/^v/iu, '')
+  if (cleanLeft === cleanRight) return 0
+  const [leftCore = '', leftPre] = cleanLeft.split('-', 2)
+  const [rightCore = '', rightPre] = cleanRight.split('-', 2)
+  const lParts = leftCore.split('.').map(n => Number.parseInt(n, 10))
+  const rParts = rightCore.split('.').map(n => Number.parseInt(n, 10))
+  const maxLen = Math.max(lParts.length, rParts.length)
+  for (let i = 0; i < maxLen; i += 1) {
+    const lv = Number.isFinite(lParts[i]) ? lParts[i]! : 0
+    const rv = Number.isFinite(rParts[i]) ? rParts[i]! : 0
+    if (lv !== rv) return lv > rv ? 1 : -1
+  }
+  if (leftPre === undefined && rightPre !== undefined) return 1
+  if (leftPre !== undefined && rightPre === undefined) return -1
+  return cleanLeft.localeCompare(cleanRight)
 }
