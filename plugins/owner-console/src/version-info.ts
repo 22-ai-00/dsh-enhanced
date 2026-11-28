@@ -22,6 +22,8 @@ export interface CollectOwnerConsoleVersionOptions {
 interface SqlitePathBoundary {
   readonly dshHome: string
   readonly canonicalDshHome: string
+  readonly rayHome?: string
+  readonly canonicalRayHome?: string
 }
 
 const VALID_PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -124,7 +126,27 @@ function resolveDshHomeAndProfile(
   }
 }
 
-function resolveSqliteBoundary(dshHome: string | null, diagnostics: string[]): SqlitePathBoundary | null {
+function resolveRayHomeDir(host: Pick<Context, 'get'>): string | null {
+  try {
+    const policy = host.get('assistantPolicy' as never) as { rayHomeDir?: () => unknown } | undefined
+    const live = policy?.rayHomeDir?.()
+    if (typeof live === 'string' && live.trim() !== '' && isAbsolute(live.trim())) {
+      return resolve(live.trim())
+    }
+  } catch {
+    // Ignore when assistantPolicy is not loaded.
+  }
+  const envRay = process.env['RAY_HOME']
+  return typeof envRay === 'string' && envRay.trim() !== '' && isAbsolute(envRay.trim())
+    ? resolve(envRay.trim())
+    : null
+}
+
+function resolveSqliteBoundary(
+  dshHome: string | null,
+  diagnostics: string[],
+  rayHome: string | null = null,
+): SqlitePathBoundary | null {
   if (!dshHome) return null
   try {
     if (!existsSync(dshHome)) return null
@@ -134,7 +156,22 @@ function resolveSqliteBoundary(dshHome: string | null, diagnostics: string[]): S
       return null
     }
     const canonicalDshHome = realpathSync(dshHome)
-    return { dshHome: resolve(dshHome), canonicalDshHome }
+    let canonicalRayHome: string | undefined
+    let normalizedRayHome: string | undefined
+    if (rayHome !== null && existsSync(rayHome)) {
+      const rst = lstatSync(rayHome)
+      if (!rst.isSymbolicLink() && rst.isDirectory()) {
+        normalizedRayHome = resolve(rayHome)
+        canonicalRayHome = realpathSync(rayHome)
+      }
+    }
+    return {
+      dshHome: resolve(dshHome),
+      canonicalDshHome,
+      ...(normalizedRayHome !== undefined && canonicalRayHome !== undefined
+        ? { rayHome: normalizedRayHome, canonicalRayHome }
+        : {}),
+    }
   } catch (error) {
     diagnostics.push(`failed to inspect DSH_HOME (${dshHome}): ${error instanceof Error ? error.message : String(error)}`)
     return null
@@ -142,10 +179,17 @@ function resolveSqliteBoundary(dshHome: string | null, diagnostics: string[]): S
 }
 
 function isWithinBoundary(targetPath: string, realTargetPath: string, boundary: SqlitePathBoundary): boolean {
-  const logicallyWithin = targetPath.startsWith(`${boundary.dshHome}${sep}`)
+  const logicallyWithinDsh = targetPath.startsWith(`${boundary.dshHome}${sep}`)
     || targetPath.startsWith(`${boundary.canonicalDshHome}${sep}`)
-  const physicallyWithin = realTargetPath.startsWith(`${boundary.canonicalDshHome}${sep}`)
-  return logicallyWithin && physicallyWithin
+  const physicallyWithinDsh = realTargetPath.startsWith(`${boundary.canonicalDshHome}${sep}`)
+  if (logicallyWithinDsh && physicallyWithinDsh) return true
+  if (boundary.rayHome !== undefined && boundary.canonicalRayHome !== undefined) {
+    const logicallyWithinRay = targetPath.startsWith(`${boundary.rayHome}${sep}`)
+      || targetPath.startsWith(`${boundary.canonicalRayHome}${sep}`)
+    const physicallyWithinRay = realTargetPath.startsWith(`${boundary.canonicalRayHome}${sep}`)
+    if (logicallyWithinRay && physicallyWithinRay) return true
+  }
+  return false
 }
 
 function isLoaderEntryDisabled(entry: { readonly disabled?: unknown; readonly options: { readonly disabled?: unknown } }): boolean {
@@ -799,7 +843,7 @@ export async function collectOwnerConsoleVersionInfo(
   const countedTables = new Set<string>()
 
   const resolved = resolveDshHomeAndProfile(host, options)
-  const boundary = resolveSqliteBoundary(resolved.dshHome, diagnostics)
+  const boundary = resolveSqliteBoundary(resolved.dshHome, diagnostics, resolveRayHomeDir(host))
   const profiles = listProfiles(boundary)
   const targetProfiles = resolved.profileName !== null
     ? [resolved.profileName]

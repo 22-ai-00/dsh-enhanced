@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-11-28（确立 [Ray 自主成长设计](ray-autonomous-self.md) 与 P1–P6 演进路线；已通过纯 GitHub OIDC 发布 `dsh-ray` / `@dsh-ray/cli` 与全部 40 个 `@dsh-ray/*@0.2.4` 包并在 npm 完成校验，合回 `fe9c4363`）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
+更新：2026-11-28（完成 **P1 自我与家** 并在 `dev` 验证通过；当前 `v0.2.4` 基线为纯 GitHub OIDC 40 包发行，下一步进入 **P2 前台意识 + 持久 Worker**）。完整成功条件见[验收合同](rsi-acceptance.md)，演进设计见[Ray 自主成长设计](ray-autonomous-self.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
 
 ## 目标
 
@@ -8,7 +8,11 @@
 
 ## 能力边界
 
-- **发布、包身份与 Host 基线**：[release-manifest](../release-manifest.json) 当前 `current: 0.2.4`、`pending: null`（40 个 `@dsh-ray/*@0.2.4` 包：36 插件 + 4 共享包含 `@dsh-ray/cli`，内部 `@dsh-ray/*` peer 上限 `<0.3.0`，`release.yml` Run `46055285713` 与 `node ./scripts/verify-npm-release.mjs --tag v0.2.4 --verify-tarball` 40/40 通过并合回 `record` 提交 `fe9c4363`）；`pinnedHostVersion: 0.2.2-rc.5`、`verifiedHostRange: >=0.2.2-rc.5 <0.3.0`，Node `.node-version` 为 `24.9.0`（`pnpm@11.7.0`），Cordis/Loader/Include/Group 锁定 `4.1.0`/`1.1.0`/`1.1.0`/`1.1.0`。
+- **P1 自我与家（已完成）**：
+  - `@dsh-ray/assistant-growth-contract`（`src/ray-home.ts`）与 `@dsh-ray/assistant-policy`（`RayHomeRuntime` + `Config.rayHome`）：在 `~/.ray` 或任意外部磁盘建立 `manifest.json`、`kernel/kernel.json`（Body Kernel 不可被 Ray 工具或 shell 重定向直接写入，哪怕 `danger-full-access` + `reviewer='none'`）、`kernel/proposals.json`、`self/self-model.json`、`self/autobiography.jsonl`；首发启动基于既有记忆/设定自动写出 `文鳐 / Ray / 小鳐` 第一版自述、长期理想与 2 个阶段目标，支持 `ray_read_self` / `ray_evolve_self` / `ray_propose_kernel_change`、Owner 1 轮否决、凭据句柄清单与明文搬家克隆导入导出。
+  - `@dsh-ray/owner-console`、`@dsh-ray/assistant-delivery`、`@dsh-ray/lark-channel`、`@dsh-ray/assistant-web-owner`：飞书（`ownsSession` + `/status` Card 2.0 自我模型区 + `/veto` + `ray_owner_veto`/`ray_home_import`）与桌面端（`ownsAssistantSession` + `RaySelfPanelCard` + `raySelfSnapshot`/`vetoRaySelf`/`decideRayKernelProposal`/`importRayHome` RPC）统一复用 `RayHomeRuntime` 单一身份（抑制重复 `owner-console:wenyao-persona`），并在档案配置/只读报告/安装包编译器中放行显式配置的 `rayHome` 路径边界（仍阻断任意越界及 `~/.dsh` 泄漏）。
+  - `@dsh-ray/cli`（`dsh-ray home status|init|migrate|export|import`）：支持 Safe SQLite (`VACUUM INTO`) 迁移非凭据账本、`personal-wiki/vault` 与 `rsi-sources` 至 `Ray Home` 并重写 `cordis.patch.yml`，凭据保留原机钥匙串/$DSH_HOME，克隆包排除凭据并生成重认证清单，`growth-report` / `version-report` 放行 `rayHome`。
+- **发布、包身份与 Host 基线**：[release-manifest](../release-manifest.json) 当前 `current: 0.2.4`、`pending: null`（40 个 `@dsh-ray/*@0.2.4` 包），`pinnedHostVersion: 0.2.2-rc.5`、`verifiedHostRange: >=0.2.2-rc.5 <0.3.0`，Node `24.9.0`（`pnpm@11.7.0`），Cordis/Loader/Include/Group 锁定 `4.1.0`/`1.1.0`/`1.1.0`/`1.1.0`。
 - **v0.2.4 `pnpm` 隔离传递解析、旧实目录清理与 `0.2.2`–`0.2.3` 基线**：`scripts/install/lifecycle-profile.mjs` 为 `SUPERVISED_OPERATOR_PROGRAM` 与 `SUPERVISED_CAPABILITY_PROGRAM` 注入 `SUPERVISED_PROFILE_RESOLVER_SNIPPET`，在 `pnpm` `nodeLinker: isolated` 下经 `@dsh-ray/personal-assistant` / `@dsh-ray/lark-channel` 锚点解析未直接声明的传递插件（并显式拦截破损顶层旧目录回退）；`@dsh-ray/cli`（`packages/cli/src/upgrade.ts`）在 `pnpm` profile 执行 `pnpm install` 前清理 `KNOWN_ENHANCED_PACKAGES` 遗留非符号链接旧实目录（保留 `.pnpm`/本地源码符号链接、非 registry 依赖与自演化插件目录），使二次 `dsh-ray update --all` 成为幂等 no-op；延续 `v0.2.3` 的 `@dsh-ray/assistant-isolation` `windows-job` 宿主目录 env/DLL 缓存/线程池冷启动修复、`HOST_PEER_RESOLVER_SNIPPET` 外部 Host `@deepseek-ai/*` 解析、`@dsh-ray/owner-console` `store/v10`/`v11` 对账与 `@dsh-ray/cli` macOS 内置 `pnpm` 优先/`--profile` 透传，以及 `v0.2.2` 的 ACP 多模态输入/`128000` 上下文压缩、`/update` 无人值守恢复与 `--to-npm` 迁移。
 - **R3 默认自迭代、M6 实时档案防死锁与预派发进度 UX**：常规队列默认启用自迭代套件，且在 M6（`2fba9516`）修复了 live-profile 死锁与误报问题：`@dsh-ray/assistant-verifier` 保留代码 `Config` 默认 fail-closed `requireAcceptance: true`，同时在 `cordis.patch.yml` 及 `owner-console` / `assistant-web-owner` / `lark-channel` 档案编译器中对空 `profiles: []` 默认配置 `requireAcceptance: false` 并完整保留已有 `databasePath` 与评审字段（避免 Cordis 整块替换覆盖必需配置）；`@dsh-ray/assistant-dreaming` `cordis.patch.yml` 默认写入 `databasePath` 且保持 `enabled` 未启用直至 6 项前提满足；`@dsh-ray/assistant-delivery` 将 `publishProgress({ kind: 'started' })` 移至验收与执行准备及 `markDispatching()` 之后，并将非瞬态验收配置错误标记为不可重试（`acceptance-profile-missing`），避免零执行时误触发「执行被中断，已有操作的结果尚未确认。」。
 - **M7 飞书 Card 2.0 交互卡片与斜杠命令样式**：`plugins/lark-channel`（`1f720aa6`）将 `permissionPicker`、`userQuestion*`、`toolApproval*`、`approval*`、`automationIncident`、`modelPicker` 与 `modelSelectionResult` 升级为飞书 Card 2.0（`schema: '2.0'`、`config.summary`、`standard_icon`、等宽 `1:1` 按钮列、`behaviors: []` 表面容器，所有非信任/动态载荷严格隔离在 `plain_text` 内）；`/help`、`/status`|`/session`、`/version`、`/autonomy`、`/learning`、`/feedback` 在保持 `assistant-delivery` `intent.text` 契约的前提下于 `LarkDeliveryAdapter` 渲染为结构化 Card 2.0 卡片并保留字节预算与格式降级回退。
@@ -18,11 +22,16 @@
 
 - **平台验证边界（Linux 宿主与 Windows Named Pipe 边界）**：当前物理验证宿主为 Linux，Linux 原生隔离/cgroup、`SO_PEERCRED`、独立沙箱仓与全部服务端链路已在本地实测通过；macOS（`macos-seatbelt`、`LOCAL_PEERCRED`、`launchd`）与 Windows（`windows-job`、Named Pipe/ACL）路径由跨平台 CI（`macos-verify`、`windows-acp-smoke`）门禁覆盖。在真实 Windows Node.js `net.Socket` Named Pipe 上，`socket._handle` 不暴露底层 Win32 句柄，默认 `inspectWindowsPeerCredentials` 按 fail-closed 返回 `undefined`（仅在具备句柄或注入 FFI 绑定时执行进程与 `TokenUser` SID 核验）。
 - **D 类纵向验证边界**：真实用户在长期普通使用中的质量、成本、延迟、打扰分布与长期因果收益（D 类纵向证据）属于发布后（post-release）真实使用观测范围，显式排除在发版前工程验收门禁之外。
-- **下一步验收（P1 自我与家）**：建立 Ray Home（默认 `~/.ray`、支持任意磁盘挂载）、身体内核（精力/凭据/对外授权/独立验收器/回滚/根本立场）、全渠道统一自我模型与自传、搬家导出导入与现有 SQLite 迁入；验收要求为新装或换盘后自动建家并正常运行，飞书与桌面端同人格且首次启动写出自述与理想（`/status` 或面板可见），成长执行体写内核被拒且 owner 否决一轮内生效，跨机导入 Ray Home 并补凭据后记忆/技能/自创插件/自传完整接续，以及 `pnpm check` 通过。
+- **下一步验收（P2 前台意识 + 持久 Worker）**：引入 `ray_tickets` 持久任务账本与基于 `ctx.agents.create`/`resume` 的可恢复 worker 会话，确保飞书/Web/桌面共享连续前台意识，owner 在 worker 运行中插话不取消进行中的 worker 而是路由为 `followup`/`steer` 或友好回复，超范围任务支持 `ticket_handback`，完成后自然融入主人生活流播报；完成后进入 P3 并评估 `v0.2.5` 阶段发版。
 - **后续基线与纵向观察**：基于已发布的 `@dsh-ray/*@0.2.4` 完成本机 `0.2.3 -> 0.2.4` 升级、幂等 no-op 与 capability 探针实测、外部节点（`xtorybot` / macOS Desktop）升级与隔离临时 `DSH_HOME` 公网 `install-npm.sh` 冒烟，以及日常普通使用中的 D 类长期纵向观察。
 
 ## 最新验证
 
-- **纯 OIDC 发布与 npm 回读校验（`v0.2.4`）**：`.github/workflows/release.yml` Run `46055285713`（tag `v0.2.4` on `28bb627b`：`publish` 通过、`verify-npm` 于 npm CDN 缓存过期后 `--failed` 重跑通过、`record` 提交 `fe9c4363` 通过）全部 `success`；`node ./scripts/verify-npm-release.mjs --tag v0.2.4 --verify-tarball` 退出码 `0`（`Verified 40/40 packages at 0.2.4`）；`pnpm release:status` 为 `Current release: 0.2.4`、`Pending release: none`。
-- **全仓门禁与跨平台 CI（`v0.2.4` 基线 `28bb627b`）**：`TMPDIR=/data00/home/jiataorui/t VITEST_MAX_WORKERS=4 DSH_TEST_CONCURRENCY=2 pnpm check`（`validate` 36+4/40、`oxlint --deny-warnings .` 0 警告/2034 文件、40/40 `build` 与 `typecheck:built`、`test:root` 123 passed / 1 skipped、`2017` passed / `4` skipped、`test:packages` 40/40、`pack:check` 40/40 tarballs）通过；`.github/workflows/ci.yml` Run `46051946556`（`28bb627b`）Attempt 1 8/8 全量 `success`（含 `windows-acp-smoke` `tests/windows-job-backend.spec.ts` `57516ms`）。
-- **状态同步文档校验（`dev`）**：已执行 `TMPDIR=/data00/home/jiataorui/t pnpm run validate`、`TMPDIR=/data00/home/jiataorui/t pnpm run lint` 与 `TMPDIR=/data00/home/jiataorui/t pnpm exec vitest run --config ./tests/vitest.config.ts --testTimeout=15000 tests/release-version.spec.ts tests/ci-workflows.spec.ts` 验证。
+- **P1 自我与家验证（`dev` 当前工作区）**：
+  - `pnpm run validate`（36 插件 + 4 共享包）、`pnpm run lint`（2042 文件 0 警告/0 错误）；
+  - `@dsh-ray/assistant-growth-contract`：12 文件 169 tests passed；
+  - `@dsh-ray/assistant-policy`：25 文件 580 tests passed (2 skipped)；
+  - `@dsh-ray/personal-assistant`、`@dsh-ray/assistant-web-owner`、`@dsh-ray/owner-console`（28 文件 274 tests passed）；
+  - `@dsh-ray/assistant-delivery`（74 文件 1534 tests passed）、`@dsh-ray/lark-channel`（`command-card.spec.ts` / `sdk.spec.ts` / `index.spec.ts` 79 tests passed）；
+  - `@dsh-ray/cli`（20 文件 358 tests passed）与根集成验收 `tests/optional-peer-imports.spec.ts` + `tests/ray-home-p1.spec.ts`（2 文件 78 tests passed）。
+- **全仓门禁基线（`v0.2.4` `28bb627b`）**：`pnpm check` 40/40 通过，`.github/workflows/ci.yml` Run `46051946556` 8/8 全量 `success`。

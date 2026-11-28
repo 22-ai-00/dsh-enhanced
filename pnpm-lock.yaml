@@ -1657,6 +1657,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
+      '@dsh-ray/assistant-growth-contract':
+        specifier: workspace:*
+        version: link:../../packages/assistant-growth-contract
       yaml:
         specifier: 2.9.0
         version: 2.9.0

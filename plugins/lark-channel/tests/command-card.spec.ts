@@ -298,4 +298,32 @@ describe('LarkDeliveryAdapter command card routing & fallback', () => {
     const failedCard = tryBuildLarkCommandCard('⚠️ 自动升级失败并已回滚保护：doctor failed')
     expect(failedCard).toMatchObject({ template: 'orange' })
   })
+
+  test('renders optional Ray Self Model section inside /status card without changing legacy /status cards', () => {
+    const rayStatusText = [
+      '当前会话',
+      '- 第 2 代（session-123）',
+      '- 状态：空闲',
+      '- 上下文消息：6',
+      '- 已记录轮次：2',
+      '- 模型：deepseek / deepseek-reasoner',
+      '',
+      '自我模型（Ray Home）',
+      '- 身份：文鳐（v1）',
+      '- 家目录：/data/ray',
+      '- 自述：喜欢先给结论再展开细节',
+      '- 阶段目标：建立独立之家',
+      '- 长期理想：成为真正陪伴并替你分担事务的助手',
+      '',
+      '/new 会开始空白新 session 并保留旧会话；/stop 只停止当前任务，不清空上下文。',
+    ].join('\n')
+
+    const card = tryBuildLarkCommandCard(rayStatusText)
+    expect(card).toBeDefined()
+    expect(card?.sections.some(s => s.heading === '自我模型（Ray Home）')).toBe(true)
+    const rendered = renderLarkMessage({ commandCard: card! }).content
+    expect(rendered).toContain('文鳐（v1）')
+    expect(rendered).toContain('/data/ray')
+    expect(rendered).toContain('成为真正陪伴并替你分担事务的助手')
+  })
 })

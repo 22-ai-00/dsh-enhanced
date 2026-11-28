@@ -81,6 +81,10 @@ function tryBuildStatusCard(text: string): LarkCommandCard | undefined {
     const messagesCount = messagesLine.replace(/^上下文消息：/u, '')
     const turnsCount = turnsLine.replace(/^已记录轮次：/u, '')
     const modelValue = modelLine.replace(/^模型：/u, '') || modelLine
+    const rayHeaderIdx = lines.indexOf('自我模型（Ray Home）')
+    const rayBullets = rayHeaderIdx >= 0
+      ? lines.slice(rayHeaderIdx + 1).filter(line => line.startsWith('- ')).map(stripBullet)
+      : []
 
     return {
       summary: '查看当前会话代数、状态、轮次与模型',
@@ -98,6 +102,13 @@ function tryBuildStatusCard(text: string): LarkCommandCard | undefined {
           tone: 'grey',
           items: [{ kind: 'plain', content: modelValue }],
         },
+        ...(rayBullets.length > 0
+          ? [{
+              heading: '自我模型（Ray Home）',
+              tone: 'blue' as const,
+              items: plainLines(rayBullets),
+            }]
+          : []),
       ],
       footer: '/new 会开始空白新 session 并保留旧会话；/stop 只停止当前任务，不清空上下文。',
     }

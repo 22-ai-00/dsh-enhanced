@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { isMap, isScalar, isSeq, parseDocument, Scalar, type Document, type YAMLMap } from 'yaml'
 import { parseSettingsDefaultModelRoute } from './settings-route.js'
 import { dumpEffectiveProfile, globalDshDatabasePath, withinDshHome } from './host-dsh.js'
@@ -530,7 +530,34 @@ export function resolveAutonomyValidators(
 
 const DSH_HOME_PATH_EXPR_RE = /^dshHomePath\(\s*['"]([A-Za-z0-9][A-Za-z0-9._/-]*)['"]\s*\)$/u
 
-function resolveConfiguredSqlitePath(pathValue: string, label: string, canonicalHome: string): string {
+function resolveRayHomeFromStates(
+  patchState: ProfileBundleState,
+  effectiveState: ProfileBundleState,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  for (const rowId of ['dsh-ray-assistant-policy', 'dsh-ray-personal-assistant'] as const) {
+    const cfg = mergedRowConfig(patchState, effectiveState, rowId).config
+    if (typeof cfg.rayHome === 'string' && cfg.rayHome.trim() !== '' && isAbsolute(cfg.rayHome.trim()) && !CONTROL_CHAR_RE.test(cfg.rayHome)) {
+      return canonicalizePath(cfg.rayHome.trim())
+    }
+  }
+  const fromEnv = env.RAY_HOME
+  if (typeof fromEnv === 'string' && fromEnv.trim() !== '' && isAbsolute(fromEnv.trim()) && !CONTROL_CHAR_RE.test(fromEnv)) {
+    return canonicalizePath(fromEnv.trim())
+  }
+  return undefined
+}
+
+function isWithinDirectory(rootDir: string, candidatePath: string): boolean {
+  return candidatePath === rootDir || candidatePath.startsWith(`${rootDir}${sep}`)
+}
+
+function resolveConfiguredSqlitePath(
+  pathValue: string,
+  label: string,
+  canonicalHome: string,
+  canonicalRayHome?: string,
+): string {
   const exprMatch = DSH_HOME_PATH_EXPR_RE.exec(pathValue.trim())
   const candidate = exprMatch
     ? (() => {
@@ -545,9 +572,12 @@ function resolveConfiguredSqlitePath(pathValue: string, label: string, canonical
     throw new Error(`assistant-web-owner: ${label} must resolve to an explicit absolute path under $DSH_HOME`)
   }
   const canonicalTarget = canonicalizePath(candidate)
-  withinDshHome(canonicalTarget, canonicalHome, label, (message) => {
-    throw new Error(`assistant-web-owner: ${message}`)
-  })
+  const inRayHome = canonicalRayHome !== undefined && isWithinDirectory(canonicalRayHome, canonicalTarget)
+  if (!inRayHome) {
+    withinDshHome(canonicalTarget, canonicalHome, label, (message) => {
+      throw new Error(`assistant-web-owner: ${message}`)
+    })
+  }
   const realUserDshHome = canonicalizePath(join(homedir(), '.dsh'))
   if (canonicalHome !== realUserDshHome) {
     const fileName = canonicalTarget.slice(canonicalTarget.lastIndexOf('/') + 1)
@@ -752,8 +782,9 @@ function resolveActiveWebOwnerInternal(
     return { ok: false, workspace, preset, principalId, reason: 'assistant-delivery.databasePath is not configured' }
   }
   let deliveryDatabasePath: string
+  const canonicalRayHome = resolveRayHomeFromStates(patchState, effectiveState)
   try {
-    deliveryDatabasePath = resolveConfiguredSqlitePath(rawDeliveryDb, 'assistant-delivery.databasePath', canonicalHome)
+    deliveryDatabasePath = resolveConfiguredSqlitePath(rawDeliveryDb, 'assistant-delivery.databasePath', canonicalHome, canonicalRayHome)
   } catch (error) {
     return { ok: false, workspace, preset, principalId, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -1036,19 +1067,20 @@ function assertExistingPluginDbPathsScoped(
   patchState: ProfileBundleState,
   effectiveState: ProfileBundleState,
   canonicalHome: string,
+  canonicalRayHome?: string,
 ): void {
   const learning = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-memory-learning').config
   if (typeof learning.databasePath === 'string' && learning.databasePath.length > 0) {
-    resolveConfiguredSqlitePath(learning.databasePath, 'assistant-memory-learning.databasePath', canonicalHome)
+    resolveConfiguredSqlitePath(learning.databasePath, 'assistant-memory-learning.databasePath', canonicalHome, canonicalRayHome)
   }
   const dreaming = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-dreaming').config
   if (typeof dreaming.databasePath === 'string' && dreaming.databasePath.length > 0) {
-    resolveConfiguredSqlitePath(dreaming.databasePath, 'assistant-dreaming.databasePath', canonicalHome)
+    resolveConfiguredSqlitePath(dreaming.databasePath, 'assistant-dreaming.databasePath', canonicalHome, canonicalRayHome)
   }
   const growth = mergedRowConfig(patchState, effectiveState, 'dsh-ray-assistant-growth-driver').config
   const usageDb = asPlainObject(growth.usageLearning)?.databasePath
   if (typeof usageDb === 'string' && usageDb.length > 0) {
-    resolveConfiguredSqlitePath(usageDb, 'assistant-growth-driver.usageLearning.databasePath', canonicalHome)
+    resolveConfiguredSqlitePath(usageDb, 'assistant-growth-driver.usageLearning.databasePath', canonicalHome, canonicalRayHome)
   }
 }
 
@@ -1084,7 +1116,8 @@ export function compileWebOwnerAutonomyGrants(
     growth: growth || (input.growth === false && hasGrowthBundle),
   })
 
-  assertExistingPluginDbPathsScoped(patchState, effectiveState, canonicalHome)
+  const canonicalRayHome = resolveRayHomeFromStates(patchState, effectiveState)
+  assertExistingPluginDbPathsScoped(patchState, effectiveState, canonicalHome, canonicalRayHome)
 
   const ownerCheck = resolveActiveWebOwnerInternal(input, patchState, effectiveState, canonicalHome, profile, validators)
   const modelCheck = resolveModelRouteInternal(input, patchState, effectiveState, canonicalHome)

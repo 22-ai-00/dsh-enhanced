@@ -157,6 +157,7 @@ export type DecisionReasonCode =
   | 'predecessor-digest-invalid'
   | 'idempotency-key-missing'
   | 'idempotency-conflict'
+  | 'ray-kernel-protected'
 
 export interface PolicyDecision {
   effect: PolicyEffect

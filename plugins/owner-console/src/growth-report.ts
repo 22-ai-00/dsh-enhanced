@@ -70,6 +70,8 @@ function findLoaderConfig(host: Context, moduleName: string): Record<string, unk
 interface SqlitePathBoundary {
   readonly dshHome: string
   readonly canonicalDshHome: string
+  readonly rayHome?: string
+  readonly canonicalRayHome?: string
   readonly explicitHome: boolean
 }
 
@@ -105,10 +107,14 @@ function resolveSqliteBoundary(host: Context): SqlitePathBoundary {
   }
   const envHome = cleanAbsoluteDir(process.env['DSH_HOME'])
   const dshHome = hostHome ?? envHome ?? resolve(homedir(), '.dsh')
+  const policyRayHome = cleanAbsoluteDir((host.get('assistantPolicy') as { rayHomeDir?: () => unknown } | undefined)?.rayHomeDir?.())
+  const envRayHome = cleanAbsoluteDir(process.env['RAY_HOME'])
+  const rayHome = policyRayHome ?? envRayHome
   return {
     dshHome,
     canonicalDshHome: tryRealpath(dshHome),
-    explicitHome: Boolean(hostHome || envHome),
+    ...(rayHome === undefined ? {} : { rayHome, canonicalRayHome: tryRealpath(rayHome) }),
+    explicitHome: Boolean(hostHome || envHome || rayHome),
   }
 }
 
@@ -214,7 +220,11 @@ function withReadOnlySqlite<T>(
     realTarget = realpathSync(target)
     const logicallyWithin = target.startsWith(`${boundary.dshHome}${sep}`)
       || target.startsWith(`${boundary.canonicalDshHome}${sep}`)
-    if (!logicallyWithin || !realTarget.startsWith(`${boundary.canonicalDshHome}${sep}`)) {
+    const physicallyWithin = realTarget.startsWith(`${boundary.canonicalDshHome}${sep}`)
+    const withinRayHome = boundary.rayHome !== undefined && boundary.canonicalRayHome !== undefined
+      && (target.startsWith(`${boundary.rayHome}${sep}`) || target.startsWith(`${boundary.canonicalRayHome}${sep}`))
+      && realTarget.startsWith(`${boundary.canonicalRayHome}${sep}`)
+    if (!(logicallyWithin && physicallyWithin) && !withinRayHome) {
       return undefined
     }
   } catch {

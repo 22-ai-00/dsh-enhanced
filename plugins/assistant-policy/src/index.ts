@@ -4,6 +4,19 @@ import { version } from './version.js'
 
 export const name = 'dsh-ray-assistant-policy'
 export { AssistantPolicyService, Config, version }
+export {
+  RayHomeRuntime,
+  defaultUserRayHome,
+  resolveConfiguredRayHome,
+  type RayCloneExportResult,
+  type RayCloneImportResult,
+  type RayMissingCredentialItem,
+  type RaySelfEvolutionInput,
+  type RaySelfSnapshot,
+  type RayVetoHandler,
+  type RayVetoInput,
+  type RayVetoResult,
+} from './ray-home-runtime.js'
 export { compilePolicy, evaluatePolicy } from './evaluator.js'
 export {
   APPROVAL_REVIEWERS,

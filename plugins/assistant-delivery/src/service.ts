@@ -8268,6 +8268,65 @@ export class AssistantDeliveryService extends Service {
 
   get supportsPlannedRestart(): boolean { return this.restartStore !== undefined }
 
+  ownsSession(sessionId: string): boolean {
+    const clean = sessionId.trim()
+    return clean !== '' && this.active && this.deliveryStore.getBindingBySession(clean) !== undefined
+  }
+
+  raySelfRuntime(): {
+    snapshot?: (limit?: number) => {
+      rayHome: string
+      selfModel: {
+        name: string
+        version: number
+        selfSummary: string
+        stageGoals: readonly { title: string; status: string }[]
+        ideals: readonly { title: string }[]
+      }
+      missingCredentials: readonly { id: string; label?: string }[]
+    }
+    vetoByOwner?: (input: {
+      targetEntryId?: string
+      targetCapabilityId?: string
+      reason?: string
+      ownerProof: string
+    }) => Promise<{
+      ok: boolean
+      vetoedEntryId?: string
+      revertedCapabilityId?: string
+      autobiographyEntry: { entryId: string; summary: string }
+      selfModel: { name: string; version: number }
+    }>
+    importClone?: (sourceDir: string) => {
+      ok: true
+      rayId: string
+      name: string
+      importedFiles: number
+      missingCredentials: readonly { id: string; service: string; label?: string; required: boolean; reason: string }[]
+    }
+  } | undefined {
+    try {
+      const policy = (this.context as { get?: (key: string) => unknown }).get?.('assistantPolicy') as { raySelf?: unknown } | undefined
+      return policy?.raySelf as ReturnType<AssistantDeliveryService['raySelfRuntime']>
+    } catch {
+      return undefined
+    }
+  }
+
+  isOwnerSessionAgent(agent: Agent | undefined): boolean {
+    if (!this.active || agent === undefined || agent.session === undefined) return false
+    if (agent.session.header.origin === 'subagent' || agent.session.header.delegationDepth !== undefined) return false
+    const sessionId = String(agent.session.id)
+    const binding = this.deliveryStore.getBindingBySession(sessionId)
+    if (binding?.status !== 'active' || binding.sessionId !== sessionId) return false
+    const active = this.deliveryStore.getActiveBinding(binding.conversation)
+    const principal = this.deliveryStore.getPrincipal(binding.principal)
+    return active?.id === binding.id
+      && principal?.status === 'active'
+      && principal.role === 'owner'
+      && JSON.stringify(principal.principal) === JSON.stringify(binding.principal)
+  }
+
   /** Host-side registration of an exact, currently mounted read-only definition. */
   registerRestartSafeTool(caller: Context, definition: ToolDefinition): () => void {
     if (this.restartStore === undefined) return () => {}

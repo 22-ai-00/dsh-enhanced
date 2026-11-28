@@ -3868,6 +3868,97 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     return { outcome: 'processed' }
   }
 
+  private async runOwnerVetoCommand(
+    command: ParsedDeliveryCommand,
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    markDispatching: MarkInboundDispatching | undefined,
+  ): Promise<InboundProcessResult> {
+    if ((envelope.attachments?.length ?? 0) > 0) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '/veto 命令不接受文件、图片或其他附件；本次未执行。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    let authorized: boolean
+    try {
+      authorized = this.options.isOwnerFeedbackController(binding, envelope)
+    } catch {
+      return { outcome: 'not-processed', failureCode: 'veto-authorization-check-failed', retryable: true }
+    }
+    if (!authorized) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '当前身份不是此会话的 owner；仅 owner 可执行 /veto 否决，本次未执行。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    const policy = (this.ctx as { get?: (key: string) => unknown }).get?.('assistantPolicy') as {
+      raySelf?: {
+        vetoByOwner?: (input: {
+          targetEntryId?: string
+          targetCapabilityId?: string
+          reason?: string
+          ownerProof: string
+        }) => Promise<{
+          ok: boolean
+          vetoedEntryId?: string
+          revertedCapabilityId?: string
+          autobiographyEntry: { summary: string }
+          selfModel: { name: string; version: number }
+        }>
+      }
+    } | undefined
+    if (policy?.raySelf?.vetoByOwner === undefined) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '当前尚未挂载 Ray Home 自我模型（assistant-policy.raySelf 未启用）；/veto 未执行。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    if (markDispatching === undefined) {
+      return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+    }
+    signal.throwIfAborted()
+    markDispatching()
+    signal.throwIfAborted()
+
+    const rawArgs = command.rawInput.trim()
+    const tokens = rawArgs === '' ? [] : rawArgs.split(/\s+/u)
+    const first = tokens[0] ?? ''
+    const isTargetToken = /^(?:evo-|boot-|autobiography-|cap:|skill:|tool:|plugin:)/u.test(first)
+    const targetCapabilityId = /^cap:|skill:|tool:|plugin:/u.test(first) ? first : undefined
+    const targetEntryId = isTargetToken && targetCapabilityId === undefined ? first : undefined
+    const reasonText = isTargetToken ? tokens.slice(1).join(' ').trim() : rawArgs
+    const ownerProof = `owner:${envelope.conversation.channel}:${externalPrincipalId(binding.principal)}`
+
+    try {
+      const result = await policy.raySelf.vetoByOwner({
+        ...(targetEntryId === undefined ? {} : { targetEntryId }),
+        ...(targetCapabilityId === undefined ? {} : { targetCapabilityId }),
+        ...(reasonText === '' ? {} : { reason: reasonText }),
+        ownerProof,
+      })
+      this.options.replyCommand(binding, envelope.eventId, {
+        text: result.ok
+          ? [
+              '✅ Owner 否决已在当前轮次生效（下一轮即按新状态执行）：',
+              `- 回滚记录：${result.autobiographyEntry.summary}`,
+              `- 当前自我模型：${result.selfModel.name}（v${result.selfModel.version}）`,
+              ...(result.revertedCapabilityId ? [`- 已回退能力：${result.revertedCapabilityId}`] : []),
+            ].join('\n')
+          : '⚠️ 未找到匹配的近期自主演化或能力记录；已在自传中记录本次 owner 反对意见。',
+        format: 'plain',
+      })
+      return { outcome: 'processed' }
+    } catch (error) {
+      return {
+        outcome: 'not-processed',
+        failureCode: error instanceof Error ? error.message : 'ray-veto-failed',
+        retryable: false,
+      }
+    }
+  }
+
   private sessionHelp(native: readonly CommandDescriptor[]): string {
     const lines = [
       '会话命令：',
@@ -3880,6 +3971,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       '- /learning：查看、导出、暂停、恢复或清除当前 scope 的偏好学习；不进入模型。',
       '- /autonomy：开启、关闭或升级整体助手自迭代能力；不进入模型。',
       '- /update（/upgrade）：在后台升级整体助手并自动重启恢复（仅限 owner）；不进入模型。',
+      '- /veto [条目ID] [原因]：立即推翻并回滚最近一次自主演化或能力变更（仅限 owner）；下一轮生效。',
       '- /version：查看当前助手、Host、插件版本与自迭代演进统计；不进入模型。',
       '- /help：显示当前实际可用命令。',
     ]
@@ -3968,6 +4060,32 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       if (command.name === 'status' || command.name === 'session') {
         const messages = agent.session.deriveMessages().length
         const turns = agent.session.snapshotEvents().filter(event => event.type === 'turn/end').length
+        const rayPolicy = (this.ctx as { get?: (key: string) => unknown }).get?.('assistantPolicy') as {
+          raySelf?: {
+            snapshot?: (limit?: number) => {
+              rayHome: string
+              selfModel: {
+                name: string
+                version: number
+                selfSummary: string
+                stageGoals: readonly { title: string; status: string }[]
+                ideals: readonly { title: string }[]
+              }
+              missingCredentials: readonly unknown[]
+            }
+          }
+        } | undefined
+        const raySnap = typeof rayPolicy?.raySelf?.snapshot === 'function' ? rayPolicy.raySelf.snapshot(3) : undefined
+        const rayLines = raySnap === undefined ? [] : [
+          '',
+          '自我模型（Ray Home）',
+          `- 身份：${raySnap.selfModel.name}（v${raySnap.selfModel.version}）`,
+          `- 家目录：${raySnap.rayHome}`,
+          `- 自述：${raySnap.selfModel.selfSummary}`,
+          `- 阶段目标：${raySnap.selfModel.stageGoals.filter(g => g.status === 'active').map(g => g.title).join('；') || '暂无'}`,
+          `- 长期理想：${raySnap.selfModel.ideals.map(i => i.title).join('；') || '暂无'}`,
+          ...(raySnap.missingCredentials.length > 0 ? [`- 待重授权凭据：${raySnap.missingCredentials.length} 项`] : []),
+        ]
         return this.replySessionCommand(binding, envelope, {
           text: [
             '当前会话',
@@ -3976,6 +4094,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             `- 上下文消息：${messages}`,
             `- 已记录轮次：${turns}`,
             `- 模型：${routeLabel(selectedRoute)}`,
+            ...rayLines,
             '',
             '/new 会开始空白新 session 并保留旧会话；/stop 只停止当前任务，不清空上下文。',
           ].join('\n'),
@@ -4273,6 +4392,9 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         }
         return modelCommandFailure(error)
       }
+    }
+    if (sessionCommand?.name === 'veto') {
+      return await this.runOwnerVetoCommand(sessionCommand, binding, envelope, signal, markDispatching)
     }
     if (sessionCommand !== undefined) {
       return await this.runSessionCommand(sessionCommand, binding, envelope, signal, markDispatching)

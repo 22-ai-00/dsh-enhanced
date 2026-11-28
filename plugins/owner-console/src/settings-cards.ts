@@ -12,7 +12,7 @@ import {
   type AutonomySetupStatus, type CodingToolProbe, type FeishuQrOnboardingSnapshot, type FeishuQrOwnerBinding,
   type GrowthDataState, type IntakeAgreementAvailability,
   type OwnerConsoleAssistantOverview, type OwnerConsoleControlActionResult, type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement,
-  type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleModelCatalog, type OwnerConsoleStatus,
+  type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleModelCatalog, type OwnerConsoleRaySelfState, type OwnerConsoleStatus,
   type OwnerConsoleTrendSnapshotItem, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
   type SelfUpgradePreview, type SelfUpgradeStatus, type SetupDoctorIssue, type SetupDoctorReport,
 } from './typert.js'
@@ -302,6 +302,10 @@ export type ConsoleRemote = Readonly<{
   modelCatalog?(force: boolean): Promise<RemoteResult<OwnerConsoleModelCatalog>>
   assistantChatContext?(): Promise<RemoteResult<AssistantChatContext>>
   registerAssistantSession?(sessionId: string, makeActive: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  raySelfSnapshot?(): Promise<RemoteResult<OwnerConsoleRaySelfState>>
+  vetoRaySelf?(targetEntryId: string, targetCapabilityId: string, reason: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  decideRayKernelProposal?(proposalId: string, decision: 'approved' | 'rejected'): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  importRayHome?(sourceDir: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
 }>
 
 export type OwnerConsoleNavigation = Readonly<{ openConversation(): void; openPlugins(): void }>
@@ -2651,6 +2655,122 @@ export function ProactiveWorkItemsCard({ ctrl }: Readonly<{ ctrl: ConsoleControl
               `${item.source ?? 'host'}${item.observeReason ? ` · ${item.observeReason}` : item.reasonCode ? ` · ${item.reasonCode}` : ''} · ${isoTime(item.recordedAt)}`)))))))
 }
 
+export function RaySelfPanelCard({ ctrl, remote }: Readonly<{ ctrl: ConsoleController; remote: ConsoleRemote }>) {
+  const [rayState, setRayState] = useState<OwnerConsoleRaySelfState>()
+  const [loading, setLoading] = useState(false)
+  const [failed, setFailed] = useState('')
+  const [vetoReason, setVetoReason] = useState('')
+  const [cloneSource, setCloneSource] = useState('')
+
+  const load = () => {
+    if (typeof remote.raySelfSnapshot !== 'function') return
+    setLoading(true)
+    setFailed('')
+    void remote.raySelfSnapshot().then(res => {
+      setLoading(false)
+      if (res.ok) setRayState(res.value)
+      else setFailed(remoteFailureText(res.error))
+    }, cause => {
+      setLoading(false)
+      setFailed(cause instanceof Error ? cause.message : String(cause))
+    })
+  }
+
+  useEffect(() => {
+    load()
+    return subscribeConsoleRefresh(remote, load)
+  }, [remote])
+
+  const busy = ctrl.busy || loading
+  const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
+
+  return el('div', { 'data-owner-console-ray-self': '' },
+    card('文鳐自我模型与 Ray Home',
+      el('p', { style: hintStyle }, '查看独立家目录（Ray Home）、长期理想、阶段目标、自传演化与内核提案；Owner 否决可在 1 轮内立即生效。'),
+      failed !== '' ? el('p', { role: 'alert', style: { margin: 0, fontSize: 12, color: danger } }, `读取失败：${failed}`) : null,
+      typeof remote.raySelfSnapshot !== 'function'
+        ? placeholder('当前 Host 尚未暴露 Ray Self Panel 接口。')
+        : rayState === undefined
+          ? placeholder(loading ? '正在读取自我模型…' : '暂无自我模型状态。')
+          : !rayState.active || rayState.selfModel === null
+            ? placeholder('Ray Home 尚未配置（可在 profile 设置 rayHome 或运行 dsh-ray home init）。')
+            : el('div', { style: gridStyle },
+              el('div', { style: listStyle },
+                row('身份 / 版本', `${rayState.selfModel.name}（${rayState.selfModel.aliases.join(' / ')}） · v${rayState.selfModel.version}`),
+                row('Ray Home 路径', el('span', { style: monoMuted }, rayState.rayHome ?? '-')),
+                row('当前自述', rayState.selfModel.selfSummary),
+                row('精力上限（Kernel）', rayState.energy === null ? '-' : `每日 ${rayState.energy.dailyTokenCap} tokens（自由时间 ${(rayState.energy.freeEnergyRatioBp / 100).toFixed(0)}%）`),
+                row('长期理想', rayState.selfModel.ideals.map((i, idx) => `${idx + 1}. ${i.title}`).join('；') || '暂无'),
+                row('活跃阶段目标', rayState.selfModel.stageGoals.filter(g => g.status === 'active').map(g => `${g.title}（${g.completionCriteria}）`).join('；') || '暂无'),
+                row('缺失凭据提醒', rayState.missingCredentials.length === 0
+                  ? pill('凭据完整', 'ok')
+                  : pill(`需重授权 ${rayState.missingCredentials.length} 项：${rayState.missingCredentials.map(c => c.label ?? c.id).join('、')}`, 'warn'))),
+              rayState.pendingProposals.length > 0
+                ? el('div', { style: gridStyle },
+                  el('p', { style: subheadStyle }, '待 Owner 审批的身体内核提案'),
+                  ...rayState.pendingProposals.map(proposal => el('div', {
+                    key: proposal.proposalId,
+                    style: { ...listStyle, gap: 6, padding: '8px 12px' },
+                  },
+                  row(`${proposal.section} · ${proposal.proposalId}`, proposal.summary),
+                  el('div', { style: actionsStyle },
+                    el('button', {
+                      type: 'button',
+                      style: btn(primaryButtonStyle),
+                      disabled: busy,
+                      onClick: () => {
+                        if (typeof remote.decideRayKernelProposal === 'function') {
+                          void ctrl.run(() => remote.decideRayKernelProposal!(proposal.proposalId, 'approved')).then(load)
+                        }
+                      },
+                    }, '批准提案'),
+                    el('button', {
+                      type: 'button',
+                      style: btn(dangerButtonStyle),
+                      disabled: busy,
+                      onClick: () => {
+                        if (typeof remote.decideRayKernelProposal === 'function') {
+                          void ctrl.run(() => remote.decideRayKernelProposal!(proposal.proposalId, 'rejected')).then(load)
+                        }
+                      },
+                    }, '拒绝')))))
+                : null,
+              rayState.recentAutobiography.length > 0
+                ? el('div', { style: listStyle },
+                  ...rayState.recentAutobiography.slice(-3).reverse().map(entry =>
+                    row(`${entry.kind}${entry.vetoed ? '（已否决）' : ''}`, boundedLine(entry.summary, 160))))
+                : null,
+              el('div', { style: actionsStyle },
+                el('input', {
+                  type: 'text',
+                  value: vetoReason,
+                  placeholder: '可选：否决原因（默认回滚最近一次自主演化）',
+                  style: { ...inputStyle, flex: '1 1 200px' },
+                  onChange: (event: { target: { value: string } }) => setVetoReason(event.target.value),
+                }),
+                typeof remote.vetoRaySelf === 'function' ? el('button', {
+                  type: 'button',
+                  style: btn(dangerButtonStyle),
+                  disabled: busy,
+                  onClick: () => void ctrl.run(() => remote.vetoRaySelf!('', '', vetoReason)).then(load),
+                }, '1 轮推翻最近演化') : null,
+                el('button', { type: 'button', style: btn(), disabled: busy, onClick: load }, '刷新自我状态')),
+              typeof remote.importRayHome === 'function' ? el('div', { style: actionsStyle },
+                el('input', {
+                  type: 'text',
+                  value: cloneSource,
+                  placeholder: '明文搬家包路径（如 /Volumes/Disk/ray-export）',
+                  style: { ...inputStyle, flex: '1 1 220px' },
+                  onChange: (event: { target: { value: string } }) => setCloneSource(event.target.value),
+                }),
+                el('button', {
+                  type: 'button',
+                  style: btn(),
+                  disabled: busy || cloneSource.trim() === '',
+                  onClick: () => void ctrl.run(() => remote.importRayHome!(cloneSource.trim())).then(load),
+                }, '导入搬家包')) : null)))
+}
+
 export function GrowthMemoryCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const { overview, status, busy, remote } = ctrl
   const ml = overview?.memoryLearning
@@ -3693,6 +3813,7 @@ export function SettingsCardsDeck({ ctrl, remote }: Readonly<{ ctrl: ConsoleCont
     show('models') ? jsx(CodingToolsCard, { ctrl }) : null,
     show('autonomy') ? jsx(AutonomyWizardCard, { ctrl }) : null,
     show('channels') ? jsx(FeishuCard, { ctrl }) : null,
+    show('autonomy') ? jsx(RaySelfPanelCard, { ctrl, remote }) : null,
     show('autonomy') ? jsx(GrowthReportCard, { remote }) : null,
     show('doctor') ? jsx(SelfUpgradeCard, { ctrl }) : null,
     show('autonomy') ? jsx(DreamingCard, { ctrl }) : null,

@@ -4,6 +4,7 @@ import { lstat, readFile, realpath } from 'node:fs/promises'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { parseDocument } from 'yaml'
+import { discoverExtraRayHomes } from './ray-home.ts'
 import { listProfilePlugins, listProfiles } from './paths.ts'
 import { PurgeError } from './purge.ts'
 
@@ -307,21 +308,37 @@ type LedgerFamily =
 
 type PatchDbMap = Record<LedgerFamily, Set<string>>
 
-function isWithinHome(target: string, dshHome: string, canonicalHome: string): boolean {
-  return target === dshHome
+function isWithinHome(
+  target: string,
+  dshHome: string,
+  canonicalHome: string,
+  extraHomes: readonly { raw: string; canonical: string }[] = [],
+): boolean {
+  if (target === dshHome
     || target.startsWith(`${dshHome}${sep}`)
     || target === canonicalHome
-    || target.startsWith(`${canonicalHome}${sep}`)
+    || target.startsWith(`${canonicalHome}${sep}`)) {
+    return true
+  }
+  return extraHomes.some(h =>
+    target === h.raw || target.startsWith(`${h.raw}${sep}`)
+    || target === h.canonical || target.startsWith(`${h.canonical}${sep}`))
 }
 
-function resolveConfiguredPath(raw: unknown, dshHome: string, canonicalHome: string, diagnostics?: string[]): string | undefined {
+function resolveConfiguredPath(
+  raw: unknown,
+  dshHome: string,
+  canonicalHome: string,
+  diagnostics?: string[],
+  extraHomes: readonly { raw: string; canonical: string }[] = [],
+): string | undefined {
   if (typeof raw !== 'string') return undefined
   const trimmed = raw.trim()
   if (trimmed === '' || trimmed === ':memory:' || trimmed.includes('\0')) return undefined
   const jsMatch = /^(?:!!js\s+)?dshHomePath\(\s*['"]([^'"\r\n]+)['"]\s*\)$/u.exec(trimmed)
   if (jsMatch?.[1]) {
     const resolved = resolve(dshHome, jsMatch[1])
-    if (!isWithinHome(resolved, dshHome, canonicalHome)) {
+    if (!isWithinHome(resolved, dshHome, canonicalHome, extraHomes)) {
       diagnostics?.push(`跳过越界 dshHomePath 账本路径：${trimmed}`)
       return undefined
     }
@@ -329,7 +346,7 @@ function resolveConfiguredPath(raw: unknown, dshHome: string, canonicalHome: str
   }
   if (isAbsolute(trimmed)) {
     const resolved = resolve(trimmed)
-    if (!isWithinHome(resolved, dshHome, canonicalHome)) {
+    if (!isWithinHome(resolved, dshHome, canonicalHome, extraHomes)) {
       diagnostics?.push(`跳过越界账本路径：${trimmed}`)
       return undefined
     }
@@ -360,6 +377,7 @@ async function collectPatchDbPaths(
   into: PatchDbMap,
   enabledFamilies: Set<LedgerFamily>,
   diagnostics: string[],
+  extraHomes: readonly { raw: string; canonical: string }[] = [],
 ): Promise<void> {
   if (!existsSync(patchPath)) return
   let source: string
@@ -393,19 +411,19 @@ async function collectPatchDbPaths(
         enabledFamilies.add(fam)
         if (fam === 'growthDriver') {
           const usage = cfg.usageLearning && typeof cfg.usageLearning === 'object' ? cfg.usageLearning as Record<string, unknown> : undefined
-          const usagePath = resolveConfiguredPath(usage?.databasePath, dshHome, canonicalHome, diagnostics)
+          const usagePath = resolveConfiguredPath(usage?.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (usagePath) into.growthDriver.add(usagePath)
         } else if (fam === 'controlPlane') {
-          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics)
+          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (dbPath) into.controlPlane.add(dbPath)
-          const stateDir = resolveConfiguredPath(cfg.statePath, dshHome, canonicalHome, diagnostics)
+          const stateDir = resolveConfiguredPath(cfg.statePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (stateDir) {
             into.controlPlane.add(join(stateDir, 'control.sqlite'))
             into.controlPlane.add(join(stateDir, 'creation-adoptions.sqlite'))
             into.controlPlane.add(join(stateDir, 'revision-adoptions.sqlite'))
           }
         } else {
-          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics)
+          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (dbPath) into[fam].add(dbPath)
         }
       }
@@ -414,7 +432,7 @@ async function collectPatchDbPaths(
         const pmCfg = cfg.personalMemory && typeof cfg.personalMemory === 'object' && !Array.isArray(cfg.personalMemory)
           ? cfg.personalMemory as Record<string, unknown>
           : undefined
-        const pmPath = resolveConfiguredPath(pmCfg?.databasePath, dshHome, canonicalHome, diagnostics)
+        const pmPath = resolveConfiguredPath(pmCfg?.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
         if (pmPath) into.memory.add(pmPath)
       }
       if (Array.isArray(row.insert)) walkRows(row.insert)
@@ -444,6 +462,7 @@ async function openReadOnlyDbs(
   canonicalHome: string,
   diagnostics: string[],
   inspected: Set<string>,
+  extraHomes: readonly { raw: string; canonical: string }[] = [],
 ): Promise<DatabaseSync[]> {
   const opened: DatabaseSync[] = []
   const seenTargets = new Set<string>()
@@ -469,7 +488,7 @@ async function openReadOnlyDbs(
       diagnostics.push(`跳过无法解析真实路径的账本文件：${target}`)
       continue
     }
-    if (!isWithinHome(target, dshHome, canonicalHome) || !realTarget.startsWith(`${canonicalHome}${sep}`)) {
+    if (!isWithinHome(target, dshHome, canonicalHome, extraHomes) || !isWithinHome(realTarget, dshHome, canonicalHome, extraHomes)) {
       diagnostics.push(`跳过符号链接越界账本文件：${target}`)
       continue
     }
@@ -666,6 +685,7 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
   const dshHome = resolve(options.dshHome)
   const homeExists = existsSync(dshHome)
   const canonicalHome = homeExists ? await realpath(dshHome).catch(() => dshHome) : dshHome
+  const extraHomes = homeExists ? discoverExtraRayHomes(dshHome, options.profile) : discoverExtraRayHomes(dshHome)
   const discoveredProfiles = homeExists ? await listProfiles(dshHome) : []
   if (options.profile !== undefined) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(options.profile)) {
@@ -698,12 +718,12 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
   if (homeExists) {
     const enabledFamilies = new Set<LedgerFamily>()
     if (options.profile === undefined) {
-      await collectPatchDbPaths(join(dshHome, 'cordis.yml'), dshHome, canonicalHome, dbMap, enabledFamilies, diagnostics)
-      await collectPatchDbPaths(join(dshHome, 'cordis.patch.yml'), dshHome, canonicalHome, dbMap, enabledFamilies, diagnostics)
+      await collectPatchDbPaths(join(dshHome, 'cordis.yml'), dshHome, canonicalHome, dbMap, enabledFamilies, diagnostics, extraHomes)
+      await collectPatchDbPaths(join(dshHome, 'cordis.patch.yml'), dshHome, canonicalHome, dbMap, enabledFamilies, diagnostics, extraHomes)
     }
     for (const prof of targetProfiles) {
-      await collectPatchDbPaths(join(dshHome, 'profiles', prof, 'cordis.yml'), dshHome, canonicalHome, dbMap, enabledFamilies, diagnostics)
-      await collectPatchDbPaths(join(dshHome, 'profiles', prof, 'cordis.patch.yml'), dshHome, canonicalHome, dbMap, enabledFamilies, diagnostics)
+      await collectPatchDbPaths(join(dshHome, 'profiles', prof, 'cordis.yml'), dshHome, canonicalHome, dbMap, enabledFamilies, diagnostics, extraHomes)
+      await collectPatchDbPaths(join(dshHome, 'profiles', prof, 'cordis.patch.yml'), dshHome, canonicalHome, dbMap, enabledFamilies, diagnostics, extraHomes)
       const installed = await listProfilePlugins(dshHome, prof).catch(() => [])
       for (const pkg of installed) {
         const fam = classifyPluginFamily(pkg.name)
@@ -787,7 +807,7 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
   }
 
   // 1. Evaluation DBs -> Tasks, Suppliers, Notifications
-  const evalDbs = await openReadOnlyDbs(dbMap.evaluation, dshHome, canonicalHome, diagnostics, inspected)
+  const evalDbs = await openReadOnlyDbs(dbMap.evaluation, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
   let sawEvalOutcomesTable = false
   let totalTasks = 0
   let achieved = 0
@@ -1139,7 +1159,7 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
   }
 
   // Also check workItems intake evaluation ledger if Evaluation agreement table had 0 rows
-  const workItemDbs = await openReadOnlyDbs(dbMap.workItems, dshHome, canonicalHome, diagnostics, inspected)
+  const workItemDbs = await openReadOnlyDbs(dbMap.workItems, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
   try {
     for (const db of workItemDbs) {
       if (hasTable(db, 'work_item_intake_evaluation')) {
@@ -1160,8 +1180,8 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
   }
 
   // 2. Memory + Preference DBs -> Memory & Prompt Exposure
-  const memDbs = await openReadOnlyDbs(dbMap.memory, dshHome, canonicalHome, diagnostics, inspected)
-  const prefDbs = await openReadOnlyDbs(dbMap.preference, dshHome, canonicalHome, diagnostics, inspected)
+  const memDbs = await openReadOnlyDbs(dbMap.memory, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
+  const prefDbs = await openReadOnlyDbs(dbMap.preference, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
   let sawMemoryOrPrefTable = false
   let activeMemoriesTotal = 0
   let newMemories = 0
@@ -1252,13 +1272,13 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
   }
 
   // 3. Candidates, Verification & Adoption across all RSI lanes (window-filtered)
-  const mlDbs = await openReadOnlyDbs(dbMap.memoryLearning, dshHome, canonicalHome, diagnostics, inspected)
-  const cpDbs = await openReadOnlyDbs(dbMap.controlPlane, dshHome, canonicalHome, diagnostics, inspected)
-  const skillDbs = await openReadOnlyDbs(dbMap.skills, dshHome, canonicalHome, diagnostics, inspected)
-  const gdDbs = await openReadOnlyDbs(dbMap.growthDriver, dshHome, canonicalHome, diagnostics, inspected)
-  const prefCandDbs = await openReadOnlyDbs(dbMap.preference, dshHome, canonicalHome, diagnostics, inspected)
-  const evoDbs = await openReadOnlyDbs(dbMap.evolution, dshHome, canonicalHome, diagnostics, inspected)
-  const geDbs = await openReadOnlyDbs(dbMap.growthExperiments, dshHome, canonicalHome, diagnostics, inspected)
+  const mlDbs = await openReadOnlyDbs(dbMap.memoryLearning, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
+  const cpDbs = await openReadOnlyDbs(dbMap.controlPlane, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
+  const skillDbs = await openReadOnlyDbs(dbMap.skills, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
+  const gdDbs = await openReadOnlyDbs(dbMap.growthDriver, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
+  const prefCandDbs = await openReadOnlyDbs(dbMap.preference, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
+  const evoDbs = await openReadOnlyDbs(dbMap.evolution, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
+  const geDbs = await openReadOnlyDbs(dbMap.growthExperiments, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
 
   let sawCandidatesTable = false
   let candGenerated = 0
@@ -1453,7 +1473,7 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
   }
 
   // 4. Association DBs -> Online Metrics & Sealed Holdout Comparison
-  const assocDbs = await openReadOnlyDbs(dbMap.association, dshHome, canonicalHome, diagnostics, inspected)
+  const assocDbs = await openReadOnlyDbs(dbMap.association, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
   let sawAssociationTable = false
   let assocEvaluatedSteps = 0
   let assocHoldoutSteps = 0

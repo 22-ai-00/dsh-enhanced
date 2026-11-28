@@ -257,3 +257,12 @@ const result = await applyRecommendedPluginPreset({ dshHome, profile }, { dryRun
 | `dsh-intake-file-watch-change` | `digest` | `digest` |
 | `dsh-intake-github-mention-or-review` | `notify` | `accept` |
 | `dsh-intake-webhook-priority` | `notify` | `notify` |
+
+## Ray Home 与身体内核权限边界
+
+当配置 `config.rayHome`（或环境启用 `RAY_HOME`）时，`AssistantPolicyService` 会在指定的独立目录（默认 `~/.ray`，支持任意外部磁盘挂载）挂载 `RayHomeRuntime`：
+
+- **文件系统与隔离权限**：在 `rayHome` 下创建 `0700` 目录与 `0600` 文件，保存身体内核（`kernel/kernel.json`、`kernel/proposals.json`）、跨通道统一自我模型（`self/self-model.json`、`self/autobiography.jsonl`）、`manifest.json` 以及迁移自 `$DSH_HOME` 的非凭据状态库（`state/`）。凭据与密钥始终留在宿主机钥匙串或 `$DSH_HOME`，严禁写入 Ray Home 克隆导出包。
+- **身体内核硬写拒绝**：在 `tools/pre-execute` 与 `authorizeToolExecution` 双层入口优先于 `reviewer='none'` 与通配符 `allow` 规则校验目标路径与 Shell 命令，任何试图直接写入或重定向覆盖 `kernel/` 下文件的工具调用均强制 fail-closed（`ray-kernel-protected`）。内核变更只能由 Ray 调用 `ray_propose_kernel_change` 提交提案并等待 owner 显式批准。
+- **跨通道人格与 1 轮否决**：按 `ownsSession` / `ownsAssistantSession` 为飞书与桌面助手会话注入统一 `ray:self-persona` 与 `ray:self-state`（排除 `subagent`）；支持 `ray_read_self`、`ray_evolve_self` 以及 owner 经 `/veto`、`ray_owner_veto` 或桌面面板触发的 1 轮即时回滚。
+

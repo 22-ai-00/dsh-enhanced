@@ -52,6 +52,8 @@ export interface ConfigureAutonomySetupInput {
 export interface ProfilePaths {
   readonly dshHome: string | null
   readonly canonicalHome: string | null
+  readonly rayHome?: string | null
+  readonly canonicalRayHome?: string | null
   readonly profileName: string
   readonly profileDir: string | null
   readonly patchPath: string | null
@@ -190,6 +192,7 @@ export function insideDirectory(root: string, candidate: string): boolean {
 export function checkScopedDbPath(
   rawNode: unknown,
   canonicalHome: string | null,
+  canonicalRayHome: string | null = null,
 ): Readonly<{ display: string | null; resolved: string | null; scoped: boolean }> {
   if (isScalar(rawNode) && rawNode.tag === 'tag:yaml.org,2002:js' && typeof rawNode.value === 'string') {
     const match = DSH_HOME_CALL.exec(rawNode.value.trim())
@@ -209,7 +212,7 @@ export function checkScopedDbPath(
   if (rawString.startsWith('~')) {
     return { display: rawString, resolved: null, scoped: false }
   }
-  if (!isAbsolute(rawString) || canonicalHome === null) {
+  if (!isAbsolute(rawString) || (canonicalHome === null && canonicalRayHome === null)) {
     return { display: rawString, resolved: null, scoped: false }
   }
   const canonicalCandidate = canonicalPathAllowMissingLeaf(rawString)
@@ -218,14 +221,42 @@ export function checkScopedDbPath(
   }
   const globalDsh = resolve(homedir(), '.dsh')
   const canonicalGlobalDsh = safeRealpath(globalDsh) ?? globalDsh
-  if (canonicalHome !== canonicalGlobalDsh && (canonicalCandidate === canonicalGlobalDsh || insideDirectory(canonicalGlobalDsh, canonicalCandidate))) {
+  const inRayHome = canonicalRayHome !== null && canonicalRayHome !== canonicalGlobalDsh
+    && insideDirectory(canonicalRayHome, canonicalCandidate)
+  if (canonicalHome !== canonicalGlobalDsh && !inRayHome
+    && (canonicalCandidate === canonicalGlobalDsh || insideDirectory(canonicalGlobalDsh, canonicalCandidate))) {
     return { display: rawString, resolved: canonicalCandidate, scoped: false }
   }
   return {
     display: rawString,
     resolved: canonicalCandidate,
-    scoped: insideDirectory(canonicalHome, canonicalCandidate),
+    scoped: (canonicalHome !== null && insideDirectory(canonicalHome, canonicalCandidate)) || inRayHome,
   }
+}
+
+export function resolveConfiguredRayHome(
+  host: AutonomyHostContext,
+  seq: YAMLSeq | undefined,
+  descriptors: readonly SettingsDescriptor[],
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  try {
+    const policy = host.get('assistantPolicy') as { rayHomeDir?: () => string | undefined } | undefined
+    const live = strOrNull(policy?.rayHomeDir?.())
+    if (live !== null && isAbsolute(live)) return canonicalPathAllowMissingLeaf(live)
+  } catch {
+    // Ignore missing assistantPolicy on offline probes.
+  }
+  if (seq !== undefined) {
+    for (const rowId of ['dsh-ray-assistant-policy', 'dsh-ray-personal-assistant'] as const) {
+      const cfg = mergeDescriptorConfig(descriptors, rowId, getPatchRowConfig(seq, rowId))
+      const fromCfg = strOrNull(cfg['rayHome'])
+      if (fromCfg !== null && isAbsolute(fromCfg)) return canonicalPathAllowMissingLeaf(fromCfg)
+    }
+  }
+  const fromEnv = strOrNull(env['RAY_HOME'])
+  if (fromEnv !== null && isAbsolute(fromEnv)) return canonicalPathAllowMissingLeaf(fromEnv)
+  return null
 }
 
 export function resolveProfilePaths(host: AutonomyHostContext, env: NodeJS.ProcessEnv): ProfilePaths {
@@ -272,7 +303,19 @@ export function resolveProfilePaths(host: AutonomyHostContext, env: NodeJS.Proce
     }
   }
 
-  return { dshHome, canonicalHome, profileName, profileDir, patchPath, patchExists, writable }
+  const canonicalRayHome = strOrNull(env['RAY_HOME'])
+    ? (isAbsolute(strOrNull(env['RAY_HOME'])!) ? canonicalPathAllowMissingLeaf(strOrNull(env['RAY_HOME'])!) : null)
+    : null
+  return {
+    dshHome,
+    canonicalHome,
+    ...(canonicalRayHome === null ? {} : { rayHome: canonicalRayHome, canonicalRayHome }),
+    profileName,
+    profileDir,
+    patchPath,
+    patchExists,
+    writable,
+  }
 }
 
 const DOC_BY_SEQ = new WeakMap<YAMLSeq, Document>()
@@ -560,9 +603,11 @@ export function inspectOwnerRoute(
   const defaultPreset = strOrNull(deliveryCfg['defaultAgentPreset']) ?? 'standard'
 
   const dbPathNode = deliveryNode?.get('databasePath', true) ?? deliveryCfg['databasePath']
+  const canonicalRayHome = resolveConfiguredRayHome(host, seq, descriptors)
   const scopedDeliveryDb = checkScopedDbPath(
     dbPathNode,
     paths.canonicalHome,
+    canonicalRayHome ?? paths.canonicalRayHome ?? null,
   )
   const defaultDeliveryDb = paths.canonicalHome !== null ? join(paths.canonicalHome, 'assistant-delivery', 'state.sqlite') : null
   const deliveryDbPath = scopedDeliveryDb.resolved ?? defaultDeliveryDb
@@ -896,10 +941,11 @@ export async function inspectAutonomyWizardStatus(
   }
   const seq = doc && isSeq(doc.contents) ? doc.contents : undefined
 
+  const canonicalRayHome = resolveConfiguredRayHome(host, seq, descriptors) ?? paths.canonicalRayHome ?? null
   const unscopedDbPaths: string[] = []
   const checkDbNode = (label: string, rawNode: unknown): string | null => {
     if (rawNode === undefined) return null
-    const checked = checkScopedDbPath(rawNode, paths.canonicalHome)
+    const checked = checkScopedDbPath(rawNode, paths.canonicalHome, canonicalRayHome)
     if (checked.display !== null && !checked.scoped && unscopedDbPaths.length < 16) {
       unscopedDbPaths.push(`${label}: ${checked.display}`)
     }

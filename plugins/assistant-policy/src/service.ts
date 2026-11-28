@@ -25,6 +25,7 @@ import {
   classifyToolRisk,
 } from './tool-risk.js'
 import { compilePolicy, evaluatePolicy, matchesRuleScope } from './evaluator.js'
+import { RayHomeRuntime, resolveConfiguredRayHome } from './ray-home-runtime.js'
 import {
   PolicyLedger,
   PolicyLedgerError,
@@ -70,6 +71,7 @@ export interface PolicyBudgetConfig {
 
 export interface Config {
   databasePath: string
+  rayHome?: string
   toolDefaultEffect?: 'deny' | 'allow'
   autoReview?: AutoReviewConfig
   rules?: PolicyRule[]
@@ -218,6 +220,7 @@ const ruleSchema = Schema.object({
 
 const configSchema = Schema.object({
   databasePath: Schema.string().required(),
+  rayHome: Schema.string(),
   toolDefaultEffect: Schema.union(['deny', 'allow'] as const).default('deny'),
   autoReview: Schema.union([Schema.object({
     enabled: Schema.boolean().default(true),
@@ -404,6 +407,15 @@ export class AssistantPolicyService extends Service {
   private readonly ownerReviewAbort = new AbortController()
   private ownerRequestedScope: OwnerRequestedScope | undefined
   private active = true
+  private readonly rayHomeRuntime: RayHomeRuntime | undefined
+
+  get raySelf(): RayHomeRuntime | undefined {
+    return this.rayHomeRuntime
+  }
+
+  rayHomeDir(): string | undefined {
+    return this.rayHomeRuntime?.rayHome
+  }
 
   /** Host channel composition only; the channel retains all owner/call checks. */
   registerHumanApprovalAnswerer(answerer: HumanApprovalAnswerer): () => void {
@@ -436,6 +448,18 @@ export class AssistantPolicyService extends Service {
       path: config.databasePath,
       now: this.now,
     })
+    const resolvedRayHome = resolveConfiguredRayHome(config.rayHome)
+    this.rayHomeRuntime = resolvedRayHome === undefined
+      ? undefined
+      : new RayHomeRuntime({
+          context: ctx,
+          isActive: () => this.active,
+          registerPreauthorizedTool: (caller, definition, authorize, opts) =>
+            this.registerPreauthorizedTool(caller, definition, authorize, opts),
+        }, {
+          rayHome: resolvedRayHome,
+          now: this.now,
+        })
     registerAutoReviewAnswerer(ctx, this.configuration.autoReview ?? undefined,
       (request, next) => this.humanApprovalRouter.dispatch(request, next))
 
@@ -454,6 +478,7 @@ export class AssistantPolicyService extends Service {
     ctx.effect(() => () => {
       this.active = false
       this.ownerReviewAbort.abort()
+      this.rayHomeRuntime?.dispose()
       this.ledger.close()
     }, 'assistant-policy.database')
     if ((config.proposalMaintenanceIntervalMs ?? 15_000) > 0) {
@@ -509,6 +534,18 @@ export class AssistantPolicyService extends Service {
         if (!start.nativeAutoLive || approvalPermissionFingerprint(events) !== start.fingerprint) return changed
       }
       toolsCtx.on('tools/pre-execute', async (execution, next) => {
+        const kernelDenial = this.rayHomeRuntime?.inspectToolExecutionForKernel(execution)
+        if (kernelDenial !== undefined) {
+          this.ledger.appendAudit({
+            actor: `tool:${execution.name}`,
+            action: 'execute',
+            resource: { kind: 'filesystem', id: 'ray-body-kernel' },
+            outcome: 'denied',
+            reasonCode: 'ray-kernel-protected',
+            details: { callId: execution.callId, reason: kernelDenial },
+          })
+          return { kind: 'deny', reason: kernelDenial }
+        }
         const agent = execution.agent
         const workspace = agent?.session.header.cwd
         if (agent === undefined || workspace === undefined || !isAbsolute(workspace)) return next()
@@ -632,7 +669,10 @@ export class AssistantPolicyService extends Service {
       : ['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report', 'work_item_list', 'work_item_recall', 'work_item_read_source', 'work_item_continue', 'work_item_read_context'].includes(definition.name) ? 'AssistantWorkItemsService'
       : ['plugin_source_gaps', 'plugin_source_read', 'plugin_source_create', 'plugin_source_job_status',
         'plugin_source_revision_targets', 'plugin_source_revision_inspect', 'plugin_source_revise'].includes(definition.name) ? 'dsh-ray-assistant-growth-driver'
-      : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-ray-assistant-skills' : undefined
+      : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-ray-assistant-skills'
+      : ['ray_read_self', 'ray_evolve_self', 'ray_propose_kernel_change'].includes(definition.name) ? ['dsh-ray-assistant-policy', 'AssistantPolicyService']
+      : ['ray_owner_veto', 'ray_home_import', 'ray_teach_export', 'ray_teach_import'].includes(definition.name) ? ['dsh-ray-assistant-delivery', 'AssistantDeliveryService']
+      : undefined
     if (expectedCaller === undefined || !(Array.isArray(expectedCaller)
       ? expectedCaller.includes(caller.fiber.name) : caller.fiber.name === expectedCaller)) {
       throw new Error('assistant-policy: preauthorization is reserved for the exact owning assistant-actions, assistant-isolation, assistant-goals, assistant-proactive, assistant-skills, assistant-growth-driver, AssistantWorkItemsService, PersonalMemoryService or PersonalWikiService Fiber and tool')
@@ -1533,6 +1573,18 @@ export class AssistantPolicyService extends Service {
 
   authorizeToolExecution(execution: Readonly<ToolExecution>): PolicyDecision {
     this.assertActive()
+    const kernelDenial = this.rayHomeRuntime?.inspectToolExecutionForKernel(execution)
+    if (kernelDenial !== undefined) {
+      this.ledger.appendAudit({
+        actor: execution.agent ? `agent:${execution.agent.session.header.agentPreset ?? 'unknown'}` : 'unknown',
+        action: 'execute',
+        resource: { kind: 'filesystem', id: 'ray-body-kernel' },
+        outcome: 'denied',
+        reasonCode: 'ray-kernel-protected',
+        details: { callId: execution.callId, reason: kernelDenial },
+      })
+      return denial('ray-kernel-protected')
+    }
     const agent = execution.agent
     if (agent === undefined) return this.auditToolIdentityFailure(execution, 'missing-agent')
     const workspace = agent.session.header.cwd

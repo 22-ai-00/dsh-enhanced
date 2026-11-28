@@ -72,7 +72,7 @@ describe('dsh-ray-owner-console', () => {
     const source = readFileSync(new URL('../src/service.ts', import.meta.url), 'utf8')
     const asyncMethods = [...source.matchAll(/^  async ([A-Za-z][A-Za-z0-9]*)\(/gmu)]
       .map(match => match[1]!).sort()
-    expect(asyncMethods).toHaveLength(37)
+    expect(asyncMethods).toHaveLength(41)
     expect(TYPERT.invocations.map(invocation => invocation.method).sort()).toEqual(asyncMethods)
   })
 

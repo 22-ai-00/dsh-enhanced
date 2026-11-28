@@ -22,7 +22,7 @@ import {
   formatGrantIdWithGeneration, getPatchRowConfig, getPatchRowConfigNode, getPersonalAndPolicyConfigs,
   inspectMemoryLearningGrantConflicts, inspectOwnerRoute, jsDshHomeScalar, mergeDescriptorConfig,
   normalizeLearningConfigForDigest, normalizeMemoryGrantForDigest, normalizeProfileSlug, pruneStaleOwnerRouteRules,
-  readConfigMap, readPatchDocument, resolveProfilePaths, resolveScopedDbTarget, strOrNull,
+  readConfigMap, readPatchDocument, resolveConfiguredRayHome, resolveProfilePaths, resolveScopedDbTarget, strOrNull,
   syncPrimaryOwnerRoutes, upsertById, yamlNodeToJs, type AutonomyHostContext, type ProfilePaths,
 } from './autonomy-setup.js'
 
@@ -948,7 +948,11 @@ export async function inspectSetupDoctor(input: InspectSetupDoctorInput): Promis
     const verifierPatchNode = seq ? getPatchRowConfigNode(seq, 'dsh-ray-assistant-verifier') : undefined
     const verifierDiag = `${verifierPlugin?.diagnostic ?? ''} ${verifierBundle?.error?.diagnostic ?? ''}`
     const verifierDbMissingInPatch = verifierPatchNode !== undefined
-      && checkScopedDbPath(verifierPatchNode.get('databasePath', true), paths.canonicalHome).display === null
+      && checkScopedDbPath(
+        verifierPatchNode.get('databasePath', true),
+        paths.canonicalHome,
+        resolveConfiguredRayHome(input.host, seq, input.descriptors) ?? paths.canonicalRayHome ?? null,
+      ).display === null
     const verifierMissingDbCrash = (verifierPlugin?.fiberPhase === 'failed' || verifierBundle?.error?.code === 'CONFIG_ERROR')
       && /databasePath/iu.test(verifierDiag)
     if (verifierDbMissingInPatch || verifierMissingDbCrash) {
@@ -1126,12 +1130,17 @@ export async function inspectSetupDoctor(input: InspectSetupDoctorInput): Promis
   }
 
   if (paths.canonicalHome !== null && seq !== undefined) {
+    const canonicalRayHome = resolveConfiguredRayHome(input.host, seq, input.descriptors) ?? paths.canonicalRayHome ?? null
     const unscopedTargets: string[] = []
     for (const spec of SCOPED_STATE_BUNDLES) {
       if (!isBundleEnabled(spec.pkg, spec.rowId, manifestBundles, input.status.bundles, seq)) continue
       const rowCfgNode = getPatchRowConfigNode(seq, spec.rowId)
       const rowCfg = mergeDescriptorConfig(input.descriptors, spec.rowId, getPatchRowConfig(seq, spec.rowId))
-      const dbCheck = checkScopedDbPath(rowCfgNode?.get('databasePath', true) ?? rowCfg['databasePath'], paths.canonicalHome)
+      const dbCheck = checkScopedDbPath(
+        rowCfgNode?.get('databasePath', true) ?? rowCfg['databasePath'],
+        paths.canonicalHome,
+        canonicalRayHome,
+      )
       if (!dbCheck.scoped) unscopedTargets.push(spec.rowId)
     }
     if (unscopedTargets.length > 0) {
@@ -1595,13 +1604,18 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
       continue
     }
     if (issue.id === 'unscoped-db-paths' && paths.canonicalHome !== null) {
+      const canonicalRayHome = resolveConfiguredRayHome(input.host, seq, input.descriptors) ?? paths.canonicalRayHome ?? null
       const manifestBundles = readProfileManifestBundles(paths.profileDir)
       for (const spec of SCOPED_STATE_BUNDLES) {
         if (!isBundleEnabled(spec.pkg, spec.rowId, manifestBundles, input.status.bundles, seq)) continue
         const row = findPatchRow(seq, spec.rowId)
         const rowCfg = row ? readConfigMap(row, 'config') : undefined
         const merged = mergeDescriptorConfig(input.descriptors, spec.rowId, getPatchRowConfig(seq, spec.rowId))
-        const existingCheck = checkScopedDbPath(rowCfg?.get('databasePath', true) ?? merged['databasePath'], paths.canonicalHome)
+        const existingCheck = checkScopedDbPath(
+          rowCfg?.get('databasePath', true) ?? merged['databasePath'],
+          paths.canonicalHome,
+          canonicalRayHome,
+        )
         if (existingCheck.scoped) continue
         const targetRow = ensurePatchRow(doc, seq, spec.rowId, spec.pkg)
         const cfg = ensureConfigMap(doc, targetRow, 'config')
@@ -1618,8 +1632,13 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
       const deliveryCfgMap = ensureConfigMap(doc, deliveryRow, 'config')
       setMissingMapDefaults(doc, deliveryCfgMap, ASSISTANT_DELIVERY_DEFAULTS)
 
+      const canonicalRayHome = resolveConfiguredRayHome(input.host, seq, input.descriptors) ?? paths.canonicalRayHome ?? null
       const mergedDelivery = mergeDescriptorConfig(input.descriptors, 'dsh-ray-assistant-delivery', getPatchRowConfig(seq, 'dsh-ray-assistant-delivery'))
-      const scopedDb = checkScopedDbPath(deliveryCfgMap.get('databasePath', true) ?? mergedDelivery['databasePath'], paths.canonicalHome)
+      const scopedDb = checkScopedDbPath(
+        deliveryCfgMap.get('databasePath', true) ?? mergedDelivery['databasePath'],
+        paths.canonicalHome,
+        canonicalRayHome,
+      )
       const deliveryDbPath = scopedDb.resolved ?? join(paths.canonicalHome, 'assistant-delivery', 'state.sqlite')
       const defaultWorkspace = resolveDeliveryWorkspacePath(
         deliveryCfgMap.get('defaultWorkspace', true),

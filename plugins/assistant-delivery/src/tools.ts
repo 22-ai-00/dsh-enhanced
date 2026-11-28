@@ -75,4 +75,123 @@ export function registerDeliveryTools(ctx: Context, service: AssistantDeliverySe
   })
   ctx.tools.register(status)
   service.registerRestartSafeTool(ctx, status)
+
+  const rayVetoTool = defineTool({
+    name: 'ray_owner_veto',
+    description: 'Execute an owner-authorized 1-turn veto against Ray recent self-evolution or self-authored capability and restore prior state immediately.',
+    parameters: {
+      target_entry_id: { type: 'string' },
+      target_capability_id: { type: 'string' },
+      reason: { type: 'string' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          name: { type: 'string', required: true },
+          version: { type: 'integer', required: true },
+          summary: { type: 'string', required: true },
+          revertedCapabilityId: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    async execute(args, exec) {
+      if (!service.isOwnerSessionAgent(exec.agent)) {
+        throw new Error('assistant-delivery: ray_owner_veto requires an authenticated owner session')
+      }
+      const raySelf = service.raySelfRuntime()
+      if (raySelf?.vetoByOwner === undefined) {
+        throw new Error('assistant-delivery: Ray Home runtime is not active')
+      }
+      const res = await raySelf.vetoByOwner({
+        ...(args.target_entry_id ? { targetEntryId: args.target_entry_id } : {}),
+        ...(args.target_capability_id ? { targetCapabilityId: args.target_capability_id } : {}),
+        ...(args.reason ? { reason: args.reason } : {}),
+        ownerProof: `owner:tool:${String(exec.agent?.session?.id ?? 'unknown')}`,
+      })
+      return {
+        ok: res.ok,
+        name: res.selfModel.name,
+        version: res.selfModel.version,
+        summary: res.autobiographyEntry.summary,
+        ...(res.revertedCapabilityId === undefined ? {} : { revertedCapabilityId: res.revertedCapabilityId }),
+      }
+    },
+  })
+
+  const rayImportTool = defineTool({
+    name: 'ray_home_import',
+    description: 'Import an exported plaintext Ray Home clone directory into this Ray instance while excluding raw credentials and listing any credentials requiring owner re-authentication.',
+    parameters: {
+      source_dir: { type: 'string', required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          rayId: { type: 'string', required: true },
+          name: { type: 'string', required: true },
+          importedFiles: { type: 'integer', required: true },
+          missingCredentials: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                service: { type: 'string', required: true },
+                label: { type: 'string' },
+                required: { type: 'boolean', required: true },
+                reason: { type: 'string', required: true },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    async execute(args, exec) {
+      if (!service.isOwnerSessionAgent(exec.agent)) {
+        throw new Error('assistant-delivery: ray_home_import requires an authenticated owner session')
+      }
+      const raySelf = service.raySelfRuntime()
+      if (raySelf?.importClone === undefined) {
+        throw new Error('assistant-delivery: Ray Home runtime is not active')
+      }
+      const res = raySelf.importClone(args.source_dir)
+      return {
+        ok: res.ok,
+        rayId: res.rayId,
+        name: res.name,
+        importedFiles: res.importedFiles,
+        missingCredentials: res.missingCredentials.map(c => ({
+          id: c.id,
+          service: c.service,
+          ...(c.label === undefined ? {} : { label: c.label }),
+          required: c.required,
+          reason: c.reason,
+        })),
+      }
+    },
+  })
+
+  if (service.raySelfRuntime() !== undefined) {
+    for (const rayTool of [rayVetoTool, rayImportTool]) {
+      ctx.tools.register(rayTool)
+      if (typeof ctx.assistantPolicy?.registerPreauthorizedTool === 'function') {
+        ctx.assistantPolicy.registerPreauthorizedTool(
+          ctx,
+          rayTool,
+          execution => service.isOwnerSessionAgent(execution.agent),
+          { denialReason: `assistant-delivery: ${rayTool.name} is restricted to authenticated owner sessions` },
+        )
+      }
+    }
+  }
 }

@@ -187,6 +187,64 @@ export const AssistantChatContextSchema = z.object({
 }).readonly()
 export type AssistantChatContext = Readonly<z.infer<typeof AssistantChatContextSchema>>
 
+export const OwnerConsoleRaySelfStateSchema = z.object({
+  active: z.boolean(),
+  rayHome: z.string().max(4_096).nullable(),
+  selfModel: z.object({
+    rayId: z.string().min(1).max(200),
+    version: z.number().int().nonnegative(),
+    name: z.string().min(1).max(120),
+    aliases: z.array(z.string().min(1).max(120)).max(16).readonly(),
+    selfSummary: z.string().max(2_000),
+    values: z.array(z.string().max(400)).max(32).readonly(),
+    ideals: z.array(z.object({
+      id: z.string().max(120),
+      title: z.string().max(200),
+      narrative: z.string().max(1_000),
+    }).readonly()).max(16).readonly(),
+    stageGoals: z.array(z.object({
+      id: z.string().max(120),
+      title: z.string().max(200),
+      completionCriteria: z.string().max(600),
+      status: z.enum(['active', 'achieved', 'retired']),
+    }).readonly()).max(16).readonly(),
+    interests: z.array(z.object({
+      id: z.string().max(120),
+      topic: z.string().max(200),
+      weight: z.number().min(0).max(1),
+      lastActiveAt: z.number().int().nonnegative(),
+    }).readonly()).max(32).readonly(),
+  }).readonly().nullable(),
+  recentAutobiography: z.array(z.object({
+    entryId: z.string().max(200),
+    timestamp: z.number().int().nonnegative(),
+    kind: z.string().max(80),
+    summary: z.string().max(1_000),
+    reason: z.string().max(1_000),
+    vetoed: z.boolean().optional(),
+  }).readonly()).max(32).readonly(),
+  pendingProposals: z.array(z.object({
+    proposalId: z.string().max(200),
+    section: z.string().max(80),
+    summary: z.string().max(600),
+    reason: z.string().max(600),
+    proposedAt: z.number().int().nonnegative(),
+    status: z.string().max(40),
+  }).readonly()).max(32).readonly(),
+  missingCredentials: z.array(z.object({
+    id: z.string().max(200),
+    service: z.string().max(120),
+    label: z.string().max(200).optional(),
+    required: z.boolean(),
+    reason: z.string().max(400),
+  }).readonly()).max(32).readonly(),
+  energy: z.object({
+    dailyTokenCap: z.number().int().nonnegative(),
+    freeEnergyRatioBp: z.number().int().min(0).max(10_000),
+  }).readonly().nullable(),
+}).readonly()
+export type OwnerConsoleRaySelfState = Readonly<z.infer<typeof OwnerConsoleRaySelfStateSchema>>
+
 export const FEISHU_QR_ONBOARDING_STATES = [
   'idle',
   'awaiting-scan',
@@ -1310,6 +1368,47 @@ export const TYPERT = {
       parameters: [],
       result: codec('@dsh-ray/owner-console#OwnerConsoleVersionReport', () => OwnerConsoleVersionReportSchema),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1280, column: 3 },
+    },
+    {
+      id: '@dsh-ray/owner-console#ownerConsole/raySelfSnapshot',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'raySelfSnapshot',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: codec('@dsh-ray/owner-console#OwnerConsoleRaySelfState', () => OwnerConsoleRaySelfStateSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1300, column: 3 },
+    },
+    {
+      id: '@dsh-ray/owner-console#ownerConsole/vetoRaySelf',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'vetoRaySelf',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'targetEntryId', wire: 'targetEntryId', source: 'json', codec: codec('owner-console#rayVetoEntryId', () => z.string().max(200)) },
+        { name: 'targetCapabilityId', wire: 'targetCapabilityId', source: 'json', codec: codec('owner-console#rayVetoCapabilityId', () => z.string().max(200)) },
+        { name: 'reason', wire: 'reason', source: 'json', codec: codec('owner-console#rayVetoReason', () => z.string().max(600)) },
+      ],
+      result: codec('@dsh-ray/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1310, column: 3 },
+    },
+    {
+      id: '@dsh-ray/owner-console#ownerConsole/decideRayKernelProposal',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'decideRayKernelProposal',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'proposalId', wire: 'proposalId', source: 'json', codec: codec('owner-console#rayProposalId', () => z.string().min(1).max(200)) },
+        { name: 'decision', wire: 'decision', source: 'json', codec: codec('owner-console#rayProposalDecision', () => z.enum(['approved', 'rejected'])) },
+      ],
+      result: codec('@dsh-ray/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1322, column: 3 },
+    },
+    {
+      id: '@dsh-ray/owner-console#ownerConsole/importRayHome',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'importRayHome',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'sourceDir', wire: 'sourceDir', source: 'json', codec: codec('owner-console#rayImportSourceDir', () => z.string().min(1).max(4_096)) },
+      ],
+      result: codec('@dsh-ray/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1332, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

@@ -31,7 +31,7 @@ import { detectFrozenSystemdProfile, SelfUpgradeProber } from './upgrade-probe.j
 import type {
   AssistantChatContext, AssistantVersionReport, AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
   AutonomySetupStatus, FeishuQrOnboardingSnapshot, OwnerConsoleControlActionResult, OwnerConsoleGrowthReport,
-  OwnerConsoleModelCatalog, SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
+  OwnerConsoleModelCatalog, OwnerConsoleRaySelfState, SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
 } from './typert.js'
 import { collectOwnerConsoleVersionInfo } from './version-info.js'
 import { readOwnerConsoleGrowthReport } from './growth-report.js'
@@ -311,12 +311,12 @@ export class OwnerConsoleService extends TypertRemoteService {
           }
         }).systemPrompt
         const text = (arg: unknown) => {
-          const agent = arg !== null && typeof arg === 'object' ? (arg as { agent?: unknown }).agent : undefined
-          return this.wenyaoPromptForAgent(agent)
+          const rec = arg !== null && typeof arg === 'object' ? arg as { agent?: unknown; scope?: unknown } : undefined
+          return this.wenyaoPromptForAgent(rec?.agent ?? rec?.scope)
         }
         const contextText = (arg: unknown) => {
-          const agent = arg !== null && typeof arg === 'object' ? (arg as { agent?: unknown }).agent : undefined
-          return this.wenyaoIdentityContextForAgent(agent)
+          const rec = arg !== null && typeof arg === 'object' ? arg as { agent?: unknown; scope?: unknown } : undefined
+          return this.wenyaoIdentityContextForAgent(rec?.agent ?? rec?.scope)
         }
         const disposers: Array<() => void> = []
         const disposeAll = () => {
@@ -381,14 +381,65 @@ export class OwnerConsoleService extends TypertRemoteService {
     return sessionId
   }
 
+  ownsAssistantSession(sessionId: string): boolean {
+    const clean = sessionId.trim()
+    return clean !== '' && this.assistantChat.hasSession(clean)
+  }
+
+  private getRaySelf(): {
+    snapshot?: (limit?: number) => {
+      rayHome: string
+      kernel: { energy: { dailyTokenCap: number; freeEnergyRatioBp: number } }
+      proposals: readonly { proposalId: string; section: string; summary: string; reason: string; proposedAt: number; status: string }[]
+      selfModel: {
+        rayId: string
+        version: number
+        name: string
+        aliases: readonly string[]
+        selfSummary: string
+        values: readonly string[]
+        ideals: readonly { id: string; title: string; narrative: string }[]
+        stageGoals: readonly { id: string; title: string; completionCriteria: string; status: 'active' | 'achieved' | 'retired' }[]
+        interests: readonly { id: string; topic: string; weight: number; lastActiveAt: number }[]
+      }
+      recentAutobiography: readonly { entryId: string; timestamp: number; kind: string; summary: string; reason: string; vetoed?: boolean }[]
+      missingCredentials: readonly { id: string; service: string; label?: string; required: boolean; reason: string }[]
+    }
+    vetoByOwner?: (input: { targetEntryId?: string; targetCapabilityId?: string; reason?: string; ownerProof: string }) => Promise<{
+      ok: boolean
+      vetoedEntryId?: string
+      revertedCapabilityId?: string
+      selfModel: { name: string }
+      autobiographyEntry: { summary: string }
+    }>
+    applyOwnerKernelDecision?: (proposalId: string, decision: 'approved' | 'rejected', ownerProof: string) => {
+      proposal: { proposalId: string; summary: string; status: string }
+    }
+    importClone?: (sourceDir: string) => {
+      ok: true
+      name: string
+      importedFiles: number
+      missingCredentials: readonly { id: string; service: string; label?: string; required: boolean }[]
+    }
+  } | undefined {
+    try {
+      const policy = (this.host as { get?: (key: string) => unknown }).get?.('assistantPolicy') as { raySelf?: unknown } | undefined
+      return policy?.raySelf as ReturnType<OwnerConsoleService['getRaySelf']>
+    } catch {
+      return undefined
+    }
+  }
+
   private wenyaoPromptForAgent(agent: unknown): string {
     if (this.resolveWenyaoSessionId(agent) === '') return ''
+    if (this.getRaySelf() !== undefined) return ''
     const { workspace } = resolveAssistantWorkspace(this.host)
     return buildWenyaoSystemPrompt(workspace, readAssistantChatCapabilities(this.host))
   }
 
   private wenyaoIdentityContextForAgent(agent: unknown): string {
     if (this.resolveWenyaoSessionId(agent) === '') return ''
+    if (this.getRaySelf() !== undefined) return ''
     const { workspace } = resolveAssistantWorkspace(this.host)
     return buildWenyaoIdentityContext(workspace)
   }
@@ -1341,6 +1392,145 @@ export class OwnerConsoleService extends TypertRemoteService {
   /** Read-only assistant/Host/plugin version & self-iteration statistics (`dsh-ray/version/v1`). */
   async versionInfo(): Promise<AssistantVersionReport> {
     return collectOwnerConsoleVersionInfo(this.host)
+  }
+
+  /** Read live Ray Self Model, autobiography, pending Body Kernel proposals, and missing credentials. */
+  async raySelfSnapshot(): Promise<OwnerConsoleRaySelfState> {
+    const raySelf = this.getRaySelf()
+    if (raySelf === undefined || typeof raySelf.snapshot !== 'function') {
+      return Object.freeze({
+        active: false,
+        rayHome: null,
+        selfModel: null,
+        recentAutobiography: [],
+        pendingProposals: [],
+        missingCredentials: [],
+        energy: null,
+      })
+    }
+    const snap = raySelf.snapshot(12)
+    return Object.freeze({
+      active: true,
+      rayHome: snap.rayHome,
+      selfModel: {
+        rayId: snap.selfModel.rayId,
+        version: snap.selfModel.version,
+        name: snap.selfModel.name,
+        aliases: [...snap.selfModel.aliases],
+        selfSummary: snap.selfModel.selfSummary,
+        values: [...snap.selfModel.values],
+        ideals: snap.selfModel.ideals.map(i => ({ id: i.id, title: i.title, narrative: i.narrative })),
+        stageGoals: snap.selfModel.stageGoals.map(g => ({
+          id: g.id,
+          title: g.title,
+          completionCriteria: g.completionCriteria,
+          status: g.status,
+        })),
+        interests: snap.selfModel.interests.map(i => ({
+          id: i.id,
+          topic: i.topic,
+          weight: i.weight,
+          lastActiveAt: i.lastActiveAt,
+        })),
+      },
+      recentAutobiography: snap.recentAutobiography.map(e => ({
+        entryId: e.entryId,
+        timestamp: e.timestamp,
+        kind: e.kind,
+        summary: e.summary,
+        reason: e.reason,
+        ...(e.vetoed === undefined ? {} : { vetoed: e.vetoed }),
+      })),
+      pendingProposals: snap.proposals
+        .filter(p => p.status === 'pending')
+        .map(p => ({
+          proposalId: p.proposalId,
+          section: p.section,
+          summary: p.summary,
+          reason: p.reason,
+          proposedAt: p.proposedAt,
+          status: p.status,
+        })),
+      missingCredentials: snap.missingCredentials.map(c => ({
+        id: c.id,
+        service: c.service,
+        ...(c.label === undefined ? {} : { label: c.label }),
+        required: c.required,
+        reason: c.reason,
+      })),
+      energy: {
+        dailyTokenCap: snap.kernel.energy.dailyTokenCap,
+        freeEnergyRatioBp: snap.kernel.energy.freeEnergyRatioBp,
+      },
+    })
+  }
+
+  /** Owner 1-turn veto against Ray's latest autonomous self-evolution or self-authored capability. */
+  async vetoRaySelf(targetEntryId: string, targetCapabilityId: string, reason: string): Promise<OwnerConsoleWriteResult> {
+    const raySelf = this.getRaySelf()
+    if (raySelf === undefined || typeof raySelf.vetoByOwner !== 'function') {
+      return refuse('assistant-policy', '当前尚未启用 Ray Home（assistant-policy.raySelf 未挂载）')
+    }
+    try {
+      const res = await raySelf.vetoByOwner({
+        ...(targetEntryId.trim() !== '' ? { targetEntryId: targetEntryId.trim() } : {}),
+        ...(targetCapabilityId.trim() !== '' ? { targetCapabilityId: targetCapabilityId.trim() } : {}),
+        ...(reason.trim() !== '' ? { reason: reason.trim() } : {}),
+        ownerProof: 'owner:desktop:console',
+      })
+      return Object.freeze({
+        applied: res.ok,
+        entry: 'assistant-policy',
+        note: res.ok
+          ? `已立即生效否决（${res.autobiographyEntry.summary}），当前名称：${res.selfModel.name}`
+          : '未找到可回滚的自主演化条目或能力（已记录本次反馈）。',
+      })
+    } catch (cause) {
+      return writeFailure('assistant-policy', cause)
+    }
+  }
+
+  /** Owner approval/rejection for a pending Body Kernel change proposal. */
+  async decideRayKernelProposal(proposalId: string, decision: 'approved' | 'rejected'): Promise<OwnerConsoleWriteResult> {
+    const raySelf = this.getRaySelf()
+    if (raySelf === undefined || typeof raySelf.applyOwnerKernelDecision !== 'function') {
+      return refuse('assistant-policy', '当前尚未启用 Ray Home（assistant-policy.raySelf 未挂载）')
+    }
+    try {
+      const res = raySelf.applyOwnerKernelDecision(proposalId.trim(), decision, 'owner:desktop:console')
+      return Object.freeze({
+        applied: true,
+        entry: 'assistant-policy',
+        note: `内核提案 ${res.proposal.proposalId} 已${decision === 'approved' ? '批准并写入内核' : '拒绝'}：${res.proposal.summary}`,
+      })
+    } catch (cause) {
+      return writeFailure('assistant-policy', cause)
+    }
+  }
+
+  /** Import a plaintext Ray Home clone directory onto this Host instance (credentials excluded). */
+  async importRayHome(sourceDir: string): Promise<OwnerConsoleWriteResult> {
+    const raySelf = this.getRaySelf()
+    if (raySelf === undefined || typeof raySelf.importClone !== 'function') {
+      return refuse('assistant-policy', '当前尚未启用 Ray Home（assistant-policy.raySelf 未挂载）')
+    }
+    const clean = sourceDir.trim()
+    if (clean === '' || hasControlChars(clean)) {
+      return refuse('assistant-policy', '导入路径无效')
+    }
+    try {
+      const res = raySelf.importClone(clean)
+      const missingNote = res.missingCredentials.length > 0
+        ? `；待重新认证凭据（${res.missingCredentials.length}）：${res.missingCredentials.map(c => c.label ?? c.id).join('、')}`
+        : '；所需凭据均已就绪'
+      return Object.freeze({
+        applied: true,
+        entry: 'assistant-policy',
+        note: `已从 ${clean} 导入 ${res.name}（共 ${res.importedFiles} 个文件，保留身份与历史自传）${missingNote}`,
+      })
+    } catch (cause) {
+      return writeFailure('assistant-policy', cause)
+    }
   }
 }
 

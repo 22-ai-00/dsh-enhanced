@@ -71,6 +71,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
+    "@dsh-ray/assistant-growth-contract": "workspace:*",
     "yaml": "2.9.0"
   },
   "peerDependencies": {

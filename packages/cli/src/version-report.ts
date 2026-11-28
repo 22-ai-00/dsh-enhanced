@@ -7,6 +7,7 @@ import { parseDocument } from 'yaml'
 import { inspectBoundHostRuntime } from './install-host.ts'
 import { listProfilePlugins, listProfiles, profilesDirectory, resolveDshHome } from './paths.ts'
 import { PurgeError } from './purge.ts'
+import { discoverExtraRayHomes } from './ray-home.ts'
 import { defaultRunner, type CommandRunner } from './run.ts'
 import { version as VERSION } from './version.ts'
 
@@ -138,11 +139,21 @@ function nonNegInt(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null
 }
 
-function isWithinHome(target: string, dshHome: string, canonicalHome: string): boolean {
-  return target === dshHome
+function isWithinHome(
+  target: string,
+  dshHome: string,
+  canonicalHome: string,
+  extraHomes: readonly { raw: string; canonical: string }[] = [],
+): boolean {
+  if (target === dshHome
     || target.startsWith(withTrailingSep(dshHome))
     || target === canonicalHome
-    || target.startsWith(withTrailingSep(canonicalHome))
+    || target.startsWith(withTrailingSep(canonicalHome))) {
+    return true
+  }
+  return extraHomes.some(h =>
+    target === h.raw || target.startsWith(withTrailingSep(h.raw))
+    || target === h.canonical || target.startsWith(withTrailingSep(h.canonical)))
 }
 
 function parseDshHomePathArgs(rawArgs: string): string[] | undefined {
@@ -164,6 +175,7 @@ function resolveConfiguredPath(
   dshHome: string,
   canonicalHome: string,
   diagnostics?: string[],
+  extraHomes: readonly { raw: string; canonical: string }[] = [],
 ): string | undefined {
   if (typeof raw !== 'string') return undefined
   const trimmed = raw.trim()
@@ -176,7 +188,7 @@ function resolveConfiguredPath(
       return undefined
     }
     const resolved = resolve(dshHome, ...args)
-    if (!isWithinHome(resolved, dshHome, canonicalHome)) {
+    if (!isWithinHome(resolved, dshHome, canonicalHome, extraHomes)) {
       diagnostics?.push(`跳过越界 dshHomePath 账本路径：${trimmed}`)
       return undefined
     }
@@ -184,7 +196,7 @@ function resolveConfiguredPath(
   }
   if (isAbsolute(trimmed)) {
     const resolved = resolve(trimmed)
-    if (!isWithinHome(resolved, dshHome, canonicalHome)) {
+    if (!isWithinHome(resolved, dshHome, canonicalHome, extraHomes)) {
       diagnostics?.push(`跳过越界账本路径：${trimmed}`)
       return undefined
     }
@@ -240,6 +252,7 @@ async function collectPatchDbPaths(
   configuredFamilies: Set<LedgerFamily>,
   patchStates: Map<string, PatchPluginState> | undefined,
   diagnostics: string[],
+  extraHomes: readonly { raw: string; canonical: string }[] = [],
 ): Promise<void> {
   let st
   try {
@@ -304,30 +317,30 @@ async function collectPatchDbPaths(
           const usage = cfg.usageLearning && typeof cfg.usageLearning === 'object'
             ? cfg.usageLearning as Record<string, unknown>
             : undefined
-          const usagePath = resolveConfiguredPath(usage?.databasePath, dshHome, canonicalHome, diagnostics)
+          const usagePath = resolveConfiguredPath(usage?.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (usagePath) into.growthDriver.add(usagePath)
-          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics)
+          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (dbPath) into.growthDriver.add(dbPath)
         } else if (fam === 'controlPlane') {
-          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics)
+          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (dbPath) into.controlPlane.add(dbPath)
-          const stateDir = resolveConfiguredPath(cfg.statePath, dshHome, canonicalHome, diagnostics)
+          const stateDir = resolveConfiguredPath(cfg.statePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (stateDir) {
             into.controlPlane.add(join(stateDir, 'control.sqlite'))
             into.controlPlane.add(join(stateDir, 'creation-adoptions.sqlite'))
             into.controlPlane.add(join(stateDir, 'revision-adoptions.sqlite'))
           }
         } else if (fam === 'goals') {
-          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics)
+          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (dbPath) {
             into.goals.add(`${dbPath}.strategies`)
             into.goals.add(dbPath)
           }
         } else if (fam === 'verifier') {
-          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics)
+          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (dbPath) addVerifierVariants(into.verifier, dbPath)
         } else {
-          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics)
+          const dbPath = resolveConfiguredPath(cfg.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
           if (dbPath) into[fam].add(dbPath)
         }
       }
@@ -336,7 +349,7 @@ async function collectPatchDbPaths(
         const pmCfg = cfg.personalMemory && typeof cfg.personalMemory === 'object' && !Array.isArray(cfg.personalMemory)
           ? cfg.personalMemory as Record<string, unknown>
           : undefined
-        const pmPath = resolveConfiguredPath(pmCfg?.databasePath, dshHome, canonicalHome, diagnostics)
+        const pmPath = resolveConfiguredPath(pmCfg?.databasePath, dshHome, canonicalHome, diagnostics, extraHomes)
         if (pmPath) into.memory.add(pmPath)
       }
       if (Array.isArray(row.insert)) walkRows(row.insert)
@@ -448,6 +461,7 @@ async function openReadOnlyDbs(
   canonicalHome: string,
   diagnostics: string[],
   inspected: Set<string>,
+  extraHomes: readonly { raw: string; canonical: string }[] = [],
 ): Promise<Array<{ db: DatabaseSync; realTarget: string }>> {
   const opened: Array<{ db: DatabaseSync; realTarget: string }> = []
   const seenTargets = new Set<string>()
@@ -478,8 +492,8 @@ async function openReadOnlyDbs(
       continue
     }
     if (
-      !isWithinHome(target, dshHome, canonicalHome)
-      || !isWithinHome(realTarget, dshHome, canonicalHome)
+      !isWithinHome(target, dshHome, canonicalHome, extraHomes)
+      || !isWithinHome(realTarget, dshHome, canonicalHome, extraHomes)
     ) {
       diagnostics.push(`跳过符号链接越界账本文件：${target}`)
       continue
@@ -817,16 +831,17 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   const patchStatesByProfile = new Map<string, Map<string, PatchPluginState>>()
   const homePatchStates = new Map<string, PatchPluginState>()
 
+  const extraHomes = homeExists ? discoverExtraRayHomes(dshHome, options?.profile) : discoverExtraRayHomes(dshHome)
   if (homeExists) {
     const configuredFamilies = new Set<LedgerFamily>()
     if (options?.profile === undefined) {
-      await collectPatchDbPaths(join(dshHome, 'cordis.yml'), dshHome, canonicalHome, dbMap, configuredFamilies, homePatchStates, diagnostics)
-      await collectPatchDbPaths(join(dshHome, 'cordis.patch.yml'), dshHome, canonicalHome, dbMap, configuredFamilies, homePatchStates, diagnostics)
+      await collectPatchDbPaths(join(dshHome, 'cordis.yml'), dshHome, canonicalHome, dbMap, configuredFamilies, homePatchStates, diagnostics, extraHomes)
+      await collectPatchDbPaths(join(dshHome, 'cordis.patch.yml'), dshHome, canonicalHome, dbMap, configuredFamilies, homePatchStates, diagnostics, extraHomes)
     }
     for (const prof of targetProfiles) {
       const profPatchStates = new Map<string, PatchPluginState>(homePatchStates)
-      await collectPatchDbPaths(join(dshHome, 'profiles', prof, 'cordis.yml'), dshHome, canonicalHome, dbMap, configuredFamilies, profPatchStates, diagnostics)
-      await collectPatchDbPaths(join(dshHome, 'profiles', prof, 'cordis.patch.yml'), dshHome, canonicalHome, dbMap, configuredFamilies, profPatchStates, diagnostics)
+      await collectPatchDbPaths(join(dshHome, 'profiles', prof, 'cordis.yml'), dshHome, canonicalHome, dbMap, configuredFamilies, profPatchStates, diagnostics, extraHomes)
+      await collectPatchDbPaths(join(dshHome, 'profiles', prof, 'cordis.patch.yml'), dshHome, canonicalHome, dbMap, configuredFamilies, profPatchStates, diagnostics, extraHomes)
       patchStatesByProfile.set(prof, profPatchStates)
 
       const installed = await listProfilePlugins(dshHome, prof).catch(() => [])
@@ -1051,7 +1066,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 1. Work Items
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.workItems, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.workItems, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const total = queryDedupCount(db, realTarget, countedTables, 'work_item', 'SELECT COUNT(*) AS cnt FROM work_item')
@@ -1086,7 +1101,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 2. Growth Driver
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.growthDriver, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.growthDriver, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const jobs = queryDedupCount(db, realTarget, countedTables, 'usage_jobs', 'SELECT COUNT(*) AS cnt FROM usage_jobs')
@@ -1102,7 +1117,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 3. Dreaming
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.dreaming, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.dreaming, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const runs = queryDedupCount(db, realTarget, countedTables, 'dream_runs', 'SELECT COUNT(*) AS cnt FROM dream_runs')
@@ -1133,7 +1148,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 4. Recovery
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.recovery, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.recovery, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const runs = queryDedupCount(db, realTarget, countedTables, 'recovery_runs', 'SELECT COUNT(*) AS cnt FROM recovery_runs')
@@ -1149,7 +1164,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 5. Goal Strategy Runs
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.goals, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.goals, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const runs = queryDedupCount(db, realTarget, countedTables, 'goal_strategy_records', 'SELECT COUNT(*) AS cnt FROM goal_strategy_records')
@@ -1165,7 +1180,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 6. Memory Learning
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.memoryLearning, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.memoryLearning, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const jobsTotal = queryDedupCount(db, realTarget, countedTables, 'jobs', 'SELECT COUNT(*) AS cnt FROM jobs')
@@ -1186,7 +1201,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 7. Personal Memory
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.memory, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.memory, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const active = queryDedupCount(
@@ -1206,7 +1221,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 8. Preference Learning
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.preference, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.preference, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const hyps = queryDedupCount(db, realTarget, countedTables, 'preference_hypotheses', 'SELECT COUNT(*) AS cnt FROM preference_hypotheses')
@@ -1253,7 +1268,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 9. Assistant Evolution
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.evolution, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.evolution, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const props = queryDedupCount(db, realTarget, countedTables, 'evolution_proposals', 'SELECT COUNT(*) AS cnt FROM evolution_proposals')
@@ -1279,7 +1294,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 10. Assistant Skills
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.skills, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.skills, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const cands = queryDedupCount(db, realTarget, countedTables, 'skill_candidates', 'SELECT COUNT(*) AS cnt FROM skill_candidates')
@@ -1309,7 +1324,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 11. Assistant Growth Experiments
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.growthExperiments, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.growthExperiments, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const wTotal = queryDedupCount(db, realTarget, countedTables, 'workflow_candidates', 'SELECT COUNT(*) AS cnt FROM workflow_candidates')
@@ -1335,7 +1350,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 12. Assistant Association
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.association, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.association, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         if (hasTable(db, 'assoc_param_profile_heads') && hasColumn(db, 'assoc_param_profile_heads', 'active_version')) {
@@ -1382,7 +1397,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 13. Assistant Evaluation
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.evaluation, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.evaluation, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const tuned = queryDedupCount(
@@ -1424,7 +1439,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 14. Assistant Verifier
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.verifier, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.verifier, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     try {
       for (const { db, realTarget } of dbs) {
         const done = queryDedupCount(
@@ -1459,7 +1474,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   // 15. Plugin Control Plane (Pass 0: source_adoptions links -> Pass A: creation-adoptions -> Pass B: revision-adoptions -> Pass C: control.sqlite)
   if (homeExists) {
-    const dbs = await openReadOnlyDbs(dbMap.controlPlane, dshHome, canonicalHome, diagnostics, inspected)
+    const dbs = await openReadOnlyDbs(dbMap.controlPlane, dshHome, canonicalHome, diagnostics, inspected, extraHomes)
     if (dbs.length > 0) sawControlPlaneDb = true
     try {
       const sourceIdToActivationId = new Map<string, string>()
