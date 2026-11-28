@@ -12,7 +12,7 @@ import {
   type AutonomySetupStatus, type CodingToolProbe, type FeishuQrOnboardingSnapshot, type FeishuQrOwnerBinding,
   type GrowthDataState, type IntakeAgreementAvailability,
   type OwnerConsoleAssistantOverview, type OwnerConsoleControlActionResult, type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement,
-  type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleModelCatalog, type OwnerConsoleRaySelfState, type OwnerConsoleRayWorkerTickets, type OwnerConsoleStatus,
+  type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleModelCatalog, type OwnerConsoleRayGrowthReport, type OwnerConsoleRaySelfState, type OwnerConsoleRayWorkerTickets, type OwnerConsoleStatus,
   type OwnerConsoleTrendSnapshotItem, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
   type SelfUpgradePreview, type SelfUpgradeStatus, type SetupDoctorIssue, type SetupDoctorReport,
 } from './typert.js'
@@ -307,6 +307,7 @@ export type ConsoleRemote = Readonly<{
   decideRayKernelProposal?(proposalId: string, decision: 'approved' | 'rejected'): Promise<RemoteResult<OwnerConsoleWriteResult>>
   importRayHome?(sourceDir: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
   rayWorkerTickets?(): Promise<RemoteResult<OwnerConsoleRayWorkerTickets>>
+  rayGrowthReport?(): Promise<RemoteResult<OwnerConsoleRayGrowthReport>>
 }>
 
 export type OwnerConsoleNavigation = Readonly<{ openConversation(): void; openPlugins(): void }>
@@ -2659,6 +2660,7 @@ export function ProactiveWorkItemsCard({ ctrl }: Readonly<{ ctrl: ConsoleControl
 export function RaySelfPanelCard({ ctrl, remote }: Readonly<{ ctrl: ConsoleController; remote: ConsoleRemote }>) {
   const [rayState, setRayState] = useState<OwnerConsoleRaySelfState>()
   const [workerTickets, setWorkerTickets] = useState<OwnerConsoleRayWorkerTickets>()
+  const [growthReport, setGrowthReport] = useState<OwnerConsoleRayGrowthReport>()
   const [loading, setLoading] = useState(false)
   const [failed, setFailed] = useState('')
   const [vetoReason, setVetoReason] = useState('')
@@ -2679,6 +2681,11 @@ export function RaySelfPanelCard({ ctrl, remote }: Readonly<{ ctrl: ConsoleContr
     if (typeof remote.rayWorkerTickets === 'function') {
       void remote.rayWorkerTickets().then(res => {
         if (res.ok) setWorkerTickets(res.value)
+      }, () => {})
+    }
+    if (typeof remote.rayGrowthReport === 'function') {
+      void remote.rayGrowthReport().then(res => {
+        if (res.ok) setGrowthReport(res.value)
       }, () => {})
     }
   }
@@ -2755,6 +2762,28 @@ export function RaySelfPanelCard({ ctrl, remote }: Readonly<{ ctrl: ConsoleContr
                       `${ticket.title} · ${ticket.status === 'running' ? '运行中' : ticket.status === 'completed' ? '已完成' : ticket.status === 'handed_back' ? '已交回' : '失败'}`,
                       boundedLine(ticket.handbackReason ?? ticket.resultSummary ?? ticket.errorMessage ?? ticket.ticketId, 160),
                     ))))
+                : null,
+              growthReport !== undefined && growthReport.active
+                ? el('div', { style: gridStyle },
+                  el('p', { style: subheadStyle }, '内核成长度量与精力账本'),
+                  el('div', { style: listStyle },
+                    growthReport.energy !== null
+                      ? row('今日精力使用', `Owner ${growthReport.energy.ownerTokensUsed} · 自由精力 ${growthReport.energy.freeTokensUsed}/${growthReport.energy.freeAllowanceTokens} tokens${growthReport.energy.windDown ? '（已进入休眠降噪）' : ''}`)
+                      : null,
+                    growthReport.ownerService !== null
+                      ? row('服务 Owner 指标', `任务 ${growthReport.ownerService.totalOwnerTasks} · 纠正 ${growthReport.ownerService.correctionCount} · 新伤退化 (newly_regressed) ${growthReport.ownerService.newlyRegressedCount} · 固有缺口 (persistent_gap) ${growthReport.ownerService.persistentGapCount}`)
+                      : null,
+                    growthReport.proactiveValue !== null
+                      ? row('主动价值与调用', `提起 ${growthReport.proactiveValue.surfacedCount} · 采纳 ${growthReport.proactiveValue.acceptedCount} · 嫌烦 ${growthReport.proactiveValue.annoyedCount} · 自创调用 ${growthReport.proactiveValue.selfCapabilityInvocations}`)
+                      : null,
+                    growthReport.ideaPool !== null
+                      ? row('统一点子池', `待处理 ${growthReport.ideaPool.pooledCount} · 静默探索 ${growthReport.ideaPool.exploredCount} · 顺口提配额 ${growthReport.ideaPool.dailyNaturalMentionCap}/天`)
+                      : null,
+                    growthReport.selfGoals !== null
+                      ? row('自身目标（低信任自评）', el('span', { style: actionsStyle },
+                        pill(growthReport.selfGoals.trustLevel, 'warn'),
+                        `${growthReport.selfGoals.idealsCount} 理想 / ${growthReport.selfGoals.activeGoalsCount} 活跃目标（不等同客观证明）`))
+                      : null))
                 : null,
               el('div', { style: actionsStyle },
                 el('input', {

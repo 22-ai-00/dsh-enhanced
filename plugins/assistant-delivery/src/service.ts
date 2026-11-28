@@ -1748,6 +1748,8 @@ export class AssistantDeliveryService extends Service {
           this.dispatchWorkflowCommand(binding, envelope, command),
         dispatchLearningCommand: (binding, envelope, action, preferenceKey) =>
           this.dispatchLearningCommand(binding, envelope, action, preferenceKey),
+        raySelfGrowthReport: () => this.raySelfRuntime()?.growthReport?.(),
+        rayCognitiveSummary: () => this.rayCognitiveSummary(),
         dispatchOwnerSelfIterationCommand: (binding, envelope, command) =>
           this.dispatchOwnerSelfIterationCommand(binding, envelope, command),
         dispatchVersionQuery: (binding, envelope, query) =>
@@ -8336,10 +8338,82 @@ export class AssistantDeliveryService extends Service {
     }
     setSessionRole?: (sessionId: string, role: 'front' | 'worker') => void
     registerDatabase?: (plugin: string, dbPath: string, migratedFrom?: string) => void
+    energySnapshot?: () => {
+      dayKey: string
+      dailyTokenCap: number
+      freeEnergyRatioBp: number
+      ownerTokensUsed: number
+      freeTokensUsed: number
+      remainingDailyTokens: number
+      freeAllowanceTokens: number
+      freeRemainingTokens: number
+      windDown: boolean
+    }
+    growthReport?: () => {
+      rayHome: string
+      generatedAt: number
+      energy: {
+        dayKey: string
+        dailyTokenCap: number
+        freeEnergyRatioBp: number
+        ownerTokensUsed: number
+        freeTokensUsed: number
+        remainingDailyTokens: number
+        freeAllowanceTokens: number
+        freeRemainingTokens: number
+        windDown: boolean
+      }
+      ownerService: {
+        totalOwnerTasks: number
+        correctionCount: number
+        correctionRate: number
+        repeatRequestCount: number
+        repeatRequestRate: number
+        verifiedPassCount: number
+        totalTokens: number
+        avgLatencyMs: number
+        newlyRegressedCount: number
+        persistentGapCount: number
+      }
+      proactiveValue: {
+        surfacedCount: number
+        acceptedCount: number
+        acceptanceRate: number
+        annoyedCount: number
+        annoyanceRate: number
+        selfCapabilityInvocations: number
+      }
+      selfGoals: {
+        trustLevel: 'low-self-reported'
+        note: string
+        ideals: readonly { id: string; title: string; narrative: string }[]
+        stageGoals: readonly { id: string; title: string; completionCriteria: string; status: string }[]
+      }
+    }
   } | undefined {
     try {
       const policy = (this.context as { get?: (key: string) => unknown }).get?.('assistantPolicy') as { raySelf?: unknown } | undefined
       return policy?.raySelf as ReturnType<AssistantDeliveryService['raySelfRuntime']>
+    } catch {
+      return undefined
+    }
+  }
+
+  rayCognitiveSummary(): {
+    active: boolean
+    pooledCount: number
+    exploredCount: number
+    naturalMentionCount: number
+    proposeWorkCount: number
+    acceptedCount: number
+    annoyedCount: number
+    tuning: { naturalMentionThreshold: number; dailyNaturalMentionCap: number }
+  } | undefined {
+    try {
+      const proactive = (this.context as { get?: (key: string) => unknown }).get?.('assistantProactive') as {
+        rayCognitiveSummary?: () => ReturnType<AssistantDeliveryService['rayCognitiveSummary']>
+      } | undefined
+      return this.active ? proactive?.rayCognitiveSummary?.() : undefined
     } catch {
       return undefined
     }

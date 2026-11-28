@@ -4,6 +4,21 @@ import { version } from './version.js'
 
 export const name = 'dsh-ray-assistant-policy'
 export { AssistantPolicyService, Config, version }
+export type {
+  RayIdeal,
+  RayInterest,
+  RayStageGoal,
+} from '@dsh-ray/assistant-growth-contract'
+export {
+  RayEnergyRuntime,
+  type RayEnergyBudgetCheck,
+  type RayEnergyDailySnapshot,
+  type RayEnergyLane,
+  type RayEnergyRuntimeOptions,
+  type RayGrowthEventCategory,
+  type RayGrowthEventInput,
+  type RayKernelGrowthReport,
+} from './ray-energy-runtime.js'
 export {
   RayHomeRuntime,
   defaultUserRayHome,

@@ -206,6 +206,56 @@ describe('owner-console Ray Self integration & path fences', () => {
           }],
         },
       }),
+      rayGrowthReport: async () => ({
+        ok: true,
+        value: {
+          active: true,
+          energy: {
+            dayKey: '2026-11-28',
+            dailyTokenCap: 100_000,
+            freeEnergyRatioBp: 2000,
+            ownerTokensUsed: 12_000,
+            freeTokensUsed: 800,
+            freeAllowanceTokens: 17_600,
+            freeRemainingTokens: 16_800,
+            windDown: false,
+          },
+          ownerService: {
+            totalOwnerTasks: 15,
+            correctionCount: 1,
+            correctionRate: 0.0667,
+            repeatRequestCount: 0,
+            verifiedPassCount: 14,
+            totalTokens: 12_800,
+            avgLatencyMs: 920,
+            newlyRegressedCount: 0,
+            persistentGapCount: 2,
+          },
+          proactiveValue: {
+            surfacedCount: 3,
+            acceptedCount: 2,
+            acceptanceRate: 0.6667,
+            annoyedCount: 0,
+            annoyanceRate: 0,
+            selfCapabilityInvocations: 4,
+          },
+          ideaPool: {
+            pooledCount: 2,
+            exploredCount: 1,
+            naturalMentionCount: 1,
+            proposeWorkCount: 0,
+            acceptedCount: 2,
+            annoyedCount: 0,
+            dailyNaturalMentionCap: 3,
+          },
+          selfGoals: {
+            trustLevel: 'low-self-reported',
+            note: '低信任自评，不等同客观成长证明',
+            activeGoalsCount: 2,
+            idealsCount: 2,
+          },
+        },
+      }),
     }
     const ctrl = {
       remote,
@@ -229,6 +279,9 @@ describe('owner-console Ray Self integration & path fences', () => {
     expect(container.textContent).toContain('完成记忆沉淀')
     expect(container.textContent).toContain('prop-99')
     expect(container.textContent).toContain('并发调研架构')
+    expect(container.textContent).toContain('内核成长度量与精力账本')
+    expect(container.textContent).toContain('low-self-reported')
+    expect(container.textContent).toContain('newly_regressed')
 
     const buttons = [...container.querySelectorAll('button')]
     const vetoBtn = buttons.find(b => b.textContent?.includes('1 轮推翻最近演化'))

@@ -7,6 +7,7 @@ import {
 export type LearningCommand =
   | { readonly kind: 'help' }
   | { readonly kind: 'status' }
+  | { readonly kind: 'growth' }
   | { readonly kind: 'explain' }
   | { readonly kind: 'export' }
   | { readonly kind: 'pause' }
@@ -57,6 +58,7 @@ export function parseLearningCommand(rawInput: string): LearningCommand {
   // surrounding or Unicode whitespace is normalized into authority.
   if (rawInput === '' || rawInput === ' help') return { kind: 'help' }
   if (rawInput === ' status') return { kind: 'status' }
+  if (rawInput === ' growth') return { kind: 'growth' }
   if (rawInput === ' explain') return { kind: 'explain' }
   if (rawInput === ' export') return { kind: 'export' }
   if (rawInput === ' pause') return { kind: 'pause' }

@@ -206,7 +206,7 @@ export const OwnerConsoleRaySelfStateSchema = z.object({
       id: z.string().max(120),
       title: z.string().max(200),
       completionCriteria: z.string().max(600),
-      status: z.enum(['active', 'achieved', 'retired']),
+      status: z.enum(['active', 'achieved', 'retired', 'completed', 'invalidated']),
     }).readonly()).max(16).readonly(),
     interests: z.array(z.object({
       id: z.string().max(120),
@@ -262,6 +262,55 @@ export const OwnerConsoleRayWorkerTicketsSchema = z.object({
   }).readonly()).max(50).readonly(),
 }).readonly()
 export type OwnerConsoleRayWorkerTickets = Readonly<z.infer<typeof OwnerConsoleRayWorkerTicketsSchema>>
+
+export const OwnerConsoleRayGrowthReportSchema = z.object({
+  active: z.boolean(),
+  energy: z.object({
+    dayKey: z.string().max(32),
+    dailyTokenCap: z.number().int().nonnegative(),
+    freeEnergyRatioBp: z.number().int().min(0).max(10_000),
+    ownerTokensUsed: z.number().int().nonnegative(),
+    freeTokensUsed: z.number().int().nonnegative(),
+    freeAllowanceTokens: z.number().int().nonnegative(),
+    freeRemainingTokens: z.number().int().nonnegative(),
+    windDown: z.boolean(),
+  }).readonly().nullable(),
+  ownerService: z.object({
+    totalOwnerTasks: z.number().int().nonnegative(),
+    correctionCount: z.number().int().nonnegative(),
+    correctionRate: z.number().min(0),
+    repeatRequestCount: z.number().int().nonnegative(),
+    verifiedPassCount: z.number().int().nonnegative(),
+    totalTokens: z.number().int().nonnegative(),
+    avgLatencyMs: z.number().int().nonnegative(),
+    newlyRegressedCount: z.number().int().nonnegative(),
+    persistentGapCount: z.number().int().nonnegative(),
+  }).readonly().nullable(),
+  proactiveValue: z.object({
+    surfacedCount: z.number().int().nonnegative(),
+    acceptedCount: z.number().int().nonnegative(),
+    acceptanceRate: z.number().min(0),
+    annoyedCount: z.number().int().nonnegative(),
+    annoyanceRate: z.number().min(0),
+    selfCapabilityInvocations: z.number().int().nonnegative(),
+  }).readonly().nullable(),
+  ideaPool: z.object({
+    pooledCount: z.number().int().nonnegative(),
+    exploredCount: z.number().int().nonnegative(),
+    naturalMentionCount: z.number().int().nonnegative(),
+    proposeWorkCount: z.number().int().nonnegative(),
+    acceptedCount: z.number().int().nonnegative(),
+    annoyedCount: z.number().int().nonnegative(),
+    dailyNaturalMentionCap: z.number().int().nonnegative(),
+  }).readonly().nullable(),
+  selfGoals: z.object({
+    trustLevel: z.literal('low-self-reported'),
+    note: z.string().max(400),
+    activeGoalsCount: z.number().int().nonnegative(),
+    idealsCount: z.number().int().nonnegative(),
+  }).readonly().nullable(),
+}).readonly()
+export type OwnerConsoleRayGrowthReport = Readonly<z.infer<typeof OwnerConsoleRayGrowthReportSchema>>
 
 export const FEISHU_QR_ONBOARDING_STATES = [
   'idle',
@@ -1435,6 +1484,14 @@ export const TYPERT = {
       parameters: [],
       result: codec('@dsh-ray/owner-console#OwnerConsoleRayWorkerTickets', () => OwnerConsoleRayWorkerTicketsSchema),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1350, column: 3 },
+    },
+    {
+      id: '@dsh-ray/owner-console#ownerConsole/rayGrowthReport',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'rayGrowthReport',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: codec('@dsh-ray/owner-console#OwnerConsoleRayGrowthReport', () => OwnerConsoleRayGrowthReportSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1360, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

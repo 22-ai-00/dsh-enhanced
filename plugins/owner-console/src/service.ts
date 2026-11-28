@@ -31,7 +31,7 @@ import { detectFrozenSystemdProfile, SelfUpgradeProber } from './upgrade-probe.j
 import type {
   AssistantChatContext, AssistantVersionReport, AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
   AutonomySetupStatus, FeishuQrOnboardingSnapshot, OwnerConsoleControlActionResult, OwnerConsoleGrowthReport,
-  OwnerConsoleModelCatalog, OwnerConsoleRaySelfState, OwnerConsoleRayWorkerTickets, SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
+  OwnerConsoleModelCatalog, OwnerConsoleRayGrowthReport, OwnerConsoleRaySelfState, OwnerConsoleRayWorkerTickets, SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
 } from './typert.js'
 import { collectOwnerConsoleVersionInfo } from './version-info.js'
 import { readOwnerConsoleGrowthReport } from './growth-report.js'
@@ -1569,6 +1569,119 @@ export class OwnerConsoleService extends TypertRemoteService {
       updatedAt: t.updatedAt,
     }))
     return Object.freeze({ active: true, tickets: items })
+  }
+
+  /** Read Body Kernel immutable growth metrics, daily energy usage, and unified idea pool summary. */
+  async rayGrowthReport(): Promise<OwnerConsoleRayGrowthReport> {
+    const raySelf = this.getRaySelf() as {
+      growthReport?: () => {
+        energy: {
+          dayKey: string
+          dailyTokenCap: number
+          freeEnergyRatioBp: number
+          ownerTokensUsed: number
+          freeTokensUsed: number
+          freeAllowanceTokens: number
+          freeRemainingTokens: number
+          windDown: boolean
+        }
+        ownerService: {
+          totalOwnerTasks: number
+          correctionCount: number
+          correctionRate: number
+          repeatRequestCount: number
+          verifiedPassCount: number
+          totalTokens: number
+          avgLatencyMs: number
+          newlyRegressedCount: number
+          persistentGapCount: number
+        }
+        proactiveValue: {
+          surfacedCount: number
+          acceptedCount: number
+          acceptanceRate: number
+          annoyedCount: number
+          annoyanceRate: number
+          selfCapabilityInvocations: number
+        }
+        selfGoals: {
+          trustLevel: 'low-self-reported'
+          note: string
+          ideals: readonly unknown[]
+          stageGoals: readonly { status: string }[]
+        }
+      }
+    } | undefined
+    const proactive = this.host.get('assistantProactive' as never, false) as {
+      rayCognitiveSummary?: () => {
+        pooledCount: number
+        exploredCount: number
+        naturalMentionCount: number
+        proposeWorkCount: number
+        acceptedCount: number
+        annoyedCount: number
+        tuning: { dailyNaturalMentionCap: number }
+      }
+    } | undefined
+    const report = typeof raySelf?.growthReport === 'function' ? raySelf.growthReport() : undefined
+    const cog = typeof proactive?.rayCognitiveSummary === 'function' ? proactive.rayCognitiveSummary() : undefined
+    if (report === undefined) {
+      return Object.freeze({
+        active: false,
+        energy: null,
+        ownerService: null,
+        proactiveValue: null,
+        ideaPool: null,
+        selfGoals: null,
+      })
+    }
+    return Object.freeze({
+      active: true,
+      energy: Object.freeze({
+        dayKey: report.energy.dayKey,
+        dailyTokenCap: report.energy.dailyTokenCap,
+        freeEnergyRatioBp: report.energy.freeEnergyRatioBp,
+        ownerTokensUsed: report.energy.ownerTokensUsed,
+        freeTokensUsed: report.energy.freeTokensUsed,
+        freeAllowanceTokens: report.energy.freeAllowanceTokens,
+        freeRemainingTokens: report.energy.freeRemainingTokens,
+        windDown: report.energy.windDown,
+      }),
+      ownerService: Object.freeze({
+        totalOwnerTasks: report.ownerService.totalOwnerTasks,
+        correctionCount: report.ownerService.correctionCount,
+        correctionRate: report.ownerService.correctionRate,
+        repeatRequestCount: report.ownerService.repeatRequestCount,
+        verifiedPassCount: report.ownerService.verifiedPassCount,
+        totalTokens: report.ownerService.totalTokens,
+        avgLatencyMs: report.ownerService.avgLatencyMs,
+        newlyRegressedCount: report.ownerService.newlyRegressedCount,
+        persistentGapCount: report.ownerService.persistentGapCount,
+      }),
+      proactiveValue: Object.freeze({
+        surfacedCount: report.proactiveValue.surfacedCount,
+        acceptedCount: report.proactiveValue.acceptedCount,
+        acceptanceRate: report.proactiveValue.acceptanceRate,
+        annoyedCount: report.proactiveValue.annoyedCount,
+        annoyanceRate: report.proactiveValue.annoyanceRate,
+        selfCapabilityInvocations: report.proactiveValue.selfCapabilityInvocations,
+      }),
+      ideaPool: cog === undefined ? null : Object.freeze({
+        pooledCount: cog.pooledCount,
+        exploredCount: cog.exploredCount,
+        naturalMentionCount: cog.naturalMentionCount,
+        proposeWorkCount: cog.proposeWorkCount,
+        acceptedCount: cog.acceptedCount,
+        annoyedCount: cog.annoyedCount,
+        dailyNaturalMentionCap: cog.tuning.dailyNaturalMentionCap,
+      }),
+      selfGoals: Object.freeze({
+        trustLevel: report.selfGoals.trustLevel,
+        note: report.selfGoals.note,
+        activeGoalsCount: report.selfGoals.stageGoals.filter(g => g.status === 'active').length,
+        idealsCount: report.selfGoals.ideals.length,
+      }),
+    })
   }
 }
 

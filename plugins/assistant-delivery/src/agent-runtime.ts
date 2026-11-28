@@ -224,6 +224,10 @@ interface DshDeliveryRuntimeOptions {
     action: DeliveryLearningControlAction,
     preferenceKey?: string,
   ): Promise<'forbidden' | 'unavailable' | 'unknown' | Readonly<DeliveryLearningControlReceipt>>
+  raySelfGrowthReport?(): (ReturnType<import('./service.js').AssistantDeliveryService['raySelfRuntime']> extends infer R
+    ? R extends { growthReport?: () => infer G } ? G : never
+    : never) | undefined
+  rayCognitiveSummary?(): ReturnType<import('./service.js').AssistantDeliveryService['rayCognitiveSummary']>
   dispatchOwnerSelfIterationCommand(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
@@ -3690,6 +3694,24 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     signal.throwIfAborted()
     markDispatching()
     signal.throwIfAborted()
+    if (parsed.kind === 'growth') {
+      const report = this.options.raySelfGrowthReport?.()
+      const cog = this.options.rayCognitiveSummary?.()
+      const text = report === undefined
+        ? 'Ray 独立成长度量报告：\n- 当前未启用 Ray Home 身体内核（assistant-policy.raySelf 未挂载）。'
+        : [
+            `Ray 独立成长度量报告（身体内核不可篡改口径 · ${report.energy.dayKey}）：`,
+            `【服务 Owner 指标】任务=${report.ownerService.totalOwnerTasks}｜纠正=${report.ownerService.correctionCount} (${(report.ownerService.correctionRate * 100).toFixed(1)}%)｜重复请求=${report.ownerService.repeatRequestCount}｜验收通过=${report.ownerService.verifiedPassCount}｜平均延迟=${report.ownerService.avgLatencyMs}ms`,
+            `【退化与缺口】新伤退化 (newly_regressed)=${report.ownerService.newlyRegressedCount}｜固有缺口 (persistent_gap)=${report.ownerService.persistentGapCount}`,
+            `【主动价值指标】提起=${report.proactiveValue.surfacedCount}｜采纳=${report.proactiveValue.acceptedCount} (${(report.proactiveValue.acceptanceRate * 100).toFixed(1)}%)｜嫌烦=${report.proactiveValue.annoyedCount} (${(report.proactiveValue.annoyanceRate * 100).toFixed(1)}%)｜自创能力调用=${report.proactiveValue.selfCapabilityInvocations}`,
+            `【今日精力账本】Owner=${report.energy.ownerTokensUsed} tokens｜自由精力=${report.energy.freeTokensUsed}/${report.energy.freeAllowanceTokens} tokens｜每日上限=${report.energy.dailyTokenCap}${report.energy.windDown ? '（已进入休眠降噪 wind-down）' : ''}`,
+            ...(cog ? [`【统一点子池】待处理=${cog.pooledCount}｜静默探索=${cog.exploredCount}｜顺口提配额上限=${cog.tuning.dailyNaturalMentionCap}/天`] : []),
+            `【自身目标进展｜${report.selfGoals.trustLevel} 低信任自评，不等同客观成长证明】`,
+            ...report.selfGoals.stageGoals.map(g => `- [${g.status}] ${g.title}（标准：${g.completionCriteria}）`),
+          ].join('\n')
+      this.options.replyCommand(binding, envelope.eventId, { text, format: 'plain' })
+      return { outcome: 'processed' }
+    }
     const action = parsed.kind === 'forget-confirm'
       ? 'forget'
       : parsed.kind === 'rollback-confirm' ? 'rollback' : parsed.kind

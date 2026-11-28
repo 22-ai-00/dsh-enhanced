@@ -17,6 +17,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolExecution } from '@deepseek-ai/dsh-tools'
 import {
+  RayEnergyRuntime,
+  type RayEnergyBudgetCheck,
+  type RayEnergyDailySnapshot,
+  type RayGrowthEventInput,
+  type RayKernelGrowthReport,
+} from './ray-energy-runtime.js'
+import {
   RAY_AUTOBIOGRAPHY_FILENAME,
   RAY_AUTOBIOGRAPHY_PROTOCOL,
   RAY_BODY_KERNEL_PROTOCOL,
@@ -321,6 +328,7 @@ export function defaultUserRayHome(env: NodeJS.ProcessEnv = process.env): string
 
 export class RayHomeRuntime {
   readonly rayHome: string
+  readonly energy: RayEnergyRuntime
   private readonly host: RayHomeRuntimeHost
   private readonly now: () => number
   private readonly vetoHandlers = new Set<RayVetoHandler>()
@@ -345,6 +353,15 @@ export class RayHomeRuntime {
     this.now = options.now ?? Date.now
     this.rayHome = canonicalAllowMissingLeaf(options.rayHome)
     this.bootstrap(options.energyOverrides)
+    this.energy = new RayEnergyRuntime({
+      rayHome: this.rayHome,
+      now: this.now,
+      getKernelEnergy: () => this.kernel.energy,
+      getSessionRole: sessionId => this.getSessionRole(sessionId),
+      getSelfModel: () => this.selfModel,
+      registerDatabase: (plugin, dbPath) => this.registerDatabase(plugin, dbPath),
+      context: this.host.context,
+    })
     this.installPromptIntegration()
     this.installToolsIntegration()
   }
@@ -358,8 +375,34 @@ export class RayHomeRuntime {
     for (const dispose of this.disposers.splice(0).reverse()) {
       try { dispose() } catch { /* ignore */ }
     }
+    this.energy.dispose()
     this.vetoHandlers.clear()
     this.sessionRoles.clear()
+  }
+
+  energySnapshot(): RayEnergyDailySnapshot {
+    this.assertActive()
+    return this.energy.snapshot()
+  }
+
+  growthReport(): RayKernelGrowthReport {
+    this.assertActive()
+    return this.energy.growthReport()
+  }
+
+  checkFreeEnergyBudget(requestedTokens: number): RayEnergyBudgetCheck {
+    this.assertActive()
+    return this.energy.checkFreeEnergyBudget(requestedTokens)
+  }
+
+  tryConsumeFreeEnergy(tokens: number, source: string, sessionId?: string) {
+    this.assertActive()
+    return this.energy.tryConsumeFreeEnergy(tokens, source, sessionId)
+  }
+
+  recordGrowthEvent(input: RayGrowthEventInput): string {
+    this.assertActive()
+    return this.energy.recordGrowthEvent(input)
   }
 
   private assertActive(): void {
@@ -568,22 +611,39 @@ export class RayHomeRuntime {
 
     if (isReadOnlyTool) return undefined
 
+    const energyRoot = join(this.rayHome, 'energy')
+    const energyRootNorm = energyRoot.replaceAll('\\', '/')
+
     for (const raw of strings) {
       const trimmed = raw.trim()
       if (trimmed === '') continue
+      const normalizedRaw = trimmed.replaceAll('\\', '/')
       if (isAbsolute(trimmed)) {
         const canonical = canonicalAllowMissingLeaf(trimmed)
         if (isRayKernelPath(this.rayHome, canonical) || isRayKernelPath(this.rayHome, trimmed)) {
           return `RAY_KERNEL_WRITE_DENIED: 身体内核（${kernelRoot}）由 owner 维护，不允许通过工具直接修改；请改用 ray_propose_kernel_change 提交提案。`
+        }
+        if (isPathInsideRoot(energyRoot, canonical) || canonical === energyRoot || normalizedRaw.startsWith(energyRootNorm)) {
+          return `RAY_KERNEL_WRITE_DENIED: 身体内核精力与成长账本（${energyRoot}）受内核保护，不允许通过工具直接写入。`
         }
       } else if (workspace !== undefined && isAbsolute(workspace)) {
         const resolved = canonicalAllowMissingLeaf(resolve(workspace, trimmed))
         if (isRayKernelPath(this.rayHome, resolved)) {
           return `RAY_KERNEL_WRITE_DENIED: 身体内核（${kernelRoot}）由 owner 维护，不允许通过相对路径直接修改；请改用 ray_propose_kernel_change 提交提案。`
         }
+        if (isPathInsideRoot(energyRoot, resolved) || resolved === energyRoot) {
+          return `RAY_KERNEL_WRITE_DENIED: 身体内核精力与成长账本（${energyRoot}）受内核保护，不允许通过相对路径直接写入。`
+        }
       }
       if (commandReferencesRayKernel(trimmed, this.rayHome, workspace)) {
         return `RAY_KERNEL_WRITE_DENIED: 检测到命令引用身体内核路径（${kernelRoot}）；身体内核不可由执行体直接改写，请使用 ray_propose_kernel_change。`
+      }
+      if (
+        normalizedRaw.includes(energyRootNorm)
+        || /(\$RAY_HOME|\$\{RAY_HOME\}|~\/\.ray)\/energy(?:\b|\/)/iu.test(normalizedRaw)
+        || /\benergy\.sqlite(?:-(?:wal|shm|journal))?\b/u.test(normalizedRaw)
+      ) {
+        return `RAY_KERNEL_WRITE_DENIED: 检测到命令直接写入内核精力账本（${energyRoot}）；请通过受控运行时接口记账。`
       }
     }
     return undefined
@@ -767,6 +827,11 @@ export class RayHomeRuntime {
             name: { type: 'string' },
             selfSummary: { type: 'string' },
             persona: { type: 'string' },
+            aliasesJson: { type: 'string' },
+            valuesJson: { type: 'string' },
+            idealsJson: { type: 'string' },
+            stageGoalsJson: { type: 'string' },
+            interestsJson: { type: 'string' },
           },
           output: {
             schema: { type: 'object', additionalProperties: true, properties: {} },
@@ -776,11 +841,27 @@ export class RayHomeRuntime {
             if (!this.isRayOwnedSession(exec.agent)) {
               throw new Error('ray_evolve_self requires an active Ray assistant session')
             }
+            const parseJsonArray = <T>(raw: string | undefined, label: string): T[] | undefined => {
+              if (typeof raw !== 'string' || raw.trim() === '') return undefined
+              const parsed = JSON.parse(raw) as unknown
+              if (!Array.isArray(parsed)) throw new Error(`ray_evolve_self: ${label} must be a JSON array`)
+              return parsed as T[]
+            }
+            const aliases = parseJsonArray<string>(args.aliasesJson, 'aliasesJson')
+            const values = parseJsonArray<string>(args.valuesJson, 'valuesJson')
+            const ideals = parseJsonArray<RayIdeal>(args.idealsJson, 'idealsJson')
+            const stageGoals = parseJsonArray<RayStageGoal>(args.stageGoalsJson, 'stageGoalsJson')
+            const interests = parseJsonArray<RayInterest>(args.interestsJson, 'interestsJson')
             const res = this.evolveSelfModel({
               reason: args.reason,
               ...(args.name === undefined ? {} : { name: args.name }),
               ...(args.selfSummary === undefined ? {} : { selfSummary: args.selfSummary }),
               ...(args.persona === undefined ? {} : { persona: args.persona }),
+              ...(aliases === undefined ? {} : { aliases }),
+              ...(values === undefined ? {} : { values }),
+              ...(ideals === undefined ? {} : { ideals }),
+              ...(stageGoals === undefined ? {} : { stageGoals }),
+              ...(interests === undefined ? {} : { interests }),
             })
             return JSON.parse(JSON.stringify({
               ok: true,
@@ -788,6 +869,9 @@ export class RayHomeRuntime {
               version: res.selfModel.version,
               name: res.selfModel.name,
               selfSummary: res.selfModel.selfSummary,
+              idealsCount: res.selfModel.ideals.length,
+              activeStageGoalsCount: res.selfModel.stageGoals.filter(g => g.status === 'active').length,
+              interestsCount: res.selfModel.interests.length,
             })) as Record<string, never>
           },
         })

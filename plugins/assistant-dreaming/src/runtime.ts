@@ -139,6 +139,7 @@ export class AssistantDreamingService extends Service {
   #unsubscribeWake: (() => void) | undefined
   #unsubscribeLlm: (() => void) | undefined
   readonly #ideaChangeListeners = new Set<() => void>()
+  readonly #ideaRecordedListeners = new Set<(idea: Readonly<DreamIdea>) => void>()
   #coldStartAnchorAt: number
   /**
    * Fresh per-load reconcile nonce for the active transition. Automations
@@ -613,17 +614,37 @@ export class AssistantDreamingService extends Service {
         signal: input.signal,
         onSubmit: ideas => {
           let recorded = 0
+          const recordedIdeas: DreamIdea[] = []
           try {
             for (const idea of ideas) {
-              store.recordIdea({
+              const record: DreamIdea = {
                 id: createHash('sha256').update(`${runId}\0${recorded}\0${idea.summary}`).digest('hex').slice(0, 32),
-                runId, createdAt: Date.now(), dayKey: decision.dayKey,
-                summary: idea.summary, detail: idea.detail, evidenceRefs: idea.evidenceRefs,
+                lane: this.#lane,
+                runId,
+                createdAt: Date.now(),
+                dayKey: decision.dayKey,
+                state: 'recorded',
+                summary: idea.summary,
+                detail: idea.detail,
+                evidenceRefs: idea.evidenceRefs,
+              }
+              store.recordIdea({
+                id: record.id,
+                runId: record.runId,
+                createdAt: record.createdAt,
+                dayKey: record.dayKey,
+                summary: record.summary,
+                detail: record.detail,
+                evidenceRefs: record.evidenceRefs,
               })
+              recordedIdeas.push(record)
               recorded += 1
             }
           } finally {
-            if (recorded > 0) this.#notifyIdeaChange()
+            if (recorded > 0) {
+              this.#notifyIdeaChange()
+              for (const entry of recordedIdeas) this.#notifyIdeaRecorded(entry)
+            }
           }
           return recorded
         },
@@ -740,11 +761,37 @@ export class AssistantDreamingService extends Service {
     }
   }
 
+  /** Host-only notification carrying each newly recorded dreaming idea for Unified Idea Pool ingestion. */
+  onIdeaRecorded = (listener: (idea: Readonly<DreamIdea>) => void): (() => void) => {
+    if (!this.#active) throw new Error('assistant-dreaming: dreaming service is not active')
+    if (typeof listener !== 'function') throw new TypeError('assistant-dreaming: listener must be a function')
+    if (!this.#config.enabled) return () => {}
+    this.#ideaRecordedListeners.add(listener)
+    let subscribed = true
+    return () => {
+      if (!subscribed) return
+      subscribed = false
+      this.#ideaRecordedListeners.delete(listener)
+    }
+  }
+
   #notifyIdeaChange(): void {
     if (!this.#active) return
     for (const listener of Array.from(this.#ideaChangeListeners)) {
       try {
         listener()
+      } catch {
+        // Listener errors must never disrupt idea persistence or transitions.
+      }
+    }
+  }
+
+  #notifyIdeaRecorded(idea: Readonly<DreamIdea>): void {
+    if (!this.#active) return
+    const frozen = Object.freeze({ ...idea, evidenceRefs: Object.freeze([...idea.evidenceRefs]) })
+    for (const listener of Array.from(this.#ideaRecordedListeners)) {
+      try {
+        listener(frozen)
       } catch {
         // Listener errors must never disrupt idea persistence or transitions.
       }
@@ -843,6 +890,7 @@ export class AssistantDreamingService extends Service {
     if (!this.#config.enabled || this.#store === undefined) return
     this.#active = false
     this.#ideaChangeListeners.clear()
+    this.#ideaRecordedListeners.clear()
     this.#unsubscribeLlm?.()
     this.#unsubscribeLlm = undefined
     this.#unsubscribeWake?.()

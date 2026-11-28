@@ -324,6 +324,24 @@ function tryBuildLearningCard(text: string): LarkCommandCard | undefined {
     }
   }
 
+  if (text.startsWith('Ray 独立成长度量报告')) {
+    const lines = text.split('\n').slice(1).filter(Boolean)
+    return {
+      summary: 'Ray 身体内核成长度量与精力账本',
+      template: 'blue',
+      title: 'Ray 独立成长度量报告',
+      subtitle: '服务 Owner 与主动价值指标由不可自改内核计算 · 自身目标标注低信任自评',
+      iconToken: 'info_outlined',
+      sections: [
+        {
+          heading: '内核度量与精力详情',
+          tone: 'grey',
+          items: plainLines(lines.length > 0 ? lines : [text]),
+        },
+      ],
+    }
+  }
+
   if (text.startsWith('组件状态：')) {
     const { metrics, detailLines } = parseLearningStatusSection(text.split('\n'))
     const subtitle = metrics.length === 2

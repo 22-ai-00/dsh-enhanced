@@ -662,7 +662,7 @@ export class AssistantPolicyService extends Service {
     const expectedCaller = ['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'action_github_compensate', 'action_github_compensation_status'].includes(definition.name) ? 'dsh-ray-assistant-actions'
       : ['isolation_run', 'isolation_grants'].includes(definition.name) ? 'dsh-ray-assistant-isolation'
       : ['goal_create', 'goal_context', 'goal_schedule', 'goal_strategy', 'goal_wait_event', 'goal_checkpoint'].includes(definition.name) ? 'dsh-ray-assistant-goals'
-      : definition.name === 'proactive_status' ? 'dsh-ray-assistant-proactive'
+      : ['proactive_status', 'ray_idea_pool', 'ray_reflect'].includes(definition.name) ? ['dsh-ray-assistant-proactive', 'AssistantProactiveService']
       : ['memory_manage', 'episode_recall'].includes(definition.name) ? ['dsh-ray-personal-memory', 'PersonalMemoryService']
       : definition.name === 'wiki_upsert' ? ['dsh-ray-personal-wiki', 'PersonalWikiService']
       : definition.name === 'delivery_request_restart' ? ['dsh-ray-assistant-delivery', 'AssistantDeliveryService']

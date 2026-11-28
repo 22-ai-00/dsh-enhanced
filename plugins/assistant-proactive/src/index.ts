@@ -46,6 +46,11 @@ import {
 } from './intake-routing.js'
 import { PreparationRuntime } from './preparation.js'
 import { PreparationStore } from './preparation-store.js'
+import {
+  RayCognitiveLoopRuntime,
+  type RayCognitiveSummary,
+  type RayReflectionCadence,
+} from './ray-cognitive-loop.js'
 import { version } from './version.js'
 
 const MAX_GOAL_UNSUBSCRIBE_HOOKS = 64
@@ -107,6 +112,19 @@ export type { AttentionOverlay }
 export * from './goal-lifecycle.js'
 export * from './intake-routing.js'
 export type * from './types.js'
+export {
+  RayCognitiveLoopRuntime,
+  type RayCandidateDisposition,
+  type RayCandidateOutcomeRecord,
+  type RayCognitiveSummary,
+  type RayIdeaRecord,
+  type RayIdeaSource,
+  type RayIdeaStatus,
+  type RayIdeaTier,
+  type RayIdeaTuning,
+  type RayReflectionCadence,
+  type RayReflectionRecord,
+} from './ray-cognitive-loop.js'
 /** `attention` is ignored by Delivery releases before the WP19 audit; it never changes how the notice is sent. */
 interface NotificationPort { enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: OpportunityScope; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: { purpose: 'result' } }): unknown }
 interface EvaluationAttentionPort {
@@ -184,6 +202,7 @@ export class AssistantProactiveService extends Service {
   readonly #pendingGoalChanges = new Map<string, TerminalGoalChangeSignal>()
   #goalChangeMicrotaskQueued = false
   #active = true
+  #rayCognitive: RayCognitiveLoopRuntime | undefined
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'assistantProactive')
     const resolvedIntake = resolveServiceIntakeEvaluation(config.intakeEvaluation)
@@ -207,8 +226,30 @@ export class AssistantProactiveService extends Service {
       this.#pendingGoalChanges.clear()
       this.#goalUnsubscribeHooks.clear()
       this.#emittedGoalUnsubscribes.clear()
+      this.#rayCognitive?.dispose()
+      this.#rayCognitive = undefined
       this.#engine.close()
     }, 'assistant-proactive.store')
+    try {
+      const inject = ctx.inject as unknown as (
+        deps: readonly string[],
+        cb: (c: Context) => unknown,
+      ) => { dispose(): void | Promise<void> }
+      const rayHandle = inject(['assistantPolicy'], policyCtx => {
+        const policy = policyCtx.get('assistantPolicy' as never) as AssistantPolicyService | undefined
+        const raySelf = policy?.raySelf
+        if (!this.#active || policy === undefined || raySelf === undefined) return
+        const runtime = new RayCognitiveLoopRuntime(ctx, policy, raySelf)
+        this.#rayCognitive = runtime
+        return () => {
+          if (this.#rayCognitive === runtime) this.#rayCognitive = undefined
+          runtime.dispose()
+        }
+      })
+      ctx.effect(() => () => { void rayHandle.dispose() }, 'assistant-proactive.ray-cognitive')
+    } catch {
+      // Ignore if host context lacks inject() or assistantPolicy.
+    }
     const preparationPath = config.databasePath === ':memory:' ? ':memory:' : `${config.databasePath ?? join(homedir(), '.dsh', 'assistant-proactive.sqlite')}.preparations`
     const hasPrepareProfiles = [...this.#profiles.values()].some(profile => profile.mode === 'prepare' && profile.preparation !== undefined)
     this.#preparations = new PreparationRuntime(ctx, new PreparationStore(preparationPath), { active: hasPrepareProfiles })
@@ -1077,6 +1118,32 @@ export class AssistantProactiveService extends Service {
     }))
   }
   reconcilePreparations = (): Promise<void> => this.#preparations.tick()
+  rayCognitiveRuntime = (): RayCognitiveLoopRuntime | undefined => (this.#active ? this.#rayCognitive : undefined)
+  rayCognitiveSummary = (): RayCognitiveSummary | undefined => (this.#active ? this.#rayCognitive?.summary() : undefined)
+  rayIngestIdea = (input: Parameters<RayCognitiveLoopRuntime['ingestSignal']>[0]) => {
+    if (!this.#active || this.#rayCognitive === undefined) return undefined
+    return this.#rayCognitive.ingestSignal(input)
+  }
+  rayRunReflection = (cadence: RayReflectionCadence, options?: Parameters<RayCognitiveLoopRuntime['runReflection']>[1]) => {
+    if (!this.#active || this.#rayCognitive === undefined) return undefined
+    return this.#rayCognitive.runReflection(cadence, options)
+  }
+  rayRecordIdeaReaction = (ideaId: string, reaction: 'accepted' | 'ignored' | 'annoyed') => {
+    if (!this.#active || this.#rayCognitive === undefined) return undefined
+    return this.#rayCognitive.recordReaction(ideaId, reaction)
+  }
+  rayRecordCandidateOutcome = (input: Parameters<RayCognitiveLoopRuntime['recordCandidateOutcome']>[0]) => {
+    if (!this.#active || this.#rayCognitive === undefined) return undefined
+    return this.#rayCognitive.recordCandidateOutcome(input)
+  }
+  raySurfaceNaturalMention = (contextText: string, explicitIdeaId?: string) => {
+    if (!this.#active || this.#rayCognitive === undefined) return undefined
+    return this.#rayCognitive.surfaceNaturalMention(contextText, explicitIdeaId)
+  }
+  rayListIdeas = (filter?: Parameters<RayCognitiveLoopRuntime['listIdeas']>[0]) => {
+    if (!this.#active || this.#rayCognitive === undefined) return []
+    return this.#rayCognitive.listIdeas(filter)
+  }
   feedback = (agent: Agent | undefined, id: string, feedback: 'accepted' | 'rejected') => {
     const scope = this.#scope(agent, true)
     const decision = this.#engine.feedback(id, scope, feedback)
