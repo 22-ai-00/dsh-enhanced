@@ -96,6 +96,7 @@ import { DeliveryStoreError } from './store.js'
 import { SessionLeaseUnavailable } from './session-lease-runtime.js'
 import type { DeliverySessionLeases, SessionExecutionLease } from './session-lease-runtime.js'
 import { isDeliveryGoalWakeDeadline, type DeliveryGoalWakeInput, type DeliveryGoalWakeResult } from './goal-wake-types.js'
+import type { RayWorkerTicketRuntime } from './ray-worker-runtime.js'
 import {
   parseWorkflowCommand,
   workflowCommandUsage,
@@ -139,6 +140,7 @@ interface DshDeliveryRuntimeOptions {
   workspace: string
   agentPreset: string
   getAgentPresets(): Pick<AgentPresets, 'mount' | 'resolve'> | undefined
+  getWorkerTickets?(): RayWorkerTicketRuntime | undefined
   readOwnerApprovalStatus(agent: Agent): OwnerApprovalStatusRead | undefined
   policyRef: string
   provider: string
@@ -2365,6 +2367,26 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     agentCtx.effect(() => unbind, `assistant-delivery.${initiator}-initiator`)
     installModelSelection(agentCtx)
     agent.model.select(selected)
+    const workerTickets = this.options.getWorkerTickets?.()
+    if (workerTickets !== undefined && !workerTickets.ownsWorkerSession(String(agent.session.id))) {
+      let pendingToMark: readonly string[] = []
+      agentCtx.inject(['systemPrompt'], promptCtx => promptCtx.systemPrompt.context({
+        name: 'ray:worker-tickets',
+        order: 242,
+        text: () => {
+          pendingToMark = workerTickets.pendingFrontNarrationIds()
+          return workerTickets.renderFrontPromptContext()
+        },
+      }))
+      agentCtx.on('session/event', (eventSession, event) => {
+        if (eventSession !== agent.session || event.type !== 'turn/end') return
+        const reason = event.data.reason as { kind?: unknown } | undefined
+        if (reason?.kind === 'completed' && pendingToMark.length > 0) {
+          workerTickets.markFrontNarrated(pendingToMark)
+          pendingToMark = []
+        }
+      })
+    }
     // The trusted post-cancellation clarification is installed LAZILY and only
     // for a session whose history actually contains a human-aborted turn with an
     // aborted-before-dispatch tool result. Merely registering a runtime context
@@ -3972,6 +3994,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       '- /autonomy：开启、关闭或升级整体助手自迭代能力；不进入模型。',
       '- /update（/upgrade）：在后台升级整体助手并自动重启恢复（仅限 owner）；不进入模型。',
       '- /veto [条目ID] [原因]：立即推翻并回滚最近一次自主演化或能力变更（仅限 owner）；下一轮生效。',
+      '- /tickets：查看文鳐持久后台 Worker 工单状态；不进入模型。',
       '- /version：查看当前助手、Host、插件版本与自迭代演进统计；不进入模型。',
       '- /help：显示当前实际可用命令。',
     ]
@@ -3991,7 +4014,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     markDispatching: MarkInboundDispatching | undefined,
   ): Promise<InboundProcessResult> {
     const args = command.rawInput.trim()
-    const local = new Set(['clear', 'help', 'new', 'session', 'status', 'stop'])
+    const local = new Set(['clear', 'help', 'new', 'session', 'status', 'stop', 'tickets'])
     if (local.has(command.name) && args !== '') {
       return this.replySessionCommand(binding, envelope, {
         text: `/${command.name} 不接受参数。发送 /help 查看用法。`,
@@ -4057,6 +4080,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           format: 'plain',
         }, signal, markDispatching)
       }
+      if (command.name === 'tickets') {
+        const workerTickets = this.options.getWorkerTickets?.()
+        return this.replySessionCommand(binding, envelope, {
+          text: workerTickets === undefined
+            ? '当前尚未启用 Ray 持久后台 Worker（assistant-policy.raySelf 未配置 rayHome）。'
+            : workerTickets.formatTicketsCommandReply(),
+          format: 'plain',
+        }, signal, markDispatching)
+      }
       if (command.name === 'status' || command.name === 'session') {
         const messages = agent.session.deriveMessages().length
         const turns = agent.session.snapshotEvents().filter(event => event.type === 'turn/end').length
@@ -4076,7 +4108,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           }
         } | undefined
         const raySnap = typeof rayPolicy?.raySelf?.snapshot === 'function' ? rayPolicy.raySelf.snapshot(3) : undefined
-        const rayLines = raySnap === undefined ? [] : [
+        const workerTickets = this.options.getWorkerTickets?.()
+        const ticketList = workerTickets === undefined ? [] : workerTickets.listTickets({ limit: 5 })
+        const workerLines = ticketList.length === 0 ? [] : [
+          `- 持久 Worker：运行中 ${ticketList.filter(t => t.status === 'running').length} · 已完成 ${ticketList.filter(t => t.status === 'completed').length} · 交回 ${ticketList.filter(t => t.status === 'handed_back').length}`,
+        ]
+        const rayLines = raySnap === undefined ? workerLines : [
           '',
           '自我模型（Ray Home）',
           `- 身份：${raySnap.selfModel.name}（v${raySnap.selfModel.version}）`,
@@ -4085,6 +4122,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           `- 阶段目标：${raySnap.selfModel.stageGoals.filter(g => g.status === 'active').map(g => g.title).join('；') || '暂无'}`,
           `- 长期理想：${raySnap.selfModel.ideals.map(i => i.title).join('；') || '暂无'}`,
           ...(raySnap.missingCredentials.length > 0 ? [`- 待重授权凭据：${raySnap.missingCredentials.length} 项`] : []),
+          ...workerLines,
         ]
         return this.replySessionCommand(binding, envelope, {
           text: [

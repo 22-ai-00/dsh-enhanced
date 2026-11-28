@@ -71,6 +71,7 @@ import {
   type OwnerRouteDispatchGuard,
 } from './store.js'
 import { DshDeliveryRuntime, redactOwnerLearningReply } from './agent-runtime.js'
+import { RayWorkerTicketRuntime, type RayWorkerTicketSnapshot } from './ray-worker-runtime.js'
 import type { OwnerApprovalStatusRead } from './approval-status-context.js'
 import { DeliverySessionLeases } from './session-lease-runtime.js'
 import { NativeWebOwner, type NativeWebOwnerConfig, type NativeWebOwnerAccess } from './native-web-owner.js'
@@ -1497,6 +1498,7 @@ export class AssistantDeliveryService extends Service {
   private preferenceProjectionRetryTimer: ReturnType<typeof setTimeout> | undefined
   private modelSelectionRetryTimer: ReturnType<typeof setTimeout> | undefined
   private runtime: DeliveryInboundRuntime | undefined
+  private readonly workerTickets: RayWorkerTicketRuntime | undefined
   private timer: ReturnType<typeof setInterval> | undefined
   private active = true
 
@@ -1547,6 +1549,25 @@ export class AssistantDeliveryService extends Service {
     }
     this.ownerRouteGuard = Object.freeze(ownerRouteGuard)
     this.deliveryStore = new DeliveryStore({ path: config.databasePath, maxTextBytes: config.maxTextBytes })
+    const configuredRayHome = typeof policy.rayHomeDir === 'function' ? policy.rayHomeDir() : undefined
+    this.workerTickets = configuredRayHome === undefined || configuredRayHome.trim() === ''
+      ? undefined
+      : new RayWorkerTicketRuntime({
+          rayHome: configuredRayHome,
+          policy,
+          deliveryStore: this.deliveryStore,
+          defaultWorkspace: config.defaultWorkspace,
+          defaultAgentPreset: config.defaultAgentPreset,
+          defaultProvider: config.agentProvider,
+          defaultModel: config.agentModel,
+          maxOutputTokens: config.agentMaxOutputTokens,
+          getAgentPresets: () => this.context.get('agentPresets'),
+          getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
+          isOwnerSessionAgent: agent => this.isOwnerSessionAgent(agent),
+          getRaySelf: () => this.raySelfRuntime(),
+          publishNarration: ticket => this.publishWorkerTicketNarration(ticket),
+          warn: message => this.context.logger.warn(message),
+        })
     if (config.restart !== undefined && (!isAbsolute(config.restart.databasePath)
       || config.restart.databasePath === config.databasePath || !this.ownerRoutes.has(config.restart.ownerRouteId))) {
       throw new Error('assistant-delivery: restart requires a separate absolute journal and an exact configured owner route')
@@ -1665,7 +1686,11 @@ export class AssistantDeliveryService extends Service {
       })
       const webRuntime = { ctx: runtimeCtx, leases: sessionLeases }
       this.nativeWebRuntime = webRuntime
-      runtimeCtx.effect(() => () => { if (this.nativeWebRuntime === webRuntime) this.nativeWebRuntime = undefined })
+      this.workerTickets?.attachRuntime(runtimeCtx)
+      runtimeCtx.effect(() => () => {
+        if (this.nativeWebRuntime === webRuntime) this.nativeWebRuntime = undefined
+        this.workerTickets?.detachRuntime(runtimeCtx)
+      })
       const unregister = this.registerInboundRuntime(new DshDeliveryRuntime(runtimeCtx, policy, {
         ...(this.restartStore === undefined ? {} : { restart: { store: this.restartStore, config: config.restart,
           invocationId: this.restartInvocationId,
@@ -1679,6 +1704,7 @@ export class AssistantDeliveryService extends Service {
         sessionNamespace: this.deliveryStore.instanceId(),
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
         getAgentPresets: () => runtimeCtx.get('agentPresets'),
+        getWorkerTickets: () => this.workerTickets,
         readOwnerApprovalStatus: agent => this.readOwnerApprovalStatus(agent),
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
         maxAutoContinuationTurns: config.agentMaxAutoContinuationTurns,
@@ -1752,6 +1778,9 @@ export class AssistantDeliveryService extends Service {
         }) },
       }))
       void this.drainModelSelectionSettlements().catch(() => {})
+      void this.workerTickets?.recoverUnfinishedTickets().catch(error => {
+        this.context.logger.warn(`assistant-delivery: worker ticket recovery failed: ${String(error)}`)
+      })
       return unregister
     })
     // Register behind Policy's risk reviewer, but before the generic Web remote.
@@ -1822,6 +1851,7 @@ export class AssistantDeliveryService extends Service {
         controller.abort(new Error('assistant-delivery is stopping'))
       }
       await this.stopInternal()
+      await this.workerTickets?.dispose()
       await this.registry.stop()
       this.restartStore?.close()
       this.deliveryStore.close()
@@ -8304,6 +8334,8 @@ export class AssistantDeliveryService extends Service {
       importedFiles: number
       missingCredentials: readonly { id: string; service: string; label?: string; required: boolean; reason: string }[]
     }
+    setSessionRole?: (sessionId: string, role: 'front' | 'worker') => void
+    registerDatabase?: (plugin: string, dbPath: string, migratedFrom?: string) => void
   } | undefined {
     try {
       const policy = (this.context as { get?: (key: string) => unknown }).get?.('assistantPolicy') as { raySelf?: unknown } | undefined
@@ -8311,6 +8343,90 @@ export class AssistantDeliveryService extends Service {
     } catch {
       return undefined
     }
+  }
+
+  workerTicketsRuntime(): RayWorkerTicketRuntime | undefined {
+    return this.active ? this.workerTickets : undefined
+  }
+
+  listRayWorkerTickets(limit = 20): readonly RayWorkerTicketSnapshot[] {
+    return this.active && this.workerTickets !== undefined ? this.workerTickets.listTickets({ limit }) : []
+  }
+
+  async recoverRayWorkerTickets(): Promise<number> {
+    this.assertActive()
+    return this.workerTickets === undefined ? 0 : await this.workerTickets.recoverUnfinishedTickets()
+  }
+
+  ownsWorkerSessionAgent(agent: Agent | undefined): boolean {
+    if (!this.active || this.workerTickets === undefined || agent === undefined || agent.session === undefined) return false
+    return this.workerTickets.ownsWorkerSession(String(agent.session.id))
+  }
+
+  private publishWorkerTicketNarration(ticket: Readonly<RayWorkerTicketSnapshot>): boolean {
+    if (!this.active || !ticket.narrationText) return false
+    const binding = ticket.sourceBindingId === undefined
+      ? undefined
+      : this.deliveryStore.getBinding(ticket.sourceBindingId)
+    if (binding === undefined || binding.status !== 'active' || !this.hasActivePrincipal(binding)) {
+      return false
+    }
+    const idempotencyKey = `ray-worker:${ticket.ticketId}:${ticket.status}:${ticket.updatedAt}`
+    const attention = { purpose: 'result' as const }
+    for (const route of this.ownerRoutes.values()) {
+      if (!bindingMatchesOwnerRoute(binding, route)) continue
+      try {
+        if (binding.conversation.channel === 'web') {
+          const owner = this.deliveryStore.getPrincipal(binding.principal)
+          if (owner === undefined) continue
+          this.enqueueOwnerNotification({
+            sourceId: 'assistant-delivery/worker-tickets',
+            ownerRouteId: route.id,
+            scope: {
+              principalId: externalPrincipalId(binding.principal),
+              principalRecordId: owner.id,
+              principalVersion: owner.version,
+              workspace: binding.workspace,
+              preset: binding.agentPreset,
+            },
+            sessionId: binding.sessionId,
+            idempotencyKey,
+            text: ticket.narrationText,
+            expiresAt: Date.now() + 86_400_000,
+            attention,
+          })
+          return true
+        }
+        this.enqueueBackgroundRoute({
+          sourceId: 'assistant-delivery/worker-tickets',
+          authorityId: route.id,
+          idempotencyKey,
+          text: ticket.narrationText,
+          format: 'plain',
+          attention,
+        })
+        return true
+      } catch {
+        // Fallback below if route notification is disallowed in this runtime configuration.
+      }
+    }
+    if (binding.conversation.channel !== 'web') {
+      try {
+        this.enqueueBackground({
+          sourceId: 'assistant-delivery/worker-tickets',
+          workspace: binding.workspace,
+          bindingId: binding.id,
+          idempotencyKey,
+          text: ticket.narrationText,
+          format: 'plain',
+          attention,
+        })
+        return true
+      } catch {
+        return false
+      }
+    }
+    return false
   }
 
   isOwnerSessionAgent(agent: Agent | undefined): boolean {

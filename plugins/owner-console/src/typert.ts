@@ -245,6 +245,24 @@ export const OwnerConsoleRaySelfStateSchema = z.object({
 }).readonly()
 export type OwnerConsoleRaySelfState = Readonly<z.infer<typeof OwnerConsoleRaySelfStateSchema>>
 
+export const OwnerConsoleRayWorkerTicketsSchema = z.object({
+  active: z.boolean(),
+  tickets: z.array(z.object({
+    ticketId: z.string().max(120),
+    sessionId: z.string().max(200),
+    title: z.string().max(300),
+    status: z.enum(['running', 'completed', 'handed_back', 'failed']),
+    sourceChannel: z.string().max(80).optional(),
+    usedTokens: z.number().int().nonnegative(),
+    tokenBudget: z.number().int().positive().optional(),
+    resultSummary: z.string().max(1_500).optional(),
+    handbackReason: z.string().max(600).optional(),
+    errorMessage: z.string().max(600).optional(),
+    updatedAt: z.number().int().nonnegative(),
+  }).readonly()).max(50).readonly(),
+}).readonly()
+export type OwnerConsoleRayWorkerTickets = Readonly<z.infer<typeof OwnerConsoleRayWorkerTicketsSchema>>
+
 export const FEISHU_QR_ONBOARDING_STATES = [
   'idle',
   'awaiting-scan',
@@ -1409,6 +1427,14 @@ export const TYPERT = {
       ],
       result: codec('@dsh-ray/owner-console#write', () => WRITE_RESULT),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1332, column: 3 },
+    },
+    {
+      id: '@dsh-ray/owner-console#ownerConsole/rayWorkerTickets',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'rayWorkerTickets',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: codec('@dsh-ray/owner-console#OwnerConsoleRayWorkerTickets', () => OwnerConsoleRayWorkerTicketsSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1350, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

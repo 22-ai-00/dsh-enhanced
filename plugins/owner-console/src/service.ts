@@ -31,7 +31,7 @@ import { detectFrozenSystemdProfile, SelfUpgradeProber } from './upgrade-probe.j
 import type {
   AssistantChatContext, AssistantVersionReport, AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
   AutonomySetupStatus, FeishuQrOnboardingSnapshot, OwnerConsoleControlActionResult, OwnerConsoleGrowthReport,
-  OwnerConsoleModelCatalog, OwnerConsoleRaySelfState, SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
+  OwnerConsoleModelCatalog, OwnerConsoleRaySelfState, OwnerConsoleRayWorkerTickets, SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
 } from './typert.js'
 import { collectOwnerConsoleVersionInfo } from './version-info.js'
 import { readOwnerConsoleGrowthReport } from './growth-report.js'
@@ -1531,6 +1531,44 @@ export class OwnerConsoleService extends TypertRemoteService {
     } catch (cause) {
       return writeFailure('assistant-policy', cause)
     }
+  }
+
+  /** Read active and recent persistent Ray worker tickets across channels. */
+  async rayWorkerTickets(): Promise<OwnerConsoleRayWorkerTickets> {
+    const delivery = this.host.get('assistantDelivery' as never, false) as {
+      workerTicketsRuntime?: () => unknown
+      listRayWorkerTickets?: (limit?: number) => readonly {
+        ticketId: string
+        sessionId: string
+        title: string
+        status: 'running' | 'completed' | 'handed_back' | 'failed'
+        sourceChannel?: string
+        usedTokens: number
+        tokenBudget?: number
+        resultSummary?: string
+        handbackReason?: string
+        errorMessage?: string
+        updatedAt: number
+      }[]
+    } | undefined
+    const runtime = typeof delivery?.workerTicketsRuntime === 'function' ? delivery.workerTicketsRuntime() : undefined
+    if (runtime === undefined || typeof delivery?.listRayWorkerTickets !== 'function') {
+      return Object.freeze({ active: false, tickets: [] })
+    }
+    const items = delivery.listRayWorkerTickets(25).map(t => Object.freeze({
+      ticketId: t.ticketId,
+      sessionId: t.sessionId,
+      title: t.title,
+      status: t.status,
+      ...(t.sourceChannel === undefined ? {} : { sourceChannel: t.sourceChannel }),
+      usedTokens: t.usedTokens,
+      ...(t.tokenBudget === undefined ? {} : { tokenBudget: t.tokenBudget }),
+      ...(t.resultSummary === undefined ? {} : { resultSummary: t.resultSummary.slice(0, 1_500) }),
+      ...(t.handbackReason === undefined ? {} : { handbackReason: t.handbackReason.slice(0, 600) }),
+      ...(t.errorMessage === undefined ? {} : { errorMessage: t.errorMessage.slice(0, 600) }),
+      updatedAt: t.updatedAt,
+    }))
+    return Object.freeze({ active: true, tickets: items })
   }
 }
 

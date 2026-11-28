@@ -29,6 +29,7 @@ describe('owner-console Ray Self integration & path fences', () => {
     expect(names).toContain('vetoRaySelf')
     expect(names).toContain('decideRayKernelProposal')
     expect(names).toContain('importRayHome')
+    expect(names).toContain('rayWorkerTickets')
 
     const dshHome = mkdtempSync(join(tmpdir(), 'oc-ray-dsh-'))
     const rayHome = mkdtempSync(join(tmpdir(), 'oc-ray-home-'))
@@ -190,6 +191,21 @@ describe('owner-console Ray Self integration & path fences', () => {
         vetoCalls.push(reason)
         return { ok: true, value: { applied: true, entry: 'assistant-policy', note: 'vetoed' } }
       },
+      rayWorkerTickets: async () => ({
+        ok: true,
+        value: {
+          active: true,
+          tickets: [{
+            ticketId: 'tkt_demo_1',
+            sessionId: 'ray_worker_1',
+            title: '并发调研架构',
+            status: 'running',
+            sourceChannel: 'lark',
+            usedTokens: 420,
+            updatedAt: 1000,
+          }],
+        },
+      }),
     }
     const ctrl = {
       remote,
@@ -212,6 +228,7 @@ describe('owner-console Ray Self integration & path fences', () => {
     expect(container.textContent).toContain('助人自强')
     expect(container.textContent).toContain('完成记忆沉淀')
     expect(container.textContent).toContain('prop-99')
+    expect(container.textContent).toContain('并发调研架构')
 
     const buttons = [...container.querySelectorAll('button')]
     const vetoBtn = buttons.find(b => b.textContent?.includes('1 轮推翻最近演化'))

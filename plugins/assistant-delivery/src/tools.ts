@@ -194,4 +194,193 @@ export function registerDeliveryTools(ctx: Context, service: AssistantDeliverySe
       }
     }
   }
+
+  const workerTickets = service.workerTicketsRuntime()
+  if (workerTickets !== undefined) {
+    const ticketDispatchTool = defineTool({
+      name: 'ticket_dispatch',
+      description: 'Dispatch a long-running or parallelizable task to a persistent recoverable Ray worker session and return immediately so the front conversation remains responsive.',
+      parameters: {
+        title: { type: 'string', required: true },
+        objective: { type: 'string', required: true },
+        scope_summary: { type: 'string' },
+        token_budget: { type: 'integer' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ticketId: { type: 'string', required: true },
+            sessionId: { type: 'string', required: true },
+            title: { type: 'string', required: true },
+            status: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      async execute(args, exec) {
+        const ticket = await workerTickets.dispatchTicket(exec.agent, {
+          title: args.title,
+          objective: args.objective,
+          ...(args.scope_summary === undefined ? {} : { scopeSummary: args.scope_summary }),
+          ...(args.token_budget === undefined ? {} : { tokenBudget: args.token_budget }),
+        })
+        return {
+          ticketId: ticket.ticketId,
+          sessionId: ticket.sessionId,
+          title: ticket.title,
+          status: ticket.status,
+        }
+      },
+    })
+
+    const ticketListTool = defineTool({
+      name: 'ticket_list',
+      description: 'List Ray persistent worker tickets across channels with live status, token usage, handback reason, or result summary.',
+      parameters: {
+        status: { type: 'string', enum: ['running', 'completed', 'handed_back', 'failed'] },
+        limit: { type: 'integer' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            tickets: {
+              type: 'array',
+              required: true,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  ticketId: { type: 'string', required: true },
+                  sessionId: { type: 'string', required: true },
+                  title: { type: 'string', required: true },
+                  status: { type: 'string', required: true },
+                  usedTokens: { type: 'integer', required: true },
+                  resultSummary: { type: 'string' },
+                  handbackReason: { type: 'string' },
+                  errorMessage: { type: 'string' },
+                  narrationText: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      async execute(args, exec) {
+        if (!service.isOwnerSessionAgent(exec.agent)) {
+          throw new Error('assistant-delivery: ticket_list requires an authenticated owner front session')
+        }
+        const tickets = workerTickets.listTickets({
+          ...(args.status === undefined ? {} : { status: args.status }),
+          ...(args.limit === undefined ? {} : { limit: args.limit }),
+        })
+        return {
+          tickets: tickets.map(t => ({
+            ticketId: t.ticketId,
+            sessionId: t.sessionId,
+            title: t.title,
+            status: t.status,
+            usedTokens: t.usedTokens,
+            ...(t.resultSummary === undefined ? {} : { resultSummary: t.resultSummary }),
+            ...(t.handbackReason === undefined ? {} : { handbackReason: t.handbackReason }),
+            ...(t.errorMessage === undefined ? {} : { errorMessage: t.errorMessage }),
+            ...(t.narrationText === undefined ? {} : { narrationText: t.narrationText }),
+          })),
+        }
+      },
+    })
+
+    const ticketFollowupTool = defineTool({
+      name: 'ticket_followup',
+      description: 'Route an owner interruption, clarification, or steering instruction to a persistent worker ticket via steer/followup without cancelling running work.',
+      parameters: {
+        ticket_id: { type: 'string', required: true },
+        message: { type: 'string', required: true },
+        mode: { type: 'string', enum: ['steer', 'followup'] },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ticketId: { type: 'string', required: true },
+            status: { type: 'string', required: true },
+            deliveryMode: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      async execute(args, exec) {
+        const res = await workerTickets.followupTicket(exec.agent, {
+          ticketId: args.ticket_id,
+          message: args.message,
+          ...(args.mode === undefined ? {} : { mode: args.mode }),
+        })
+        return {
+          ticketId: res.ticket.ticketId,
+          status: res.ticket.status,
+          deliveryMode: res.deliveryMode,
+        }
+      },
+    })
+
+    const ticketHandbackTool = defineTool({
+      name: 'ticket_handback',
+      description: 'Hand a worker ticket back to the front consciousness when requirements exceed scope or require owner clarification.',
+      parameters: {
+        reason: { type: 'string', required: true },
+        summary: { type: 'string', required: true },
+        suggested_next_step: { type: 'string' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ticketId: { type: 'string', required: true },
+            status: { type: 'string', required: true },
+            handbackReason: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      async execute(args, exec) {
+        const ticket = await workerTickets.handbackTicket(exec.agent, {
+          reason: args.reason,
+          summary: args.summary,
+          ...(args.suggested_next_step === undefined ? {} : { suggestedNextStep: args.suggested_next_step }),
+        })
+        return {
+          ticketId: ticket.ticketId,
+          status: ticket.status,
+          handbackReason: ticket.handbackReason ?? args.reason,
+        }
+      },
+    })
+
+    for (const ownerTool of [ticketDispatchTool, ticketListTool, ticketFollowupTool]) {
+      ctx.tools.register(ownerTool)
+      if (typeof ctx.assistantPolicy?.registerPreauthorizedTool === 'function') {
+        ctx.assistantPolicy.registerPreauthorizedTool(
+          ctx,
+          ownerTool,
+          execution => service.isOwnerSessionAgent(execution.agent),
+          { denialReason: `assistant-delivery: ${ownerTool.name} is restricted to authenticated owner front sessions` },
+        )
+      }
+    }
+    ctx.tools.register(ticketHandbackTool)
+    if (typeof ctx.assistantPolicy?.registerPreauthorizedTool === 'function') {
+      ctx.assistantPolicy.registerPreauthorizedTool(
+        ctx,
+        ticketHandbackTool,
+        execution => service.ownsWorkerSessionAgent(execution.agent),
+        { denialReason: 'assistant-delivery: ticket_handback is restricted to active persistent worker sessions' },
+      )
+    }
+  }
 }

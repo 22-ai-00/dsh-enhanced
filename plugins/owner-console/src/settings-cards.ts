@@ -12,7 +12,7 @@ import {
   type AutonomySetupStatus, type CodingToolProbe, type FeishuQrOnboardingSnapshot, type FeishuQrOwnerBinding,
   type GrowthDataState, type IntakeAgreementAvailability,
   type OwnerConsoleAssistantOverview, type OwnerConsoleControlActionResult, type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement,
-  type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleModelCatalog, type OwnerConsoleRaySelfState, type OwnerConsoleStatus,
+  type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleModelCatalog, type OwnerConsoleRaySelfState, type OwnerConsoleRayWorkerTickets, type OwnerConsoleStatus,
   type OwnerConsoleTrendSnapshotItem, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
   type SelfUpgradePreview, type SelfUpgradeStatus, type SetupDoctorIssue, type SetupDoctorReport,
 } from './typert.js'
@@ -306,6 +306,7 @@ export type ConsoleRemote = Readonly<{
   vetoRaySelf?(targetEntryId: string, targetCapabilityId: string, reason: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
   decideRayKernelProposal?(proposalId: string, decision: 'approved' | 'rejected'): Promise<RemoteResult<OwnerConsoleWriteResult>>
   importRayHome?(sourceDir: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  rayWorkerTickets?(): Promise<RemoteResult<OwnerConsoleRayWorkerTickets>>
 }>
 
 export type OwnerConsoleNavigation = Readonly<{ openConversation(): void; openPlugins(): void }>
@@ -2657,6 +2658,7 @@ export function ProactiveWorkItemsCard({ ctrl }: Readonly<{ ctrl: ConsoleControl
 
 export function RaySelfPanelCard({ ctrl, remote }: Readonly<{ ctrl: ConsoleController; remote: ConsoleRemote }>) {
   const [rayState, setRayState] = useState<OwnerConsoleRaySelfState>()
+  const [workerTickets, setWorkerTickets] = useState<OwnerConsoleRayWorkerTickets>()
   const [loading, setLoading] = useState(false)
   const [failed, setFailed] = useState('')
   const [vetoReason, setVetoReason] = useState('')
@@ -2674,6 +2676,11 @@ export function RaySelfPanelCard({ ctrl, remote }: Readonly<{ ctrl: ConsoleContr
       setLoading(false)
       setFailed(cause instanceof Error ? cause.message : String(cause))
     })
+    if (typeof remote.rayWorkerTickets === 'function') {
+      void remote.rayWorkerTickets().then(res => {
+        if (res.ok) setWorkerTickets(res.value)
+      }, () => {})
+    }
   }
 
   useEffect(() => {
@@ -2739,6 +2746,15 @@ export function RaySelfPanelCard({ ctrl, remote }: Readonly<{ ctrl: ConsoleContr
                 ? el('div', { style: listStyle },
                   ...rayState.recentAutobiography.slice(-3).reverse().map(entry =>
                     row(`${entry.kind}${entry.vetoed ? '（已否决）' : ''}`, boundedLine(entry.summary, 160))))
+                : null,
+              workerTickets !== undefined && workerTickets.tickets.length > 0
+                ? el('div', { style: gridStyle },
+                  el('p', { style: subheadStyle }, '持久后台任务（Worker Tickets）'),
+                  el('div', { style: listStyle },
+                    ...workerTickets.tickets.slice(0, 5).map(ticket => row(
+                      `${ticket.title} · ${ticket.status === 'running' ? '运行中' : ticket.status === 'completed' ? '已完成' : ticket.status === 'handed_back' ? '已交回' : '失败'}`,
+                      boundedLine(ticket.handbackReason ?? ticket.resultSummary ?? ticket.errorMessage ?? ticket.ticketId, 160),
+                    ))))
                 : null,
               el('div', { style: actionsStyle },
                 el('input', {

@@ -610,3 +610,12 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 每条进度在交给 adapter 前审计一次，按 `lane` 来源的 `result` 计：字数与字素按一次运行（binding + eventId + origin）累计，超过 `attentionWordCaps.result` / `attentionGraphemeCaps.result` 记 `would-attach`，拆成多条气泡不能规避；估值与 id 外露原因码在本次运行内保持。计量文本取 adapter 可能展示的上界（步骤、待办、工具名与参数、结果预览、错误码），与通道详情模式无关。`inspectProgressAttentionAudit({ afterSequence?, limit? })` 只读分页（默认 100、最多 500），不含正文，返回 `durable: false`、环形淘汰数 `evicted` 与 `processLocalWriteFailures`。审计只记录，不改变进度发送。
 
 v31 `delivery_attention_audit` 以 `outbox_id` 为主键并外键到 Outbox，`lane` 为封闭集合，进度不是 Outbox 行，因此未复用该表、未改 schema：进度审计只保存在本进程内（最近 1000 条、最多 256 个未结束运行），Host 重启清零。
+
+## Ray 前台意识与持久 Worker（P2）
+
+当 `assistantPolicy.rayHomeDir()` 已配置时，`assistant-delivery` 额外挂载独立于 `delivery_store` 与 WorkItems 的持久 Worker 台账 `<rayHome>/state/tickets.sqlite`（表 `ray_tickets` 与 `ray_ticket_events`，不改动既有 `state.sqlite` 或 WorkItems v14 schema）：
+
+- **前台与 Worker 分离**：前台会话保持敏捷响应，通过预授权工具 `ticket_dispatch`、`ticket_list`、`ticket_followup`（经由 `AssistantPolicyService.registerPreauthorizedTool` 绑定 `isOwnerSessionAgent`）将长任务交给以 `ctx.agents.create`/`resume` 运行的独立持久化 Worker 会话（标注为 `worker` 角色而非 `subagent`）。
+- **插话不取消**：主人中途发来补充要求时，前台通过 `ticket_followup` 原生注入 `agent.steer` 或 `agent.followup` 到正在运行的 Worker 会话，不中断已有进度。
+- **交回与转述**：Worker 仅持有预授权的 `ticket_handback`（限定 `ownsWorkerSessionAgent`）；遇到超出工单范围的需求或需要主人再确认时交回前台；工单结束或交回时优先复用现有 Outbox/通知守卫通道推送自然语言转述，并在下一轮前台 `ray:worker-tickets` 上下文中保底同步。
+- **冷恢复与命令**：宿主重启重新注入 `agents`/`sessions`/`llm` 后，自动经 `ctx.agents.resume` 恢复未完成的 `running` 工单；`/status` 附带工单摘要，`/tickets` 查看当前及近期 Worker 列表。

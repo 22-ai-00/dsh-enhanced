@@ -671,7 +671,7 @@ export class AssistantPolicyService extends Service {
         'plugin_source_revision_targets', 'plugin_source_revision_inspect', 'plugin_source_revise'].includes(definition.name) ? 'dsh-ray-assistant-growth-driver'
       : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-ray-assistant-skills'
       : ['ray_read_self', 'ray_evolve_self', 'ray_propose_kernel_change'].includes(definition.name) ? ['dsh-ray-assistant-policy', 'AssistantPolicyService']
-      : ['ray_owner_veto', 'ray_home_import', 'ray_teach_export', 'ray_teach_import'].includes(definition.name) ? ['dsh-ray-assistant-delivery', 'AssistantDeliveryService']
+      : ['ray_owner_veto', 'ray_home_import', 'ray_teach_export', 'ray_teach_import', 'ticket_dispatch', 'ticket_list', 'ticket_followup', 'ticket_handback'].includes(definition.name) ? ['dsh-ray-assistant-delivery', 'AssistantDeliveryService']
       : undefined
     if (expectedCaller === undefined || !(Array.isArray(expectedCaller)
       ? expectedCaller.includes(caller.fiber.name) : caller.fiber.name === expectedCaller)) {
