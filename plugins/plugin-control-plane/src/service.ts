@@ -36,6 +36,8 @@ import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-ray/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-ray/assistant-evaluation'
 import type { AssistantAutomationsService } from '@dsh-ray/assistant-automations'
+import type { AssistantPolicyService } from '@dsh-ray/assistant-policy'
+import { RayStatefulHotplugRuntime } from './ray-stateful-hotplug.js'
 import { isSourceOwnerContinuation, isPluginRevisionTaskSource, anySourceGrowthRunDigest as sourceGrowthRunDigest, validateAnySourceGrowthRunBinding as validateSourceGrowthRunBinding, validateWorkItemGrowthAuthorityPins, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
   validateRevisionAcceptanceAuthorityRef, verifyPluginRevisionVerificationCertificate, type RevisionAcceptanceAuthorityRef,
   validateRevisionRegressionAcceptanceAuthorityRef, verifyPluginRevisionRegressionCertificate,
@@ -413,6 +415,7 @@ export class PluginControlPlaneService extends Service {
   private growthProviderDraining = false
   private workItemCreationFrame:{gapId:string;run:Readonly<WorkItemSourceGrowthRunBinding>;source:WorkItemEngineeringSource}|undefined
   private workItemRevisionFrame:{gapId:string;run:Readonly<WorkItemRevisionSourceGrowthRunBinding>;source:WorkItemEngineeringSource}|undefined
+  private rayHotplugRuntime: RayStatefulHotplugRuntime | undefined
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'pluginControlPlane')
@@ -1162,6 +1165,31 @@ export class PluginControlPlaneService extends Service {
         }
       }, 'plugin-control-plane.source-jobs')
     })
+    ctx.inject(['assistantPolicy' as never], policyCtx => {
+      policyCtx.effect(async () => {
+        const policy = policyCtx.get('assistantPolicy' as never) as AssistantPolicyService | undefined
+        const raySelf = policy?.raySelf
+        if (policy === undefined || raySelf === undefined) return () => {}
+        await raySelf.whenReady()
+        this.abort.signal.throwIfAborted()
+        if (this.abort.signal.aborted) return () => {}
+        const hotplug = new RayStatefulHotplugRuntime({
+          hostCtx: ctx,
+          callerCtx: this.ctx,
+          policy,
+          raySelf,
+        })
+        this.rayHotplugRuntime = hotplug
+        return async () => {
+          if (this.rayHotplugRuntime === hotplug) this.rayHotplugRuntime = undefined
+          await hotplug.close()
+        }
+      }, 'plugin-control-plane.ray-hotplug')
+    })
+  }
+
+  rayHotplug(): RayStatefulHotplugRuntime | undefined {
+    return this.rayHotplugRuntime
   }
 
   ownsForegroundTaskObservationRegistration = (registration: ForegroundTaskObservationRegistration): boolean =>

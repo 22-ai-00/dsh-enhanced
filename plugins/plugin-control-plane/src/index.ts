@@ -74,6 +74,22 @@ export type { SourceMaintenanceRecord, SourceMaintenanceAnchor } from './source-
 export { CANDIDATE_PLUGIN_KINDS, normalizeCandidatePluginKind } from './source-creation.js'
 export type { CandidatePluginKind } from './source-creation.js'
 export type { EnqueueSourceJobInput, SourceJobCaller } from './source-jobs.js'
+export {
+  RAY_SPINE_AND_KERNEL_PLUGIN_DENYLIST,
+  RayStatefulHotplugRuntime,
+  RayStatefulHotplugService,
+  type RayHotplugPluginFile,
+  type RayHotplugPluginSummary,
+  type RayHotplugPrecondition,
+  type RayHotplugPromoteInput,
+  type RayHotplugPromoteResult,
+  type RayHotplugRevisionRecord,
+  type RayHotplugRollbackResult,
+  type RayHotplugStageInput,
+  type RayHotplugStageResult,
+  type RayStatefulPluginKind,
+  type RayStatefulPluginStatus,
+} from './ray-stateful-hotplug.js'
 
 export function apply(ctx: Context, config: Config): void {
   new PluginControlPlaneService(ctx, config)

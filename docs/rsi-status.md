@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-11-28（已完成 **P1 自我与家**、**P2 前台意识 + 持久 Worker**、**P3 情景记忆 + 无 LLM 表面裁剪** 与 **P4 反思、志向、点子池、精力与成长面板**；当前基线 `v0.2.4`，下一步实施 **P5 自创有状态插件分级热插拔** 与 **P6 全量传授包**，并执行全仓 `pnpm check` 与 `v0.2.5` 阶段发布评估）。完整成功条件见[验收合同](rsi-acceptance.md)，演进设计见[Ray 自主成长设计](ray-autonomous-self.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
+更新：2026-11-28（已完成 **P1 自我与家**、**P2 前台意识 + 持久 Worker**、**P3 情景记忆 + 无 LLM 表面裁剪**、**P4 反思、志向、点子池与精力账本** 与 **P5 自创有状态插件分级热插拔**；当前基线 `v0.2.4`，下一步实施 **P6 全量传授包** 并执行全仓 `pnpm check` 与 `v0.2.5` 阶段发布评估）。完整成功条件见[验收合同](rsi-acceptance.md)，演进设计见[Ray 自主成长设计](ray-autonomous-self.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
 
 ## 目标
 
@@ -20,6 +20,8 @@
   - `@dsh-ray/assistant-policy`（`src/ray-energy-runtime.ts`、`ray-home-runtime.ts`、`service.ts`）：在受内核保护的 `<rayHome>/energy/energy.sqlite` 维护每日 token 精力预算、约 20% 剩余自由精力（`freeEnergyRatioBp`）、85% 低精力 `windDown` 收尾保护（owner 主任务永远不受阻），以及内核冻结口径的客观成长统计（`newly_regressed` 新伤退化 vs `persistent_gap` 固有缺口，并明确标记自身阶段目标进展为 `low-self-reported`）；阻断直接工具或 shell 写入 `<rayHome>/energy`；扩展 `ray_evolve_self` 结构化 JSON 更新三层志向。
   - `@dsh-ray/assistant-dreaming` & `@dsh-ray/assistant-proactive`（`src/ray-cognitive-loop.ts`、`index.ts`）：打通 Dreaming `onIdeaRecorded` 至 `<rayHome>/ideas/ideas.sqlite` 统一点子池，按兴趣与价值分为三级响应（`silent_explore` 静默探索 / `natural_mention` 日上限内经 `ray:proactive-mentions` 顺口提及 / `propose_work` 涉及外部副作用先征求 owner 授权），接入 `accepted`/`ignored`/`annoyed` 反应动态调参、`<rayHome>/reflections/*.jsonl` 四级反思节奏（回味/每日/每周/阶段复盘维持 2–4 个可衡量活跃阶段目标）、有界候选因果账本（200 条）与预授权工具 `ray_idea_pool` / `ray_reflect`。
   - `@dsh-ray/assistant-delivery` / `@dsh-ray/lark-channel` / `@dsh-ray/owner-console`：新增只读 `/learning growth` 命令及飞书 Card 2.0 渲染，并在桌面端 `RaySelfPanelCard` 挂载 `rayGrowthReport` TYPERT RPC 实时展示内核精力与独立成长指标（不改动既有 `/learning` 偏好帮助及工作项账本）。
+- **P5 自创有状态插件分级热插拔（已完成）**：
+  - `@dsh-ray/plugin-control-plane`（`src/ray-stateful-hotplug.ts`、`service.ts`、`index.ts`、`README.md`）与 `@dsh-ray/assistant-policy`（`service.ts` 预授权白名单）：在 `<rayHome>/plugins/{sources,artifacts,hotplug.sqlite}`（取消 30 天强删）实现有状态插件（`service`/`channel`/`ui`/`tool`）**三级无重启生命周期**：Stage 1 在隔离子 `Context` 试用、运行独立探针后释放试用 Fiber 才写回 `verificationDigest`；Stage 2 校验 `[iff]` 前置服务条件与不可变目录 SHA-256 后直接热加载进活 Host `Context`（保持已有会话与状态零中断），并支持 `[iff]` 条件收敛与二次试跑；Stage 3 在观察期探针失败或 Owner 1 轮 `/veto` 时通过 Cordis Fiber 释放直接无重启回滚至上一稳定版本，并同步记入自传与 `assistant-proactive` 候选结果账本（`rolled_back`）。严格拒绝脊髓与内核插件（`@dsh-ray/plugin-control-plane`、`@dsh-ray/assistant-delivery`、`@dsh-ray/assistant-policy`、`@dsh-ray/assistant-verifier`）及任何引用 `<rayHome>/kernel`、`energy.sqlite` 或凭据的代码。
 - **发布、包身份与 Host 基线**：[release-manifest](../release-manifest.json) 当前 `current: 0.2.4`、`pending: null`（40 个 `@dsh-ray/*@0.2.4` 包），`pinnedHostVersion: 0.2.2-rc.5`、`verifiedHostRange: >=0.2.2-rc.5 <0.3.0`，Node `24.9.0`（`pnpm@11.7.0`），Cordis/Loader/Include/Group 锁定 `4.1.0`/`1.1.0`/`1.1.0`/`1.1.0`。
 - **v0.2.4 `pnpm` 隔离传递解析、旧实目录清理与 `0.2.2`–`0.2.3` 基线**：`scripts/install/lifecycle-profile.mjs` 为 `SUPERVISED_OPERATOR_PROGRAM` 与 `SUPERVISED_CAPABILITY_PROGRAM` 注入 `SUPERVISED_PROFILE_RESOLVER_SNIPPET`，在 `pnpm` `nodeLinker: isolated` 下经 `@dsh-ray/personal-assistant` / `@dsh-ray/lark-channel` 锚点解析未直接声明的传递插件（并显式拦截破损顶层旧目录回退）；`@dsh-ray/cli`（`packages/cli/src/upgrade.ts`）在 `pnpm` profile 执行 `pnpm install` 前清理 `KNOWN_ENHANCED_PACKAGES` 遗留非符号链接旧实目录（保留 `.pnpm`/本地源码符号链接、非 registry 依赖与自演化插件目录），使二次 `dsh-ray update --all` 成为幂等 no-op；延续 `v0.2.3` 的 `@dsh-ray/assistant-isolation` `windows-job` 宿主目录 env/DLL 缓存/线程池冷启动修复、`HOST_PEER_RESOLVER_SNIPPET` 外部 Host `@deepseek-ai/*` 解析、`@dsh-ray/owner-console` `store/v10`/`v11` 对账与 `@dsh-ray/cli` macOS 内置 `pnpm` 优先/`--profile` 透传，以及 `v0.2.2` 的 ACP 多模态输入/`128000` 上下文压缩、`/update` 无人值守恢复与 `--to-npm` 迁移。
 - **R3 默认自迭代、M6 实时档案防死锁与预派发进度 UX**：常规队列默认启用自迭代套件，且在 M6（`2fba9516`）修复了 live-profile 死锁与误报问题：`@dsh-ray/assistant-verifier` 保留代码 `Config` 默认 fail-closed `requireAcceptance: true`，同时在 `cordis.patch.yml` 及 `owner-console` / `assistant-web-owner` / `lark-channel` 档案编译器中对空 `profiles: []` 默认配置 `requireAcceptance: false` 并完整保留已有 `databasePath` 与评审字段（避免 Cordis 整块替换覆盖必需配置）；`@dsh-ray/assistant-dreaming` `cordis.patch.yml` 默认写入 `databasePath` 且保持 `enabled` 未启用直至 6 项前提满足；`@dsh-ray/assistant-delivery` 将 `publishProgress({ kind: 'started' })` 移至验收与执行准备及 `markDispatching()` 之后，并将非瞬态验收配置错误标记为不可重试（`acceptance-profile-missing`），避免零执行时误触发「执行被中断，已有操作的结果尚未确认。」。
@@ -30,18 +32,19 @@
 
 - **平台验证边界（Linux 宿主与 Windows Named Pipe 边界）**：当前物理验证宿主为 Linux，Linux 原生隔离/cgroup、`SO_PEERCRED`、独立沙箱仓与全部服务端链路已在本地实测通过；macOS（`macos-seatbelt`、`LOCAL_PEERCRED`、`launchd`）与 Windows（`windows-job`、Named Pipe/ACL）路径由跨平台 CI（`macos-verify`、`windows-acp-smoke`）门禁覆盖。在真实 Windows Node.js `net.Socket` Named Pipe 上，`socket._handle` 不暴露底层 Win32 句柄，默认 `inspectWindowsPeerCredentials` 按 fail-closed 返回 `undefined`（仅在具备句柄或注入 FFI 绑定时执行进程与 `TokenUser` SID 核验）。
 - **D 类纵向验证边界**：真实用户在长期普通使用中的质量、成本、延迟、打扰分布与长期因果收益（D 类纵向证据）属于发布后（post-release）真实使用观测范围，显式排除在发版前工程验收门禁之外。
-- **下一步验收（P5 分级热插拔、P6 传授模式与全仓 `pnpm check`）**：实现 **P5 自创有状态插件分级热插拔**（隔离 Trial Loader -> 活 Host Cordis 热加载 -> Fiber 释放无重启回滚与 1 轮 `/veto`，保护脊髓插件）与 **P6 全量传授包**（`ray-teaching-pack/v1`、对端独立重验证与同名比较合并），随后执行全仓 `pnpm check` 并按 [发布协议](releasing.md) 评估 `v0.2.5` 发布。
+- **下一步验收（P6 全量传授包与全仓 `pnpm check`）**：实现 **P6 全量传授包**（`ray-teaching-pack/v1` 导出/导入、对端 Stage 1 独立重验证、受教 provenance 标记与同名能力防降级比较合并，保留对端身份/内核/自传），随后执行全仓 `pnpm check` 并按 [发布协议](releasing.md) 评估 `v0.2.5` 发布。
 - **后续基线与纵向观察**：基于已发布的 `@dsh-ray/*@0.2.4` 完成本机 `0.2.3 -> 0.2.4` 升级、幂等 no-op 与 capability 探针实测、外部节点（`xtorybot` / macOS Desktop）升级与隔离临时 `DSH_HOME` 公网 `install-npm.sh` 冒烟，以及日常普通使用中的 D 类长期纵向观察。
 
 ## 最新验证
 
-- **P4 反思、志向、点子池、精力与成长面板验证（`dev` 当前提交）**：
-  - `pnpm run validate`（36 插件 + 4 共享包）、`pnpm run lint`（2049 文件 0 警告/0 错误）；
-  - 根端到端验收 `tests/ray-reflection-proactive-p4.spec.ts` + P1–P3 + `optional-peer-imports.spec.ts`（5 文件 81 tests passed：Kernel 精力/写保护、Dreaming->3 级点子池与反应调参、4 节律反思、`/learning growth` Card 2.0、`owner-console` `rayGrowthReport` 与子代理权限边界）；
-  - `@dsh-ray/assistant-proactive`（9 文件 79 passed）、`@dsh-ray/assistant-dreaming`（7 文件 68 passed）、`@dsh-ray/owner-console`（28 文件 274 passed）、`@dsh-ray/lark-channel`（86 文件 1558 passed / 8 skipped）、`@dsh-ray/assistant-policy`（25 文件 580 passed / 2 skipped）、`@dsh-ray/assistant-delivery`（74 文件 1534 passed）；
-  - 上述 6 个变更包 `pnpm pack --dry-run` 均通过。
+- **P5 自创有状态插件分级热插拔验证（`dev` 当前提交）**：
+  - `pnpm run validate`（36 插件 + 4 共享包）、`pnpm run lint`（2051 文件 0 警告/0 错误）；
+  - `@dsh-ray/plugin-control-plane` `build` / `typecheck` 及根端到端回归 `tests/ray-hotplug-plugins-p5.spec.ts` + P1–P4 + `optional-peer-imports.spec.ts`（6 文件 **82 passed (82)**：有状态服务 Stage 1 隔离试用 -> Stage 2 活进程零重启热加载 -> 退化 `v2` 自动 Fiber 释放回滚 `v1`、`[iff]` 前置条件收敛、Owner 1 轮 `/veto` 释放、脊髓/内核拒绝及 `ray_plugin_*` 权限边界）；
+  - `@dsh-ray/plugin-control-plane` 全套单元测试（**114 passed | 3 skipped (117)** 文件、**1753 passed | 7 skipped (1760)** 用例）及 `plugin-control-plane` / `assistant-policy` `pack --dry-run` 通过。
+- **P4 反思、志向、点子池、精力与成长面板验证（`dev` `5bbed22c`）**：
+  - `@dsh-ray/assistant-proactive`（9 文件 79 passed）、`@dsh-ray/assistant-dreaming`（7 文件 68 passed）、`@dsh-ray/owner-console`（28 文件 274 passed）、`@dsh-ray/lark-channel`（86 文件 1558 passed / 8 skipped）、`@dsh-ray/assistant-policy`（25 文件 580 passed / 2 skipped）、`@dsh-ray/assistant-delivery`（74 文件 1534 passed）。
 - **P3 情景记忆 + 无 LLM 表面裁剪验证（`dev` `70d4722c`）**：
-  - `@dsh-ray/personal-memory`（17 文件 209 passed）；`tests/ray-episodic-memory-p3.spec.ts` 等 4 项重型端到端 `VITEST_MAX_WORKERS=3 DSH_NIGHTLY_FULL_MATRIX=0` 复跑 `4 files / 65 passed`。
+  - `@dsh-ray/personal-memory`（17 文件 209 passed）；4 项重型端到端 `VITEST_MAX_WORKERS=3 DSH_NIGHTLY_FULL_MATRIX=0` 复跑 `4 files / 65 passed`。
 - **P2 前台意识 + 持久 Worker 验证（`dev` `5891dec6`）**：`@dsh-ray/owner-console`（28 文件 274 tests passed）、`@dsh-ray/assistant-delivery`（74 文件 1534 tests passed）。
 - **P1 自我与家验证（`dev` `6a04bf55`）**：`@dsh-ray/assistant-growth-contract`（12 文件 169 tests passed）、`@dsh-ray/lark-channel`（3 文件 79 tests passed）、`@dsh-ray/cli`（20 文件 358 tests passed）。
 - **全仓门禁基线（`v0.2.4` `28bb627b`）**：`pnpm check` 40/40 通过，`.github/workflows/ci.yml` Run `46051946556` 8/8 全量 `success`。

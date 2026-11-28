@@ -80,6 +80,7 @@ Agent 工具：
 - `plugin_gap_rankings`：读取按 ROI 排序的开放缺口。
 - `plugin_discover`：只读匹配 owner-provided、完整性固定的 catalog。
 - `plugin_activation_plan`：为一个精确 gap/candidate/profile 创建不可变、待审批计划，不安装任何内容。
+- `ray_plugin_stage_trial` / `ray_plugin_promote` / `ray_plugin_rollback` / `ray_plugin_list`：仅面向启用 `Ray Home` 的活跃非子代理 Ray 会话（子代理始终拒绝）；在 `<rayHome>/plugins/{sources,artifacts,hotplug.sqlite}`（无 30 天 TTL 强删）内完成**隔离 child Context Stage 1 Trial -> 活 Host Cordis Stage 2 热加载（零重启）-> Fiber 释放无重启回滚与 1 轮 `/veto`**；严格拒绝 `@dsh-ray/plugin-control-plane`、`@dsh-ray/assistant-delivery`、`@dsh-ray/assistant-policy`、`@dsh-ray/assistant-verifier` 等脊髓/内核插件及任何读写 `<rayHome>/kernel`、`energy.sqlite` 或凭据的代码。
 
 计划、审批、phase operation、签名 receipt 和终态 receipt 都写入 owner-private SQLite。幂等键、revision CAS、activation id 和递增 fence 共同阻止旧 worker、ABA 和跨计划重放。
 
