@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-11-28（完成 **P1 自我与家** 与 **P2 前台意识 + 持久 Worker** 并在 `dev` 验证通过；当前 `v0.2.4` 基线为纯 GitHub OIDC 40 包发行，下一步进入 **P3 情景记忆 + 无 LLM 表面裁剪**）。完整成功条件见[验收合同](rsi-acceptance.md)，演进设计见[Ray 自主成长设计](ray-autonomous-self.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
+更新：2026-11-28（已完成 **P1 自我与家**、**P2 前台意识 + 持久 Worker** 与 **P3 情景记忆 + 无 LLM 表面裁剪**；当前基线 `v0.2.4`，下一步进行全仓 `pnpm check`、`v0.2.5` 阶段发布评估与 **P4 反思、志向、点子池与精力账本**）。完整成功条件见[验收合同](rsi-acceptance.md)，演进设计见[Ray 自主成长设计](ray-autonomous-self.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
 
 ## 目标
 
@@ -14,6 +14,8 @@
   - `@dsh-ray/cli`（`dsh-ray home status|init|migrate|export|import`）：支持 Safe SQLite (`VACUUM INTO`) 迁移非凭据账本、`personal-wiki/vault` 与 `rsi-sources` 至 `Ray Home` 并重写 `cordis.patch.yml`，凭据保留原机钥匙串/$DSH_HOME，克隆包排除凭据并生成重认证清单，`growth-report` / `version-report` 放行 `rayHome`。
 - **P2 前台意识 + 持久 Worker（已完成）**：
   - `@dsh-ray/assistant-delivery`（`src/ray-worker-runtime.ts`、`service.ts`、`agent-runtime.ts`、`tools.ts`）与 `@dsh-ray/assistant-policy`（预授权白名单）：在 `<rayHome>/state/tickets.sqlite` 维护 `ray_tickets` 与 `ray_ticket_events`（不改动 `delivery_store` 与 WorkItems v14 schema），通过 `ctx.agents.create`/`resume` 运行独立持久化 `worker` 会话；前台保持敏捷响应并支持 `ticket_dispatch` / `ticket_list` / `ticket_followup`（经原生 `agent.steer`/`agent.followup` 路由插话而不取消运行中 worker），Worker 持有专属预授权 `ticket_handback`，支持宿主冷重启自动恢复与跨渠道自然语言转述，并提供 `/tickets`、`/status` 摘要与 `owner-console` `rayWorkerTickets` 面板联动。
+- **P3 情景记忆 + 无 LLM 表面裁剪（已完成）**：
+  - `@dsh-ray/personal-memory`（`src/ray-episodic-runtime.ts`、`service.ts`、`tools.ts`、`index.ts`）、`@dsh-ray/assistant-delivery`（`sessionChannel`）与 `@dsh-ray/assistant-policy`（`episode_recall` 预授权白名单）：在 `<rayHome>/life-stream/turns.jsonl` 只追加保存跨渠道（飞书 / Desktop / Web / Worker）原文对话流，并在 `<rayHome>/episodes/episodes.sqlite`（FTS5 + CJK `LIKE`）按主题相似度、空闲超时与 `ticketId` 自动切分情景片段（注册到 `RayHomeRuntime` SQLite 安全迁移清单）；前台注册 `episode_recall` 预授权只读工具与 `ray:episodic-recall` runtime context（`order: 238`），并在 `agent/pre-step` 达到节点预算上限时零 LLM 总结调用执行 `compaction/prune` + `user/message`（`replace` 指针消息）无损表面裁剪（保留最近节点、不劈裂成对 `tool-call`/`tool-result`、完整保留 `AgentLoopRequestAttestor`）。
 - **发布、包身份与 Host 基线**：[release-manifest](../release-manifest.json) 当前 `current: 0.2.4`、`pending: null`（40 个 `@dsh-ray/*@0.2.4` 包），`pinnedHostVersion: 0.2.2-rc.5`、`verifiedHostRange: >=0.2.2-rc.5 <0.3.0`，Node `24.9.0`（`pnpm@11.7.0`），Cordis/Loader/Include/Group 锁定 `4.1.0`/`1.1.0`/`1.1.0`/`1.1.0`。
 - **v0.2.4 `pnpm` 隔离传递解析、旧实目录清理与 `0.2.2`–`0.2.3` 基线**：`scripts/install/lifecycle-profile.mjs` 为 `SUPERVISED_OPERATOR_PROGRAM` 与 `SUPERVISED_CAPABILITY_PROGRAM` 注入 `SUPERVISED_PROFILE_RESOLVER_SNIPPET`，在 `pnpm` `nodeLinker: isolated` 下经 `@dsh-ray/personal-assistant` / `@dsh-ray/lark-channel` 锚点解析未直接声明的传递插件（并显式拦截破损顶层旧目录回退）；`@dsh-ray/cli`（`packages/cli/src/upgrade.ts`）在 `pnpm` profile 执行 `pnpm install` 前清理 `KNOWN_ENHANCED_PACKAGES` 遗留非符号链接旧实目录（保留 `.pnpm`/本地源码符号链接、非 registry 依赖与自演化插件目录），使二次 `dsh-ray update --all` 成为幂等 no-op；延续 `v0.2.3` 的 `@dsh-ray/assistant-isolation` `windows-job` 宿主目录 env/DLL 缓存/线程池冷启动修复、`HOST_PEER_RESOLVER_SNIPPET` 外部 Host `@deepseek-ai/*` 解析、`@dsh-ray/owner-console` `store/v10`/`v11` 对账与 `@dsh-ray/cli` macOS 内置 `pnpm` 优先/`--profile` 透传，以及 `v0.2.2` 的 ACP 多模态输入/`128000` 上下文压缩、`/update` 无人值守恢复与 `--to-npm` 迁移。
 - **R3 默认自迭代、M6 实时档案防死锁与预派发进度 UX**：常规队列默认启用自迭代套件，且在 M6（`2fba9516`）修复了 live-profile 死锁与误报问题：`@dsh-ray/assistant-verifier` 保留代码 `Config` 默认 fail-closed `requireAcceptance: true`，同时在 `cordis.patch.yml` 及 `owner-console` / `assistant-web-owner` / `lark-channel` 档案编译器中对空 `profiles: []` 默认配置 `requireAcceptance: false` 并完整保留已有 `databasePath` 与评审字段（避免 Cordis 整块替换覆盖必需配置）；`@dsh-ray/assistant-dreaming` `cordis.patch.yml` 默认写入 `databasePath` 且保持 `enabled` 未启用直至 6 项前提满足；`@dsh-ray/assistant-delivery` 将 `publishProgress({ kind: 'started' })` 移至验收与执行准备及 `markDispatching()` 之后，并将非瞬态验收配置错误标记为不可重试（`acceptance-profile-missing`），避免零执行时误触发「执行被中断，已有操作的结果尚未确认。」。
@@ -24,16 +26,16 @@
 
 - **平台验证边界（Linux 宿主与 Windows Named Pipe 边界）**：当前物理验证宿主为 Linux，Linux 原生隔离/cgroup、`SO_PEERCRED`、独立沙箱仓与全部服务端链路已在本地实测通过；macOS（`macos-seatbelt`、`LOCAL_PEERCRED`、`launchd`）与 Windows（`windows-job`、Named Pipe/ACL）路径由跨平台 CI（`macos-verify`、`windows-acp-smoke`）门禁覆盖。在真实 Windows Node.js `net.Socket` Named Pipe 上，`socket._handle` 不暴露底层 Win32 句柄，默认 `inspectWindowsPeerCredentials` 按 fail-closed 返回 `undefined`（仅在具备句柄或注入 FFI 绑定时执行进程与 `TokenUser` SID 核验）。
 - **D 类纵向验证边界**：真实用户在长期普通使用中的质量、成本、延迟、打扰分布与长期因果收益（D 类纵向证据）属于发布后（post-release）真实使用观测范围，显式排除在发版前工程验收门禁之外。
-- **下一步验收（P3 情景记忆 + 无 LLM 表面裁剪）**：落地只追加生活流原话 `turns.jsonl`、主题片段库 `episodes.sqlite`、`episode_recall` 精确原话召回与无 LLM `compaction/prune` 表面裁剪（保持 `AgentLoopRequestAttestor`），并评估 `v0.2.5` 阶段发版。
+- **下一步验收（全仓 `pnpm check` + `v0.2.5` 评估与 P4）**：执行全仓 `pnpm check` 并按 [发布协议](releasing.md) 评估 `v0.2.5` 阶段发布，随后进入 **P4 反思、志向、点子池、精力与成长面板**（`energy.sqlite` 精力账本、4 节律反思、3 层志向、3 层点子池与 `/learning` 只读成长面板）。
 - **后续基线与纵向观察**：基于已发布的 `@dsh-ray/*@0.2.4` 完成本机 `0.2.3 -> 0.2.4` 升级、幂等 no-op 与 capability 探针实测、外部节点（`xtorybot` / macOS Desktop）升级与隔离临时 `DSH_HOME` 公网 `install-npm.sh` 冒烟，以及日常普通使用中的 D 类长期纵向观察。
 
 ## 最新验证
 
-- **P2 前台意识 + 持久 Worker 验证（`dev` 当前工作区）**：
-  - `pnpm run validate`（36 插件 + 4 共享包）、`pnpm run lint`（2044 文件 0 警告/0 错误，清理测试未用导入后复验）；
-  - `@dsh-ray/assistant-policy`（25 文件全部通过）、`@dsh-ray/owner-console`（28 文件 274 tests passed）、`@dsh-ray/assistant-delivery`（74 文件 1534 tests passed）；
-  - 根端到端验收 `tests/ray-workers-p2.spec.ts` + `tests/ray-home-p1.spec.ts` + `tests/optional-peer-imports.spec.ts`（3 文件 79 tests passed）；
-  - `assistant-delivery` / `assistant-policy` / `owner-console` `pnpm pack --dry-run` 通过。
-- **P1 自我与家验证（`dev` 基线 `6a04bf55`）**：
-  - `@dsh-ray/assistant-growth-contract`（12 文件 169 tests passed）、`@dsh-ray/personal-assistant`、`@dsh-ray/assistant-web-owner`、`@dsh-ray/lark-channel`（3 文件 79 tests passed）、`@dsh-ray/cli`（20 文件 358 tests passed）。
+- **P3 情景记忆 + 无 LLM 表面裁剪验证（`dev` 当前工作区）**：
+  - `pnpm run validate`（36 插件 + 4 共享包）、`pnpm run lint`（2046 文件 0 警告/0 错误）；
+  - `@dsh-ray/personal-memory`（17 文件 209 tests passed）、`@dsh-ray/assistant-policy`（25 文件 580 passed / 2 skipped）；
+  - 根端到端验收 `tests/ray-episodic-memory-p3.spec.ts` + `tests/ray-workers-p2.spec.ts` + `tests/ray-home-p1.spec.ts` + `tests/optional-peer-imports.spec.ts`（4 文件 80 tests passed：跨飞书 195 轮 + Desktop 18 轮共 213+ 轮零 LLM 总结调用表面裁剪、跨端原话召回、子代理边界与 `AgentLoopRequestAttestor` 全程保持）；
+  - `assistant-policy` / `assistant-delivery` / `personal-memory` `pnpm pack --dry-run` 通过。
+- **P2 前台意识 + 持久 Worker 验证（`dev` `5891dec6`）**：`@dsh-ray/owner-console`（28 文件 274 tests passed）、`@dsh-ray/assistant-delivery`（74 文件 1534 tests passed）。
+- **P1 自我与家验证（`dev` `6a04bf55`）**：`@dsh-ray/assistant-growth-contract`（12 文件 169 tests passed）、`@dsh-ray/lark-channel`（3 文件 79 tests passed）、`@dsh-ray/cli`（20 文件 358 tests passed）。
 - **全仓门禁基线（`v0.2.4` `28bb627b`）**：`pnpm check` 40/40 通过，`.github/workflows/ci.yml` Run `46051946556` 8/8 全量 `success`。

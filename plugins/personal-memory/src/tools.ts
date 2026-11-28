@@ -339,4 +339,92 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
     if (!(error instanceof Error) || !error.message.startsWith('assistant-policy: preauthorization is reserved for ')) throw error
     // An older Policy release does not have the exact memory tool allowlist.
   }
+
+  if (service.episodicRuntime() !== undefined) {
+    const episodeRecall = defineTool({
+      name: 'episode_recall',
+      description: 'Search and retrieve exact verbatim historical turns and cross-channel episodes from Ray life-stream archive when earlier conversation turns were pruned from the active surface.',
+      parameters: {
+        query: { type: 'string' },
+        episode_id: { type: 'string' },
+        channel: { type: 'string' },
+        limit: { type: 'integer' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            episodes: {
+              type: 'array',
+              required: true,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  episodeId: { type: 'string', required: true },
+                  title: { type: 'string', required: true },
+                  channels: { type: 'array', required: true, items: { type: 'string' } },
+                  turnCount: { type: 'integer', required: true },
+                  previewText: { type: 'string', required: true },
+                  startedAt: { type: 'integer', required: true },
+                  updatedAt: { type: 'integer', required: true },
+                },
+              },
+            },
+            turns: {
+              type: 'array',
+              required: true,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  turnId: { type: 'string', required: true },
+                  episodeId: { type: 'string', required: true },
+                  channel: { type: 'string', required: true },
+                  role: { type: 'string', required: true },
+                  text: { type: 'string', required: true },
+                  createdAt: { type: 'integer', required: true },
+                },
+              },
+            },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: renderUntrustedJson('episode_recall_results', value) }],
+      },
+      async execute(args, exec) {
+        const result = service.episodicRecall(exec.agent, {
+          ...(args.query === undefined ? {} : { query: args.query }),
+          ...(args.episode_id === undefined ? {} : { episodeId: args.episode_id }),
+          ...(args.channel === undefined ? {} : { channel: args.channel }),
+          ...(args.limit === undefined ? {} : { limit: args.limit }),
+        })
+        return {
+          episodes: result.episodes.map(ep => ({
+            episodeId: ep.episodeId,
+            title: ep.title,
+            channels: [...ep.channels],
+            turnCount: ep.turnCount,
+            previewText: ep.previewText,
+            startedAt: ep.startedAt,
+            updatedAt: ep.updatedAt,
+          })),
+          turns: result.turns.map(t => ({
+            turnId: t.turnId,
+            episodeId: t.episodeId,
+            channel: t.channel,
+            role: t.role,
+            text: t.text,
+            createdAt: t.createdAt,
+          })),
+        }
+      },
+    })
+    ctx.tools.register(episodeRecall)
+    try {
+      policy?.registerPreauthorizedTool?.(ctx, episodeRecall, exec => service.isRayEpisodicAuthorized(exec.agent))
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.startsWith('assistant-policy: preauthorization is reserved for ')) throw error
+    }
+  }
 }

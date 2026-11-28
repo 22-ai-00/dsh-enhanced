@@ -187,3 +187,11 @@ JSON 导入是一组独立、可重放的提案，不承诺跨所有记录的一
 ## 兼容性
 
 兼容范围与验证基线见仓库[兼容性基线](../../docs/compatibility.md)。
+
+## Ray 只追加生活流、情景记忆与无 LLM 表面裁剪（P3）
+
+当 `assistantPolicy.rayHomeDir()` 已配置时，`personal-memory` 自动挂载 `RayEpisodicRuntime`（不影响未启用 `rayHome` 的既有配置与 schema）：
+
+- **只追加原话归档**：在已结算轮次后（及表面裁剪前），以幂等 `turnId` 追加写入 `<rayHome>/life-stream/turns.jsonl` 与 `<rayHome>/episodes/episodes.sqlite`（`ray_episodes`、`ray_episode_turns` 与 `ray_episode_turns_fts`），并登记至 Ray Home 数据库清单。
+- **自动分片**：基于空闲间隔（默认 30 分钟）、后台工单切换（`ticketId`）及主题关键词重叠度自动将连续对话切分为跨渠道主题片段（`ep_*`）。
+- **无 LLM 表面裁剪与精确原话召回**：超出表面消息预算时，在 `agent/pre-step` 阶段零模型调用地按完整 `tool-call`/`tool-result` 边界写入原生 `compaction/prune` 与轻量指针消息（`surfaceOp: replace`），保留 `AgentLoopRequestAttestor` 与最新尾窗；`ray:episodic-recall`（`order: 238`）提示近期片段目录，预授权工具 `episode_recall`（限非 `subagent` Ray 会话）按 `episode_id`、关键词或渠道原样召回历史对话原话。

@@ -8363,6 +8363,15 @@ export class AssistantDeliveryService extends Service {
     return this.workerTickets.ownsWorkerSession(String(agent.session.id))
   }
 
+  sessionChannel(sessionId: string): string | undefined {
+    const clean = sessionId.trim()
+    if (!this.active || clean === '') return undefined
+    const binding = this.deliveryStore.getBindingBySession(clean)
+    if (binding !== undefined) return binding.conversation.channel
+    if (this.workerTickets?.ownsWorkerSession(clean)) return 'worker'
+    return undefined
+  }
+
   private publishWorkerTicketNarration(ticket: Readonly<RayWorkerTicketSnapshot>): boolean {
     if (!this.active || !ticket.narrationText) return false
     const binding = ticket.sourceBindingId === undefined

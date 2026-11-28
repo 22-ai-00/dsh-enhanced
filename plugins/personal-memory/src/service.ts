@@ -22,6 +22,8 @@ import type {
   PolicyDecision,
 } from '@dsh-ray/assistant-policy'
 import { MemoryPromotionCancelledError, MemoryProposalManager } from './proposals.js'
+import { RayEpisodicRuntime, type RayEpisodeRecallResult, type RaySurfacePruneResult } from './ray-episodic-runtime.js'
+import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { MemoryLearningService } from './learning-service.js'
 import { validateMemoryLearningAdoptionGrant } from './learning-adoptions.js'
 import {
@@ -91,6 +93,10 @@ export interface Config {
   reconcileIntervalMs?: number
   /** Maximum locally pending proposals inspected per reconcile pass. */
   reconcileLimit?: number
+  /** Optional surface prune thresholds for Ray episodic memory (zero-LLM compaction). */
+  episodicMaxSurfaceNodes?: number
+  episodicRetainRecentNodes?: number
+  episodicIdleSplitMs?: number
 }
 
 export interface ServiceSearchRequest {
@@ -160,6 +166,9 @@ const baseConfigSchema = Schema.object({
     .max(2_147_483_647)
     .default(15_000),
   reconcileLimit: Schema.number().step(1).min(1).max(1_000).default(50),
+  episodicMaxSurfaceNodes: Schema.number().step(1).min(8).max(2_000),
+  episodicRetainRecentNodes: Schema.number().step(1).min(2).max(500),
+  episodicIdleSplitMs: Schema.number().step(1).min(1).max(86_400_000),
 })
 
 const configSchema = Schema.transform(Schema.any(), (value, options) => {
@@ -197,6 +206,7 @@ export class PersonalMemoryService extends Service {
     'prepareAgentApproval' | 'preferencePrincipalForAgent' | 'prepareOwnerApprovalForPreference' | 'inspectOwnerRequestedChange'> | undefined
   private readonly promotionBridge: PreferenceMemoryPromotionBridge
   private readonly learning: MemoryLearningService | undefined
+  private readonly episodic: RayEpisodicRuntime | undefined
   private readonly headlessNamespaces = new WeakMap<Agent, MemoryOwnerNamespace>()
   private readonly config: Required<Omit<Config, 'automaticLearning'>> & Pick<Config, 'automaticLearning'>
   private readonly sessionSnapshots = new WeakMap<Agent, MemorySnapshot>()
@@ -240,6 +250,27 @@ export class PersonalMemoryService extends Service {
         ? Promise.resolve(false)
         : revalidateFileEvidence(this.toolsCtx, this.policy, exec, source, anchor),
     }) : undefined
+    const configuredRayHome = typeof policy.rayHomeDir === 'function' ? policy.rayHomeDir() : undefined
+    this.episodic = configuredRayHome === undefined || configuredRayHome.trim() === ''
+      ? undefined
+      : new RayEpisodicRuntime(ctx, {
+          rayHome: configuredRayHome,
+          policy,
+          resolveChannel: session => {
+            const sessionId = String(session.id)
+            const deliveryChannel = (this.delivery as { sessionChannel?: (id: string) => string | undefined } | undefined)
+              ?.sessionChannel?.(sessionId)
+            if (deliveryChannel !== undefined && deliveryChannel !== '') return deliveryChannel
+            if (sessionId.startsWith('lark')) return 'lark'
+            if (sessionId.startsWith('desktop')) return 'desktop'
+            if (sessionId.startsWith('web')) return 'web'
+            if (sessionId.startsWith('ray_worker_')) return 'worker'
+            return 'session'
+          },
+          ...(config.episodicIdleSplitMs === undefined ? {} : { idleSplitMs: config.episodicIdleSplitMs }),
+          ...(config.episodicMaxSurfaceNodes === undefined ? {} : { maxSurfaceNodes: config.episodicMaxSurfaceNodes }),
+          ...(config.episodicRetainRecentNodes === undefined ? {} : { retainRecentNodes: config.episodicRetainRecentNodes }),
+        })
     this.proposals = new MemoryProposalManager(
       this.memoryStore,
       policy,
@@ -270,6 +301,7 @@ export class PersonalMemoryService extends Service {
     ctx.effect(() => () => {
       this.active = false
       this.promotionBridge.dispose()
+      this.episodic?.dispose()
       this.memoryStore.close()
     }, 'personal-memory.database')
     if (config.reconcileIntervalMs > 0) {
@@ -1075,6 +1107,40 @@ export class PersonalMemoryService extends Service {
       && route.principalRecordId === proposal.namespace.principalRecordId
       && route.principalVersion === proposal.namespace.principalVersion
       && route.bindingGeneration === proposal.promotion.ownerGeneration
+  }
+
+  episodicRuntime(): RayEpisodicRuntime | undefined {
+    return this.active ? this.episodic : undefined
+  }
+
+  isRayEpisodicAuthorized(agent: Agent | undefined): boolean {
+    if (!this.active || this.episodic === undefined || !this.episodic.isSessionEligible(agent) || agent === undefined) {
+      return false
+    }
+    if (agent.session.header.delegationDepth !== undefined) return false
+    return true
+  }
+
+  episodicRecall(
+    agent: Agent | undefined,
+    args: { query?: string; episodeId?: string; channel?: string; limit?: number },
+  ): RayEpisodeRecallResult {
+    this.assertActive()
+    if (this.episodic === undefined || !this.isRayEpisodicAuthorized(agent)) {
+      throw new PersonalMemoryError('missing-identity', 'episode_recall requires an eligible non-subagent Ray session')
+    }
+    return this.episodic.recall(args)
+  }
+
+  pruneEpisodicSession(
+    session: Session,
+    options?: { retainRecentNodes?: number; minPruneNodes?: number },
+  ): RaySurfacePruneResult & { pointerSeq?: SessionSeq } {
+    this.assertActive()
+    if (this.episodic === undefined) {
+      return { pruned: false, prunedNodeCount: 0, archivedTurnsCount: 0, shadowedTokenCount: 0, episodeIds: [] }
+    }
+    return this.episodic.pruneSessionSurface(session, options)
   }
 
   private assertActive(): void {

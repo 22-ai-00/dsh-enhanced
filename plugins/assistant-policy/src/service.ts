@@ -663,7 +663,7 @@ export class AssistantPolicyService extends Service {
       : ['isolation_run', 'isolation_grants'].includes(definition.name) ? 'dsh-ray-assistant-isolation'
       : ['goal_create', 'goal_context', 'goal_schedule', 'goal_strategy', 'goal_wait_event', 'goal_checkpoint'].includes(definition.name) ? 'dsh-ray-assistant-goals'
       : definition.name === 'proactive_status' ? 'dsh-ray-assistant-proactive'
-      : definition.name === 'memory_manage' ? ['dsh-ray-personal-memory', 'PersonalMemoryService']
+      : ['memory_manage', 'episode_recall'].includes(definition.name) ? ['dsh-ray-personal-memory', 'PersonalMemoryService']
       : definition.name === 'wiki_upsert' ? ['dsh-ray-personal-wiki', 'PersonalWikiService']
       : definition.name === 'delivery_request_restart' ? ['dsh-ray-assistant-delivery', 'AssistantDeliveryService']
       : ['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report', 'work_item_list', 'work_item_recall', 'work_item_read_source', 'work_item_continue', 'work_item_read_context'].includes(definition.name) ? 'AssistantWorkItemsService'
